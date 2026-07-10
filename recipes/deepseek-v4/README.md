@@ -10,32 +10,20 @@ tuned for the **agentic** workload (64k ISL / 400 OSL / 90% KV reuse) at a floor
 **≥ 50 output tok/s/user**. Each variant is a `DynamoGraphDeployment` (DGD); a single
 shared [`perf/`](perf) Job replays the benchmark traces against any variant.
 
-## Configurations
+## Recipes by model
 
-Per-worker parallelism and speculative decode differ between the prefill and decode
-workers in the disaggregated variants, so those are listed as `prefill / decode`.
+Each model's README is self-contained — its own **Recipes** (agentic + Day-0), **Performance**,
+and **Quick Start**. The sections below this table (Optimization targets, Per-rank NIC mapping,
+Known limitations) are **shared** and linked from both.
 
-| Variant (`vllm/…`) | Model | GPUs | Prefill / Decode | MoE backend | Spec. decode | `max_model_len` | Disagg fabric |
-|---|---|---|---|---|---|---|---|
-| `deepseek-v4-pro/vllm/agg-b200-agentic` | `nvidia/DeepSeek-V4-Pro-NVFP4` | 8× B200 | TP8 + EP | FLASHINFER_TRTLLM | MTP-2 | 1,048,576 | — |
-| `deepseek-v4-pro/vllm/agg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Pro` | 8× H200 | TP8 + EP | MARLIN | none | 86,016 ¹ | — |
-| `deepseek-v4-pro/vllm/disagg-b200-agentic` | `nvidia/DeepSeek-V4-Pro-NVFP4` | 16× B200 | TP8+EP / TP8+EP | FLASHINFER_TRTLLM | none / MTP-2 | 1,048,576 | NIXL GDR |
-| `deepseek-v4-pro/vllm/disagg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Pro` | 32× H200 (1P·3D) | TP8+EP / TP8+EP | MARLIN | none | 86,016 ¹ | NIXL GDR ² |
-| `deepseek-v4-flash/vllm/agg-b200-agentic` | `nvidia/DeepSeek-V4-Flash-NVFP4` | 4× B200 | TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | — |
-| `deepseek-v4-flash/vllm/agg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Flash` | 4× H200 | DP4 + TP1 + EP | MARLIN (FLASHINFER_MLA attn) | MTP-1 | 1,048,576 | — |
-| `deepseek-v4-flash/vllm/disagg-b200-agentic` | `nvidia/DeepSeek-V4-Flash-NVFP4` | 24× B200 (4P·2D) | TP4 / TP4 | FLASHINFER_TRTLLM | none | 1,048,576 | NIXL GDR |
-| `deepseek-v4-flash/vllm/disagg-h200-agentic` | `deepseek-ai/DeepSeek-V4-Flash` | 28× H200 (4P·3D) | DP4+TP1+EP / DP4+TP1+EP | MARLIN (FLASHINFER_MLA attn) | none / MTP-1 | 1,048,576 | NIXL GDR ² |
+| Model | Size | Recommended picks | README |
+|---|---|---|---|
+| **DeepSeek-V4-Pro** | 1.6T / 49B active · 1M ctx | B200 → `disagg-b200-agentic` · H200 → `agg-h200-agentic` | [`deepseek-v4-pro/`](deepseek-v4-pro/) |
+| **DeepSeek-V4-Flash** | 284B / 13B active | B200 → `disagg-b200-agentic` (4P2D) · H200 → `disagg-h200-agentic` (4P3D) | [`deepseek-v4-flash/`](deepseek-v4-flash/) |
 
-Common to all: FP8 KV cache, block size 256, KV-aware routing, prefix caching. B200 variants
-serve the NVFP4 checkpoints; H200 variants serve the public checkpoints. Modality: text; reasoning + tool calling supported.
-
-¹ **H200 Pro is capped at `max_model_len=86,016`**: the full-precision weights plus a 1M-token KV
-cache do not fit in H200 memory (OOM at load / during `determine_available_memory`). Requests longer
-than ~86k tokens are rejected, so the H200 Pro variants cannot serve the longest contexts the B200
-(1M) recipes can. B200 and H200-Flash keep the full 1M window.
-
-² **H200 disaggregated uses NIXL over RDMA/GDR.** See [Per-rank NIC mapping](#per-rank-nic-mapping-b200--h200-disaggregated) for what it needs and why.
-
+B200 variants serve the NVFP4 checkpoints (`nvidia/DeepSeek-V4-*-NVFP4`); H200 variants serve the
+public checkpoints (`deepseek-ai/DeepSeek-V4-*`). H200 Pro is capped at `max_model_len=86,016` (HBM);
+B200 and H200-Flash keep the full 1M window. Modality: text; reasoning + tool calling supported.
 
 ## Optimization targets
 
@@ -44,88 +32,10 @@ than ~86k tokens are rejected, so the H200 Pro variants cannot serve the longest
 | Agentic (coding / tool use) | 64k | 400 | 90% | ≥ 50 |
 | Custom (decode-heavy synthetic) | 10k | 1k | 10% | ≥ 50 |
 
-Benchmarks replay [Mooncake-format](https://github.com/kvcache-ai/Mooncake) traces — see [`perf/README.md`](perf/README.md).
-
-## Performance results
-
-Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature.
-Variant keys match the [Configurations](#configurations) table (`${MODEL}/vllm/${MODE}-${SKU}-agentic`).
-
-### Agentic workload
-
-| Variant (`vllm/…`) | Concurrency | User tok/s | System tok/s/GPU |
-|---|---:|---:|---:|
-| `deepseek-v4-pro/vllm/agg-b200-agentic` | 13 | 51.3 | 72.8 |
-| `deepseek-v4-pro/vllm/disagg-b200-agentic` | 28 | 51.3 | 77.3 |
-| `deepseek-v4-pro/vllm/agg-h200-agentic` | 8 | 53.2 | 45.9 |
-| `deepseek-v4-pro/vllm/disagg-h200-agentic` | 32 | 50.5 | 43.9 |
-| `deepseek-v4-flash/vllm/agg-b200-agentic` | 38 | 50.6 | 362.1 |
-| `deepseek-v4-flash/vllm/disagg-b200-agentic` | 320 | 50.0 | 388.3 |
-| `deepseek-v4-flash/vllm/agg-h200-agentic` | 16 | 50.7 | 145.4 |
-| `deepseek-v4-flash/vllm/disagg-h200-agentic` | 128 | 51.8 | 201.9 |
-
-**AGG figures are single-replica floor-picks** (best tok/s/GPU at user_p50 ≥ 50). AGG scales by deploying
-independent replicas; KV-routed *multi*-replica AGG does **not** improve per-GPU throughput — see
-[Known limitations](#known-limitations).
-
-### Custom workload
-
-Flash only (Pro not characterized on this workload).
-
-| Variant (`vllm/…`) | Concurrency | User tok/s | System tok/s/GPU |
-|---|---:|---:|---:|
-| `deepseek-v4-flash/vllm/agg-b200-agentic` | 64 | 50.1 | 741.6 |
-| `deepseek-v4-flash/vllm/disagg-b200-agentic` | 128 | 51.9 | 738.2 ¹ |
-| `deepseek-v4-flash/vllm/agg-h200-agentic` | 16 | 58.9 | 222.0 |
-| `deepseek-v4-flash/vllm/disagg-h200-agentic` | 416 | 51.8 | 513.6 |
-
-¹ Measured at the **1P1D** prefill:decode ratio, which is optimal for this decode-heavy workload. The shipped
-`disagg-b200-agentic` deploy.yaml is **4P2D** (tuned for the agentic target; → 577 tok/s/GPU on this workload) —
-the two differ only in the prefill:decode replica count, not in serving config.
-
-## Prerequisites
-
-1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
-2. **GPU cluster** matching the variant (8× B200 / 8× H200 for aggregated; 16–32× for
-   disaggregated — see the [Configurations](#configurations) table for each shape's exact GPU count,
-   e.g. Flash B200 4P·2D = 24×, Flash H200 4P·3D = 28×), nodes labeled
-   `nvidia.com/gpu.product=NVIDIA-B200` or `NVIDIA-H200`.
-3. **HuggingFace token** with access to the checkpoints you deploy:
-   ```bash
-   export NAMESPACE=your-namespace
-   kubectl create namespace ${NAMESPACE}
-   kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}
-   ```
-
-## Quick Start
-
-The variant path is `${MODEL}/vllm/${MODE}-${SKU}-agentic` where `MODEL ∈ {deepseek-v4-pro,
-deepseek-v4-flash}`, `MODE ∈ {agg, disagg}`, `SKU ∈ {b200, h200}`. Example below deploys
-**Pro AGG B200**; change the variables for any other cell.
-
-```bash
-export NAMESPACE=your-namespace
-MODEL=deepseek-v4-pro
-SKU=b200
-MODE=agg
-
-# 1) Storage — edit storageClassName (RWX) first.
-kubectl apply -f ${MODEL}/model-cache/model-cache.yaml -n ${NAMESPACE}
-
-# 2) Weights — model-download.yaml fetches both the NVFP4 (B200) and public (H200)
-#    checkpoints; delete the line that does not apply to your SKU to save disk/time.
-kubectl apply -f ${MODEL}/model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
-
-# 3) Deploy. For ANY disaggregated variant (B200 or H200 — both use NIXL GDR), first set
-#    VLLM_GPU_NIC_PCIE_MAPPING in the manifest to your cluster's map (see "Per-rank NIC mapping" below).
-kubectl apply -f ${MODEL}/vllm/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
-
-# 4) Benchmark — see perf/README.md to point ENDPOINT + TRACE_FILE at this DGD.
-kubectl apply -f perf/perf.yaml -n ${NAMESPACE}
-```
-
-First worker launch loads weights and captures CUDA graphs and can take tens of minutes.
+Benchmarks replay [Mooncake-format](https://github.com/kvcache-ai/Mooncake) traces — see
+[`perf/README.md`](perf/README.md). Per-variant floor-picks (max system tok/s/GPU at user_p50 ≥ 50)
+live in each model's **Performance** section. Pro is characterized on the Agentic workload only; the
+Custom cell is Flash-only.
 
 ## Per-rank NIC mapping (B200 & H200 disaggregated)
 
@@ -142,7 +52,8 @@ the same way, and DSV4's "packed" KV layout (investigated at length) was ruled o
 
 **Scope: disaggregated only.** Only recipes that ship **disaggregated** over GDR use this. Aggregated recipes
 have no cross-worker KV transfer and ignore `VLLM_GPU_NIC_PCIE_MAPPING` (empty ⇒ no-op). Among the recommended
-picks that's **Pro B200 DisAgg** and **Flash H200 4P3D**.
+picks that's **Pro B200 DisAgg (1P1D)**, **Flash B200 DisAgg (4P2D)**, and **Flash H200 DisAgg (4P3D)** —
+Pro H200 ships AGG, so it needs no NIC map.
 
 **Providing the affine NIC per rank.** Set `VLLM_GPU_NIC_PCIE_MAPPING` to the node's `GPU_BDF=NIC_BDF` pairs
 so each rank uses its PCIe-affine NIC (regenerate per node type — below). This assumes the cluster exposes
@@ -157,10 +68,11 @@ constructs. With no RDMA fabric at all, fall back to TCP: `NCCL_IB_DISABLE=1`, `
 **`rdma/ib` vs `rdma/shared_ib` is cluster-plugin-dependent, not GPU-dependent** — which RDMA resource to
 request depends on your cluster's RDMA device plugin:
 - **`rdma/ib: "N"`** (N exclusive devices) is clean and NIC-isolated but relies on the plugin injecting the
-  pod's *affine* NICs. The **H200 disaggregated** recipes ship this (validated where affine injection works).
+  pod's *affine* NICs. The **H200 disaggregated** recipes (Pro + Flash) ship this (validated where affine
+  injection works).
 - **`rdma/shared_ib: "1"`** exposes **all** of the node's NICs to the pod, so the per-rank map can always find
   each rank's affine NIC even when the plugin would inject a non-affine set. The **B200 disaggregated** recipes
-  ship this (validated on a cluster where affine injection had drifted). Both pair with the same
+  (Pro + Flash) ship this (validated on a cluster where affine injection had drifted). Both pair with the same
   `VLLM_GPU_NIC_PCIE_MAPPING`; pick whichever your cluster's plugin exposes.
 
 Caveat for `shared_ib`: because it exposes **all** NICs, a **wrong or stale map fails silently**. Under
