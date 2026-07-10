@@ -9,7 +9,9 @@
 
 import asyncio
 import base64
+import io
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -99,7 +101,18 @@ def _make_handler(
     # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
     # registers per-request deferred-abort guards here.
     handler._deferred_aborts = {}
+    handler.engine_client = MagicMock()
+    handler._pause_controller = mod.VllmEnginePauseController(handler.engine_client)
+    handler._pause_lock = asyncio.Lock()
+    handler.generate_endpoint = None
+    handler.additional_generate_endpoints = ()
     return handler
+
+
+def _set_admin_engine(handler, engine_client) -> None:
+    """Keep the unified pause owner bound to the test's replacement engine."""
+    handler.engine_client = engine_client
+    handler._pause_controller = mod.VllmEnginePauseController(engine_client)
 
 
 def _make_raw_frontend_request(image_urls: list[str] | None = None) -> dict:
@@ -984,6 +997,102 @@ async def test_prefill_engine_request_builds_only_engine_prompt_once():
 
 
 @pytest.mark.asyncio
+async def test_prefill_engine_generate_emits_choice_aligned_prompt_metadata():
+    """Exercise the real prefill producer, not decode-side injected metadata."""
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    request = {
+        "model": "test-model",
+        "token_ids": [11, 22],
+        "generate_request": {
+            "model": "test-model",
+            "token_ids": [11, 22],
+            "sampling_params": {"n": 2, "prompt_logprobs": 1},
+        },
+        "generate_sampling_fields": ["n", "prompt_logprobs"],
+        "routing": {},
+    }
+    prompt_logprobs = [
+        None,
+        {11: SimpleNamespace(logprob=-0.25, rank=1, decoded_token=None)},
+    ]
+    experts = {
+        0: np.array([[[10]], [[11]]], dtype=np.int16),
+        1: np.array([[[20]], [[21]]], dtype=np.int16),
+    }
+
+    async def responses():
+        for index in (0, 1):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=index,
+                        token_ids=[40 + index],
+                        routed_experts=experts[index],
+                    )
+                ],
+                prompt_token_ids=[11, 22],
+                prompt_logprobs=prompt_logprobs if index == 0 else None,
+                num_cached_tokens=0,
+                kv_transfer_params={"request_handoff": "shared"},
+            )
+
+    handler.engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=256)),
+        generate=MagicMock(return_value=responses()),
+    )
+    handler.default_sampling_params = {}
+    handler.model_max_len = 4096
+    handler.loaded_loras = {}
+    handler._multimodal_request_processor = SimpleNamespace(
+        prepare_input=AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=request,
+                multi_modal_data=None,
+                mm_processor_kwargs=None,
+            )
+        ),
+        build_prefill_handoff=MagicMock(return_value=None),
+    )
+    handler._log_with_lora_context = MagicMock()
+    handler._to_local_dp_rank = MagicMock(return_value=None)
+
+    @asynccontextmanager
+    async def no_abort_monitor(*args, **kwargs):
+        yield None
+
+    handler._abort_monitor = no_abort_monitor
+    context = MagicMock()
+    context.trace_headers.return_value = {}
+    kv_protocol = SimpleNamespace(
+        prefill_request_kv_transfer_params=lambda: None,
+        decode_request_kv_transfer_params=lambda response: response.kv_transfer_params,
+    )
+
+    with patch.object(mod, "make_kv_connector_protocol", return_value=kv_protocol):
+        chunks = [
+            chunk
+            async for chunk in handler._generate_token_mode(
+                request, context, "request-engine-prefill"
+            )
+        ]
+
+    assert [chunk["index"] for chunk in chunks] == [0, 1]
+    assert [chunk["disaggregated_params"] for chunk in chunks] == [
+        {"kv_transfer_params": {"request_handoff": "shared"}},
+        {"kv_transfer_params": {"request_handoff": "shared"}},
+    ]
+    assert chunks[0]["generate_metadata"]["prompt_logprobs"] == [
+        None,
+        {"11": {"logprob": -0.25, "rank": 1}},
+    ]
+    assert "prompt_logprobs" not in chunks[1]["generate_metadata"]
+    for index, chunk in enumerate(chunks):
+        payload = chunk["generate_metadata"]["routed_experts"]
+        actual = np.load(io.BytesIO(base64.b64decode(payload)), allow_pickle=False)
+        np.testing.assert_array_equal(actual, experts[index])
+
+
+@pytest.mark.asyncio
 async def test_prefill_returns_structured_error_when_multimodal_is_disabled():
     handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
     processor = SimpleNamespace(
@@ -1707,13 +1816,12 @@ class TestRLAdminRouteHardening:
                 assert "JSON object" in resp["message"]
 
     @pytest.mark.asyncio
-    async def test_distributed_update_can_match_async_rl_semantics(self):
+    async def test_distributed_update_rejects_unpaused_async_rl_semantics(self):
         handler = _make_handler()
-        handler._pause_lock = asyncio.Lock()
-        handler._paused = False
-        handler.engine_client = MagicMock()
-        handler.engine_client.collective_rpc = AsyncMock()
-        handler.engine_client.reset_prefix_cache = AsyncMock()
+        engine = MagicMock()
+        engine.collective_rpc = AsyncMock()
+        engine.reset_prefix_cache = AsyncMock()
+        _set_admin_engine(handler, engine)
 
         resp = await handler.update_weights_from_distributed(
             {
@@ -1725,27 +1833,23 @@ class TestRLAdminRouteHardening:
             }
         )
 
-        assert resp == {"status": "ok", "version": 7}
-        handler.engine_client.collective_rpc.assert_awaited_once_with(
-            "update_weights",
-            kwargs={"update_info": {"names": ["weight"]}},
-        )
+        assert resp["status"] == "error"
+        assert "unsafe" in resp["message"].lower()
+        handler.engine_client.collective_rpc.assert_not_awaited()
         handler.engine_client.reset_prefix_cache.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_default_pause_establishes_a_real_drained_admission_fence(self):
         handler = _make_handler()
-        handler._pause_lock = asyncio.Lock()
-        handler._paused = False
-        handler._pause_drained = False
-        handler.engine_client = MagicMock()
-        handler.engine_client.pause_generation = AsyncMock()
+        engine = MagicMock()
+        engine.pause_generation = AsyncMock()
+        _set_admin_engine(handler, engine)
 
         resp = await handler.pause_generation({})
 
         assert resp["status"] == "ok"
-        assert handler._paused is True
-        assert handler._pause_drained is True
+        assert handler._pause_controller.is_rl_paused is True
+        assert handler._pause_controller.is_rl_drained is True
         handler.engine_client.pause_generation.assert_awaited_once_with(
             mode="wait", clear_cache=False
         )
@@ -1753,53 +1857,51 @@ class TestRLAdminRouteHardening:
     @pytest.mark.asyncio
     async def test_legacy_pause_fallback_is_not_claimed_as_drained(self):
         handler = _make_handler()
-        handler._pause_lock = asyncio.Lock()
-        handler._paused = False
-        handler._pause_drained = False
-        handler.engine_client = MagicMock()
-        handler.engine_client.pause_generation = AsyncMock(
+        engine = MagicMock()
+        engine.pause_generation = AsyncMock(
             side_effect=[TypeError("old signature"), None]
         )
+        _set_admin_engine(handler, engine)
 
         resp = await handler.pause_generation({})
 
         assert resp["status"] == "ok"
-        assert handler._paused is True
-        assert handler._pause_drained is False
+        assert handler._pause_controller.is_rl_paused is True
+        assert handler._pause_controller.is_rl_drained is False
 
     @pytest.mark.asyncio
-    async def test_distributed_update_rejects_unpaused_cache_reset(self):
+    async def test_distributed_update_rejects_skipping_cache_reset(self):
         handler = _make_handler()
-        handler._pause_lock = asyncio.Lock()
-        handler._paused = False
-        handler.engine_client = MagicMock()
-        handler.engine_client.collective_rpc = AsyncMock()
-        handler.engine_client.reset_prefix_cache = AsyncMock()
+        engine = MagicMock()
+        engine.collective_rpc = AsyncMock()
+        engine.reset_prefix_cache = AsyncMock()
+        _set_admin_engine(handler, engine)
 
         resp = await handler.update_weights_from_distributed(
-            {"allow_unpaused": True, "engine_rpc": "update_weights"}
+            {"reset_prefix_cache": False, "engine_rpc": "update_weights"}
         )
 
         assert resp["status"] == "error"
-        assert "cannot reset the prefix cache" in resp["message"]
+        assert "require" in resp["message"].lower()
+        assert "cache reset" in resp["message"].lower()
         handler.engine_client.collective_rpc.assert_not_awaited()
         handler.engine_client.reset_prefix_cache.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_distributed_update_preserves_safe_defaults(self):
         handler = _make_handler()
-        handler._pause_lock = asyncio.Lock()
-        handler.engine_client = MagicMock()
-        handler.engine_client.collective_rpc = AsyncMock()
-        handler.engine_client.reset_prefix_cache = AsyncMock()
+        engine = MagicMock()
+        engine.pause_generation = AsyncMock()
+        engine.collective_rpc = AsyncMock()
+        engine.reset_prefix_cache = AsyncMock()
+        _set_admin_engine(handler, engine)
 
-        handler._paused = False
         resp = await handler.update_weights_from_distributed({})
         assert resp["status"] == "error"
         handler.engine_client.collective_rpc.assert_not_awaited()
 
-        handler._paused = True
-        handler._pause_drained = True
+        pause = await handler.pause_generation({"mode": "wait"})
+        assert pause["status"] == "ok"
         handler.engine_client.reset_prefix_cache.return_value = True
         resp = await handler.update_weights_from_distributed(
             {"engine_rpc": "finish_weight_update"}
@@ -1815,12 +1917,16 @@ class TestRLAdminRouteHardening:
     @pytest.mark.asyncio
     async def test_weight_update_rejects_non_drained_pause(self):
         handler = _make_handler()
-        handler._pause_lock = asyncio.Lock()
-        handler._paused = True
-        handler._pause_drained = False
-        handler.engine_client = MagicMock()
-        handler.engine_client.collective_rpc = AsyncMock()
-        handler.engine_client.reset_prefix_cache = AsyncMock(return_value=True)
+        engine = MagicMock()
+        engine.pause_generation = AsyncMock(
+            side_effect=[TypeError("old signature"), None]
+        )
+        engine.collective_rpc = AsyncMock()
+        engine.reset_prefix_cache = AsyncMock(return_value=True)
+        _set_admin_engine(handler, engine)
+        pause = await handler.pause_generation({"mode": "wait"})
+        assert pause["status"] == "ok"
+        assert handler._pause_controller.is_rl_drained is False
 
         resp = await handler.update_weights_from_distributed(
             {"engine_rpc": "finish_weight_update"}
@@ -1833,12 +1939,13 @@ class TestRLAdminRouteHardening:
     @pytest.mark.asyncio
     async def test_weight_update_fails_when_cache_or_connector_reset_fails(self):
         handler = _make_handler()
-        handler._pause_lock = asyncio.Lock()
-        handler._paused = True
-        handler._pause_drained = True
-        handler.engine_client = MagicMock()
-        handler.engine_client.collective_rpc = AsyncMock()
-        handler.engine_client.reset_prefix_cache = AsyncMock(return_value=False)
+        engine = MagicMock()
+        engine.pause_generation = AsyncMock()
+        engine.collective_rpc = AsyncMock()
+        engine.reset_prefix_cache = AsyncMock(return_value=False)
+        _set_admin_engine(handler, engine)
+        pause = await handler.pause_generation({"mode": "wait"})
+        assert pause["status"] == "ok"
 
         resp = await handler.update_weights_from_distributed(
             {"engine_rpc": "finish_weight_update"}

@@ -108,6 +108,9 @@ from .response_adapters import (
 from .response_adapters import build_completion_usage as _build_completion_usage
 from .response_adapters import finite_logprob as _finite_logprob
 from .response_adapters import serialize_prompt_logprobs as _serialize_prompt_logprobs
+from .response_adapters import (
+    serialize_vllm_routed_experts as _serialize_vllm_routed_experts,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -901,7 +904,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.additional_generate_endpoints = additional_generate_endpoints
-        self._routing_publication_recovery_needed = False
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
@@ -913,8 +915,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
         # Guard lock-map access in case handlers are invoked from multiple threads.
         self._lora_load_locks_guard = threading.Lock()
-        self._paused: bool = False
-        self._pause_drained: bool = False
         self._weight_version: str = "initial"
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
@@ -1024,6 +1024,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _set_routing_endpoints_published(self, published: bool) -> None:
         endpoints = self._routing_endpoints()
         if not endpoints:
+            self._pause_controller.mark_routing_publication(published)
             return
         method_name = (
             "register_endpoint_instance"
@@ -1041,6 +1042,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raise RuntimeError(
                 f"failed to {action} {len(failures)} of {len(endpoints)} routing endpoints: {details}"
             )
+        self._pause_controller.mark_routing_publication(published)
 
     async def _fail_closed_routing_endpoints(self) -> None:
         try:
@@ -1049,7 +1051,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.error(
                 "Failed to converge routing endpoints to unpublished: %s", error
             )
-        self._routing_publication_recovery_needed = True
+        self._pause_controller.mark_routing_publication_failed()
+
+    async def _latch_indeterminate_weight_state(self, message: str) -> None:
+        self._pause_controller.mark_fatal(message)
+        await self._fail_closed_routing_endpoints()
 
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
         logger.error(f"vLLM EngineDeadError: {e}")
@@ -1128,21 +1134,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         level = body.get("level", 1)
         async with self._pause_lock:
+            if self._pause_controller.fatal_error is not None:
+                await self._fail_closed_routing_endpoints()
+                return {
+                    "status": "error",
+                    "message": (
+                        "engine state is indeterminate and requires restart: "
+                        f"{self._pause_controller.fatal_error}"
+                    ),
+                }
+            if self._pause_controller.needs_sleep_recovery:
+                return {
+                    "status": "error",
+                    "message": "wake_up required before retrying sleep",
+                }
             if self._pause_controller.is_paused:
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
                 }
-            if self._pause_controller.needs_resume_recovery:
-                return {
-                    "status": "error",
-                    "message": "wake_up required before retrying sleep",
-                }
 
-            if getattr(self, "_routing_publication_recovery_needed", False):
+            if self._pause_controller.publication_recovery_needed:
                 try:
                     await self._set_routing_endpoints_published(True)
-                    self._routing_publication_recovery_needed = False
                 except Exception as error:
                     logger.error(
                         "Failed to repair routing endpoint publication: %s", error
@@ -1172,19 +1186,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "status": "ok",
                     "message": f"Engine slept (level={level})",
                 }
-            except Exception as e:
+            except BaseException as e:
                 logger.error(f"Failed to sleep engine: {e}")
                 # If pause rolled back cleanly the engine is serving-safe again,
                 # but discovery still shows us unregistered and wake_up will
                 # early-return. Re-register so the worker rejoins the routing pool.
-                if (
-                    self._routing_endpoints()
-                    and not self._pause_controller.is_paused
-                    and not self._pause_controller.needs_resume_recovery
-                ):
+                if self._routing_endpoints() and self._pause_controller.can_serve:
                     try:
                         await self._set_routing_endpoints_published(True)
-                        self._routing_publication_recovery_needed = False
                         logger.info(
                             "[Sleep] Re-registered routing endpoints after failed sleep rollback"
                         )
@@ -1193,6 +1202,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         logger.error(
                             f"Failed to re-register endpoint after sleep failure: {reg_err}"
                         )
+                if not isinstance(e, Exception):
+                    raise
                 return {"status": "error", "message": str(e)}
 
     async def scale_elastic_ep(self, body: dict) -> dict:
@@ -1323,29 +1334,32 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         tags = body.get("tags")
         async with self._pause_lock:
-            needs_recovery = self._pause_controller.needs_resume_recovery
-            publication_needs_recovery = getattr(
-                self, "_routing_publication_recovery_needed", False
+            if self._pause_controller.fatal_error is not None:
+                await self._fail_closed_routing_endpoints()
+                return {
+                    "status": "error",
+                    "message": (
+                        "engine state is indeterminate and requires restart: "
+                        f"{self._pause_controller.fatal_error}"
+                    ),
+                }
+            has_sleep_state = self._pause_controller.has_sleep_state
+            publication_needs_recovery = (
+                self._pause_controller.publication_recovery_needed
             )
-            if (
-                not self._pause_controller.is_paused
-                and not needs_recovery
-                and not publication_needs_recovery
-            ):
-                return {"status": "ok", "message": "Engine already awake"}
+            if not has_sleep_state and not publication_needs_recovery:
+                message = (
+                    "Engine awake; generation remains RL-paused"
+                    if self._pause_controller.is_rl_paused
+                    else "Engine already awake"
+                )
+                return {"status": "ok", "message": message}
 
-            engine_resumed = False
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                if self._pause_controller.is_paused or needs_recovery:
+                if has_sleep_state:
                     await self._pause_controller.resume(tags)
-                    # resume() has completed the native wake and generation
-                    # resume. Reflect that physical state even if discovery
-                    # publication subsequently fails; a later wake call can then
-                    # repair publication without waking the engine twice.
-                    self._pause_controller.mark_resumed()
-                    engine_resumed = True
-                if self._routing_endpoints():
+                if self._routing_endpoints() and self._pause_controller.can_serve:
                     try:
                         await self._set_routing_endpoints_published(True)
                     except Exception:
@@ -1354,16 +1368,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         # publication transaction.
                         await self._fail_closed_routing_endpoints()
                         raise
-                    self._routing_publication_recovery_needed = False
                     logger.info(
                         "[Wake] Re-registered routing endpoints to discovery - worker added back to routing pools"
                     )
-                if not engine_resumed:
-                    self._pause_controller.mark_resumed()
 
                 return {
                     "status": "ok",
-                    "message": "Engine woke",
+                    "message": (
+                        "Engine woke; generation remains RL-paused"
+                        if self._pause_controller.is_rl_paused
+                        else "Engine woke"
+                    ),
                 }
             except Exception as e:
                 logger.error(f"Failed to wake up engine: {e}")
@@ -1441,30 +1456,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         async with self._pause_lock:
             try:
-                legacy_pause = False
-                try:
-                    await self.engine_client.pause_generation(
-                        mode=mode, clear_cache=clear_cache
-                    )
-                except TypeError:
-                    legacy_pause = True
-                    await self.engine_client.pause_generation()
-                    if clear_cache:
-                        reset_successful = await self.engine_client.reset_prefix_cache(
-                            reset_connector=True
-                        )
-                        if reset_successful is not True:
-                            raise RuntimeError(
-                                "prefix/KV/connector cache reset did not complete"
-                            )
-                self._paused = True
-                self._pause_drained = not legacy_pause and mode in ("wait", "abort")
+                changed = await self._pause_controller.pause_generation(
+                    mode=mode, clear_cache=clear_cache
+                )
                 logger.info(
                     f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})"
                 )
                 return {
                     "status": "ok",
-                    "message": "Engine paused",
+                    "message": "Engine paused" if changed else "Engine already paused",
                     "mode": mode,
                     "clear_cache": clear_cache,
                 }
@@ -1488,11 +1488,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # mutating weights (dynamo-ops).
         async with self._pause_lock:
             try:
-                await self.engine_client.resume_generation()
-                self._paused = False
-                self._pause_drained = False
+                changed = await self._pause_controller.resume_generation()
+                if (
+                    self._pause_controller.can_serve
+                    and self._routing_endpoints()
+                    and (
+                        not self._pause_controller.routing_endpoints_published
+                        or self._pause_controller.publication_recovery_needed
+                    )
+                ):
+                    try:
+                        await self._set_routing_endpoints_published(True)
+                    except Exception:
+                        await self._fail_closed_routing_endpoints()
+                        raise
                 logger.info("[RL] Engine resumed")
-                return {"status": "ok", "message": "Engine resumed"}
+                return {
+                    "status": "ok",
+                    "message": "Engine resumed"
+                    if changed
+                    else "Engine already resumed",
+                }
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
@@ -1593,7 +1609,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Hold _pause_lock across the paused-state check and the weight RPC so a
         # concurrent resume cannot re-enable generation mid-update (dynamo-ops).
         async with self._pause_lock:
-            if not getattr(self, "_paused", False):
+            if self._pause_controller.fatal_error is not None:
+                return {
+                    "status": "error",
+                    "message": (
+                        "engine state is indeterminate and requires restart: "
+                        f"{self._pause_controller.fatal_error}"
+                    ),
+                }
+            if not self._pause_controller.is_rl_paused:
                 return {
                     "status": "error",
                     "message": (
@@ -1602,7 +1626,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "update, then resume_generation()."
                     ),
                 }
-            if not getattr(self, "_pause_drained", False):
+            if not self._pause_controller.is_rl_drained:
                 return {
                     "status": "error",
                     "message": (
@@ -1620,7 +1644,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if rpc == "reload_weights"
                 else {"weight_path": path}
             )
+            mutation_dispatched = False
             try:
+                mutation_dispatched = True
                 await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 # Weights changed: any prefix/KV cache computed under the old
                 # weights is now stale and must not be reused. Invalidate it
@@ -1637,9 +1663,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
                 )
                 return {"status": "ok", "version": version}
-            except EngineDeadError as e:
-                self._shutdown_on_engine_dead(e)
-            except Exception as e:
+            except BaseException as e:
+                if mutation_dispatched:
+                    await self._latch_indeterminate_weight_state(str(e))
+                if isinstance(e, EngineDeadError):
+                    self._shutdown_on_engine_dead(e)
+                if not isinstance(e, Exception):
+                    raise
                 logger.error(f"[RL] update_weights_from_disk failed: {e}")
                 return {"status": "error", "message": str(e)}
 
@@ -1664,16 +1694,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "'reset_prefix_cache' must be a boolean",
             }
-        if allow_unpaused and reset_prefix_cache:
+        if allow_unpaused:
             return {
                 "status": "error",
                 "message": (
-                    "Unpaused weight updates cannot reset the prefix cache. "
-                    "Set 'reset_prefix_cache' to false or pause generation first."
+                    "Unpaused weight updates are unsafe. Pause generation with "
+                    "mode='wait' or mode='abort' before updating weights."
                 ),
             }
+        if not reset_prefix_cache:
+            return {
+                "status": "error",
+                "message": "Weight updates require prefix/KV/connector cache reset",
+            }
         async with self._pause_lock:
-            if not self._paused and not allow_unpaused:
+            if self._pause_controller.fatal_error is not None:
+                return {
+                    "status": "error",
+                    "message": (
+                        "engine state is indeterminate and requires restart: "
+                        f"{self._pause_controller.fatal_error}"
+                    ),
+                }
+            if not self._pause_controller.is_rl_paused:
                 return {
                     "status": "error",
                     "message": (
@@ -1682,7 +1725,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "update, then resume_generation()."
                     ),
                 }
-            if reset_prefix_cache and not getattr(self, "_pause_drained", False):
+            if not self._pause_controller.is_rl_drained:
                 return {
                     "status": "error",
                     "message": (
@@ -1697,27 +1740,32 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for k, v in body.items()
                 if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
             }
+            mutation_dispatched = False
             try:
+                mutation_dispatched = True
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
-                if reset_prefix_cache:
-                    # Weights changed: stale prefix/KV cache must be invalidated
-                    # before resume so it is not reused under the new weights.
-                    reset_successful = await self.engine_client.reset_prefix_cache(
-                        reset_connector=True
+                # Weights changed: stale prefix/KV cache must be invalidated
+                # before resume so it is not reused under the new weights.
+                reset_successful = await self.engine_client.reset_prefix_cache(
+                    reset_connector=True
+                )
+                if reset_successful is not True:
+                    raise RuntimeError(
+                        "prefix/KV/connector cache reset failed after weight update"
                     )
-                    if reset_successful is not True:
-                        raise RuntimeError(
-                            "prefix/KV/connector cache reset failed after weight update"
-                        )
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
                     f"(version={version}, rpc={rpc})"
                 )
                 return {"status": "ok", "version": version}
-            except EngineDeadError as e:
-                self._shutdown_on_engine_dead(e)
-            except Exception as e:
+            except BaseException as e:
+                if mutation_dispatched:
+                    await self._latch_indeterminate_weight_state(str(e))
+                if isinstance(e, EngineDeadError):
+                    self._shutdown_on_engine_dead(e)
+                if not isinstance(e, Exception):
+                    raise
                 logger.error(f"[RL] update_weights_from_distributed failed: {e}")
                 return {"status": "error", "message": str(e)}
 
@@ -3535,10 +3583,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             async for res in gen:
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
-                token_ids = res.outputs[0].token_ids if res.outputs else []
-
-                # For prefill worker, only one res will be generated,
-                # so we can always build embedding params here without conditionals
+                # Build handoff state for each vLLM response snapshot. Generate
+                # requests may expose several choice outputs for the same prompt.
                 embedding_params = (
                     self._multimodal_request_processor.build_prefill_handoff(
                         multi_modal_data=multi_modal_data,
@@ -3547,30 +3593,51 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     )
                 )
 
-                output: Dict[str, Any] = {
-                    "token_ids": list(token_ids),
-                    "disaggregated_params": self._build_disaggregated_params(
-                        kv_protocol.decode_request_kv_transfer_params(res),
-                        embedding_params,
-                    ),
-                    "completion_usage": BaseWorkerHandler._build_completion_usage(
-                        request_output=res,
-                        embedding_sequence_length=embedding_sequence_length,
-                    ),
-                }
+                response_outputs = res.outputs or [None]
+                if engine_request is None:
+                    response_outputs = response_outputs[:1]
+                for choice in response_outputs:
+                    token_ids = (
+                        list(choice.token_ids or []) if choice is not None else []
+                    )
+                    output: Dict[str, Any] = {
+                        "token_ids": token_ids,
+                        "disaggregated_params": self._build_disaggregated_params(
+                            kv_protocol.decode_request_kv_transfer_params(res),
+                            embedding_params,
+                        ),
+                        "completion_usage": BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
+                        ),
+                    }
+                    if engine_request is not None:
+                        output["index"] = int(getattr(choice, "index", 0) or 0)
+                        metadata: Dict[str, Any] = {}
+                        if getattr(res, "prompt_logprobs", None) is not None:
+                            metadata["prompt_logprobs"] = _serialize_prompt_logprobs(
+                                res.prompt_logprobs
+                            )
+                        routed_experts = _serialize_vllm_routed_experts(
+                            getattr(choice, "routed_experts", None)
+                        )
+                        if routed_experts is not None:
+                            metadata["routed_experts"] = routed_experts
+                        if metadata:
+                            output["generate_metadata"] = metadata
 
-                # Log prefill completion with LoRA info
-                self._log_with_lora_context(
-                    "Prefill completed for request {request_id}{lora_info}: "
-                    "generated {token_count} token(s), has_kv_params={has_kv_params}",
-                    request_id,
-                    lora_request,
-                    level="info" if lora_request else "debug",
-                    token_count=len(token_ids),
-                    has_kv_params=res.kv_transfer_params is not None,
-                )
+                    # Log prefill completion with LoRA info
+                    self._log_with_lora_context(
+                        "Prefill completed for request {request_id}{lora_info}: "
+                        "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                        request_id,
+                        lora_request,
+                        level="info" if lora_request else "debug",
+                        token_count=len(token_ids),
+                        has_kv_params=res.kv_transfer_params is not None,
+                    )
 
-                yield output
+                    yield output
 
     def _build_disaggregated_params(
         self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None

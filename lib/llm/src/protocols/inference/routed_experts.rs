@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Merge the vLLM routed-expert wire format across prefill and decode.
+//! Validation and phase merging for vLLM's routed-expert wire payload.
 //!
-//! vLLM serializes each expert trace with `numpy.save` and then base64-encodes
-//! the resulting `.npy` bytes. P/D generation produces one such array per
-//! phase, so the HTTP boundary concatenates axis 0 while preserving the
-//! remaining dimensions and dtype.
+//! The worker serializes an ndarray with `numpy.save` and base64 encodes the
+//! resulting `.npy` bytes. This module is deliberately protocol-owned so both
+//! prefill admission and the HTTP response assembler enforce exactly the same
+//! process-boundary limits.
 
 use std::mem;
 
@@ -14,67 +14,76 @@ use base64::Engine as _;
 use ndarray::{ArrayViewD, Axis};
 use ndarray_npy::{ViewElement, ViewNpyExt, WritableElement, WriteNpyExt};
 
-use super::invalid_response;
-use crate::protocols::inference::generate::GenerateProtocolError;
+use super::generate::GenerateProtocolError;
 
-// A trace is backend-generated rather than user-supplied, but it crosses a
-// process boundary. Bound both parsing and the merged allocation so a corrupt
-// NPY header cannot turn one response into an unbounded allocation.
-const MAX_NPY_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_NPY_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ENCODED_NPY_BYTES: usize = MAX_NPY_BYTES.div_ceil(3) * 4;
+pub(crate) const MAX_CUMULATIVE_ROUTED_EXPERT_ENCODED_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_CUMULATIVE_ROUTED_EXPERT_DECODED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NPY_ELEMENTS: usize = 8 * 1024 * 1024;
 const MAX_NPY_RANK: usize = 8;
 
-pub(super) fn merge_routed_expert_payloads(
-    prefill: Option<String>,
-    decode: Option<String>,
-) -> Result<Option<String>, GenerateProtocolError> {
-    let (prefill, decode) = match (prefill, decode) {
-        (Some(prefill), Some(decode)) => (prefill, decode),
-        (Some(payload), None) => {
-            validate_single_payload("prefill", &payload)?;
-            return Ok(Some(payload));
-        }
-        (None, Some(payload)) => {
-            validate_single_payload("decode", &payload)?;
-            return Ok(Some(payload));
-        }
-        (None, None) => return Ok(None),
-    };
-    let prefill = decode_payload("prefill", &prefill)?;
-    let decode = decode_payload("decode", &decode)?;
-
-    macro_rules! try_dtype {
-        ($dtype:ty) => {
-            if let Some(bytes) = concat_npy_rows::<$dtype>(&prefill, &decode) {
-                return Ok(Some(
-                    base64::engine::general_purpose::STANDARD.encode(bytes),
-                ));
-            }
-        };
-    }
-    try_dtype!(i8);
-    try_dtype!(u8);
-    try_dtype!(i16);
-    try_dtype!(u16);
-    try_dtype!(i32);
-    try_dtype!(u32);
-    try_dtype!(i64);
-    try_dtype!(u64);
-    try_dtype!(f32);
-    try_dtype!(f64);
-    try_dtype!(bool);
-    Err(invalid_response(
-        "prefill/decode routed-expert NumPy payloads have incompatible dtype or shape",
-    ))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RoutedExpertPayloadStats {
+    pub(crate) encoded_bytes: usize,
+    pub(crate) decoded_bytes: usize,
 }
 
-fn validate_single_payload(label: &str, payload: &str) -> Result<(), GenerateProtocolError> {
+#[derive(Debug)]
+pub(crate) struct MergedRoutedExpertPayload {
+    pub(crate) payload: String,
+    pub(crate) stats: RoutedExpertPayloadStats,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct RoutedExpertResponseBudget {
+    encoded_bytes: usize,
+    decoded_bytes: usize,
+}
+
+impl RoutedExpertResponseBudget {
+    pub(crate) fn record(
+        &mut self,
+        stats: RoutedExpertPayloadStats,
+    ) -> Result<(), GenerateProtocolError> {
+        self.encoded_bytes = self
+            .encoded_bytes
+            .checked_add(stats.encoded_bytes)
+            .ok_or_else(|| invalid_response("routed-expert encoded byte count overflowed"))?;
+        if self.encoded_bytes > MAX_CUMULATIVE_ROUTED_EXPERT_ENCODED_BYTES {
+            return Err(invalid_response(format!(
+                "routed-expert metadata exceeded the {MAX_CUMULATIVE_ROUTED_EXPERT_ENCODED_BYTES}-byte cumulative encoded limit"
+            )));
+        }
+        self.decoded_bytes = self
+            .decoded_bytes
+            .checked_add(stats.decoded_bytes)
+            .ok_or_else(|| invalid_response("routed-expert decoded byte count overflowed"))?;
+        if self.decoded_bytes > MAX_CUMULATIVE_ROUTED_EXPERT_DECODED_BYTES {
+            return Err(invalid_response(format!(
+                "routed-expert metadata exceeded the {MAX_CUMULATIVE_ROUTED_EXPERT_DECODED_BYTES}-byte cumulative decoded limit"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn invalid_response(message: impl Into<String>) -> GenerateProtocolError {
+    GenerateProtocolError::InvalidResponse(message.into())
+}
+
+pub(crate) fn validate_routed_expert_payload(
+    label: &str,
+    payload: &str,
+) -> Result<RoutedExpertPayloadStats, GenerateProtocolError> {
     let decoded = decode_payload(label, payload)?;
     macro_rules! valid_dtype {
         ($dtype:ty) => {
             if valid_npy::<$dtype>(&decoded) {
-                return Ok(());
+                return Ok(RoutedExpertPayloadStats {
+                    encoded_bytes: payload.len(),
+                    decoded_bytes: decoded.len(),
+                });
             }
         };
     }
@@ -92,6 +101,64 @@ fn validate_single_payload(label: &str, payload: &str) -> Result<(), GeneratePro
     Err(invalid_response(format!(
         "invalid {label} routed-expert NumPy payload"
     )))
+}
+
+#[cfg(test)]
+pub(crate) fn merge_routed_expert_payloads(
+    prefill: Option<String>,
+    decode: Option<String>,
+) -> Result<Option<String>, GenerateProtocolError> {
+    Ok(merge_routed_expert_payloads_with_stats(prefill, decode)?.map(|merged| merged.payload))
+}
+
+pub(crate) fn merge_routed_expert_payloads_with_stats(
+    prefill: Option<String>,
+    decode: Option<String>,
+) -> Result<Option<MergedRoutedExpertPayload>, GenerateProtocolError> {
+    let (prefill, decode) = match (prefill, decode) {
+        (Some(prefill), Some(decode)) => (prefill, decode),
+        (Some(payload), None) => {
+            let stats = validate_routed_expert_payload("prefill", &payload)?;
+            return Ok(Some(MergedRoutedExpertPayload { payload, stats }));
+        }
+        (None, Some(payload)) => {
+            let stats = validate_routed_expert_payload("decode", &payload)?;
+            return Ok(Some(MergedRoutedExpertPayload { payload, stats }));
+        }
+        (None, None) => return Ok(None),
+    };
+    let prefill = decode_payload("prefill", &prefill)?;
+    let decode = decode_payload("decode", &decode)?;
+
+    macro_rules! try_dtype {
+        ($dtype:ty) => {
+            if let Some(bytes) = concat_npy_rows::<$dtype>(&prefill, &decode) {
+                let decoded_bytes = bytes.len();
+                let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
+                return Ok(Some(MergedRoutedExpertPayload {
+                    stats: RoutedExpertPayloadStats {
+                        encoded_bytes: payload.len(),
+                        decoded_bytes,
+                    },
+                    payload,
+                }));
+            }
+        };
+    }
+    try_dtype!(i8);
+    try_dtype!(u8);
+    try_dtype!(i16);
+    try_dtype!(u16);
+    try_dtype!(i32);
+    try_dtype!(u32);
+    try_dtype!(i64);
+    try_dtype!(u64);
+    try_dtype!(f32);
+    try_dtype!(f64);
+    try_dtype!(bool);
+    Err(invalid_response(
+        "prefill/decode routed-expert NumPy payloads have incompatible dtype or shape",
+    ))
 }
 
 fn decode_payload(label: &str, payload: &str) -> Result<Vec<u8>, GenerateProtocolError> {
@@ -200,7 +267,6 @@ impl<'a> NpyInput<'a> {
 mod tests {
     use super::*;
     use ndarray::{Array, IxDyn};
-    use ndarray_npy::WriteNpyExt;
 
     fn payload<T>(values: Vec<T>, shape: &[usize]) -> String
     where
@@ -213,13 +279,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_base64() {
-        let error = merge_routed_expert_payloads(
-            Some("not-base64".to_string()),
-            Some(payload(vec![1i16], &[1, 1])),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("invalid prefill routed experts"));
+    fn validates_supported_payload_and_reports_wire_size() {
+        let payload = payload(vec![1i16, 2], &[2, 1]);
+        let stats = validate_routed_expert_payload("prefill", &payload).unwrap();
+        assert_eq!(stats.encoded_bytes, payload.len());
+        assert!(stats.decoded_bytes < stats.encoded_bytes);
+    }
+
+    #[test]
+    fn rejects_invalid_base64_and_npy() {
+        assert!(validate_routed_expert_payload("prefill", "not-base64").is_err());
+        let malformed = base64::engine::general_purpose::STANDARD.encode(b"not-npy");
+        assert!(validate_routed_expert_payload("prefill", &malformed).is_err());
     }
 
     #[test]
@@ -232,42 +303,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_malformed_single_phase_payload() {
-        let malformed = base64::engine::general_purpose::STANDARD.encode(b"not-npy");
-        let error = merge_routed_expert_payloads(None, Some(malformed)).unwrap_err();
+    fn rejects_mismatched_dtype_or_shape() {
         assert!(
-            error
-                .to_string()
-                .contains("invalid decode routed-expert NumPy payload")
+            merge_routed_expert_payloads(
+                Some(payload(vec![1i16], &[1, 1])),
+                Some(payload(vec![2i32], &[1, 1])),
+            )
+            .is_err()
         );
-    }
-
-    #[test]
-    fn rejects_malformed_npy() {
-        let malformed = base64::engine::general_purpose::STANDARD.encode(b"not-npy");
-        let error =
-            merge_routed_expert_payloads(Some(malformed.clone()), Some(malformed)).unwrap_err();
-        assert!(error.to_string().contains("incompatible dtype or shape"));
-    }
-
-    #[test]
-    fn rejects_mismatched_dtype() {
-        let error = merge_routed_expert_payloads(
-            Some(payload(vec![1i16], &[1, 1])),
-            Some(payload(vec![2i32], &[1, 1])),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("incompatible dtype or shape"));
-    }
-
-    #[test]
-    fn rejects_mismatched_non_row_shape() {
-        let error = merge_routed_expert_payloads(
-            Some(payload(vec![1i16, 2], &[1, 2])),
-            Some(payload(vec![3i16, 4, 5], &[1, 3])),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("incompatible dtype or shape"));
+        assert!(
+            merge_routed_expert_payloads(
+                Some(payload(vec![1i16, 2], &[1, 2])),
+                Some(payload(vec![3i16, 4, 5], &[1, 3])),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -280,7 +330,7 @@ mod tests {
     #[test]
     fn rejects_encoded_or_decoded_payload_over_bound() {
         assert!(
-            validate_payload_size("prefill", MAX_ENCODED_NPY_BYTES + 1, MAX_ENCODED_NPY_BYTES)
+            validate_payload_size("prefill", MAX_ENCODED_NPY_BYTES + 1, MAX_ENCODED_NPY_BYTES,)
                 .is_err()
         );
         assert!(validate_payload_size("decode", MAX_NPY_BYTES + 1, MAX_NPY_BYTES).is_err());

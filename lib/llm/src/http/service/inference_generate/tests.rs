@@ -302,6 +302,14 @@ fn routed_expert_payload(values: Vec<i16>, rows: usize) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+fn large_routed_expert_payload(data_bytes: usize) -> String {
+    assert_eq!(data_bytes % std::mem::size_of::<u32>(), 0);
+    let array = ndarray::Array1::<u32>::zeros(data_bytes / std::mem::size_of::<u32>());
+    let mut bytes = Vec::new();
+    array.write_npy(&mut bytes).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 fn request_for(model: &str) -> GenerateRequest {
     serde_json::from_value(serde_json::json!({
         "model": model,
@@ -428,6 +436,39 @@ fn routed_expert_numpy_rows_merge_across_bootstrap_prefill_and_decode() {
 
     assert_eq!(array.shape(), &[3, 1, 1]);
     assert_eq!(array.iter().copied().collect::<Vec<_>>(), vec![10, 11, 12]);
+}
+
+#[test]
+fn routed_expert_budget_is_cumulative_across_unary_and_streaming_choices() {
+    // Each payload is below the 32 MiB decoded per-payload limit, while two
+    // base64 payloads together exceed the 64 MiB response budget.
+    let payload = large_routed_expert_payload(24 * 1024 * 1024);
+
+    {
+        let mut accumulator = GenerateAccumulator::new("request-unary".into(), 2, None);
+        let mut first = output(0, 11, true);
+        first.generate_metadata.as_mut().unwrap().routed_experts = Some(payload.clone());
+        accumulator.push(first).unwrap();
+        let mut second = output(1, 12, true);
+        second.generate_metadata.as_mut().unwrap().routed_experts = Some(payload.clone());
+        let error = accumulator
+            .push(second)
+            .expect_err("unary routed-expert budget must span all choices");
+        assert!(error.to_string().contains("cumulative"));
+    }
+
+    {
+        let mut accumulator = GenerateStreamAccumulator::new("request-stream".into(), 2, None);
+        let mut first = output(0, 11, true);
+        first.generate_metadata.as_mut().unwrap().routed_experts = Some(payload.clone());
+        accumulator.push(first, false).unwrap();
+        let mut second = output(1, 12, true);
+        second.generate_metadata.as_mut().unwrap().routed_experts = Some(payload);
+        let error = accumulator
+            .push(second, false)
+            .expect_err("stream routed-expert budget must span all choices");
+        assert!(error.to_string().contains("cumulative"));
+    }
 }
 
 #[test]

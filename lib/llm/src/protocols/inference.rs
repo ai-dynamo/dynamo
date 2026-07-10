@@ -4,3 +4,4 @@
 //! Engine-native inference protocols.
 
 pub mod generate;
+pub(crate) mod routed_experts;

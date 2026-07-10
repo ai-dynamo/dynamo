@@ -37,7 +37,11 @@ use crate::protocols::inference::generate::{
     GenerateProtocolError, GenerateRequest, GenerateResponse, GenerateResponseChoice,
     GenerateStreamResponse, GenerateStreamResponseChoice, GenerateTokenLogprob, GenerateTopLogprob,
 };
-use routed_experts::merge_routed_expert_payloads;
+#[cfg(test)]
+use crate::protocols::inference::routed_experts::merge_routed_expert_payloads;
+use crate::protocols::inference::routed_experts::{
+    RoutedExpertResponseBudget, merge_routed_expert_payloads_with_stats,
+};
 
 pub(super) fn router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
     let doc = RouteDoc::new(axum::http::Method::POST, GENERATE_PATH);
@@ -570,6 +574,7 @@ struct GenerateStreamAccumulator {
     terminal_choices: BTreeSet<u32>,
     completion_tokens: BTreeMap<u32, usize>,
     latest_usage: Option<CompletionUsage>,
+    routed_expert_budget: RoutedExpertResponseBudget,
 }
 
 impl GenerateStreamAccumulator {
@@ -582,6 +587,7 @@ impl GenerateStreamAccumulator {
             terminal_choices: BTreeSet::new(),
             completion_tokens: BTreeMap::new(),
             latest_usage: None,
+            routed_expert_budget: Default::default(),
         }
     }
 
@@ -607,13 +613,19 @@ impl GenerateStreamAccumulator {
         let routed_experts = output
             .generate_metadata
             .map(|metadata| {
-                merge_routed_expert_payloads(
+                merge_routed_expert_payloads_with_stats(
                     metadata.prefill_routed_experts,
                     metadata.routed_experts,
                 )
             })
             .transpose()?
             .flatten();
+        let routed_experts = routed_experts
+            .map(|merged| {
+                self.routed_expert_budget.record(merged.stats)?;
+                Ok(merged.payload)
+            })
+            .transpose()?;
         let token_ids = output.token_ids;
         let logprobs = if let Some(requested_logprobs) = self.requested_logprobs
             && !token_ids.is_empty()
@@ -762,6 +774,7 @@ struct GenerateAccumulator {
     latest_usage: Option<CompletionUsage>,
     expected_choices: usize,
     requested_logprobs: Option<i32>,
+    routed_expert_budget: RoutedExpertResponseBudget,
 }
 
 #[derive(Default)]
@@ -782,6 +795,7 @@ impl GenerateAccumulator {
             latest_usage: None,
             expected_choices,
             requested_logprobs,
+            routed_expert_budget: Default::default(),
         }
     }
 
@@ -846,11 +860,12 @@ impl GenerateAccumulator {
             if let Some(kv_transfer_params) = metadata.kv_transfer_params {
                 self.kv_transfer_params = Some(kv_transfer_params);
             }
-            if let Some(routed_experts) = merge_routed_expert_payloads(
+            if let Some(routed_experts) = merge_routed_expert_payloads_with_stats(
                 metadata.prefill_routed_experts,
                 metadata.routed_experts,
             )? {
-                choice.routed_experts = Some(routed_experts);
+                self.routed_expert_budget.record(routed_experts.stats)?;
+                choice.routed_experts = Some(routed_experts.payload);
             }
         }
         if let Some(reason) = output.finish_reason {
@@ -1006,8 +1021,6 @@ fn protocol_error(error: GenerateProtocolError) -> ErrorResponse {
 fn invalid_response(message: impl Into<String>) -> GenerateProtocolError {
     GenerateProtocolError::InvalidResponse(message.into())
 }
-
-mod routed_experts;
 
 #[cfg(test)]
 mod tests;

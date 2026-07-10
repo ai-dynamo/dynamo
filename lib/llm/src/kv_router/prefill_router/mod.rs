@@ -33,9 +33,17 @@ use crate::{
 
 mod activation;
 mod admission;
+#[cfg(test)]
+mod admission_tests;
+mod bootstrap;
+mod metadata;
 mod query;
 
+use crate::protocols::inference::generate::MAX_GENERATE_CHOICES;
 use admission::InnerPrefillRouter;
+use bootstrap::AbortOnDrop;
+#[cfg(test)]
+use bootstrap::BOOTSTRAP_PREFILL_COMPLETION_TIMEOUT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -84,7 +92,7 @@ enum PrefillOutcome {
     Bootstrap {
         bootstrap_info: BootstrapInfo,
         worker_id: u64,
-        completion: Option<tokio::task::JoinHandle<Result<PrefillCompletion, PrefillError>>>,
+        completion: Option<AbortOnDrop<Result<PrefillCompletion, PrefillError>>>,
     },
     Completed {
         result: PrefillResult,
@@ -224,7 +232,7 @@ impl
         }
 
         let tracker = prefill_req.tracker.clone();
-        let capture_generate_metadata = prefill_req.generate_request.is_some();
+        let expected_generate_choices = generate_expected_choices(&prefill_req)?;
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
         if let Some(session_affinity) = session_affinity {
@@ -247,16 +255,27 @@ impl
                 .await?;
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
-                let completion =
-                    self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
+                let completion = self.spawn_prefill_task(
+                    prefill_stream,
+                    tracker,
+                    prefill_phase_barrier,
+                    expected_generate_choices,
+                );
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
                     worker_id: prepared.worker_id,
-                    completion: capture_generate_metadata.then_some(completion),
+                    completion: expected_generate_choices
+                        .is_some()
+                        .then(|| AbortOnDrop::new(completion)),
                 }
             } else {
                 drop(prefill_phase_barrier);
-                let completion = Self::consume_prefill_stream(prefill_stream, tracker).await?;
+                let completion = Self::consume_prefill_stream(
+                    prefill_stream,
+                    tracker,
+                    expected_generate_choices,
+                )
+                .await?;
                 PrefillOutcome::Completed {
                     result: completion.result,
                     worker_id: prepared.worker_id,
@@ -343,6 +362,33 @@ impl
             None => decode_stream,
         })
     }
+}
+
+fn generate_expected_choices(request: &PreprocessedRequest) -> Result<Option<u32>, PrefillError> {
+    let Some(generate_request) = request.generate_request.as_ref() else {
+        return Ok(None);
+    };
+    let choices = match generate_request.sampling_params.get("n") {
+        None => 1,
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                PrefillError::PrefillError(
+                    "Generate sampling parameter n must be an unsigned 32-bit integer".to_string(),
+                    None,
+                )
+            })?,
+    };
+    if choices == 0 || choices > MAX_GENERATE_CHOICES {
+        return Err(PrefillError::PrefillError(
+            format!(
+                "Generate prefill choice count must be between 1 and {MAX_GENERATE_CHOICES}, got {choices}"
+            ),
+            None,
+        ));
+    }
+    Ok(Some(choices))
 }
 
 impl PrefillRouter {
@@ -459,6 +505,7 @@ mod tests {
     use super::*;
     use dynamo_kv_router::config::RouterConfigOverride;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use serde_json::json;
     use std::collections::{HashMap, HashSet};
 
     use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
@@ -523,6 +570,36 @@ mod tests {
             }))
             .build()
             .unwrap()
+    }
+
+    fn request_with_generate_n(n: Option<serde_json::Value>) -> PreprocessedRequest {
+        let mut request = request_with_constraints(None);
+        let mut sampling_params = serde_json::Map::new();
+        if let Some(n) = n {
+            sampling_params.insert("n".to_string(), n);
+        }
+        request.generate_request =
+            Some(serde_json::from_value(json!({"sampling_params": sampling_params})).unwrap());
+        request
+    }
+
+    #[test]
+    fn generate_prefill_choice_count_uses_request_n_and_safe_bounds() {
+        assert_eq!(
+            generate_expected_choices(&request_with_constraints(None)).unwrap(),
+            None
+        );
+        assert_eq!(
+            generate_expected_choices(&request_with_generate_n(None)).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            generate_expected_choices(&request_with_generate_n(Some(json!(3)))).unwrap(),
+            Some(3)
+        );
+        for invalid in [json!(0), json!(4097), json!(-1), json!("two")] {
+            assert!(generate_expected_choices(&request_with_generate_n(Some(invalid))).is_err());
+        }
     }
 
     #[test]

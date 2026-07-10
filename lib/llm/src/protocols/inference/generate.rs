@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 pub const GENERATE_PATH: &str = "/inference/v1/generate";
+pub const MAX_GENERATE_CHOICES: u32 = 4_096;
 
 /// Private pipeline-context key for the canonical Dynamo routing headers.
 pub(crate) const GENERATE_ROUTING_HINTS_CONTEXT_KEY: &str = "dynamo.llm.generate.routing_hints";
@@ -339,8 +340,10 @@ impl GenerateSamplingParams {
     }
 
     pub fn validate(&self) -> Result<(), GenerateProtocolError> {
-        if self.n == Some(0) {
-            return Err(invalid("`sampling_params.n` must be greater than zero"));
+        if self.n == Some(0) || self.n.is_some_and(|n| n > MAX_GENERATE_CHOICES) {
+            return Err(invalid(format!(
+                "`sampling_params.n` must be between 1 and {MAX_GENERATE_CHOICES}"
+            )));
         }
         validate_range("presence_penalty", self.presence_penalty, -2.0, 2.0, true)?;
         validate_range("frequency_penalty", self.frequency_penalty, -2.0, 2.0, true)?;
@@ -743,6 +746,23 @@ mod tests {
         assert_eq!(round_trip["token_ids"], serde_json::json!([11, 22, 33, 44]));
         assert_eq!(round_trip["sampling_params"]["n"], 2);
         assert_eq!(round_trip["future_top_level"]["enabled"], true);
+    }
+
+    #[test]
+    fn generate_choice_count_has_a_canonical_upper_bound() {
+        let request_with_n = |n| {
+            serde_json::from_value::<GenerateRequest>(serde_json::json!({
+                "token_ids": [1],
+                "sampling_params": {"n": n}
+            }))
+            .unwrap()
+        };
+
+        request_with_n(4_096).validate().unwrap();
+        let error = request_with_n(4_097)
+            .validate()
+            .expect_err("oversized n must fail at the shared protocol boundary");
+        assert!(error.to_string().contains("4096"));
     }
 
     #[test]
