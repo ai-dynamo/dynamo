@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // ExtractCandidates extracts endpoint candidates from EndpointSlices
@@ -37,6 +38,7 @@ import (
 func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32) ([]Candidate, map[string]bool) {
 	var candidates []Candidate
 	serviceNames := make(map[string]bool)
+	candidateIndexes := make(map[string]int)
 
 	for _, slice := range endpointSlices.Items {
 		serviceName := slice.Labels[discoveryv1.LabelServiceName]
@@ -54,13 +56,42 @@ func ExtractCandidates(endpointSlices *discoveryv1.EndpointSliceList, port int32
 				continue
 			}
 			podName := ep.TargetRef.Name
+			candidateKey := string(ep.TargetRef.UID)
+			if candidateKey == "" {
+				candidateKey = podName
+			}
+			if index, exists := candidateIndexes[candidateKey]; exists {
+				candidate := &candidates[index]
+				if ep.Conditions.Ready != nil && *ep.Conditions.Ready {
+					candidate.KubernetesReady = true
+				}
+				if componentName := slice.Labels[consts.KubeLabelDynamoComponent]; componentName != "" {
+					candidate.WorkloadName = serviceName
+					candidate.ComponentName = componentName
+				}
+				if graphName := slice.Labels[consts.KubeLabelDynamoGraphDeploymentName]; graphName != "" {
+					candidate.GraphDeploymentName = graphName
+				}
+				continue
+			}
 
 			for _, addr := range ep.Addresses {
 				address := "http://" + net.JoinHostPort(addr, strconv.Itoa(int(port)))
+				componentName := slice.Labels[consts.KubeLabelDynamoComponent]
+				componentDeployment := ""
+				if componentName != "" {
+					componentDeployment = serviceName
+				}
+				candidateIndexes[candidateKey] = len(candidates)
 				candidates = append(candidates, Candidate{
-					Address: address,
-					PodName: podName,
+					Address:             address,
+					PodName:             podName,
+					WorkloadName:        componentDeployment,
+					ComponentName:       componentName,
+					GraphDeploymentName: slice.Labels[consts.KubeLabelDynamoGraphDeploymentName],
+					KubernetesReady:     ep.Conditions.Ready != nil && *ep.Conditions.Ready,
 				})
+				break
 			}
 		}
 	}

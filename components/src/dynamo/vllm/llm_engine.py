@@ -810,6 +810,17 @@ class VllmLLMEngine(LLMEngine):
         """
         return self._lora_load_locks[hash(lora_name) % _LORA_LOCK_STRIPES]
 
+    def _preload_lora_into_engine(self) -> bool:
+        """Whether lifecycle registration should eagerly activate the adapter.
+
+        A disaggregated prefill worker receives the adapter path again in the
+        per-request ``LoRARequest``. Letting vLLM activate it there avoids
+        consuming a prefill LoRA slot before the adapter is used. Decode and
+        aggregated workers must be immediately ready to generate, so they
+        retain the eager load behavior.
+        """
+        return self.disaggregation_mode != DisaggregationMode.PREFILL
+
     async def _publish_lora_card(self, lora_name: str, lora_id: int) -> None:
         """Publish a LoRA adapter as a ModelDeploymentCard for discovery.
 
@@ -877,6 +888,7 @@ class VllmLLMEngine(LLMEngine):
             base_model_path=self.engine_args.model,
             worker_type=worker_type,
             needs=needs,
+            max_gpu_lora_count=self.engine_args.max_loras,
         )
 
     def _lora_registration_topology(
@@ -1014,13 +1026,15 @@ class VllmLLMEngine(LLMEngine):
                 # Deterministic ID from lora_name before using it.
                 lora_id = lora_name_to_id(lora_name)
 
-                await self.engine_client.add_lora(
-                    LoRARequest(
-                        lora_name=lora_name,
-                        lora_int_id=lora_id,
-                        lora_path=lora_path,
+                preload_into_engine = self._preload_lora_into_engine()
+                if preload_into_engine:
+                    await self.engine_client.add_lora(
+                        LoRARequest(
+                            lora_name=lora_name,
+                            lora_int_id=lora_id,
+                            lora_path=lora_path,
+                        )
                     )
-                )
 
                 self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
                 logger.info(
@@ -1057,11 +1071,12 @@ class VllmLLMEngine(LLMEngine):
                         # `loaded_loras` but absent from `_published_loras`,
                         # so a retried load reconciles the publish.
                         try:
-                            logger.debug(
-                                "Rolling back: removing LoRA '%s' from engine",
-                                lora_name,
-                            )
-                            await self.engine_client.remove_lora(lora_id)
+                            if preload_into_engine:
+                                logger.debug(
+                                    "Rolling back: removing LoRA '%s' from engine",
+                                    lora_name,
+                                )
+                                await self.engine_client.remove_lora(lora_id)
                             self.loaded_loras.pop(lora_name, None)
                             logger.debug(
                                 "Successfully rolled back LoRA '%s'", lora_name

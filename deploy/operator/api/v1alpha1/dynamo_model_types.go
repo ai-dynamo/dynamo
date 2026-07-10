@@ -69,7 +69,8 @@ type EndpointInfo struct {
 	PodName string `json:"podName,omitempty"`
 
 	// Ready indicates whether the endpoint is ready to serve traffic
-	// For LoRA models: true if the POST /loras request succeeded with a 2xx status code
+	// For LoRA models: true if the lifecycle request succeeded, or during a rolling
+	// upgrade if a Kubernetes-ready legacy prefill is covered by another capable prefill
 	// For base models: always false (no probing performed)
 	Ready bool `json:"ready"`
 }

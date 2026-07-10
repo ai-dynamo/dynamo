@@ -73,6 +73,23 @@ def _load_vllm_main() -> ModuleType:
     return importlib.import_module("dynamo.vllm.main")
 
 
+@pytest.mark.parametrize(
+    "enable_lora, model_type, expected",
+    [
+        (True, dynamo_llm.ModelType.Prefill, 3),
+        (True, dynamo_llm.ModelType.Chat, 3),
+        (True, dynamo_llm.ModelType.Embedding, None),
+        (False, dynamo_llm.ModelType.Prefill, None),
+    ],
+)
+def test_base_model_lora_capacity(enable_lora, model_type, expected):
+    config = SimpleNamespace(
+        engine_args=SimpleNamespace(enable_lora=enable_lora, max_loras=3)
+    )
+
+    assert _load_vllm_main()._base_model_lora_capacity(config, model_type) == expected
+
+
 def test_custom_jinja_template_invalid_path(mock_vllm_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"

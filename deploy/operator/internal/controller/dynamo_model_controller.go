@@ -39,6 +39,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -78,6 +79,9 @@ type DynamoModelReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
@@ -221,6 +225,110 @@ func countReadyEndpoints(endpoints []v1alpha1.EndpointInfo) int {
 		}
 	}
 	return count
+}
+
+func markLoRAManagementUnavailableFallbackEligible(
+	candidates []modelendpoint.Candidate,
+	components []v1beta1.DynamoComponentDeployment,
+	graphs []v1beta1.DynamoGraphDeployment,
+) []modelendpoint.Candidate {
+	classified := append([]modelendpoint.Candidate(nil), candidates...)
+	type workloadCapability struct {
+		seen             bool
+		fallbackEligible bool
+	}
+	dcdCapabilities := make(map[string]workloadCapability)
+	lwsCapabilities := make(map[string]workloadCapability)
+	vllmPrefillGraphComponents := make(map[string]struct{})
+	recordCapability := func(capabilities map[string]workloadCapability, key string, fallbackEligible bool) {
+		capability := capabilities[key]
+		if !capability.seen {
+			capability.fallbackEligible = fallbackEligible
+		} else {
+			capability.fallbackEligible = capability.fallbackEligible && fallbackEligible
+		}
+		capability.seen = true
+		capabilities[key] = capability
+	}
+	for i := range components {
+		component := &components[i]
+		if component.Name == "" {
+			continue
+		}
+		backend, err := dynamo.GetBackendFrameworkFromDynamoComponent(component)
+		fallbackEligible := err == nil && backend == dynamo.BackendFrameworkVLLM &&
+			component.Spec.ComponentType == v1beta1.ComponentTypePrefill
+		recordCapability(dcdCapabilities, component.Name, fallbackEligible)
+		recordCapability(lwsCapabilities, component.Name+"-0", fallbackEligible)
+	}
+	for i := range graphs {
+		graph := &graphs[i]
+		for componentIndex := range graph.Spec.Components {
+			component := &graph.Spec.Components[componentIndex]
+			if component.ComponentType != v1beta1.ComponentTypePrefill {
+				continue
+			}
+			backend, err := dynamo.BackendFrameworkForComponent(component, graph)
+			if err != nil || backend != dynamo.BackendFrameworkVLLM {
+				continue
+			}
+			key := graph.Name + "\x00" + component.ComponentName
+			vllmPrefillGraphComponents[key] = struct{}{}
+		}
+	}
+
+	for i := range classified {
+		var capability workloadCapability
+		if classified[i].PodIdentityResolved {
+			if classified[i].ControllerOwnerKind == "LeaderWorkerSet" {
+				capability = lwsCapabilities[classified[i].WorkloadName]
+			} else if classified[i].ControllerOwnerKind == "" {
+				capability = dcdCapabilities[classified[i].WorkloadName]
+			}
+		}
+		workloadMatch := capability.seen && capability.fallbackEligible
+		graphComponentKey := classified[i].GraphDeploymentName + "\x00" + classified[i].ComponentName
+		_, graphComponentMatch := vllmPrefillGraphComponents[graphComponentKey]
+		classified[i].AllowLoRAManagementUnavailable = workloadMatch || graphComponentMatch
+		if graphComponentMatch {
+			classified[i].LoRAFallbackGroup = "graph:" + classified[i].GraphDeploymentName
+		} else if workloadMatch {
+			classified[i].LoRAFallbackGroup = "workload:" + classified[i].WorkloadName
+		}
+	}
+	return classified
+}
+
+func withPodIdentity(candidate modelendpoint.Candidate, pod *corev1.Pod) modelendpoint.Candidate {
+	identified := candidate
+	identified.PodIdentityResolved = true
+	identified.KubernetesReady = false
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			identified.KubernetesReady = condition.Status == corev1.ConditionTrue
+			break
+		}
+	}
+	identified.WorkloadName = ""
+	identified.ControllerOwnerKind = ""
+	if componentName := pod.Labels[consts.KubeLabelDynamoComponent]; componentName != "" {
+		identified.ComponentName = componentName
+	}
+	if graphName := pod.Labels[consts.KubeLabelDynamoGraphDeploymentName]; graphName != "" {
+		identified.GraphDeploymentName = graphName
+	}
+	if componentDeployment := pod.Labels[consts.KubeLabelDynamoSelector]; componentDeployment != "" {
+		identified.WorkloadName = componentDeployment
+	} else {
+		for _, owner := range pod.OwnerReferences {
+			if owner.Controller != nil && *owner.Controller {
+				identified.WorkloadName = owner.Name
+				identified.ControllerOwnerKind = owner.Kind
+				break
+			}
+		}
+	}
+	return identified
 }
 
 // updateCondition updates or adds a condition to the model's status
@@ -373,6 +481,34 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 
 	// Extract pod-ready endpoint candidates from all EndpointSlices
 	candidates, serviceNames := modelendpoint.ExtractCandidates(endpointSlices, int32(consts.DynamoSystemPort))
+	if model.IsLoRA() && len(candidates) > 0 {
+		for i := range candidates {
+			pod := &corev1.Pod{}
+			if err := r.Get(ctx, client.ObjectKey{Namespace: model.Namespace, Name: candidates[i].PodName}, pod); err != nil {
+				if k8serrors.IsNotFound(err) {
+					candidates[i].KubernetesReady = false
+					continue
+				}
+				logs.Error(err, "Failed to get endpoint pod for LoRA lifecycle classification", "podName", candidates[i].PodName)
+				return nil, nil, err
+			}
+			candidates[i] = withPodIdentity(candidates[i], pod)
+		}
+
+		components := &v1beta1.DynamoComponentDeploymentList{}
+		if err := r.List(ctx, components, client.InNamespace(model.Namespace)); err != nil {
+			logs.Error(err, "Failed to list component deployments for LoRA lifecycle classification")
+			r.Recorder.Event(model, corev1.EventTypeWarning, "ComponentDiscoveryFailed", err.Error())
+			return nil, nil, err
+		}
+		graphs := &v1beta1.DynamoGraphDeploymentList{}
+		if err := r.List(ctx, graphs, client.InNamespace(model.Namespace)); err != nil {
+			logs.Error(err, "Failed to list graph deployments for LoRA lifecycle classification")
+			r.Recorder.Event(model, corev1.EventTypeWarning, "GraphDiscoveryFailed", err.Error())
+			return nil, nil, err
+		}
+		candidates = markLoRAManagementUnavailableFallbackEligible(candidates, components.Items, graphs.Items)
+	}
 
 	return candidates, serviceNames, nil
 }
