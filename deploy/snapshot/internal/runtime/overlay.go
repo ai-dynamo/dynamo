@@ -452,6 +452,9 @@ func scanRootfs(
 			if err := validateRelativePath(deletedPath); err != nil {
 				return err
 			}
+			if excludedExactRootfsPath(deletedPath, patterns) {
+				return nil
+			}
 			if len(deleted) >= maxDeletedFiles {
 				return fmt.Errorf(
 					"rootfs contains more than %d deletions",
@@ -728,9 +731,17 @@ func exclusionPatterns(
 		patterns = append(patterns, rootfsExclusion{pattern: pattern})
 	}
 	for _, destination := range bindMountDests {
+		normalized, err := normalizeAbsolutePath(destination, false)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"invalid rootfs mount exclusion %q: %w",
+				destination,
+				err,
+			)
+		}
 		patterns = append(
 			patterns,
-			rootfsExclusion{pattern: destination, exact: true},
+			rootfsExclusion{pattern: normalized, exact: true},
 		)
 	}
 	for i, exclusion := range patterns {
@@ -769,6 +780,18 @@ func excludedRootfsPath(rel string, patterns []rootfsExclusion) bool {
 			continue
 		}
 		if matchRootfsPattern(exclusion.pattern, rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func excludedExactRootfsPath(rel string, patterns []rootfsExclusion) bool {
+	rel = filepath.ToSlash(rel)
+	for _, exclusion := range patterns {
+		if exclusion.exact &&
+			(rel == exclusion.pattern ||
+				strings.HasPrefix(rel, exclusion.pattern+"/")) {
 			return true
 		}
 	}

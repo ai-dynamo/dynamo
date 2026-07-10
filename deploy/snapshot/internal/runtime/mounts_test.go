@@ -3,6 +3,9 @@ package runtime
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -16,6 +19,7 @@ func TestClassifyMounts(t *testing.T) {
 		mounts  []types.MountInfo
 		ociSpec *specs.Spec
 		rootFS  string
+		setup   func(*testing.T) string
 		want    map[string]bool // mountpoint → expected IsOCIManaged
 	}{
 		{
@@ -43,6 +47,7 @@ func TestClassifyMounts(t *testing.T) {
 			mounts: []types.MountInfo{
 				{MountPoint: "/run/secrets"},
 			},
+			setup: rootFSWithSymlink("var/run", "../run"),
 			ociSpec: &specs.Spec{
 				Mounts: []specs.Mount{{Destination: "/var/run/secrets"}},
 			},
@@ -53,6 +58,7 @@ func TestClassifyMounts(t *testing.T) {
 			mounts: []types.MountInfo{
 				{MountPoint: "/var/run/secrets"},
 			},
+			setup: rootFSWithSymlink("run", "var/run"),
 			ociSpec: &specs.Spec{
 				Mounts: []specs.Mount{{Destination: "/run/secrets"}},
 			},
@@ -63,10 +69,27 @@ func TestClassifyMounts(t *testing.T) {
 			mounts: []types.MountInfo{
 				{MountPoint: "/run/other"},
 			},
+			setup: rootFSWithSymlink("var/run", "../run"),
 			ociSpec: &specs.Spec{
 				Mounts: []specs.Mount{{Destination: "/var/run/different"}},
 			},
 			want: map[string]bool{"/run/other": false},
+		},
+		{
+			name: "arbitrary nested rootfs symlink alias",
+			mounts: []types.MountInfo{
+				{MountPoint: "/srv/volumes/model/cache"},
+			},
+			setup: rootFSWithSymlink(
+				"opt/app/current",
+				"../../../srv/volumes/model",
+			),
+			ociSpec: &specs.Spec{
+				Mounts: []specs.Mount{
+					{Destination: "/opt/app/current/cache"},
+				},
+			},
+			want: map[string]bool{"/srv/volumes/model/cache": true},
 		},
 		{
 			name:   "nil OCI spec classifies nothing",
@@ -102,7 +125,14 @@ func TestClassifyMounts(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := ClassifyMounts(tc.mounts, tc.ociSpec, tc.rootFS)
+			rootFS := tc.rootFS
+			if tc.setup != nil {
+				rootFS = tc.setup(t)
+			}
+			result, err := ClassifyMounts(tc.mounts, tc.ociSpec, rootFS)
+			if err != nil {
+				t.Fatal(err)
+			}
 			for _, m := range result {
 				expected, ok := tc.want[m.MountPoint]
 				if !ok {
@@ -256,37 +286,227 @@ func TestBuildMountPolicy(t *testing.T) {
 
 func TestNormalizeOCIPath(t *testing.T) {
 	tests := []struct {
-		name   string
-		raw    string
-		rootFS string
-		want   string
+		name string
+		raw  string
+		want string
 	}{
 		{name: "normal absolute path", raw: "/etc/hostname", want: "/etc/hostname"},
-		{name: "empty string", raw: "", want: ""},
-		{name: "whitespace only", raw: "   ", want: ""},
-		{name: "dot path", raw: ".", want: ""},
 		{name: "path with trailing slashes cleaned", raw: "/etc/hostname///", want: "/etc/hostname"},
-		{
-			name: "with rootFS strips prefix via securejoin",
-			raw:  "/etc/hostname",
-			// SecureJoin(rootFS, "/etc/hostname") → rootFS+"/etc/hostname", then strip rootFS prefix
-			rootFS: "/tmp/fakefs",
-			want:   "/etc/hostname",
-		},
-		{
-			name:   "root path with rootFS returns /",
-			raw:    "/",
-			rootFS: "/tmp/fakefs",
-			want:   "/",
-		},
+		{name: "root path with rootFS returns root", raw: "/", want: "/"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := normalizeOCIPath(tc.raw, tc.rootFS)
+			got, err := normalizeOCIPath(tc.raw, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got != tc.want {
-				t.Errorf("normalizeOCIPath(%q, %q) = %q, want %q", tc.raw, tc.rootFS, got, tc.want)
+				t.Errorf("normalizeOCIPath(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
+	}
+
+	for _, raw := range []string{"", "   ", ".", "relative", "/a/../b", "/a/./b"} {
+		t.Run("invalid_"+strings.ReplaceAll(raw, "/", "_"), func(t *testing.T) {
+			if _, err := normalizeOCIPath(raw, t.TempDir()); err == nil {
+				t.Fatalf("normalizeOCIPath(%q) succeeded", raw)
+			}
+		})
+	}
+}
+
+func TestBuildRootfsMountExclusionsAliases(t *testing.T) {
+	tests := []struct {
+		name        string
+		setup       func(*testing.T) string
+		destination string
+		mountPoint  string
+		want        []string
+	}{
+		{
+			name:        "var run resolves to run",
+			setup:       rootFSWithSymlink("var/run", "../run"),
+			destination: "/var/run/secrets",
+			mountPoint:  "/run/secrets",
+			want:        []string{"/run/secrets", "/var/run/secrets"},
+		},
+		{
+			name:        "run resolves to var run",
+			setup:       rootFSWithSymlink("run", "var/run"),
+			destination: "/run/secrets",
+			mountPoint:  "/var/run/secrets",
+			want:        []string{"/run/secrets", "/var/run/secrets"},
+		},
+		{
+			name: "nested alias",
+			setup: rootFSWithSymlink(
+				"opt/app/current",
+				"../../../srv/volumes/model",
+			),
+			destination: "/opt/app/current/cache",
+			mountPoint:  "/srv/volumes/model/cache",
+			want: []string{
+				"/opt/app/current/cache",
+				"/srv/volumes/model/cache",
+			},
+		},
+		{
+			name:        "raw path without symlink",
+			setup:       func(t *testing.T) string { return t.TempDir() },
+			destination: "/data",
+			mountPoint:  "/data",
+			want:        []string{"/data"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rootFS := test.setup(t)
+			spec := &specs.Spec{Mounts: []specs.Mount{{
+				Destination: test.destination,
+				Type:        "bind",
+			}}}
+			mounts, err := ClassifyMounts(
+				[]types.MountInfo{{MountPoint: test.mountPoint}},
+				spec,
+				rootFS,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := BuildRootfsMountExclusions(spec, mounts, rootFS)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.All, test.want) {
+				t.Fatalf("All = %v, want %v", got.All, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildRootfsMountExclusionsDeterministic(t *testing.T) {
+	rootFS := rootFSWithSymlink("var/run", "../run")(t)
+	spec := &specs.Spec{Mounts: []specs.Mount{
+		{Destination: "/var/run/a", Type: "bind"},
+		{Destination: "/plain", Type: "bind"},
+		{Destination: "/run/a", Type: "bind"},
+		{Destination: "/var/run/a", Type: "bind"},
+	}}
+	mounts, err := ClassifyMounts([]types.MountInfo{
+		{MountPoint: "/plain"},
+		{MountPoint: "/run/a"},
+	}, spec, rootFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := BuildRootfsMountExclusions(spec, mounts, rootFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/plain", "/run/a", "/var/run/a"}; !reflect.DeepEqual(got.All, want) {
+		t.Fatalf("All = %v, want %v", got.All, want)
+	}
+	if want := []string{"/plain", "/run/a", "/var/run/a"}; !reflect.DeepEqual(got.Raw, want) {
+		t.Fatalf("Raw = %v, want %v", got.Raw, want)
+	}
+	if want := []string{"/plain", "/run/a"}; !reflect.DeepEqual(got.Effective, want) {
+		t.Fatalf("Effective = %v, want %v", got.Effective, want)
+	}
+}
+
+func TestBuildRootfsMountExclusionsRejectsInvalidDestinations(t *testing.T) {
+	for _, destination := range []string{
+		"",
+		"relative",
+		".",
+		"..",
+		"/",
+		"/data/../escape",
+		"/data/./ambiguous",
+		"/data\x00suffix",
+		"/" + strings.Repeat("a", maxRootfsPathLength),
+	} {
+		t.Run(strings.ReplaceAll(destination, "/", "_"), func(t *testing.T) {
+			_, err := BuildRootfsMountExclusions(
+				&specs.Spec{Mounts: []specs.Mount{{
+					Destination: destination,
+					Type:        "bind",
+				}}},
+				nil,
+				t.TempDir(),
+			)
+			if err == nil {
+				t.Fatalf("destination %q succeeded", destination)
+			}
+		})
+	}
+
+	t.Run("symlink resolution failure", func(t *testing.T) {
+		rootFS := t.TempDir()
+		if err := os.Symlink("loop", filepath.Join(rootFS, "loop")); err != nil {
+			t.Fatal(err)
+		}
+		_, err := BuildRootfsMountExclusions(
+			&specs.Spec{Mounts: []specs.Mount{{
+				Destination: "/loop/data",
+				Type:        "bind",
+			}}},
+			nil,
+			rootFS,
+		)
+		if err == nil {
+			t.Fatal("symlink loop succeeded")
+		}
+	})
+}
+
+func TestBuildRootfsMountExclusionsForBindLikeVolumes(t *testing.T) {
+	destinations := []string{
+		"/projected",
+		"/config-map",
+		"/secret",
+		"/pvc",
+		"/empty-dir",
+		"/sub-path",
+	}
+	spec := &specs.Spec{}
+	mounts := make([]types.MountInfo, 0, len(destinations))
+	rootFS := t.TempDir()
+	for _, destination := range destinations {
+		spec.Mounts = append(spec.Mounts, specs.Mount{
+			Destination: destination,
+			Type:        "bind",
+		})
+		mounts = append(mounts, types.MountInfo{MountPoint: destination})
+	}
+	classified, err := ClassifyMounts(mounts, spec, rootFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := BuildRootfsMountExclusions(spec, classified, rootFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]string(nil), destinations...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got.All, want) {
+		t.Fatalf("All = %v, want %v", got.All, want)
+	}
+}
+
+func rootFSWithSymlink(link, target string) func(*testing.T) string {
+	return func(t *testing.T) string {
+		t.Helper()
+		rootFS := t.TempDir()
+		linkPath := filepath.Join(rootFS, link)
+		if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, linkPath); err != nil {
+			t.Fatal(err)
+		}
+		return rootFS
 	}
 }

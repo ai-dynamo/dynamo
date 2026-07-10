@@ -5,10 +5,13 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 // Default socket paths and runtime-type identifiers.
@@ -76,10 +79,13 @@ func New(runtimeType, socket string) (Runtime, error) {
 // collectOCIManagedPaths returns the set of paths the OCI runtime considers
 // "managed": mount destinations, masked paths, and readonly paths, normalized
 // relative to the container rootfs.
-func collectOCIManagedPaths(ociSpec *specs.Spec, rootFS string) map[string]struct{} {
+func collectOCIManagedPaths(
+	ociSpec *specs.Spec,
+	rootFS string,
+) (map[string]struct{}, error) {
 	set := map[string]struct{}{}
 	if ociSpec == nil {
-		return set
+		return set, nil
 	}
 
 	paths := make([]string, 0, len(ociSpec.Mounts))
@@ -91,32 +97,156 @@ func collectOCIManagedPaths(ociSpec *specs.Spec, rootFS string) map[string]struc
 		paths = append(paths, ociSpec.Linux.ReadonlyPaths...)
 	}
 	for _, raw := range paths {
-		if p := normalizeOCIPath(raw, rootFS); p != "" {
-			set[p] = struct{}{}
+		p, err := normalizeOCIPath(raw, rootFS)
+		if err != nil {
+			return nil, err
 		}
+		set[p] = struct{}{}
 	}
-	return set
+	return set, nil
 }
 
 // normalizeOCIPath resolves an OCI spec path relative to rootFS, following
 // symlinks within the rootfs boundary (matching runc's addCriuDumpMount pattern).
-// Example: "/run/secrets" → "/var/run/secrets" when the container's /run symlinks to /var/run.
-func normalizeOCIPath(raw, rootFS string) string {
-	p := filepath.Clean(strings.TrimSpace(raw))
-	if p == "" || p == "." {
-		return ""
+func normalizeOCIPath(raw, rootFS string) (string, error) {
+	p, err := normalizeAbsolutePath(raw, true)
+	if err != nil {
+		return "", fmt.Errorf("invalid OCI path %q: %w", raw, err)
 	}
 	if rootFS == "" {
-		return p
+		return p, nil
 	}
-	// On SecureJoin error (e.g. /proc/<pid> races away), fall back to the
-	// cleaned logical path — matching naively is safer than dropping the
-	// entry, since under-classification can make CRIU skip a real mount.
-	if resolved, err := securejoin.SecureJoin(rootFS, p); err == nil {
-		p = strings.TrimPrefix(resolved, filepath.Clean(rootFS))
+	root := filepath.Clean(rootFS)
+	resolved, err := securejoin.SecureJoin(root, p)
+	if err != nil {
+		return "", fmt.Errorf("resolve OCI path %q in rootfs: %w", raw, err)
 	}
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return "", fmt.Errorf("make resolved OCI path relative: %w", err)
 	}
-	return p
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("resolved OCI path escapes rootfs")
+	}
+	if rel == "." {
+		return "/", nil
+	}
+	return "/" + filepath.ToSlash(rel), nil
+}
+
+func normalizeAbsolutePath(raw string, allowRoot bool) (string, error) {
+	if raw == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if len(raw) > maxRootfsPathLength {
+		return "", fmt.Errorf("path is too long")
+	}
+	if strings.IndexByte(raw, 0) >= 0 {
+		return "", fmt.Errorf("path contains NUL")
+	}
+	if !filepath.IsAbs(raw) {
+		return "", fmt.Errorf("path is not absolute")
+	}
+	for _, component := range strings.Split(filepath.ToSlash(raw), "/") {
+		if component == "." || component == ".." {
+			return "", fmt.Errorf("path contains %q component", component)
+		}
+	}
+	cleaned := filepath.Clean(raw)
+	if cleaned == "/" && !allowRoot {
+		return "", fmt.Errorf("path is root")
+	}
+	return filepath.ToSlash(cleaned), nil
+}
+
+// RootfsMountExclusions separates the logical OCI destinations from their
+// source-rootfs-resolved forms while retaining a deterministic union.
+type RootfsMountExclusions struct {
+	Raw       []string
+	Effective []string
+	All       []string
+}
+
+// BuildRootfsMountExclusions builds exact capture exclusions for OCI bind
+// mounts from their logical destinations and source mountpoints.
+func BuildRootfsMountExclusions(
+	ociSpec *specs.Spec,
+	mounts []types.MountInfo,
+	rootFS string,
+) (RootfsMountExclusions, error) {
+	var result RootfsMountExclusions
+	if ociSpec == nil {
+		return result, nil
+	}
+
+	rawSet := map[string]struct{}{}
+	normalizedBindSet := map[string]struct{}{}
+	for _, mount := range ociSpec.Mounts {
+		if mount.Type != "bind" {
+			continue
+		}
+		raw, err := normalizeAbsolutePath(mount.Destination, false)
+		if err != nil {
+			return result, fmt.Errorf(
+				"invalid OCI bind destination %q: %w",
+				mount.Destination,
+				err,
+			)
+		}
+		effective, err := normalizeOCIPath(raw, rootFS)
+		if err != nil {
+			return result, fmt.Errorf(
+				"normalize OCI bind destination %q: %w",
+				mount.Destination,
+				err,
+			)
+		}
+		if effective == "/" {
+			return result, fmt.Errorf(
+				"invalid OCI bind destination %q: resolves to root",
+				mount.Destination,
+			)
+		}
+		rawSet[raw] = struct{}{}
+		normalizedBindSet[effective] = struct{}{}
+	}
+
+	effectiveSet := map[string]struct{}{}
+	for _, mount := range mounts {
+		if !mount.IsOCIManaged {
+			continue
+		}
+		mountPoint, err := normalizeAbsolutePath(mount.MountPoint, true)
+		if err != nil {
+			return result, fmt.Errorf(
+				"invalid OCI-managed mountpoint %q: %w",
+				mount.MountPoint,
+				err,
+			)
+		}
+		if _, ok := normalizedBindSet[mountPoint]; ok {
+			effectiveSet[mountPoint] = struct{}{}
+		}
+	}
+
+	result.Raw = sortedPathSet(rawSet)
+	result.Effective = sortedPathSet(effectiveSet)
+	allSet := make(map[string]struct{}, len(rawSet)+len(effectiveSet))
+	for path := range rawSet {
+		allSet[path] = struct{}{}
+	}
+	for path := range effectiveSet {
+		allSet[path] = struct{}{}
+	}
+	result.All = sortedPathSet(allSet)
+	return result, nil
+}
+
+func sortedPathSet(set map[string]struct{}) []string {
+	paths := make([]string, 0, len(set))
+	for path := range set {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }

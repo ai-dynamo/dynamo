@@ -11,7 +11,7 @@ type MountInfo struct {
 	VFSOptions string // superblock options (e.g. "upperdir=...")
 
 	// IsOCIManaged is true when the mount destination matches an OCI spec entry
-	// (including /run/ ↔ /var/run/ aliasing). Set by ClassifyMounts.
+	// after resolving source-rootfs symlinks. Set by ClassifyMounts.
 	IsOCIManaged bool
 }
 
@@ -22,6 +22,7 @@ type CheckpointContainerSnapshot struct {
 	UpperDir       string
 	OCISpec        *specs.Spec
 	Mounts         []MountInfo
+	BindMountDests []string
 	NetNSInode     uint64
 	StdioFDs       []string // readlink targets for FDs 0, 1, 2 (e.g. "pipe:[12345]")
 	HostCgroupPath string   // host filesystem path for CRIU's --freeze-cgroup

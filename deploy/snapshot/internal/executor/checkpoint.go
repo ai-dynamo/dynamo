@@ -176,7 +176,32 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse mountinfo: %w", err)
 	}
-	mounts := snapshotruntime.ClassifyMounts(mountInfo, ociSpec, rootFS)
+	mounts, err := snapshotruntime.ClassifyMounts(mountInfo, ociSpec, rootFS)
+	if err != nil {
+		return nil, fmt.Errorf("failed to classify mounts: %w", err)
+	}
+	mountExclusions, err := snapshotruntime.BuildRootfsMountExclusions(
+		ociSpec,
+		mounts,
+		rootFS,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build rootfs mount exclusions: %w", err)
+	}
+	const maxLoggedMountExclusions = 10
+	log.V(1).Info(
+		"Resolved source rootfs mount exclusions",
+		"raw_count", len(mountExclusions.Raw),
+		"raw_sample", mountExclusions.Raw[:min(
+			len(mountExclusions.Raw),
+			maxLoggedMountExclusions,
+		)],
+		"effective_count", len(mountExclusions.Effective),
+		"effective_sample", mountExclusions.Effective[:min(
+			len(mountExclusions.Effective),
+			maxLoggedMountExclusions,
+		)],
+	)
 
 	netNSInode, err := snapshotruntime.GetNetNSInode(pid)
 	if err != nil {
@@ -234,6 +259,7 @@ func inspectContainer(ctx context.Context, rt snapshotruntime.Runtime, log logr.
 		UpperDir:       upperDir,
 		OCISpec:        ociSpec,
 		Mounts:         mounts,
+		BindMountDests: mountExclusions.All,
 		NetNSInode:     netNSInode,
 		StdioFDs:       stdioFDs,
 		HostCgroupPath: hostCgroupPath,
@@ -259,7 +285,12 @@ func configureCheckpoint(
 		req.CheckpointID,
 		types.NewCRIUDumpManifest(criuOpts, cfg.CRIU),
 		types.NewSourcePodManifest(req.ContainerID, state.PID, req.NodeName, req.PodName, req.PodNamespace, req.PodIP, state.StdioFDs),
-		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
+		types.NewOverlayManifest(
+			cfg.Overlay,
+			state.UpperDir,
+			state.OCISpec,
+			state.BindMountDests,
+		),
 	)
 	if len(state.CUDANSPIDs) > 0 {
 		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)

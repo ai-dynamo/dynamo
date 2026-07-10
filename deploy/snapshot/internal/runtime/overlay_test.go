@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
@@ -513,6 +514,7 @@ func TestCaptureRootfsExclusionsAndBindDestinations(t *testing.T) {
 		"keep/file":                 "keep",
 		"proc/hidden":               "excluded",
 		"data/hidden":               "bind",
+		"data-adjacent/visible":     "not bind",
 		"root/.cache/huggingface/x": "glob",
 		"pkg/__pycache__/x":         "glob",
 		"pkg/x.pyc":                 "glob",
@@ -550,6 +552,11 @@ func TestCaptureRootfsExclusionsAndBindDestinations(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(target, "keep", "file")); err != nil {
 		t.Fatal("included file was not restored")
 	}
+	if _, err := os.Stat(
+		filepath.Join(target, "data-adjacent", "visible"),
+	); err != nil {
+		t.Fatal("adjacent bind-prefix file was not restored")
+	}
 	for _, name := range []string{
 		"proc",
 		"data",
@@ -560,6 +567,189 @@ func TestCaptureRootfsExclusionsAndBindDestinations(t *testing.T) {
 		if _, err := os.Lstat(filepath.Join(target, name)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("excluded path %s exists: %v", name, err)
 		}
+	}
+}
+
+func TestCaptureRootfsEffectiveMountExclusion(t *testing.T) {
+	rootFS := rootFSWithSymlink("var/run", "../run")(t)
+	source := t.TempDir()
+	checkpoint := t.TempDir()
+	target := t.TempDir()
+	for name, data := range map[string]string{
+		"keep/file": "keep",
+		"run/secrets/kubernetes.io/serviceaccount/token":     "not a secret",
+		"var/run/secrets/kubernetes.io/serviceaccount/token": "raw alias",
+	} {
+		if err := os.MkdirAll(
+			filepath.Dir(filepath.Join(source, name)),
+			0o755,
+		); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, filepath.Join(source, name), []byte(data))
+	}
+	whiteoutParent := filepath.Join(source, "run", "external")
+	if err := os.MkdirAll(whiteoutParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(
+		t,
+		filepath.Join(whiteoutParent, ".wh.mounted"),
+		nil,
+	)
+	spec := &specs.Spec{Mounts: []specs.Mount{
+		{
+			Destination: "/var/run/secrets/kubernetes.io/serviceaccount",
+			Type:        "bind",
+		},
+		{
+			Destination: "/run/external/mounted",
+			Type:        "bind",
+		},
+	}}
+	mounts, err := ClassifyMounts([]types.MountInfo{
+		{MountPoint: "/run/secrets/kubernetes.io/serviceaccount"},
+		{MountPoint: "/run/external/mounted"},
+	}, spec, rootFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exclusions, err := BuildRootfsMountExclusions(spec, mounts, rootFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := CaptureRootfsDiff(
+		context.Background(),
+		source,
+		checkpoint,
+		types.OverlaySettings{},
+		exclusions.All,
+		2,
+		testr.New(t),
+	); err != nil {
+		t.Fatalf("CaptureRootfsDiff: %v", err)
+	}
+	if err := ApplyRootfsDiff(
+		context.Background(),
+		checkpoint,
+		target,
+		2,
+		testr.New(t),
+	); err != nil {
+		t.Fatalf("ApplyRootfsDiff: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(target, "keep", "file")); err != nil ||
+		string(data) != "keep" {
+		t.Fatalf("unrelated file = %q, %v", data, err)
+	}
+	for _, excluded := range []string{
+		"run/secrets/kubernetes.io/serviceaccount",
+		"var/run/secrets/kubernetes.io/serviceaccount",
+	} {
+		if _, err := os.Lstat(
+			filepath.Join(target, excluded),
+		); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("excluded path %s exists: %v", excluded, err)
+		}
+	}
+	deleted, err := os.ReadFile(
+		filepath.Join(checkpoint, deletedFilesFilename),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(deleted) != "[]" {
+		t.Fatalf("deleted-files.json = %s, want []", deleted)
+	}
+	if _, err := os.Lstat(filepath.Join(
+		checkpoint,
+		rootfsDirectoryFilename,
+		"run",
+		"secrets",
+		"kubernetes.io",
+		"serviceaccount",
+	)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("effective mount leaked into artifact: %v", err)
+	}
+}
+
+func TestCaptureRootfsOmitsBindLikeVolumes(t *testing.T) {
+	source := t.TempDir()
+	checkpoint := t.TempDir()
+	destinations := []string{
+		"/projected",
+		"/config-map",
+		"/secret",
+		"/pvc",
+		"/empty-dir",
+		"/sub-path",
+	}
+	for _, destination := range destinations {
+		path := filepath.Join(source, strings.TrimPrefix(destination, "/"))
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeTestFile(t, filepath.Join(path, "external"), nil)
+	}
+	writeTestFile(t, filepath.Join(source, "keep"), []byte("keep"))
+
+	if _, err := CaptureRootfsDiff(
+		context.Background(),
+		source,
+		checkpoint,
+		types.OverlaySettings{},
+		destinations,
+		2,
+		testr.New(t),
+	); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(checkpoint, rootfsDirectoryFilename)
+	if _, err := os.Stat(filepath.Join(artifact, "keep")); err != nil {
+		t.Fatalf("unrelated file missing from artifact: %v", err)
+	}
+	for _, destination := range destinations {
+		if _, err := os.Lstat(filepath.Join(
+			artifact,
+			strings.TrimPrefix(destination, "/"),
+		)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("bind-like destination %s exists: %v", destination, err)
+		}
+	}
+}
+
+func TestCaptureRootfsRejectsInvalidMountExclusions(t *testing.T) {
+	for _, exclusion := range []string{
+		"",
+		"relative",
+		".",
+		"..",
+		"/",
+		"/data/../escape",
+		"/data/./ambiguous",
+		"/data\x00suffix",
+		"/" + strings.Repeat("a", maxRootfsPathLength),
+	} {
+		t.Run(strings.ReplaceAll(exclusion, "/", "_"), func(t *testing.T) {
+			_, err := CaptureRootfsDiff(
+				context.Background(),
+				t.TempDir(),
+				t.TempDir(),
+				types.OverlaySettings{},
+				[]string{exclusion},
+				1,
+				testr.New(t),
+			)
+			if err == nil ||
+				!strings.Contains(err.Error(), "invalid rootfs mount exclusion") {
+				t.Fatalf(
+					"CaptureRootfsDiff(%q) error = %v",
+					exclusion,
+					err,
+				)
+			}
+		})
 	}
 }
 

@@ -102,10 +102,16 @@ type OverlayManifest struct {
 	BindMountDests []string        `yaml:"bindMountDests,omitempty"`
 }
 
-func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *specs.Spec) OverlayManifest {
+func NewOverlayManifest(
+	exclusions OverlaySettings,
+	upperDir string,
+	ociSpec *specs.Spec,
+	bindMountDests []string,
+) OverlayManifest {
 	meta := OverlayManifest{
-		Exclusions: exclusions,
-		UpperDir:   upperDir,
+		Exclusions:     exclusions,
+		UpperDir:       upperDir,
+		BindMountDests: append([]string(nil), bindMountDests...),
 	}
 	if ociSpec == nil {
 		return meta
@@ -115,11 +121,6 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 		meta.ExternalPaths = make([]string, 0, len(ociSpec.Linux.MaskedPaths)+len(ociSpec.Linux.ReadonlyPaths))
 		meta.ExternalPaths = append(meta.ExternalPaths, ociSpec.Linux.MaskedPaths...)
 		meta.ExternalPaths = append(meta.ExternalPaths, ociSpec.Linux.ReadonlyPaths...)
-	}
-	for _, m := range ociSpec.Mounts {
-		if m.Type == "bind" {
-			meta.BindMountDests = append(meta.BindMountDests, m.Destination)
-		}
 	}
 	return meta
 }

@@ -68,9 +68,12 @@ func TestParseCRIOStatusErrors(t *testing.T) {
 // TestCollectOCIManagedPathsPartialSpec confirms the helper doesn't panic on
 // partial specs the CRI-O path can produce.
 func TestCollectOCIManagedPathsPartialSpec(t *testing.T) {
-	set := collectOCIManagedPaths(&specs.Spec{
+	set, err := collectOCIManagedPaths(&specs.Spec{
 		Mounts: []specs.Mount{{Destination: "/data"}},
 	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, ok := set["/data"]; !ok || len(set) != 1 {
 		t.Errorf("want just /data, got %v", set)
 	}

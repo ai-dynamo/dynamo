@@ -3,9 +3,11 @@ package types
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -142,6 +144,35 @@ func TestNewCRIUDumpManifest(t *testing.T) {
 			t.Errorf("expected nil ExtMnt when all entries are empty/nil, got %v", m.ExtMnt)
 		}
 	})
+}
+
+func TestNewOverlayManifestStoresMountExclusions(t *testing.T) {
+	mountExclusions := []string{"/run/data", "/var/run/data"}
+	manifest := NewOverlayManifest(
+		OverlaySettings{},
+		"/upper",
+		&specs.Spec{
+			Linux: &specs.Linux{
+				MaskedPaths:   []string{"/proc/kcore"},
+				ReadonlyPaths: []string{"/proc/sys"},
+			},
+		},
+		mountExclusions,
+	)
+	mountExclusions[0] = "/changed"
+
+	if got := manifest.BindMountDests; !reflect.DeepEqual(
+		got,
+		[]string{"/run/data", "/var/run/data"},
+	) {
+		t.Fatalf("BindMountDests = %v", got)
+	}
+	if got := manifest.ExternalPaths; !reflect.DeepEqual(
+		got,
+		[]string{"/proc/kcore", "/proc/sys"},
+	) {
+		t.Fatalf("ExternalPaths = %v", got)
+	}
 }
 
 func TestWriteManifestRejectsMissingCheckpointID(t *testing.T) {

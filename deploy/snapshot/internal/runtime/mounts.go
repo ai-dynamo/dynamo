@@ -38,33 +38,33 @@ func ReadMountInfo(pid int) ([]types.MountInfo, error) {
 	return mounts, nil
 }
 
-// ClassifyMounts sets IsOCIManaged on each mount by matching against the
-// container's OCI spec (mounts, masked paths, readonly paths).
-// Handles /run/ ↔ /var/run/ aliasing since some images symlink one to the other.
-func ClassifyMounts(mounts []types.MountInfo, ociSpec *specs.Spec, rootFS string) []types.MountInfo {
-	ociSet := collectOCIManagedPaths(ociSpec, rootFS)
+// ClassifyMounts sets IsOCIManaged on each mount by matching source-rootfs
+// resolved OCI paths against mountinfo.
+func ClassifyMounts(
+	mounts []types.MountInfo,
+	ociSpec *specs.Spec,
+	rootFS string,
+) ([]types.MountInfo, error) {
+	ociSet, err := collectOCIManagedPaths(ociSpec, rootFS)
+	if err != nil {
+		return nil, fmt.Errorf("collect OCI-managed paths: %w", err)
+	}
 
 	for i := range mounts {
-		mp := mounts[i].MountPoint
+		mp, err := normalizeAbsolutePath(mounts[i].MountPoint, true)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"invalid mountpoint %q: %w",
+				mounts[i].MountPoint,
+				err,
+			)
+		}
 		if _, ok := ociSet[mp]; ok {
 			mounts[i].IsOCIManaged = true
-			continue
-		}
-		// /run/ ↔ /var/run/ aliasing
-		if strings.HasPrefix(mp, "/run/") {
-			if _, ok := ociSet["/var"+mp]; ok {
-				mounts[i].IsOCIManaged = true
-				continue
-			}
-		}
-		if strings.HasPrefix(mp, "/var/run/") {
-			if _, ok := ociSet[strings.TrimPrefix(mp, "/var")]; ok {
-				mounts[i].IsOCIManaged = true
-			}
 		}
 	}
 
-	return mounts
+	return mounts, nil
 }
 
 // BuildMountPolicy classifies mounts and masked paths for CRIU dump.
