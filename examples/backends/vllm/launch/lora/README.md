@@ -7,6 +7,7 @@ For the full LoRA integration guide (setup, usage, API reference, troubleshootin
 ```bash
 ./setup_minio.sh    # Start MinIO, download & upload LoRA
 ./agg_lora.sh       # Launch vLLM frontend + worker with LoRA
+./sidecar_agg_lora.sh # Launch vLLM through the OpenEngine sidecar
 ```
 
 ## vLLM-Specific Notes

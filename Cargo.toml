@@ -24,6 +24,7 @@ members = [
     "lib/backend-common/examples/mocker",
     "lib/vllm-rs-backend",
     "lib/sglang-sidecar",
+    "lib/vllm-sidecar",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",

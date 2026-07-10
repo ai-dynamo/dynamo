@@ -1,0 +1,87 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package prime_rl.engine.v1;
+
+// Prime RL control-plane extension served alongside canonical OpenEngine.
+// The OpenEngine schema remains byte-for-byte canonical; these operations are
+// intentionally separate because they mutate training-time engine state.
+service PrimeRlEngine {
+  rpc LivenessProbe(LivenessProbeRequest) returns (AdminResponse);
+  rpc PauseGeneration(PauseGenerationRequest) returns (AdminResponse);
+  rpc ResumeGeneration(ResumeGenerationRequest) returns (AdminResponse);
+  rpc FlushCache(FlushCacheRequest) returns (AdminResponse);
+  rpc AbortRequest(AbortRequestRequest) returns (AdminResponse);
+  rpc InitWeightsUpdateGroup(InitWeightsUpdateGroupRequest) returns (AdminResponse);
+  rpc DestroyWeightsUpdateGroup(DestroyWeightsUpdateGroupRequest) returns (AdminResponse);
+  rpc UpdateWeightsFromDisk(UpdateWeightsFromDiskRequest) returns (WeightUpdateResponse);
+  rpc UpdateWeightsFromDistributed(UpdateWeightsFromDistributedRequest)
+      returns (WeightUpdateResponse);
+  rpc GetWeightVersion(GetWeightVersionRequest) returns (GetWeightVersionResponse);
+}
+
+message AdminResponse {
+  string status = 1;
+  string message = 2;
+}
+
+message LivenessProbeRequest {}
+
+message PauseGenerationRequest {
+  string mode = 1;
+  bool clear_cache = 2;
+}
+
+message ResumeGenerationRequest {}
+
+message FlushCacheRequest {
+  bool reset_running_requests = 1;
+  bool reset_connector = 2;
+}
+
+message AbortRequestRequest {
+  string request_id = 1;
+}
+
+message InitWeightsUpdateGroupRequest {
+  string host = 1;
+  uint32 port = 2;
+  uint32 rank_offset = 3;
+  uint32 inference_world_size = 4;
+  uint64 timeout = 5;
+  bool quantize_in_weight_transfer = 6;
+  string engine_rpc = 7;
+}
+
+message DestroyWeightsUpdateGroupRequest {
+  string engine_rpc = 1;
+}
+
+message UpdateWeightsFromDiskRequest {
+  string model_path = 1;
+  string weight_version = 2;
+  string engine_rpc = 3;
+}
+
+message UpdateWeightsFromDistributedRequest {
+  string weight_dir = 1;
+  string weight_version = 2;
+  string engine_rpc = 3;
+  bool allow_unpaused = 4;
+  bool reset_prefix_cache = 5;
+}
+
+message WeightUpdateResponse {
+  string status = 1;
+  string message = 2;
+  string weight_version = 3;
+}
+
+message GetWeightVersionRequest {}
+
+message GetWeightVersionResponse {
+  string status = 1;
+  string weight_version = 2;
+}

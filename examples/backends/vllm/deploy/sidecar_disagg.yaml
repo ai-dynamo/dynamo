@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Disaggregated 1P1D serving via the OpenEngine sidecar.
+#
+# Two worker pods, each running an engine + sidecar container pair:
+#   VllmSidecarDecodeWorker : decode engine (kv_consumer) + decode sidecar
+#   VllmSidecarPrefillWorker: prefill engine (kv_producer) + prefill sidecar
+#
+# Each engine runs `vllm-rs serve` (Rust frontend + managed Python EngineCore)
+# and derives its OpenEngine role from kv_transfer_config.kv_role (kv_producer
+# -> PREFILL, kv_consumer -> DECODE). KV moves over NIXL directly between the
+# two engines; the sidecars only relay KvSessionRef across the Dynamo boundary.
+# Each engine+sidecar pair shares a pod network namespace, so the sidecar
+# reaches its engine over 127.0.0.1:50051. The sidecar is given ONLY the
+# endpoint and discovers its role from the engine.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-sidecar-disagg
+spec:
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmSidecarDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        containers:
+          - name: vllm-engine
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            command:
+              - vllm-rs
+              - serve
+              - Qwen/Qwen3-0.6B
+              - --openengine-host
+              - 127.0.0.1
+              - --openengine-port
+              - "50051"
+              - --enforce-eager
+              - --kv-transfer-config
+              - '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+        # Endpoint-only; role discovered from the engine as DECODE.
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - dynamo-vllm-sidecar
+          args:
+            - --openengine-endpoint
+            - 127.0.0.1:50051
+    VllmSidecarPrefillWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        containers:
+          - name: vllm-engine
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            command:
+              - vllm-rs
+              - serve
+              - Qwen/Qwen3-0.6B
+              - --openengine-host
+              - 127.0.0.1
+              - --openengine-port
+              - "50051"
+              - --enforce-eager
+              - --kv-transfer-config
+              - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+              - --kv-events-config
+              - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+        # Endpoint-only; role discovered from the engine as PREFILL.
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - dynamo-vllm-sidecar
+          args:
+            - --openengine-endpoint
+            - 127.0.0.1:50051

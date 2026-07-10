@@ -125,6 +125,7 @@ class LlmRegistration:
     # owns a sub-range (vLLM hybrid/external LB, multi-node SGLang DP-attention);
     # the router enumerates [start, start + data_parallel_size).
     data_parallel_start_rank: Optional[int] = None
+    supports_lora: bool = False
     # Bootstrap address advertised to decode peers. Only for backends with a
     # Dynamo-level handshake (SGLang); internal-KV-transport backends (TRT-LLM,
     # vLLM NixlConnector) leave it None. When both are set, Worker publishes

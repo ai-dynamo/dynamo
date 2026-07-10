@@ -465,6 +465,11 @@ impl LocalModel {
         &self.card.display_name
     }
 
+    /// Change the externally served model name and its discovery slug.
+    pub fn set_name(&mut self, name: &str) {
+        self.card.set_name(name);
+    }
+
     /// The name under which we make this model available over HTTP.
     /// A slugified version of the model's name, for use in NATS, etcd, etc.
     pub fn service_name(&self) -> &str {

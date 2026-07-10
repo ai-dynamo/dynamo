@@ -281,6 +281,13 @@ impl EngineKind {
         }
     }
 
+    async fn begin_drain(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.begin_drain().await,
+            EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
     async fn setup_metrics(&self, ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
         match self {
             EngineKind::Llm(e) => e.setup_metrics(ctx).await,
@@ -300,6 +307,13 @@ impl EngineKind {
         match self {
             EngineKind::Llm(e) => e.health_check_payload().await,
             EngineKind::Raw(e) => e.health_check_payload().await,
+        }
+    }
+
+    async fn watch(&self) -> Result<(), DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.watch().await,
+            EngineKind::Raw(_) => std::future::pending::<Result<(), DynamoError>>().await,
         }
     }
 
@@ -844,8 +858,8 @@ impl Worker {
                 model_type,
                 self.config.model_input,
                 None,
-                Some(worker_type),
-                needs,
+                Some(worker_type.clone()),
+                needs.clone(),
             )
             .await
             .map_err(|e| {
@@ -858,6 +872,35 @@ impl Worker {
 
         self.register_engine_controls(&endpoint).await?;
         self.register_engine_updates(&endpoint).await?;
+
+        let supports_lora = engine_config
+            .llm
+            .as_ref()
+            .is_some_and(|registration| registration.supports_lora);
+        let lora_serve_fut = match (&self.engine, supports_lora) {
+            (EngineKind::Llm(engine), true) => {
+                let controller = crate::lora::LoraController::new(
+                    engine.clone(),
+                    endpoint.clone(),
+                    local_model.clone(),
+                    model_type,
+                    Some(worker_type),
+                    needs,
+                )
+                .await?;
+                Some(
+                    crate::lora::serve_endpoints(endpoint.component(), controller).map_err(
+                        |error| {
+                            err(
+                                ErrorType::Backend(BackendError::Unknown),
+                                format!("LoRA endpoints: {error}"),
+                            )
+                        },
+                    )?,
+                )
+            }
+            _ => None,
+        };
 
         let served = resolve_served_name(&self.config, engine_config)
             .unwrap_or_else(|| engine_config.model.clone());
@@ -963,7 +1006,21 @@ impl Worker {
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
-        tokio::select! {
+        let lora_serve = async move {
+            match lora_serve_fut {
+                Some(future) => future.await,
+                None => std::future::pending::<anyhow::Result<()>>().await,
+            }
+        };
+        tokio::pin!(lora_serve);
+
+        let engine_watch = {
+            let engine = self.engine.clone();
+            async move { engine.watch().await }
+        };
+        tokio::pin!(engine_watch);
+
+        let engine_watch_result = tokio::select! {
             biased;
             result = &mut serve_fut => {
                 match result {
@@ -983,13 +1040,48 @@ impl Worker {
                         ));
                     }
                 }
+                None
+            }
+            result = &mut lora_serve => {
+                match result {
+                    Ok(()) => {
+                        tracing::warn!("LoRA control endpoints completed unexpectedly");
+                    }
+                    Err(error) => {
+                        return Err(err(
+                            ErrorType::Backend(BackendError::Unknown),
+                            format!("LoRA endpoint serve: {error}"),
+                        ));
+                    }
+                }
+                None
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
+                None
             }
-        }
+            result = &mut engine_watch => {
+                match result.as_ref() {
+                    Ok(()) => {
+                        tracing::warn!(
+                            "Engine liveness watcher requested shutdown; running graceful orchestration"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Engine liveness watcher failed; running graceful orchestration"
+                        );
+                    }
+                }
+                Some(result)
+            }
+        };
 
         self.orchestrator_steps(&endpoint).await;
+        if let Some(result) = engine_watch_result {
+            result?;
+        }
         Ok(())
     }
 
@@ -1010,6 +1102,10 @@ impl Worker {
         if grace > 0.0 {
             tracing::info!("Grace period {:.2}s before drain", grace);
             tokio::time::sleep(Duration::from_secs_f64(grace)).await;
+        }
+
+        if let Err(error) = self.engine.begin_drain().await {
+            tracing::warn!(%error, "engine begin_drain failed; continuing shutdown");
         }
 
         let drain_start = std::time::Instant::now();

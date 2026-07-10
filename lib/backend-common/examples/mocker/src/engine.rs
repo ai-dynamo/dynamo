@@ -362,6 +362,7 @@ impl LLMEngine for MockerBackend {
                 max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
                 data_parallel_size: None,
                 data_parallel_start_rank: None,
+                supports_lora: false,
                 // Mocker has no real KV transport, so it never advertises a
                 // bootstrap address.
                 bootstrap_host: None,
