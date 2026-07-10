@@ -30,6 +30,8 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
+const testDGDName = "my-dgd"
+
 // newV1alpha1DGDR builds a fully-populated v1alpha1 DGDR for use in tests.
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 	profilingBlob := map[string]interface{}{
@@ -73,7 +75,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			},
 			EnableGPUDiscovery: &trueVal,
 			DeploymentOverrides: &DeploymentOverridesSpec{
-				Name:      "my-dgd",
+				Name:      testDGDName,
 				Namespace: "prod",
 				Labels:    map[string]string{"team": "ml"},
 			},
@@ -84,7 +86,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			ObservedGeneration: 3,
 			ProfilingResults:   "configmap/profiling-cm",
 			Deployment: &DeploymentStatus{
-				Name:      "my-dgd",
+				Name:      testDGDName,
 				Namespace: "prod",
 				State:     "initializing",
 				Created:   true,
@@ -241,8 +243,8 @@ func TestConvertTo_StatusFields(t *testing.T) {
 	}
 
 	// Deployment.Name → DGDName
-	if dst.Status.DGDName != "my-dgd" {
-		t.Errorf("Status.DGDName: got %q, want %q", dst.Status.DGDName, "my-dgd")
+	if dst.Status.DGDName != testDGDName {
+		t.Errorf("Status.DGDName: got %q, want %q", dst.Status.DGDName, testDGDName)
 	}
 
 	// Alpha-only status uses the structural sparse payload.
@@ -360,13 +362,13 @@ func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
 		t.Fatalf("marshal profiling config: %v", err)
 	}
 	legacyOverrides, err := json.Marshal(map[string]any{
-		"name": "my-dgd", "namespace": "prod", "labels": map[string]string{"team": "ml"},
+		"name": testDGDName, "namespace": "prod", "labels": map[string]string{"team": "ml"},
 	})
 	if err != nil {
 		t.Fatalf("marshal deployment overrides: %v", err)
 	}
 	legacyDeployment, err := json.Marshal(dgdrDeploymentStatusAnnotation{
-		DeploymentStatus: DeploymentStatus{Name: "my-dgd", Namespace: "prod", State: "initializing", Created: true},
+		DeploymentStatus: DeploymentStatus{Name: testDGDName, Namespace: "prod", State: "initializing", Created: true},
 		RequestState:     DGDRStateProfiling,
 	})
 	if err != nil {
@@ -395,7 +397,7 @@ func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
 			Phase:              v1beta1.DGDRPhaseProfiling,
 			ObservedGeneration: 3,
-			DGDName:            "my-dgd",
+			DGDName:            testDGDName,
 		},
 	}
 
@@ -413,7 +415,7 @@ func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
 	if restored.Spec.EnableGPUDiscovery == nil || !*restored.Spec.EnableGPUDiscovery {
 		t.Fatal("EnableGPUDiscovery was not restored from legacy annotations")
 	}
-	if got := restored.Spec.DeploymentOverrides; got == nil || got.Name != "my-dgd" || got.Namespace != "prod" || got.Labels["team"] != "ml" {
+	if got := restored.Spec.DeploymentOverrides; got == nil || got.Name != testDGDName || got.Namespace != "prod" || got.Labels["team"] != "ml" {
 		t.Fatalf("DeploymentOverrides after legacy read = %#v", got)
 	}
 	assertProfilingConfigBlobHas(t, restored.Spec.ProfilingConfig.Config, map[string]any{
@@ -422,7 +424,7 @@ func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
 	if restored.Status.Backend != "vllm" || restored.Status.ProfilingResults != "configmap/profiling-cm" {
 		t.Fatalf("status after legacy read = %#v", restored.Status)
 	}
-	if got := restored.Status.Deployment; got == nil || got.Name != "my-dgd" || got.Namespace != "prod" || !got.Created {
+	if got := restored.Status.Deployment; got == nil || got.Name != testDGDName || got.Namespace != "prod" || !got.Created {
 		t.Fatalf("Deployment status after legacy read = %#v", got)
 	}
 }
