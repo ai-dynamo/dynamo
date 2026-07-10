@@ -7,7 +7,9 @@ use dynamo_kv_router::{
         KvIndexer, KvRouterError, LowerTierIndexers, MatchDetails, ThreadPoolIndexer,
         TieredMatchProvider, query_lower_tiers,
     },
-    protocols::{LocalBlockHash, OverlapScores},
+    protocols::{
+        ExternalSequenceBlockHash, LocalBlockHash, OverlapScores, StorageTier, WorkerWithDpRank,
+    },
 };
 use dynamo_runtime::pipeline::async_trait;
 
@@ -126,6 +128,24 @@ impl Indexer {
         self.lookup_pipeline()
             .find_matches_by_tier(HashInput::Borrowed(sequence))
             .await
+    }
+
+    pub(crate) fn chain_block_hashes_for_host_pinned(
+        &self,
+        worker: WorkerWithDpRank,
+        parent_hash: Option<ExternalSequenceBlockHash>,
+        local_hashes: &[LocalBlockHash],
+    ) -> Vec<ExternalSequenceBlockHash> {
+        let lower_tier = match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => lower_tier,
+            Self::Remote { .. } | Self::None => return Vec::new(),
+        };
+        let Some(indexer) = lower_tier.get(StorageTier::HostPinned) else {
+            return Vec::new();
+        };
+        indexer
+            .backend()
+            .chain_block_hashes_for_worker(worker, parent_hash, local_hashes)
     }
 
     pub(crate) async fn find_primary_matches_by_tier(
