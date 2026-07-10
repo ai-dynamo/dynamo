@@ -59,6 +59,7 @@ required-features = ["request-trace-bench"]
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
+dynamo-admission-control = { workspace = true }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-rl = { workspace = true }
