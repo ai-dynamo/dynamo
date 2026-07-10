@@ -77,7 +77,6 @@ var _ = Describe("DynamoGraphDeployment API validation", func() {
 	})
 
 	It("converts a v1beta1 DGD to v1alpha1", func() {
-		GinkgoT().Log("Create a v1beta1 DGD through the API server")
 		dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      fmt.Sprintf("conversion-dgd-%d", GinkgoRandomSeed()),
@@ -99,12 +98,10 @@ var _ = Describe("DynamoGraphDeployment API validation", func() {
 			}
 		})
 
-		GinkgoT().Log("Read the DGD as v1alpha1 through the conversion webhook")
 		var alpha nvidiacomv1alpha1.DynamoGraphDeployment
 		key := types.NamespacedName{Name: dgd.Name, Namespace: envtestNamespace}
 		Expect(k8sClient.Get(ctx, key, &alpha)).To(Succeed())
 
-		GinkgoT().Log("Assert the converted DGD uses the v1alpha1 service map shape")
 		Expect(alpha.Spec.BackendFramework).To(Equal(backendFrameworkVLLM))
 		Expect(alpha.Spec.Services["frontend"]).NotTo(BeNil())
 	})

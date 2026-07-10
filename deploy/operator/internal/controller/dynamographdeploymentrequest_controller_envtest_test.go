@@ -1444,27 +1444,22 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			GinkgoT().Log("Initialize the admitted DGDR")
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: dgdrName, Namespace: namespace},
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			GinkgoT().Log("Capture the admitted DGDR before the immutable update")
 			var current nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			initialGeneration := current.Generation
 
-			GinkgoT().Log("Set the DGDR status to Profiling")
 			current.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
 
-			GinkgoT().Log("Attempt a spec update through the validating admission webhook")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			current.Spec.Model = "modified-model"
-			Expect(k8sClient.Update(ctx, &current)).Should(MatchError(ContainSubstring("spec updates are forbidden while the resource is in phase")))
+			Expect(k8sClient.Update(ctx, &current)).Should(MatchError(ContainSubstring("spec: Forbidden: updates are forbidden while the resource is in phase")))
 
-			GinkgoT().Log("Verify the rejected update leaves the API object unchanged")
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			Expect(current.Generation).Should(Equal(initialGeneration))
 			Expect(current.Spec.Model).Should(Equal("test-model"))
