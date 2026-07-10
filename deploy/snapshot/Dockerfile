@@ -74,6 +74,45 @@ ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /snapshot-agent ./cmd/agent
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
+# Emit a CycloneDX SBOM for snapshot-agent's Go module set. nsrestore's
+# deps are a subset of agent's, so a single SBOM keyed on ./cmd/agent is
+# sufficient. The git-init dance satisfies cyclonedx-gomod's main-module
+# version probe (Docker build context doesn't carry .git). Pinned to
+# keep the SBOM tool itself reproducible.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=shared \
+    GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
+    git init -q && \
+    git -c user.email=build@dynamo -c user.name=build add -A && \
+    git -c user.email=build@dynamo -c user.name=build commit -q -m sbom && \
+    cyclonedx-gomod app -licenses -json -main ./cmd/agent -output /sbom-go.cdx.json .
+
+# Compliance: harvest each Go module's real LICENSE files from the module cache
+# so the go NOTICES generator inlines upstream license text instead of canonical
+# SPDX fallback. Preserve the cache's escaped "<module-path>@<version>/" layout —
+# generators/go.py escapes module names the same way to look up. Non-fatal.
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    mkdir -p /sbom-go-licenses && cd /go/pkg/mod && \
+    find . -path ./cache -prune -o -type f \
+        \( -iname 'LICENSE*' -o -iname 'LICENCE*' -o -iname 'COPYING*' \
+           -o -iname 'NOTICE*' -o -iname 'UNLICENSE*' \) -print | \
+    while IFS= read -r lf; do \
+        rel="${lf#./}"; dest="/sbom-go-licenses/$(dirname "$rel")"; \
+        mkdir -p "$dest" && cp "$lf" "$dest/" 2>/dev/null || true; \
+    done; \
+    echo "go license harvest: $(find /sbom-go-licenses -type f 2>/dev/null | wc -l) files"; true
+
+# Compliance source archival: vendor third-party Go modules. Same pattern
+# as operator's builder. First-party (github.com/ai-dynamo/) pruned later
+# in collect_sources.py.
+ARG ENABLE_SOURCE_ARCHIVAL=false
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
+    if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        go mod vendor -o /tmp/go-vendor ; \
+    else \
+        mkdir -p /tmp/go-vendor ; \
+    fi
+
 # =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
@@ -140,9 +179,12 @@ RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 # =============================================================================
-# Stage: Agent - Final snapshot-agent image
+# Stage: Agent (pre-compliance) - Everything that ships, minus /legal
 # =============================================================================
-FROM ${AGENT_BASE_IMAGE} AS agent
+# Split out so the licenses stage can run dpkg-query against the actual
+# installed package state (CRIU runtime libs included), then the final
+# `agent` stage is a thin downstream that COPYs /legal in.
+FROM ${AGENT_BASE_IMAGE} AS agent_pre
 
 ARG TARGETARCH=amd64
 
@@ -188,6 +230,111 @@ COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 RUN mkdir -p /checkpoints /var/run/snapshot
 
 USER root
+
+# =============================================================================
+# Stage: Compliance: licenses
+# =============================================================================
+# Runs in agent_pre's actual filesystem so dpkg-query enumerates the real
+# runtime package set (cuda-dl-base + everything we apt-get installed in
+# agent_pre). cyclonedx-gomod produced /sbom-go.cdx.json upstream in the
+# Go builder; we COPY it in here for the go generator.
+#
+# `compliance` build context is plumbed by .github/actions/build-deploy-component/action.yml
+# as `--build-context compliance=../../container/compliance`.
+FROM agent_pre AS licenses
+
+USER root
+RUN mkdir -p /legal /sboms
+# Install python3 + python3-yaml. PyYAML is required for the override
+# lookup — without it, license_overrides.yaml silently no-ops and
+# NVIDIA-proprietary dpkgs (libnccl2 etc.) come back UNKNOWN despite
+# having hand-curated overrides.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-yaml \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY --from=compliance . /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=builder /sbom-go.cdx.json /tmp/sbom-go.cdx.json
+COPY --from=builder /sbom-go-licenses /tmp/go-licenses
+
+# go + dpkg cover the runtime image's apt + Go module set. native
+# enumerates from-source components (CRIU, cuda-checkpoint,
+# cuda-checkpoint-helper) — these are attributed by the manual
+# `COPY /tmp/criu/COPYING /legal/CRIU/COPYING` lines in agent_pre, which
+# the native generator reads via license_text_path to inline in NOTICES.
+# BASELINE_SBOM_FILE (optional, empty default): the per-arch baseline SBOM
+# *stem* under /opt/compliance/base_sboms/. We append -${TARGETARCH}.cdx.json
+# so the matching-arch floor is subtracted (snapshot ships amd64-only today).
+ARG BASELINE_SBOM_FILE=""
+ARG TARGETARCH
+RUN python3 -m compliance.generators \
+    --ecosystem go,dpkg,native \
+    --go-sbom /tmp/sbom-go.cdx.json \
+    --go-licenses-dir /tmp/go-licenses \
+    --native-yaml /opt/compliance/native_packages.yaml \
+    --native-image snapshot-agent \
+    --output-dir /legal \
+    --policy /opt/compliance/policy/licenses.toml \
+    ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
+    -v
+# Policy gate on the single unified CSV (its `ecosystem` column scopes each row).
+RUN python3 -m compliance.policy.validate \
+        --policy /opt/compliance/policy/licenses.toml \
+        --input /legal/osrb-deps.csv
+
+
+# =============================================================================
+# Stage: Compliance: artifact (single unified -compliance tree for CI extraction)
+# =============================================================================
+FROM scratch AS compliance_artifact
+COPY --from=licenses /legal/ /
+
+
+# =============================================================================
+# Stage: Compliance: sources
+# =============================================================================
+# Collects third-party Go module sources + preserved native source tarballs
+# for OSRB submission. Output is a separate sources zip cross-referenced in
+# the OSRB bundle's build-provenance.json; never COPY'd into the runtime.
+FROM python:3.12-slim AS sources_collect
+WORKDIR /
+RUN mkdir -p /sources /opt/compliance /opt/go-vendor /opt/native-sources
+COPY --from=compliance . /opt/compliance
+ENV PYTHONPATH=/opt
+COPY --from=builder /tmp/go-vendor/ /opt/go-vendor/
+# Native source trees (CRIU sources + cuda-checkpoint clone) from criu-builder.
+#
+# These COPYs are unconditional (not gated on ENABLE_SOURCE_ARCHIVAL) by
+# design: sources_collect is its own stage that is NEVER COPY'd into the
+# runtime agent image — the runtime only consumes /sources.zip via the
+# `sources_archive` stage. So copying the source trees in here costs nothing
+# in the shipped image. Gating them would risk archive completeness (an ARG
+# flip would silently drop CRIU+cuda-checkpoint from the archive).
+COPY --from=criu-builder /tmp/criu/ /opt/native-sources/criu/
+COPY --from=criu-builder /tmp/cuda-checkpoint/ /opt/native-sources/cuda-checkpoint/
+
+ARG ENABLE_SOURCE_ARCHIVAL=false
+RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
+        python3 -m compliance.collect_sources \
+            --ecosystem go --ecosystem native \
+            --output-zip /sources.zip \
+            --sources-root /sources \
+            --go-vendor-dir /opt/go-vendor \
+            --native-source-dir /opt/native-sources \
+            -v ; \
+    else \
+        : > /sources.zip ; \
+    fi
+
+
+FROM scratch AS sources_archive
+COPY --from=sources_collect /sources.zip /sources.zip
+
+
+# =============================================================================
+# Stage: Agent - Final snapshot-agent image
+# =============================================================================
+FROM agent_pre AS agent
+COPY --from=licenses /legal /legal
 
 ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 
