@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # DeepSeek-V4 Benchmark Recipe
 
 This directory provides a shared AIPerf trace-replay Job for DeepSeek-V4 Dynamo
@@ -107,4 +112,3 @@ metrics summary
 frontend/router metrics when KV-aware routing is enabled
 worker prefix-cache metrics
 ```
-

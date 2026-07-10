@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Trace Staging
 
 Trace JSONL files are intentionally not copied into this work-tracker staging
@@ -20,4 +25,3 @@ Expected agentic filenames:
 
 The final Dynamo PR can vendor trace files using Git LFS, matching the policy in
 `.gitattributes`, once the exact release trace set is selected.
-
