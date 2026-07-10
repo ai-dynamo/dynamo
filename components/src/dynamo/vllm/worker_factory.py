@@ -72,11 +72,11 @@ def _merge_benchmark_rank_results(
     rank_data: list[tuple[int, Path, dict]],
     merged_path: Path,
 ) -> dict:
-    """Validate rank grids and group synchronized FPMs by benchmark id."""
+    """Validate and flatten globally synchronized benchmark iterations."""
     if not rank_data:
         raise RuntimeError("No self-benchmark rank results were loaded")
 
-    expected_ranks = [rank for rank, _, _ in rank_data]
+    source_ranks = [rank for rank, _, _ in rank_data]
     reference_rank, _, reference = rank_data[0]
     run_id = reference.get("run_id")
     grid_digest = reference.get("grid_digest")
@@ -85,28 +85,93 @@ def _merge_benchmark_rank_results(
     if not isinstance(grid_digest, str) or not grid_digest:
         raise RuntimeError("Self-benchmark rank results are missing grid_digest")
 
-    reference_by_id: dict[int, dict] = {}
-    for result in reference.get("results", []):
-        benchmark_id = result.get("point", {}).get("benchmark_id")
+    global_size = reference.get("dp", {}).get("size")
+    if not isinstance(global_size, int) or global_size < 1:
+        raise RuntimeError("Self-benchmark results have invalid global DP size")
+    global_ranks = list(range(global_size))
+
+    reference_groups = reference.get("iteration_groups")
+    if not isinstance(reference_groups, list) or not reference_groups:
+        raise RuntimeError(
+            "Self-benchmark rank results are missing synchronized iteration groups"
+        )
+
+    groups_by_id: dict[int, dict] = {}
+    for group in reference_groups:
+        benchmark_id = group.get("benchmark_id")
         if not isinstance(benchmark_id, int) or benchmark_id < 1:
             raise RuntimeError(
                 f"Self-benchmark rank {reference_rank} has invalid benchmark_id "
                 f"{benchmark_id}"
             )
-        if benchmark_id in reference_by_id:
+        if benchmark_id in groups_by_id:
             raise RuntimeError(
                 f"Self-benchmark rank {reference_rank} has duplicate "
                 f"benchmark_id={benchmark_id}"
             )
-        reference_by_id[benchmark_id] = result
+        if group.get("point", {}).get("benchmark_id") != benchmark_id:
+            raise RuntimeError(
+                "Self-benchmark iteration group point id mismatch for "
+                f"benchmark_id={benchmark_id}"
+            )
+        if group.get("expected_dp_ranks") != global_ranks or not group.get("complete"):
+            raise RuntimeError(
+                "Self-benchmark iteration group is incomplete for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={global_ranks} "
+                f"actual={group.get('expected_dp_ranks')}"
+            )
 
-    expected_ids = sorted(reference_by_id)
+        rank_results = group.get("rank_results")
+        if not isinstance(rank_results, list):
+            raise RuntimeError(
+                f"Self-benchmark iteration group {benchmark_id} has no rank results"
+            )
+        actual_ranks = [result.get("dp_rank") for result in rank_results]
+        if actual_ranks != global_ranks:
+            raise RuntimeError(
+                "Self-benchmark iteration group rank mismatch for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={global_ranks} actual={actual_ranks}"
+            )
+
+        wall_times: list[float] = []
+        for rank_result in rank_results:
+            dp_rank = rank_result["dp_rank"]
+            fpms = rank_result.get("fpms")
+            if not isinstance(fpms, list) or len(fpms) != 1:
+                raise RuntimeError(
+                    "Each self-benchmark rank-point must contain exactly one FPM: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id}"
+                )
+            fpm = fpms[0]
+            if fpm.get("counter_id") != benchmark_id:
+                raise RuntimeError(
+                    "Self-benchmark FPM counter mismatch: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id} "
+                    f"counter_id={fpm.get('counter_id')}"
+                )
+            if fpm.get("dp_rank") != dp_rank:
+                raise RuntimeError(
+                    "Self-benchmark FPM rank mismatch: "
+                    f"result_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                )
+            wall_times.append(float(fpm.get("wall_time", 0.0)))
+        expected_wall_time = max(wall_times, default=0.0)
+        if group.get("wall_time") != expected_wall_time:
+            raise RuntimeError(
+                "Self-benchmark iteration wall time mismatch for "
+                f"benchmark_id={benchmark_id}: "
+                f"expected={expected_wall_time} actual={group.get('wall_time')}"
+            )
+        groups_by_id[benchmark_id] = group
+
+    expected_ids = sorted(groups_by_id)
     if expected_ids != list(range(1, len(expected_ids) + 1)):
         raise RuntimeError(
             f"Self-benchmark ids are not a contiguous 1-based sequence: {expected_ids}"
         )
 
-    by_rank: dict[int, dict[int, dict]] = {}
     for dp_rank, path, data in rank_data:
         if data.get("run_id") != run_id:
             raise RuntimeError(
@@ -123,6 +188,15 @@ def _merge_benchmark_rank_results(
             raise RuntimeError(
                 f"Self-benchmark rank metadata mismatch at {path}: "
                 f"expected={dp_rank} actual={recorded_rank}"
+            )
+        if data.get("dp", {}).get("size") != global_size:
+            raise RuntimeError(
+                f"Self-benchmark global DP size mismatch at {path}: "
+                f"expected={global_size} actual={data.get('dp', {}).get('size')}"
+            )
+        if data.get("iteration_groups") != reference_groups:
+            raise RuntimeError(
+                f"Self-benchmark synchronized iteration groups differ at {path}"
             )
 
         results_by_id: dict[int, dict] = {}
@@ -143,77 +217,67 @@ def _merge_benchmark_rank_results(
 
         for benchmark_id in expected_ids:
             result = results_by_id[benchmark_id]
-            if result.get("point") != reference_by_id[benchmark_id].get("point"):
+            group = groups_by_id[benchmark_id]
+            if result.get("point") != group.get("point"):
                 raise RuntimeError(
                     "Self-benchmark point mismatch for "
                     f"benchmark_id={benchmark_id} on rank {dp_rank}"
                 )
             fpms = result.get("fpms") or []
-            if not fpms:
+            if len(fpms) != 1:
                 raise RuntimeError(
-                    f"Self-benchmark rank {dp_rank} has no FPM for "
+                    f"Self-benchmark rank {dp_rank} must have exactly one FPM for "
                     f"benchmark_id={benchmark_id}"
                 )
-            for fpm in fpms:
-                if fpm.get("counter_id") != benchmark_id:
-                    raise RuntimeError(
-                        "Self-benchmark FPM counter mismatch: "
-                        f"rank={dp_rank} benchmark_id={benchmark_id} "
-                        f"counter_id={fpm.get('counter_id')}"
-                    )
-                if fpm.get("dp_rank") != dp_rank:
-                    raise RuntimeError(
-                        "Self-benchmark FPM rank mismatch: "
-                        f"file_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
-                    )
-        by_rank[dp_rank] = results_by_id
+            fpm = fpms[0]
+            if fpm.get("counter_id") != benchmark_id:
+                raise RuntimeError(
+                    "Self-benchmark FPM counter mismatch: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id} "
+                    f"counter_id={fpm.get('counter_id')}"
+                )
+            if fpm.get("dp_rank") != dp_rank:
+                raise RuntimeError(
+                    "Self-benchmark FPM rank mismatch: "
+                    f"file_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                )
+            group_fpms = group["rank_results"][dp_rank]["fpms"]
+            if fpms != group_fpms:
+                raise RuntimeError(
+                    "Self-benchmark local result differs from synchronized group: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id}"
+                )
 
     flattened_results: list[dict] = []
-    iteration_groups: list[dict] = []
     for benchmark_id in expected_ids:
-        canonical_point = copy.deepcopy(reference_by_id[benchmark_id]["point"])
-        rank_results = []
-        wall_times: list[float] = []
-        for dp_rank in expected_ranks:
-            result = by_rank[dp_rank][benchmark_id]
-            fpms = copy.deepcopy(result["fpms"])
+        group = groups_by_id[benchmark_id]
+        canonical_point = group["point"]
+        for rank_result in group["rank_results"]:
+            dp_rank = rank_result["dp_rank"]
+            fpms = copy.deepcopy(rank_result["fpms"])
             point = copy.deepcopy(canonical_point)
             point["dp_rank"] = dp_rank
             flattened_results.append({"point": point, "fpms": fpms})
-            rank_results.append({"dp_rank": dp_rank, "fpms": fpms})
-            wall_times.extend(float(fpm.get("wall_time", 0.0)) for fpm in fpms)
-
-        iteration_groups.append(
-            {
-                "benchmark_id": benchmark_id,
-                "point": canonical_point,
-                "expected_dp_ranks": expected_ranks,
-                "complete": True,
-                "wall_time": max(wall_times, default=0.0),
-                "rank_results": rank_results,
-            }
-        )
 
     merged = copy.deepcopy(reference)
     merged["artifact_type"] = "merged"
     merged["dp"] = {
-        "ranks": expected_ranks,
-        "managed_size": len(expected_ranks),
-        "global_size": reference.get("dp", {}).get("size", len(expected_ranks)),
+        "ranks": global_ranks,
+        "source_ranks": source_ranks,
+        "managed_size": len(source_ranks),
+        "global_size": global_size,
     }
     merged["rank_files"] = [str(path) for _, path, _ in rank_data]
     merged["merged_output_path"] = str(merged_path)
     merged["results"] = flattened_results
-    merged["iteration_groups"] = iteration_groups
+    merged["iteration_groups"] = copy.deepcopy(reference_groups)
+    rank_point_count = len(expected_ids) * global_size
     merged["coverage"] = {
-        key: sum(data.get("coverage", {}).get(key, 0) for _, _, data in rank_data)
-        for key in ("expected_points", "completed_points", "skipped_points")
+        "expected_points": rank_point_count,
+        "completed_points": rank_point_count,
+        "skipped_points": 0,
     }
-    merged["skipped_points"] = [
-        skipped
-        for _, _, data in rank_data
-        for skipped in data.get("skipped_points", [])
-    ]
+    merged["skipped_points"] = []
     return merged
 
 
@@ -231,14 +295,7 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     )
     timeout = int(bench_cfg.get("timeout", 300))
 
-    try:
-        dp_start, dp_size = get_dp_range_for_worker(vllm_config)
-    except Exception:
-        logger.warning(
-            "Could not determine DP range, assuming single rank",
-            exc_info=True,
-        )
-        dp_start, dp_size = 0, 1
+    dp_start, dp_size = get_dp_range_for_worker(vllm_config)
 
     dp_ranks = list(range(dp_start, dp_start + dp_size))
     rank_paths = [_benchmark_rank_path(base_path, dp_rank) for dp_rank in dp_ranks]

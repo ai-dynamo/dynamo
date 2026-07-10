@@ -78,6 +78,26 @@ async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_
 async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_path):
     base_path = tmp_path / "benchmark.json"
     point = {"benchmark_id": 1, "point_type": "prefill"}
+    rank_results = [
+        {
+            "dp_rank": 0,
+            "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
+        },
+        {
+            "dp_rank": 1,
+            "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+        },
+    ]
+    iteration_groups = [
+        {
+            "benchmark_id": 1,
+            "point": point,
+            "expected_dp_ranks": [0, 1],
+            "complete": True,
+            "wall_time": 0.02,
+            "rank_results": rank_results,
+        }
+    ]
 
     def rank_payload(dp_rank: int, wall_time: float) -> dict:
         return {
@@ -102,6 +122,7 @@ async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_p
                     ],
                 }
             ],
+            "iteration_groups": iteration_groups,
             "skipped_points": [],
         }
 
@@ -151,6 +172,76 @@ async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_p
         await _wait_and_load_benchmark(
             {"output_path": str(base_path), "timeout": 1}, Mock()
         )
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_external_dp_keeps_global_group(
+    monkeypatch, tmp_path
+):
+    base_path = tmp_path / "benchmark.json"
+    point = {"benchmark_id": 1, "point_type": "decode"}
+    rank_results = [
+        {
+            "dp_rank": 0,
+            "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
+        },
+        {
+            "dp_rank": 1,
+            "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+        },
+    ]
+    base_path.write_text(
+        json.dumps(
+            {
+                "valid": True,
+                "run_id": "run-1",
+                "grid_digest": "grid-1",
+                "dp": {"rank": 0, "size": 2},
+                "coverage": {
+                    "expected_points": 1,
+                    "completed_points": 1,
+                    "skipped_points": 0,
+                },
+                "results": [
+                    {
+                        "point": point,
+                        "fpms": rank_results[0]["fpms"],
+                    }
+                ],
+                "iteration_groups": [
+                    {
+                        "benchmark_id": 1,
+                        "point": point,
+                        "expected_dp_ranks": [0, 1],
+                        "complete": True,
+                        "wall_time": 0.02,
+                        "rank_results": rank_results,
+                    }
+                ],
+                "skipped_points": [],
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    merged = await _wait_and_load_benchmark(
+        {"output_path": str(base_path), "timeout": 1}, Mock()
+    )
+
+    assert merged["dp"] == {
+        "ranks": [0, 1],
+        "source_ranks": [0],
+        "managed_size": 1,
+        "global_size": 2,
+    }
+    assert [result["point"]["dp_rank"] for result in merged["results"]] == [0, 1]
+    assert merged["coverage"] == {
+        "expected_points": 2,
+        "completed_points": 2,
+        "skipped_points": 0,
+    }
 
 
 @pytest.mark.asyncio

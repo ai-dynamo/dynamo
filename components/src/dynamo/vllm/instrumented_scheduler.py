@@ -263,11 +263,16 @@ class _BenchmarkSynchronizer:
 
     Rank 0 owns a ROUTER socket and every other rank owns a DEALER socket. A
     scheduler first constructs its complete measured ``SchedulerOutput``, then
-    blocks here until every rank reports the same benchmark point. Rank 0 sends
-    ``GO`` only after validating all READY messages. The scheduler records its
-    schedule timestamp after ``GO``, so barrier wait and arrival skew are not
-    included in the measured iteration wall time.
+    blocks here until every rank reports the same benchmark point. Rank 0 uses
+    a prepare/arm handshake before sending ``GO`` so a rank that disappeared
+    after READY cannot release the remaining ranks into an ADP collective. The
+    scheduler records its schedule timestamp after ``GO``, so barrier wait is
+    excluded from the measured iteration wall time. Small post-GO delivery and
+    model-runner launch skew can remain because this operates at scheduler level.
     """
+
+    MAX_SYNC_TIMEOUT_SECONDS = 10
+    FINAL_GO_GRACE_SECONDS = 1
 
     def __init__(
         self,
@@ -276,7 +281,7 @@ class _BenchmarkSynchronizer:
         dp_size: int,
         master_ip: str,
         port: int,
-        timeout: int,
+        timeout: float,
         endpoint: str | None = None,
     ) -> None:
         if dp_size < 2:
@@ -287,12 +292,16 @@ class _BenchmarkSynchronizer:
         self.dp_rank = dp_rank
         self.dp_size = dp_size
         self.port = port
-        self._timeout_ms = max(1, int(timeout * 1000))
+        self._timeout_ms = max(
+            1,
+            min(int(timeout * 1000), self.MAX_SYNC_TIMEOUT_SECONDS * 1000),
+        )
         self._run_id = uuid.uuid4().hex if dp_rank == 0 else None
         self._ctx = zmq.Context.instance()
 
         if dp_rank == 0:
             self._socket = self._ctx.socket(zmq.ROUTER)
+            self._socket.setsockopt(zmq.ROUTER_MANDATORY, 1)
             self._endpoint = endpoint or f"tcp://*:{port}"
             self._socket.bind(self._endpoint)
         else:
@@ -305,6 +314,10 @@ class _BenchmarkSynchronizer:
     @property
     def run_id(self) -> str | None:
         return self._run_id
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self._timeout_ms / 1000
 
     def close(self) -> None:
         self._socket.close(linger=0)
@@ -326,23 +339,15 @@ class _BenchmarkSynchronizer:
         if self.dp_rank == 0:
             return self._coordinate(ready)
 
+        deadline = time.monotonic() + self.timeout_seconds
         self._socket.send_json(ready)
-        if not self._socket.poll(self._timeout_ms, zmq.POLLIN):
-            raise TimeoutError(
-                "timed out waiting for benchmark GO from attention-DP rank 0 "
-                f"for benchmark_id={point.benchmark_id}"
-            )
-        reply = self._socket.recv_json()
-        if reply.get("type") != "go":
-            raise RuntimeError(
-                "attention-DP benchmark synchronization failed: "
-                f"{reply.get('error', reply)}"
-            )
-        if reply.get("benchmark_id") != point.benchmark_id:
-            raise RuntimeError(
-                "attention-DP benchmark GO id mismatch: "
-                f"expected={point.benchmark_id} actual={reply.get('benchmark_id')}"
-            )
+        self._follower_phase(deadline, point.benchmark_id, "prepare", "prepared")
+        deadline = time.monotonic() + self.timeout_seconds
+        self._follower_phase(deadline, point.benchmark_id, "arm", "armed")
+        go_deadline = (
+            time.monotonic() + self.timeout_seconds + self.FINAL_GO_GRACE_SECONDS
+        )
+        reply = self._recv_follower(go_deadline, point.benchmark_id, "go")
         run_id = reply.get("run_id")
         if not isinstance(run_id, str) or not run_id:
             raise RuntimeError("attention-DP benchmark GO did not include run_id")
@@ -354,6 +359,73 @@ class _BenchmarkSynchronizer:
         self._run_id = run_id
         return run_id
 
+    def collect_result(self, point: BenchmarkPoint, fpms: list[dict]) -> list[dict]:
+        """Gather one completed iteration and return every rank's FPMs."""
+        result = {
+            "type": "result",
+            "dp_rank": self.dp_rank,
+            "benchmark_id": point.benchmark_id,
+            "point_digest": _benchmark_point_digest(point),
+            "fpms": fpms,
+        }
+        if self.dp_rank == 0:
+            return self._coordinate_results(result)
+
+        deadline = time.monotonic() + self.timeout_seconds
+        self._socket.send_json(result)
+        reply = self._recv_follower(deadline, point.benchmark_id, "group")
+        rank_results = reply.get("rank_results")
+        if not isinstance(rank_results, list):
+            raise RuntimeError("attention-DP benchmark group has no rank results")
+        return rank_results
+
+    def _follower_phase(
+        self,
+        deadline: float,
+        benchmark_id: int,
+        receive_type: str,
+        send_type: str,
+    ) -> None:
+        self._recv_follower(deadline, benchmark_id, receive_type)
+        self._socket.send_json(
+            {
+                "type": send_type,
+                "dp_rank": self.dp_rank,
+                "benchmark_id": benchmark_id,
+            }
+        )
+
+    def _recv_follower(
+        self, deadline: float, benchmark_id: int, expected_type: str
+    ) -> dict:
+        remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+        if time.monotonic() >= deadline or not self._socket.poll(
+            remaining_ms, zmq.POLLIN
+        ):
+            raise TimeoutError(
+                "timed out waiting for attention-DP benchmark "
+                f"{expected_type} for benchmark_id={benchmark_id}"
+            )
+        reply = self._socket.recv_json()
+        if not isinstance(reply, dict):
+            raise RuntimeError("invalid attention-DP benchmark reply")
+        if reply.get("type") == "error":
+            raise RuntimeError(
+                "attention-DP benchmark synchronization failed: "
+                f"{reply.get('error', reply)}"
+            )
+        if reply.get("type") != expected_type:
+            raise RuntimeError(
+                "attention-DP benchmark protocol mismatch: "
+                f"expected={expected_type} actual={reply.get('type')}"
+            )
+        if reply.get("benchmark_id") != benchmark_id:
+            raise RuntimeError(
+                "attention-DP benchmark message id mismatch: "
+                f"expected={benchmark_id} actual={reply.get('benchmark_id')}"
+            )
+        return reply
+
     def _coordinate(self, local_ready: dict) -> str:
         expected_id = local_ready["benchmark_id"]
         expected_digest = local_ready["point_digest"]
@@ -363,7 +435,7 @@ class _BenchmarkSynchronizer:
         validation_errors = []
         if local_ready.get("validation_error"):
             validation_errors.append(f"rank 0: {local_ready['validation_error']}")
-        deadline = time.monotonic() + self._timeout_ms / 1000
+        deadline = time.monotonic() + self.timeout_seconds
 
         try:
             while len(identities) < self.dp_size - 1:
@@ -397,6 +469,10 @@ class _BenchmarkSynchronizer:
                     raise RuntimeError(
                         f"duplicate attention-DP benchmark READY from rank {rank}"
                     )
+                if identity != str(rank).encode():
+                    raise RuntimeError(
+                        f"attention-DP benchmark identity mismatch for rank {rank}"
+                    )
                 if message.get("benchmark_id") != expected_id:
                     validation_errors.append(
                         "attention-DP benchmark id mismatch: "
@@ -419,32 +495,168 @@ class _BenchmarkSynchronizer:
                     )
                 identities[rank] = identity
         except Exception as error:
-            response = json.dumps({"type": "error", "error": str(error)}).encode()
             error_identities = set(identities.values())
             if last_identity is not None:
                 error_identities.add(last_identity)
-            for identity in error_identities:
-                self._socket.send_multipart((identity, response))
+            self._notify_error(error_identities, str(error))
             raise
 
         if validation_errors:
-            error = "; ".join(validation_errors)
-            response = json.dumps({"type": "error", "error": error}).encode()
-            for identity in identities.values():
-                self._socket.send_multipart((identity, response))
-            raise RuntimeError(error)
+            validation_message = "; ".join(validation_errors)
+            self._notify_error(identities.values(), validation_message)
+            raise RuntimeError(validation_message)
 
         assert self._run_id is not None
-        response = json.dumps(
-            {
-                "type": "go",
-                "benchmark_id": expected_id,
-                "run_id": self._run_id,
-            }
-        ).encode()
-        for rank in sorted(identities):
-            self._socket.send_multipart((identities[rank], response))
+        try:
+            self._send_to_all(
+                identities,
+                {"type": "prepare", "benchmark_id": expected_id},
+            )
+            self._coordinate_phase(
+                identities,
+                deadline,
+                benchmark_id=expected_id,
+                expected_type="prepared",
+            )
+            self._send_to_all(
+                identities,
+                {"type": "arm", "benchmark_id": expected_id},
+            )
+            self._coordinate_phase(
+                identities,
+                deadline,
+                benchmark_id=expected_id,
+                expected_type="armed",
+            )
+            self._send_to_all(
+                identities,
+                {
+                    "type": "go",
+                    "benchmark_id": expected_id,
+                    "run_id": self._run_id,
+                },
+            )
+        except Exception as error:
+            self._notify_error(identities.values(), str(error))
+            raise
         return self._run_id
+
+    def _coordinate_phase(
+        self,
+        identities: dict[int, bytes],
+        deadline: float,
+        *,
+        benchmark_id: int,
+        expected_type: str,
+    ) -> None:
+        pending = set(identities)
+        identity_to_rank = {
+            identity: dp_rank for dp_rank, identity in identities.items()
+        }
+        while pending:
+            identity, message = self._recv_router(deadline, benchmark_id)
+            rank = identity_to_rank.get(identity)
+            if rank is None or message.get("dp_rank") != rank:
+                raise RuntimeError(
+                    "attention-DP benchmark phase came from an unknown rank"
+                )
+            if rank not in pending or message.get("type") != expected_type:
+                raise RuntimeError(
+                    "attention-DP benchmark phase mismatch: "
+                    f"rank={rank} expected={expected_type} "
+                    f"actual={message.get('type')}"
+                )
+            pending.remove(rank)
+
+    def _coordinate_results(self, local_result: dict) -> list[dict]:
+        benchmark_id = local_result["benchmark_id"]
+        point_digest = local_result["point_digest"]
+        deadline = time.monotonic() + self.timeout_seconds
+        identities: dict[int, bytes] = {}
+        rank_results = [
+            {"dp_rank": 0, "fpms": local_result["fpms"]},
+        ]
+        try:
+            while len(identities) < self.dp_size - 1:
+                identity, message = self._recv_router(deadline, benchmark_id)
+                rank = message.get("dp_rank")
+                if (
+                    message.get("type") != "result"
+                    or not isinstance(rank, int)
+                    or not 1 <= rank < self.dp_size
+                ):
+                    raise RuntimeError(
+                        f"invalid attention-DP benchmark result: {message}"
+                    )
+                if rank in identities or identity != str(rank).encode():
+                    raise RuntimeError(
+                        f"duplicate or mismatched result from ADP rank {rank}"
+                    )
+                if message.get("point_digest") != point_digest:
+                    raise RuntimeError(
+                        "attention-DP benchmark result point mismatch for "
+                        f"benchmark_id={benchmark_id} on rank {rank}"
+                    )
+                fpms = message.get("fpms")
+                if not isinstance(fpms, list):
+                    raise RuntimeError(
+                        f"attention-DP benchmark rank {rank} sent invalid FPMs"
+                    )
+                identities[rank] = identity
+                rank_results.append({"dp_rank": rank, "fpms": fpms})
+
+            rank_results.sort(key=lambda result: result["dp_rank"])
+            self._send_to_all(
+                identities,
+                {
+                    "type": "group",
+                    "benchmark_id": benchmark_id,
+                    "rank_results": rank_results,
+                },
+            )
+            return rank_results
+        except Exception as error:
+            self._notify_error(identities.values(), str(error))
+            raise
+
+    def _recv_router(self, deadline: float, benchmark_id: int) -> tuple[bytes, dict]:
+        remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+        if time.monotonic() >= deadline or not self._socket.poll(
+            remaining_ms, zmq.POLLIN
+        ):
+            raise TimeoutError(
+                "timed out waiting for attention-DP ranks for "
+                f"benchmark_id={benchmark_id}"
+            )
+        frames = self._socket.recv_multipart()
+        if len(frames) != 2:
+            raise RuntimeError("invalid attention-DP benchmark multipart message")
+        identity, payload = frames
+        message = json.loads(payload)
+        if not isinstance(message, dict):
+            raise RuntimeError("invalid attention-DP benchmark message")
+        if message.get("benchmark_id") != benchmark_id:
+            raise RuntimeError(
+                "attention-DP benchmark id mismatch: "
+                f"expected={benchmark_id} actual={message.get('benchmark_id')}"
+            )
+        return identity, message
+
+    def _send_to_all(self, identities: dict[int, bytes], message: dict) -> None:
+        payload = json.dumps(message).encode()
+        for rank in sorted(identities):
+            self._socket.send_multipart((identities[rank], payload))
+
+    def _notify_error(self, identities, error: str) -> None:
+        payload = json.dumps({"type": "error", "error": error}).encode()
+        for identity in identities:
+            try:
+                self._socket.send_multipart((identity, payload))
+            except zmq.ZMQError:
+                logger.debug(
+                    "Could not notify disconnected ADP benchmark rank",
+                    exc_info=True,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -724,22 +936,29 @@ class InstrumentedScheduler(AsyncScheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: "ModelRunnerOutput",
     ):
+        model_output_arrival = (
+            time.monotonic() if scheduler_output.total_num_scheduled_tokens > 0 else 0.0
+        )
         result = super().update_from_output(scheduler_output, model_runner_output)
 
         if scheduler_output.total_num_scheduled_tokens > 0:
-            now = time.monotonic()
             t_sched = self._schedule_times.popleft() if self._schedule_times else 0.0
-
-            if self._last_update_time > 0:
-                wall_time = now - self._last_update_time
-            elif t_sched > 0:
-                wall_time = now - t_sched
-            else:
-                wall_time = 0.0
-            self._last_update_time = now
+            scheduled = self._extract_scheduled(scheduler_output)
+            is_benchmark_point = self._bench_active and (
+                self._bench_should_record_scheduled(scheduled)
+            )
+            wall_time = self._iteration_wall_time(
+                model_output_arrival,
+                t_sched,
+                is_benchmark_point=is_benchmark_point,
+            )
+            self._last_update_time = model_output_arrival
 
             metrics = self._extract_metrics(
-                scheduler_output, self._compute_queued(), wall_time
+                scheduler_output,
+                self._compute_queued(),
+                wall_time,
+                scheduled=scheduled,
             )
             self._publish_or_record_metrics(metrics)
         else:
@@ -775,14 +994,30 @@ class InstrumentedScheduler(AsyncScheduler):
         output: SchedulerOutput,
         queued: QueuedRequestMetrics | None,
         wall_time: float,
+        scheduled: ScheduledRequestMetrics | None = None,
     ) -> ForwardPassMetrics:
         return ForwardPassMetrics(
             worker_id=self._fpm_worker_id,
             dp_rank=self._fpm_dp_rank,
             wall_time=wall_time,
-            scheduled_requests=self._extract_scheduled(output),
+            scheduled_requests=(
+                scheduled if scheduled is not None else self._extract_scheduled(output)
+            ),
             queued_requests=queued or QueuedRequestMetrics(),
         )
+
+    def _iteration_wall_time(
+        self,
+        now: float,
+        t_sched: float,
+        *,
+        is_benchmark_point: bool,
+    ) -> float:
+        if is_benchmark_point:
+            return now - t_sched if t_sched > 0 else 0.0
+        if self._last_update_time > 0:
+            return now - self._last_update_time
+        return now - t_sched if t_sched > 0 else 0.0
 
     def _extract_scheduled(self, output: SchedulerOutput) -> ScheduledRequestMetrics:
         new_reqs: list[NewRequestData] = output.scheduled_new_reqs
@@ -836,10 +1071,14 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_should_record_fpm(self, metrics: ForwardPassMetrics) -> bool:
         """Keep only the forward-pass type represented by the current point."""
+        return self._bench_should_record_scheduled(metrics.scheduled_requests)
+
+    def _bench_should_record_scheduled(
+        self, scheduled: ScheduledRequestMetrics
+    ) -> bool:
         point = getattr(self, "_bench_current_point", None)
         if point is None:
             return False
-        scheduled = metrics.scheduled_requests
         if point.point_type == "prefill":
             return scheduled.num_prefill_requests > 0
         return scheduled.num_decode_requests > 0
@@ -937,6 +1176,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_config = BenchmarkConfig(
             **{k: v for k, v in cfg.items() if k in known}
         )
+        if self._bench_config.timeout <= 0:
+            raise ValueError("benchmark timeout must be positive")
         self._bench_config.output_path = os.environ.get(
             ENV_FPM_BENCHMARK_OUTPUT_PATH,
             self._bench_config.output_path,
@@ -1017,6 +1258,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_grid: deque[BenchmarkPoint] = deque()
         self._bench_current_point: BenchmarkPoint | None = None
         self._bench_results: list[BenchmarkPointResult] = []
+        self._bench_iteration_groups: list[dict] = []
         self._bench_skipped_points: list[SkippedBenchmarkPoint] = []
         self._bench_missing_phases: list[str] = []
         self._bench_current_fpms: list[dict] = []
@@ -1031,11 +1273,17 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_grid_digest: str | None = None
         self._bench_feasible_max_decode_batch_size = 0
         self._bench_sync_pending = False
-
-        parallel_config = getattr(vllm_config, "parallel_config", None)
-        self._bench_dp_size = max(
-            1, int(getattr(parallel_config, "data_parallel_size", 1) or 1)
+        self._bench_point_deadline = 0.0
+        self._bench_point_result_timeout_seconds = (
+            min(
+                float(self._bench_config.timeout),
+                float(_BenchmarkSynchronizer.MAX_SYNC_TIMEOUT_SECONDS),
+            )
+            * 0.8
         )
+
+        parallel_config = vllm_config.parallel_config
+        self._bench_dp_size = parallel_config.data_parallel_size
         self._bench_run_id = uuid.uuid4().hex
         if self._bench_dp_size > 1:
             sync_port = (
@@ -1045,9 +1293,7 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_synchronizer = _BenchmarkSynchronizer(
                 dp_rank=dp_rank,
                 dp_size=self._bench_dp_size,
-                master_ip=getattr(
-                    parallel_config, "data_parallel_master_ip", "127.0.0.1"
-                ),
+                master_ip=parallel_config.data_parallel_master_ip,
                 port=sync_port,
                 timeout=self._bench_config.timeout,
             )
@@ -1163,12 +1409,14 @@ class InstrumentedScheduler(AsyncScheduler):
                         total_tokens, batch_size, total_kv_read_tokens
                     ):
                         continue
-                    capture_size, padding_tokens, sample_reasons = (
-                        self._bench_cudagraph_metadata(
-                            total_tokens,
-                            self._bench_prefill_capture_sizes,
-                            max_tokens,
-                        )
+                    (
+                        capture_size,
+                        padding_tokens,
+                        sample_reasons,
+                    ) = self._bench_cudagraph_metadata(
+                        total_tokens,
+                        self._bench_prefill_capture_sizes,
+                        max_tokens,
                     )
                     self._bench_grid.append(
                         BenchmarkPoint(
@@ -1550,12 +1798,14 @@ class InstrumentedScheduler(AsyncScheduler):
             feasible_max_batch,
         )
         for batch_size in batch_sizes:
-            capture_size, padding_tokens, sample_reasons = (
-                self._bench_cudagraph_metadata(
-                    batch_size,
-                    self._bench_decode_capture_sizes,
-                    feasible_max_batch,
-                )
+            (
+                capture_size,
+                padding_tokens,
+                sample_reasons,
+            ) = self._bench_cudagraph_metadata(
+                batch_size,
+                self._bench_decode_capture_sizes,
+                feasible_max_batch,
             )
             for total_kv_read_tokens in self._bench_decode_kv_read_points(batch_size):
                 if not self._bench_decode_point_feasible(
@@ -1845,6 +2095,9 @@ class InstrumentedScheduler(AsyncScheduler):
         elif validation_error is not None:
             raise RuntimeError(validation_error)
         self._bench_sync_pending = False
+        self._bench_point_deadline = (
+            time.monotonic() + self._bench_point_result_timeout_seconds
+        )
 
     @staticmethod
     def _bench_output_validation_error(
@@ -1961,6 +2214,12 @@ class InstrumentedScheduler(AsyncScheduler):
             still_alive = any(
                 rid in self.requests for rid in self._bench_active_req_ids
             )
+            if (
+                self._bench_current_point is not None
+                and not self._bench_current_fpms
+                and self._bench_point_result_timed_out()
+            ):
+                self._bench_save_current_point()
             if still_alive:
                 return None
             if self._bench_pending_seed_point is not None:
@@ -1969,8 +2228,6 @@ class InstrumentedScheduler(AsyncScheduler):
                 # cache salt, and never record the seed's forward-pass metrics.
                 self._bench_cleanup_requests()
                 self._bench_drain_pending = True
-                return None
-            if not self._bench_current_fpms:
                 return None
             self._bench_save_current_point()
             self._bench_cleanup_requests()
@@ -2093,7 +2350,8 @@ class InstrumentedScheduler(AsyncScheduler):
 
         elif self._bench_active_req_ids:
             if not self._bench_current_fpms:
-                return None
+                if not self._bench_point_result_timed_out():
+                    return None
             self._bench_save_current_point()
             self._bench_cleanup_requests()
             self._bench_drain_pending = True
@@ -2138,83 +2396,112 @@ class InstrumentedScheduler(AsyncScheduler):
             break
         return None
 
+    def _bench_point_result_timed_out(self) -> bool:
+        return (
+            self._bench_point_deadline > 0
+            and time.monotonic() >= self._bench_point_deadline
+        )
+
     def _bench_save_current_point(self) -> None:
-        if self._bench_current_point is not None and self._bench_current_fpms:
+        if self._bench_current_point is not None:
             point = self._bench_current_point
-            scheduled = self._bench_current_fpms[0].get("scheduled_requests", {})
-            batch_size_key = (
-                "num_prefill_requests"
-                if point.point_type == "prefill"
-                else "num_decode_requests"
-            )
-            actual_batch_size = scheduled.get(batch_size_key)
-            if actual_batch_size != point.batch_size:
-                logger.warning(
-                    "Skipping benchmark %s point after measured batch size "
-                    "mismatch: point=%s actual_batch_size=%s",
-                    point.point_type,
-                    point,
-                    actual_batch_size,
+            local_fpms = list(self._bench_current_fpms)
+            if self._bench_synchronizer is not None:
+                rank_results = self._bench_synchronizer.collect_result(
+                    point, local_fpms
                 )
-                self._bench_skip_point(point, "measured_batch_size_mismatch")
+            else:
+                rank_results = [{"dp_rank": self._fpm_dp_rank, "fpms": local_fpms}]
+
+            expected_ranks = list(range(self._bench_dp_size))
+            actual_ranks = [result.get("dp_rank") for result in rank_results]
+            if actual_ranks != expected_ranks:
+                raise RuntimeError(
+                    "attention-DP benchmark result ranks do not match: "
+                    f"expected={expected_ranks} actual={actual_ranks}"
+                )
+
+            wall_times: list[float] = []
+            validation_failure: tuple[int, str] | None = None
+            for result in rank_results:
+                dp_rank = result["dp_rank"]
+                fpms = result.get("fpms")
+                if not isinstance(fpms, list) or len(fpms) != 1:
+                    raise RuntimeError(
+                        "each self-benchmark point must produce exactly one FPM: "
+                        f"benchmark_id={point.benchmark_id} rank={dp_rank} "
+                        f"count={len(fpms) if isinstance(fpms, list) else 'invalid'}"
+                    )
+                fpm = fpms[0]
+                if fpm.get("counter_id") != point.benchmark_id:
+                    raise RuntimeError(
+                        "self-benchmark FPM counter mismatch: "
+                        f"rank={dp_rank} benchmark_id={point.benchmark_id} "
+                        f"counter_id={fpm.get('counter_id')}"
+                    )
+                if fpm.get("dp_rank") != dp_rank:
+                    raise RuntimeError(
+                        "self-benchmark FPM rank mismatch: "
+                        f"result_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                    )
+                wall_times.append(float(fpm.get("wall_time", 0.0)))
+                reason = self._bench_fpm_validation_failure(point, fpm)
+                if reason is not None and validation_failure is None:
+                    validation_failure = (dp_rank, reason)
+
+            if validation_failure is not None:
+                dp_rank, reason = validation_failure
+                logger.warning(
+                    "Skipping benchmark point after measured shape mismatch "
+                    "on ADP rank %d: point=%s reason=%s",
+                    dp_rank,
+                    point,
+                    reason,
+                )
+                self._bench_skip_point(point, reason)
                 self._bench_current_point = None
                 self._bench_current_fpms = []
+                self._bench_point_deadline = 0.0
                 return
 
-            if point.point_type == "prefill":
-                actual_prefill_tokens = scheduled.get("sum_prefill_tokens")
-                if actual_prefill_tokens != point.total_prefill_tokens:
-                    logger.warning(
-                        "Skipping benchmark prefill point after measured token "
-                        "mismatch: point=%s expected_prefill_tokens=%s "
-                        "actual_prefill_tokens=%s",
-                        point,
-                        point.total_prefill_tokens,
-                        actual_prefill_tokens,
-                    )
-                    self._bench_skip_point(point, "measured_prefill_tokens_mismatch")
-                    self._bench_current_point = None
-                    self._bench_current_fpms = []
-                    return
-                actual_kv_read_tokens = scheduled.get("sum_prefill_kv_tokens")
-                expected_kv_read_tokens = point.total_kv_read_tokens
-                if actual_kv_read_tokens != expected_kv_read_tokens:
-                    logger.warning(
-                        "Skipping benchmark prefill point after measured KV-read "
-                        "mismatch: point=%s expected_kv_read_tokens=%s "
-                        "actual_kv_read_tokens=%s",
-                        point,
-                        expected_kv_read_tokens,
-                        actual_kv_read_tokens,
-                    )
-                    self._bench_skip_point(point, "measured_kv_read_mismatch")
-                    self._bench_current_point = None
-                    self._bench_current_fpms = []
-                    return
-            else:
-                actual_decode_kv_tokens = scheduled.get("sum_decode_kv_tokens")
-                expected_decode_kv_tokens = point.total_kv_read_tokens
-                if actual_decode_kv_tokens != expected_decode_kv_tokens:
-                    logger.warning(
-                        "Skipping benchmark decode point after measured context "
-                        "mismatch: point=%s expected_decode_kv_tokens=%s "
-                        "actual_decode_kv_tokens=%s",
-                        point,
-                        expected_decode_kv_tokens,
-                        actual_decode_kv_tokens,
-                    )
-                    self._bench_skip_point(point, "measured_decode_context_mismatch")
-                    self._bench_current_point = None
-                    self._bench_current_fpms = []
-                    return
             self._bench_results.append(
                 BenchmarkPointResult(
                     point=point,
-                    fpms=list(self._bench_current_fpms),
+                    fpms=local_fpms,
                 )
+            )
+            self._bench_iteration_groups.append(
+                {
+                    "benchmark_id": point.benchmark_id,
+                    "point": asdict(point),
+                    "expected_dp_ranks": expected_ranks,
+                    "complete": True,
+                    "wall_time": max(wall_times, default=0.0),
+                    "rank_results": rank_results,
+                }
             )
         self._bench_current_point = None
         self._bench_current_fpms = []
+        self._bench_point_deadline = 0.0
+
+    @staticmethod
+    def _bench_fpm_validation_failure(point: BenchmarkPoint, fpm: dict) -> str | None:
+        scheduled = fpm.get("scheduled_requests", {})
+        batch_size_key = (
+            "num_prefill_requests"
+            if point.point_type == "prefill"
+            else "num_decode_requests"
+        )
+        if scheduled.get(batch_size_key) != point.batch_size:
+            return "measured_batch_size_mismatch"
+        if point.point_type == "prefill":
+            if scheduled.get("sum_prefill_tokens") != point.total_prefill_tokens:
+                return "measured_prefill_tokens_mismatch"
+            if scheduled.get("sum_prefill_kv_tokens") != point.total_kv_read_tokens:
+                return "measured_kv_read_mismatch"
+        elif scheduled.get("sum_decode_kv_tokens") != point.total_kv_read_tokens:
+            return "measured_decode_context_mismatch"
+        return None
 
     def _bench_skip_point(self, point: BenchmarkPoint, reason: str) -> None:
         self._bench_skipped_points.append(
@@ -2229,11 +2516,14 @@ class InstrumentedScheduler(AsyncScheduler):
         missing_phases = list(getattr(self, "_bench_missing_phases", []))
         error = getattr(self, "_bench_grid_error", None)
         dp_size = getattr(self, "_bench_dp_size", 1)
+        iteration_groups = list(getattr(self, "_bench_iteration_groups", []))
         output = {
             "schema_version": 2,
             "artifact_type": "rank",
             "status": "failed" if error is not None else "complete",
             "valid": completed_points == self._bench_expected_points
+            and len(iteration_groups) == completed_points
+            and all(group.get("complete") for group in iteration_groups)
             and skipped_points == 0
             and not missing_phases
             and error is None,
@@ -2287,6 +2577,7 @@ class InstrumentedScheduler(AsyncScheduler):
             "results": [
                 {"point": asdict(r.point), "fpms": r.fpms} for r in self._bench_results
             ],
+            "iteration_groups": iteration_groups,
             "skipped_points": [
                 {"point": asdict(skipped.point), "reason": skipped.reason}
                 for skipped in self._bench_skipped_points

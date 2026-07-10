@@ -203,6 +203,70 @@ def test_benchmark_records_only_current_point_forward_pass_type(
     assert InstrumentedScheduler._bench_should_record_fpm(stub, metrics) is expected
 
 
+def test_benchmark_wall_time_starts_at_post_go_schedule_timestamp():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._last_update_time = 10.0
+
+    assert (
+        InstrumentedScheduler._iteration_wall_time(
+            stub,
+            now=20.0,
+            t_sched=19.0,
+            is_benchmark_point=True,
+        )
+        == 1.0
+    )
+    assert (
+        InstrumentedScheduler._iteration_wall_time(
+            stub,
+            now=20.0,
+            t_sched=19.0,
+            is_benchmark_point=False,
+        )
+        == 10.0
+    )
+
+
+def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._schedule_times = deque([10.0])
+    stub._last_update_time = 0.0
+    stub._bench_active = True
+    stub._bench_current_point = BenchmarkPoint(point_type="decode", benchmark_id=1)
+    stub._extract_scheduled = MagicMock(
+        return_value=instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_decode_requests=1
+        )
+    )
+    stub._compute_queued = MagicMock(return_value=None)
+    stub._extract_metrics = MagicMock(return_value="metrics")
+    stub._publish_or_record_metrics = MagicMock()
+    stub._cleanup_finished = MagicMock()
+    clock = {"now": 20.0}
+
+    def parent_update(_self, _scheduler_output, _model_runner_output):
+        clock["now"] = 30.0
+        return "parent-result"
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        parent_update,
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.time,
+        "monotonic",
+        lambda: clock["now"],
+    )
+    output = SimpleNamespace(total_num_scheduled_tokens=1)
+
+    result = InstrumentedScheduler.update_from_output(stub, output, object())
+
+    assert result == "parent-result"
+    assert stub._extract_metrics.call_args.args[2] == 10.0
+    assert stub._last_update_time == 20.0
+
+
 # ---------------------------------------------------------------------------
 # self.waiting classification (existing behaviour — regression coverage)
 # ---------------------------------------------------------------------------
@@ -428,18 +492,28 @@ def test_benchmark_synchronizer_aligns_point_and_shares_run_id():
         batch_size=2,
     )
     follower_result = {}
+    rank0_fpms = [{"counter_id": 7, "dp_rank": 0, "wall_time": 0.01}]
+    rank1_fpms = [{"counter_id": 7, "dp_rank": 1, "wall_time": 0.02}]
 
     def synchronize_follower():
         follower_result["run_id"] = rank1.synchronize(point)
+        follower_result["rank_results"] = rank1.collect_result(point, rank1_fpms)
 
     follower = threading.Thread(target=synchronize_follower)
     follower.start()
     try:
         coordinator_run_id = rank0.synchronize(point)
+        coordinator_rank_results = rank0.collect_result(point, rank0_fpms)
         follower.join(timeout=2)
         assert not follower.is_alive()
         assert follower_result["run_id"] == coordinator_run_id
         assert rank1.run_id == coordinator_run_id
+        expected_rank_results = [
+            {"dp_rank": 0, "fpms": rank0_fpms},
+            {"dp_rank": 1, "fpms": rank1_fpms},
+        ]
+        assert coordinator_rank_results == expected_rank_results
+        assert follower_result["rank_results"] == expected_rank_results
     finally:
         rank1.close()
         rank0.close()
@@ -483,6 +557,81 @@ def test_benchmark_synchronizer_rejects_different_points():
         follower.join(timeout=2)
         assert not follower.is_alive()
         assert "point mismatch" in str(follower_error["error"])
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_does_not_release_stale_ready_rank():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=0.05,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=0.05,
+        endpoint=endpoint,
+    )
+    point = BenchmarkPoint(point_type="decode", benchmark_id=1)
+    try:
+        with pytest.raises(TimeoutError, match="prepare"):
+            rank1.synchronize(point)
+        rank1.close()
+
+        with pytest.raises((TimeoutError, instrumented_scheduler_module.zmq.ZMQError)):
+            rank0.synchronize(point)
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_gives_armed_rank_time_to_receive_go():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=0.05,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=0.05,
+        endpoint=endpoint,
+    )
+    point = BenchmarkPoint(point_type="decode", benchmark_id=1)
+    original_coordinate_phase = rank0._coordinate_phase
+
+    def delayed_coordinate_phase(*args, **kwargs):
+        original_coordinate_phase(*args, **kwargs)
+        if kwargs["expected_type"] == "armed":
+            instrumented_scheduler_module.time.sleep(0.075)
+
+    rank0._coordinate_phase = delayed_coordinate_phase
+    follower_result = {}
+
+    def synchronize_follower():
+        follower_result["run_id"] = rank1.synchronize(point)
+
+    follower = threading.Thread(target=synchronize_follower)
+    follower.start()
+    try:
+        coordinator_run_id = rank0.synchronize(point)
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert follower_result["run_id"] == coordinator_run_id
     finally:
         rank1.close()
         rank0.close()
@@ -1052,7 +1201,11 @@ def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
     )
 
     vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(data_parallel_index=0),
+        parallel_config=SimpleNamespace(
+            data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_master_ip="127.0.0.1",
+        ),
         additional_config={
             "benchmark": {"output_path": str(tmp_path / "benchmark.json")}
         },
@@ -1078,6 +1231,10 @@ def test_agg_resolves_piecewise_prefill_and_full_decode_capture_views(tmp_path):
     stub._bench_hash_block_size = 16
     stub.cache_config = SimpleNamespace(enable_prefix_caching=False)
     vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            data_parallel_master_ip="127.0.0.1",
+        ),
         additional_config={
             "benchmark": {"mode": "agg", "output_path": str(tmp_path / "out.json")}
         },
@@ -1105,6 +1262,10 @@ def test_cudagraph_disabled_uses_geometric_fallback(tmp_path):
     stub._bench_hash_block_size = 16
     stub.cache_config = SimpleNamespace(enable_prefix_caching=False)
     vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            data_parallel_master_ip="127.0.0.1",
+        ),
         additional_config={
             "benchmark": {
                 "mode": "prefill",
@@ -1619,25 +1780,41 @@ def test_benchmark_output_marks_requested_empty_phase_invalid(tmp_path):
     assert output["valid"] is False
 
 
+def _benchmark_save_stub(point: BenchmarkPoint, fpms: list[dict]):
+    for fpm in fpms:
+        fpm.setdefault("counter_id", point.benchmark_id)
+        fpm.setdefault("dp_rank", 0)
+        fpm.setdefault("wall_time", 0.01)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = point
+    stub._bench_current_fpms = fpms
+    stub._bench_results = []
+    stub._bench_iteration_groups = []
+    stub._bench_skipped_points = []
+    stub._bench_synchronizer = None
+    stub._bench_dp_size = 1
+    stub._fpm_dp_rank = 0
+    return stub
+
+
 def test_prefill_point_with_measured_kv_mismatch_is_skipped():
     point = BenchmarkPoint(
         point_type="prefill",
         total_prefill_tokens=24,
         total_kv_read_tokens=16,
     )
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_current_point = point
-    stub._bench_current_fpms = [
-        {
-            "scheduled_requests": {
-                "num_prefill_requests": 1,
-                "sum_prefill_tokens": 24,
-                "sum_prefill_kv_tokens": 8,
+    stub = _benchmark_save_stub(
+        point,
+        [
+            {
+                "scheduled_requests": {
+                    "num_prefill_requests": 1,
+                    "sum_prefill_tokens": 24,
+                    "sum_prefill_kv_tokens": 8,
+                }
             }
-        }
-    ]
-    stub._bench_results = []
-    stub._bench_skipped_points = []
+        ],
+    )
 
     InstrumentedScheduler._bench_save_current_point(stub)
 
@@ -1661,20 +1838,9 @@ def test_prefill_point_with_exact_batch_shape_is_saved():
                 "sum_prefill_tokens": 24,
                 "sum_prefill_kv_tokens": 48,
             }
-        },
-        {
-            "scheduled_requests": {
-                "num_prefill_requests": 3,
-                "sum_prefill_tokens": 24,
-                "sum_prefill_kv_tokens": 72,
-            }
-        },
+        }
     ]
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_current_point = point
-    stub._bench_current_fpms = fpms
-    stub._bench_results = []
-    stub._bench_skipped_points = []
+    stub = _benchmark_save_stub(point, fpms)
 
     InstrumentedScheduler._bench_save_current_point(stub)
 
@@ -1682,6 +1848,59 @@ def test_prefill_point_with_exact_batch_shape_is_saved():
         instrumented_scheduler_module.BenchmarkPointResult(point=point, fpms=fpms)
     ]
     assert stub._bench_skipped_points == []
+    assert stub._bench_iteration_groups == [
+        {
+            "benchmark_id": 0,
+            "point": point.__dict__,
+            "expected_dp_ranks": [0],
+            "complete": True,
+            "wall_time": 0.01,
+            "rank_results": [{"dp_rank": 0, "fpms": fpms}],
+        }
+    ]
+
+
+@pytest.mark.parametrize("fpm_count", [0, 2])
+def test_benchmark_point_rejects_non_single_fpm_count(fpm_count):
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=4,
+        total_kv_read_tokens=48,
+        batch_size=3,
+    )
+    fpm = {
+        "scheduled_requests": {
+            "num_decode_requests": 3,
+            "sum_decode_kv_tokens": 48,
+        }
+    }
+    stub = _benchmark_save_stub(point, [fpm.copy() for _ in range(fpm_count)])
+
+    with pytest.raises(RuntimeError, match="exactly one FPM"):
+        InstrumentedScheduler._bench_save_current_point(stub)
+
+
+def test_decode_point_with_no_fpm_stops_waiting_at_deadline(monkeypatch):
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=4,
+        total_kv_read_tokens=48,
+        batch_size=3,
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_drain_if_pending = MagicMock(return_value=False)
+    stub._bench_active_req_ids = {"request"}
+    stub._bench_current_point = point
+    stub._bench_current_fpms = []
+    stub._bench_point_deadline = 1.0
+    stub._bench_save_current_point = MagicMock(
+        side_effect=RuntimeError("exactly one FPM")
+    )
+    monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", lambda: 2.0)
+
+    with pytest.raises(RuntimeError, match="exactly one FPM"):
+        InstrumentedScheduler._bench_step_decode(stub)
+    stub._bench_save_current_point.assert_called_once_with()
 
 
 def test_prefill_point_with_measured_batch_size_mismatch_is_skipped():
@@ -1691,19 +1910,18 @@ def test_prefill_point_with_measured_batch_size_mismatch_is_skipped():
         total_kv_read_tokens=32,
         batch_size=3,
     )
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_current_point = point
-    stub._bench_current_fpms = [
-        {
-            "scheduled_requests": {
-                "num_prefill_requests": 2,
-                "sum_prefill_tokens": 48,
-                "sum_prefill_kv_tokens": 32,
+    stub = _benchmark_save_stub(
+        point,
+        [
+            {
+                "scheduled_requests": {
+                    "num_prefill_requests": 2,
+                    "sum_prefill_tokens": 48,
+                    "sum_prefill_kv_tokens": 32,
+                }
             }
-        }
-    ]
-    stub._bench_results = []
-    stub._bench_skipped_points = []
+        ],
+    )
 
     InstrumentedScheduler._bench_save_current_point(stub)
 
@@ -1723,11 +1941,7 @@ def test_decode_point_with_exact_shape_is_saved():
             }
         }
     ]
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_current_point = point
-    stub._bench_current_fpms = fpms
-    stub._bench_results = []
-    stub._bench_skipped_points = []
+    stub = _benchmark_save_stub(point, fpms)
 
     InstrumentedScheduler._bench_save_current_point(stub)
 
@@ -1739,18 +1953,17 @@ def test_decode_point_with_exact_shape_is_saved():
 
 def test_decode_point_with_measured_batch_size_mismatch_is_skipped():
     point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=48, batch_size=3)
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_current_point = point
-    stub._bench_current_fpms = [
-        {
-            "scheduled_requests": {
-                "num_decode_requests": 2,
-                "sum_decode_kv_tokens": 32,
+    stub = _benchmark_save_stub(
+        point,
+        [
+            {
+                "scheduled_requests": {
+                    "num_decode_requests": 2,
+                    "sum_decode_kv_tokens": 32,
+                }
             }
-        }
-    ]
-    stub._bench_results = []
-    stub._bench_skipped_points = []
+        ],
+    )
 
     InstrumentedScheduler._bench_save_current_point(stub)
 
@@ -1762,18 +1975,17 @@ def test_decode_point_with_measured_batch_size_mismatch_is_skipped():
 
 def test_decode_point_with_measured_context_mismatch_is_skipped():
     point = BenchmarkPoint(point_type="decode", total_kv_read_tokens=48, batch_size=3)
-    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_current_point = point
-    stub._bench_current_fpms = [
-        {
-            "scheduled_requests": {
-                "num_decode_requests": 3,
-                "sum_decode_kv_tokens": 47,
+    stub = _benchmark_save_stub(
+        point,
+        [
+            {
+                "scheduled_requests": {
+                    "num_decode_requests": 3,
+                    "sum_decode_kv_tokens": 47,
+                }
             }
-        }
-    ]
-    stub._bench_results = []
-    stub._bench_skipped_points = []
+        ],
+    )
 
     InstrumentedScheduler._bench_save_current_point(stub)
 
