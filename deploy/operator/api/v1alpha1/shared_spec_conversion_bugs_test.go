@@ -247,11 +247,6 @@ func TestBugDGD_SpokeMainContainerNameOnlyRoundTrips(t *testing.T) {
 			},
 		},
 	}
-	wantHash, err := ComputeDGDWorkersSpecHash(in)
-	if err != nil {
-		t.Fatalf("ComputeDGDWorkersSpecHash(in) error = %v", err)
-	}
-
 	hub := &v1beta1.DynamoGraphDeployment{}
 	if err := in.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
@@ -267,13 +262,6 @@ func TestBugDGD_SpokeMainContainerNameOnlyRoundTrips(t *testing.T) {
 	}
 	if got.ExtraPodSpec.MainContainer.Name != mainContainerName {
 		t.Fatalf("mainContainer.name = %q, want %q", got.ExtraPodSpec.MainContainer.Name, mainContainerName)
-	}
-	gotHash, err := ComputeDGDWorkersSpecHash(out)
-	if err != nil {
-		t.Fatalf("ComputeDGDWorkersSpecHash(out) error = %v", err)
-	}
-	if gotHash != wantHash {
-		t.Fatalf("round-trip worker hash = %q, want %q", gotHash, wantHash)
 	}
 }
 
@@ -292,11 +280,6 @@ func TestBugDGD_SpokeMultipleCompilationCacheVolumeMountsRoundTrip(t *testing.T)
 			},
 		},
 	}
-	wantHash, err := ComputeDGDWorkersSpecHash(in)
-	if err != nil {
-		t.Fatalf("ComputeDGDWorkersSpecHash(in) error = %v", err)
-	}
-
 	hub := &v1beta1.DynamoGraphDeployment{}
 	if err := in.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
@@ -318,13 +301,6 @@ func TestBugDGD_SpokeMultipleCompilationCacheVolumeMountsRoundTrip(t *testing.T)
 	}
 	if diff := cmp.Diff(in.Spec.Services["worker"].VolumeMounts, out.Spec.Services["worker"].VolumeMounts); diff != "" {
 		t.Fatalf("volume mounts changed after round-trip (-want +got):\n%s", diff)
-	}
-	gotHash, err := ComputeDGDWorkersSpecHash(out)
-	if err != nil {
-		t.Fatalf("ComputeDGDWorkersSpecHash(out) error = %v", err)
-	}
-	if gotHash != wantHash {
-		t.Fatalf("round-trip worker hash = %q, want %q", gotHash, wantHash)
 	}
 }
 

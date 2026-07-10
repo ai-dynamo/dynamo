@@ -2106,11 +2106,11 @@ func TestDynamoGraphDeploymentReconciler_checkpointWorkerHashForComponentUsesAct
 			},
 		},
 	})
-	desired, err := reconciler.desiredWorkerHashes(dgd)
+	desired, err := reconciler.desiredWorkerHash(dgd)
 	if err != nil {
-		t.Fatalf("desiredWorkerHashes() error = %v", err)
+		t.Fatalf("desiredWorkerHash() error = %v", err)
 	}
-	reconciler.setCurrentWorkerHashes(dgd, workerGenerationHashes{v1: "oldhash"})
+	reconciler.setCurrentWorkerState(dgd, workerGenerationState{activeGeneration: "oldhash"})
 
 	workerHash, err := reconciler.checkpointWorkerHashForComponent(dgd, "worker")
 	if err != nil {
@@ -4237,7 +4237,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode-e1f2a6fe",
+						Name:      "test-dgd-decode-1b69c0d3",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -4256,7 +4256,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
+							ComponentNames:    []string{"test-dgd-decode-1b69c0d3-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   2,
 							ReadyReplicas:     ptr.To(int32(2)),
@@ -4266,7 +4266,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-prefill-e1f2a6fe",
+						Name:      "test-dgd-prefill-1b69c0d3",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -4285,7 +4285,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
+							ComponentNames:    []string{"test-dgd-prefill-1b69c0d3-deployment"},
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
@@ -4309,7 +4309,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
+						ComponentNames:    []string{"test-dgd-decode-1b69c0d3-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   2,
 						ReadyReplicas:     ptr.To(int32(2)),
@@ -4317,7 +4317,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"prefill": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
+						ComponentNames:    []string{"test-dgd-prefill-1b69c0d3-deployment"},
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -4383,7 +4383,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode-e1f2a6fe",
+						Name:      "test-dgd-decode-1b69c0d3",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -4402,7 +4402,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
+							ComponentNames:    []string{"test-dgd-decode-1b69c0d3-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -4412,7 +4412,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-prefill-e1f2a6fe",
+						Name:      "test-dgd-prefill-1b69c0d3",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -4431,7 +4431,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
+							ComponentNames:    []string{"test-dgd-prefill-1b69c0d3-deployment"},
 							Replicas:          3,
 							UpdatedReplicas:   3,
 							ReadyReplicas:     ptr.To(int32(3)),
@@ -4443,7 +4443,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode-e1f2a6fe: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-1b69c0d3: Component deployment not ready - Available condition not true",
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
@@ -4455,7 +4455,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-decode-e1f2a6fe-deployment"},
+						ComponentNames:    []string{"test-dgd-decode-1b69c0d3-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
@@ -4463,7 +4463,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"prefill": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-prefill-e1f2a6fe-deployment"},
+						ComponentNames:    []string{"test-dgd-prefill-1b69c0d3-deployment"},
 						Replicas:          3,
 						UpdatedReplicas:   3,
 						ReadyReplicas:     ptr.To(int32(3)),
@@ -4523,7 +4523,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				}),
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd-decode-5f3d46ba",
+						Name:      "test-dgd-decode-cabcd5c9",
 						Namespace: "default",
 					},
 					Spec: v1alpha1.DynamoComponentDeploymentSpec{
@@ -4542,7 +4542,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						},
 						Service: &v1alpha1.ServiceReplicaStatus{
 							ComponentKind:     v1alpha1.ComponentKindDeployment,
-							ComponentNames:    []string{"test-dgd-decode-5f3d46ba-deployment"},
+							ComponentNames:    []string{"test-dgd-decode-cabcd5c9-deployment"},
 							Replicas:          2,
 							UpdatedReplicas:   1,
 							ReadyReplicas:     ptr.To(int32(1)),
@@ -4554,7 +4554,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
-				Message: "Resources not ready: test-dgd-decode-5f3d46ba: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
+				Message: "Resources not ready: test-dgd-decode-cabcd5c9: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
@@ -4566,7 +4566,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 					"decode": {
 						ComponentKind:     v1beta1.ComponentKindDeployment,
-						ComponentNames:    []string{"test-dgd-decode-5f3d46ba-deployment"},
+						ComponentNames:    []string{"test-dgd-decode-cabcd5c9-deployment"},
 						Replicas:          2,
 						UpdatedReplicas:   1,
 						ReadyReplicas:     ptr.To(int32(1)),
