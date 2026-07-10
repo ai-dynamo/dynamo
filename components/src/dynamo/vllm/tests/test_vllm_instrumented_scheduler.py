@@ -13,6 +13,8 @@ spinning up vLLM engine internals.
 from __future__ import annotations
 
 import json
+import threading
+import uuid
 from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -399,6 +401,163 @@ def test_dp_rank_prefers_data_parallel_index():
     """
     pc = SimpleNamespace(data_parallel_index=1, data_parallel_rank=0)
     assert InstrumentedScheduler._resolve_dp_rank(pc) == 1
+
+
+def test_benchmark_synchronizer_aligns_point_and_shares_run_id():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=7,
+        total_kv_read_tokens=128,
+        batch_size=2,
+    )
+    follower_result = {}
+
+    def synchronize_follower():
+        follower_result["run_id"] = rank1.synchronize(point)
+
+    follower = threading.Thread(target=synchronize_follower)
+    follower.start()
+    try:
+        coordinator_run_id = rank0.synchronize(point)
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert follower_result["run_id"] == coordinator_run_id
+        assert rank1.run_id == coordinator_run_id
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_rejects_different_points():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    coordinator_point = BenchmarkPoint(point_type="decode", benchmark_id=1)
+    follower_point = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, total_kv_read_tokens=16
+    )
+    follower_error = {}
+
+    def synchronize_follower():
+        try:
+            rank1.synchronize(follower_point)
+        except Exception as error:
+            follower_error["error"] = error
+
+    follower = threading.Thread(target=synchronize_follower)
+    follower.start()
+    try:
+        with pytest.raises(RuntimeError, match="point mismatch"):
+            rank0.synchronize(coordinator_point)
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert "point mismatch" in str(follower_error["error"])
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_fpm_publisher_drops_benchmark_metrics_until_resumed():
+    publisher = instrumented_scheduler_module._FpmPublisherThread.__new__(
+        instrumented_scheduler_module._FpmPublisherThread
+    )
+    publisher._running = True
+    publisher._publishing = threading.Event()
+    publisher._queue = instrumented_scheduler_module.queue.Queue()
+    metrics = instrumented_scheduler_module.ForwardPassMetrics()
+
+    publisher.publish(metrics)
+    assert publisher._queue.empty()
+
+    publisher.resume()
+    publisher.publish(metrics)
+    assert publisher._queue.get_nowait() is metrics
+
+
+def test_benchmark_fpm_uses_benchmark_id_and_is_not_published():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = True
+    stub._bench_current_point = BenchmarkPoint(point_type="decode", benchmark_id=7)
+    stub._bench_current_fpms = []
+    stub._publisher = MagicMock()
+    metrics = instrumented_scheduler_module.ForwardPassMetrics(
+        dp_rank=1,
+        scheduled_requests=instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_decode_requests=2,
+            sum_decode_kv_tokens=128,
+        ),
+    )
+
+    InstrumentedScheduler._publish_or_record_metrics(stub, metrics)
+
+    assert stub._bench_current_fpms[0]["counter_id"] == 7
+    assert stub._bench_current_fpms[0]["dp_rank"] == 1
+    stub._publisher.publish.assert_not_called()
+
+
+def test_live_fpm_publishing_resumes_with_publisher_owned_counter():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_active = False
+    stub._publisher = MagicMock()
+    metrics = instrumented_scheduler_module.ForwardPassMetrics(counter_id=0)
+
+    InstrumentedScheduler._publish_or_record_metrics(stub, metrics)
+
+    stub._publisher.publish.assert_called_once_with(metrics)
+
+
+def test_benchmark_output_summary_must_match_point_before_go():
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=3,
+        total_kv_read_tokens=128,
+        batch_size=2,
+    )
+    matching = {
+        "total_num_scheduled_tokens": 2,
+        "num_prefill_requests": 0,
+        "sum_prefill_tokens": 0,
+        "sum_prefill_kv_tokens": 0,
+        "num_decode_requests": 2,
+        "sum_decode_kv_tokens": 128,
+    }
+
+    assert InstrumentedScheduler._bench_output_validation_error(point, matching) is None
+
+    mismatched = dict(matching, num_decode_requests=1)
+    error = InstrumentedScheduler._bench_output_validation_error(point, mismatched)
+    assert "benchmark_id=3 SchedulerOutput does not match" in error
 
 
 def test_dp_rank_falls_back_to_rank_when_index_absent():
@@ -817,6 +976,30 @@ def test_benchmark_grid_cap_reports_expanded_dimension_counts():
     assert stub._bench_phase == _BenchPhase.DONE
     assert not stub._bench_grid
     assert "prefill(P=4097, Rp=1, Kp=1, points=4097)" in stub._bench_grid_error
+
+
+def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_grid = deque()
+    stub._bench_grid_built = False
+    stub._bench_missing_phases = []
+    stub._bench_grid_error = None
+
+    def generate_prefill_grid():
+        stub._bench_grid.extend(
+            [
+                BenchmarkPoint(point_type="prefill", total_prefill_tokens=8),
+                BenchmarkPoint(point_type="prefill", total_prefill_tokens=16),
+            ]
+        )
+
+    stub._bench_generate_prefill_grid = generate_prefill_grid
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    assert [point.benchmark_id for point in stub._bench_grid] == [1, 2]
+    assert len(stub._bench_grid_digest) == 64
 
 
 # ---------------------------------------------------------------------------

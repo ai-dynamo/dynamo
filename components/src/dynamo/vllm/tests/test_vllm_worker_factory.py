@@ -77,18 +77,36 @@ async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_
 @pytest.mark.asyncio
 async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_path):
     base_path = tmp_path / "benchmark.json"
-    rank_payload = {
-        "valid": True,
-        "coverage": {
-            "expected_points": 1,
-            "completed_points": 1,
-            "skipped_points": 0,
-        },
-        "results": [{"point": {"point_type": "prefill"}, "fpms": [{}]}],
-        "skipped_points": [],
-    }
-    base_path.write_text(json.dumps(rank_payload))
-    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(rank_payload))
+    point = {"benchmark_id": 1, "point_type": "prefill"}
+
+    def rank_payload(dp_rank: int, wall_time: float) -> dict:
+        return {
+            "valid": True,
+            "run_id": "run-1",
+            "grid_digest": "grid-1",
+            "dp": {"rank": dp_rank, "size": 2},
+            "coverage": {
+                "expected_points": 1,
+                "completed_points": 1,
+                "skipped_points": 0,
+            },
+            "results": [
+                {
+                    "point": point,
+                    "fpms": [
+                        {
+                            "counter_id": 1,
+                            "dp_rank": dp_rank,
+                            "wall_time": wall_time,
+                        }
+                    ],
+                }
+            ],
+            "skipped_points": [],
+        }
+
+    base_path.write_text(json.dumps(rank_payload(0, 0.01)))
+    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(rank_payload(1, 0.02)))
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 2)
     )
@@ -103,6 +121,36 @@ async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_p
         "skipped_points": 0,
     }
     assert [result["point"]["dp_rank"] for result in merged["results"]] == [0, 1]
+    assert merged["iteration_groups"] == [
+        {
+            "benchmark_id": 1,
+            "point": point,
+            "expected_dp_ranks": [0, 1],
+            "complete": True,
+            "wall_time": 0.02,
+            "rank_results": [
+                {
+                    "dp_rank": 0,
+                    "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}],
+                },
+                {
+                    "dp_rank": 1,
+                    "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}],
+                },
+            ],
+        }
+    ]
+    merged_path = tmp_path / "benchmark_merged.json"
+    assert merged_path.exists()
+    assert json.loads(merged_path.read_text()) == merged
+
+    bad_rank = rank_payload(1, 0.02)
+    bad_rank["results"][0]["fpms"][0]["counter_id"] = 2
+    (tmp_path / "benchmark_dp1.json").write_text(json.dumps(bad_rank))
+    with pytest.raises(RuntimeError, match="FPM counter mismatch"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(base_path), "timeout": 1}, Mock()
+        )
 
 
 @pytest.mark.asyncio

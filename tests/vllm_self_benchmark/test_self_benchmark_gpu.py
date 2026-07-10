@@ -113,6 +113,10 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
         f"benchmark JSON has no result points (mode={expected_mode})"
     )
 
+    assert [r["point"]["benchmark_id"] for r in results] == list(
+        range(1, len(results) + 1)
+    )
+
     for r in results:
         point = r["point"]
         fpms = r.get("fpms") or []
@@ -122,6 +126,7 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
             f"or the empty-frame schedule branch)"
         )
         for fpm_index, fpm in enumerate(fpms):
+            assert fpm.get("counter_id") == point["benchmark_id"]
             wall_time = fpm.get("wall_time", 0.0)
             assert wall_time > 0, (
                 f"point {point} FPM has non-positive wall_time={wall_time}; "
@@ -171,6 +176,15 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
                         f"point {point} measured the wrong decode context: "
                         f"scheduled_requests={scheduled}"
                     )
+
+    merged_path = output_path.with_name(
+        f"{output_path.stem}_merged{output_path.suffix}"
+    )
+    assert merged_path.exists(), f"merged benchmark JSON missing at {merged_path}"
+    merged = json.loads(merged_path.read_text())
+    assert merged.get("run_id") == data.get("run_id")
+    assert len(merged.get("iteration_groups", [])) == len(results)
+    assert merged.get("dp", {}).get("ranks") == [0]
     return data
 
 

@@ -4,6 +4,7 @@
 """Worker initialization factory for vLLM workers."""
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -54,6 +55,175 @@ logger = logging.getLogger(__name__)
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
 
 
+def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
+    if dp_rank == 0:
+        return base_path
+    stem, ext = os.path.splitext(str(base_path))
+    return Path(f"{stem}_dp{dp_rank}{ext}")
+
+
+def _benchmark_merged_path(base_path: Path, dp_start: int) -> Path:
+    stem, ext = os.path.splitext(str(base_path))
+    rank_suffix = "" if dp_start == 0 else f"_dp{dp_start}"
+    return Path(f"{stem}{rank_suffix}_merged{ext}")
+
+
+def _merge_benchmark_rank_results(
+    rank_data: list[tuple[int, Path, dict]],
+    merged_path: Path,
+) -> dict:
+    """Validate rank grids and group synchronized FPMs by benchmark id."""
+    if not rank_data:
+        raise RuntimeError("No self-benchmark rank results were loaded")
+
+    expected_ranks = [rank for rank, _, _ in rank_data]
+    reference_rank, _, reference = rank_data[0]
+    run_id = reference.get("run_id")
+    grid_digest = reference.get("grid_digest")
+    if not isinstance(run_id, str) or not run_id:
+        raise RuntimeError("Self-benchmark rank results are missing run_id")
+    if not isinstance(grid_digest, str) or not grid_digest:
+        raise RuntimeError("Self-benchmark rank results are missing grid_digest")
+
+    reference_by_id: dict[int, dict] = {}
+    for result in reference.get("results", []):
+        benchmark_id = result.get("point", {}).get("benchmark_id")
+        if not isinstance(benchmark_id, int) or benchmark_id < 1:
+            raise RuntimeError(
+                f"Self-benchmark rank {reference_rank} has invalid benchmark_id "
+                f"{benchmark_id}"
+            )
+        if benchmark_id in reference_by_id:
+            raise RuntimeError(
+                f"Self-benchmark rank {reference_rank} has duplicate "
+                f"benchmark_id={benchmark_id}"
+            )
+        reference_by_id[benchmark_id] = result
+
+    expected_ids = sorted(reference_by_id)
+    if expected_ids != list(range(1, len(expected_ids) + 1)):
+        raise RuntimeError(
+            f"Self-benchmark ids are not a contiguous 1-based sequence: {expected_ids}"
+        )
+
+    by_rank: dict[int, dict[int, dict]] = {}
+    for dp_rank, path, data in rank_data:
+        if data.get("run_id") != run_id:
+            raise RuntimeError(
+                f"Self-benchmark run_id mismatch at {path}: "
+                f"expected={run_id} actual={data.get('run_id')}"
+            )
+        if data.get("grid_digest") != grid_digest:
+            raise RuntimeError(
+                f"Self-benchmark grid mismatch at {path}: "
+                f"expected={grid_digest} actual={data.get('grid_digest')}"
+            )
+        recorded_rank = data.get("dp", {}).get("rank")
+        if recorded_rank != dp_rank:
+            raise RuntimeError(
+                f"Self-benchmark rank metadata mismatch at {path}: "
+                f"expected={dp_rank} actual={recorded_rank}"
+            )
+
+        results_by_id: dict[int, dict] = {}
+        for result in data.get("results", []):
+            point = result.get("point", {})
+            benchmark_id = point.get("benchmark_id")
+            if benchmark_id in results_by_id:
+                raise RuntimeError(
+                    f"Self-benchmark rank {dp_rank} has duplicate "
+                    f"benchmark_id={benchmark_id}"
+                )
+            results_by_id[benchmark_id] = result
+        if sorted(results_by_id) != expected_ids:
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has a different id set: "
+                f"expected={expected_ids} actual={sorted(results_by_id)}"
+            )
+
+        for benchmark_id in expected_ids:
+            result = results_by_id[benchmark_id]
+            if result.get("point") != reference_by_id[benchmark_id].get("point"):
+                raise RuntimeError(
+                    "Self-benchmark point mismatch for "
+                    f"benchmark_id={benchmark_id} on rank {dp_rank}"
+                )
+            fpms = result.get("fpms") or []
+            if not fpms:
+                raise RuntimeError(
+                    f"Self-benchmark rank {dp_rank} has no FPM for "
+                    f"benchmark_id={benchmark_id}"
+                )
+            for fpm in fpms:
+                if fpm.get("counter_id") != benchmark_id:
+                    raise RuntimeError(
+                        "Self-benchmark FPM counter mismatch: "
+                        f"rank={dp_rank} benchmark_id={benchmark_id} "
+                        f"counter_id={fpm.get('counter_id')}"
+                    )
+                if fpm.get("dp_rank") != dp_rank:
+                    raise RuntimeError(
+                        "Self-benchmark FPM rank mismatch: "
+                        f"file_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                    )
+        by_rank[dp_rank] = results_by_id
+
+    flattened_results: list[dict] = []
+    iteration_groups: list[dict] = []
+    for benchmark_id in expected_ids:
+        canonical_point = copy.deepcopy(reference_by_id[benchmark_id]["point"])
+        rank_results = []
+        wall_times: list[float] = []
+        for dp_rank in expected_ranks:
+            result = by_rank[dp_rank][benchmark_id]
+            fpms = copy.deepcopy(result["fpms"])
+            point = copy.deepcopy(canonical_point)
+            point["dp_rank"] = dp_rank
+            flattened_results.append({"point": point, "fpms": fpms})
+            rank_results.append({"dp_rank": dp_rank, "fpms": fpms})
+            wall_times.extend(float(fpm.get("wall_time", 0.0)) for fpm in fpms)
+
+        iteration_groups.append(
+            {
+                "benchmark_id": benchmark_id,
+                "point": canonical_point,
+                "expected_dp_ranks": expected_ranks,
+                "complete": True,
+                "wall_time": max(wall_times, default=0.0),
+                "rank_results": rank_results,
+            }
+        )
+
+    merged = copy.deepcopy(reference)
+    merged["artifact_type"] = "merged"
+    merged["dp"] = {
+        "ranks": expected_ranks,
+        "managed_size": len(expected_ranks),
+        "global_size": reference.get("dp", {}).get("size", len(expected_ranks)),
+    }
+    merged["rank_files"] = [str(path) for _, path, _ in rank_data]
+    merged["merged_output_path"] = str(merged_path)
+    merged["results"] = flattened_results
+    merged["iteration_groups"] = iteration_groups
+    merged["coverage"] = {
+        key: sum(data.get("coverage", {}).get(key, 0) for _, _, data in rank_data)
+        for key in ("expected_points", "completed_points", "skipped_points")
+    }
+    merged["skipped_points"] = [
+        skipped
+        for _, _, data in rank_data
+        for skipped in data.get("skipped_points", [])
+    ]
+    return merged
+
+
+def _write_json_atomic(path: Path, data: dict) -> None:
+    tmp_path = Path(f"{path}.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp_path, path)
+
+
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
     """Wait for benchmark result files and aggregate across DP ranks."""
     base_path = Path(
@@ -70,13 +240,13 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
         )
         dp_start, dp_size = 0, 1
 
-    rank_paths = []
-    for dp_rank in range(dp_start, dp_start + dp_size):
-        if dp_rank == 0:
-            rank_paths.append(base_path)
-        else:
-            stem, ext = os.path.splitext(str(base_path))
-            rank_paths.append(Path(f"{stem}_dp{dp_rank}{ext}"))
+    dp_ranks = list(range(dp_start, dp_start + dp_size))
+    rank_paths = [_benchmark_rank_path(base_path, dp_rank) for dp_rank in dp_ranks]
+    merged_path = _benchmark_merged_path(base_path, dp_start)
+    try:
+        merged_path.unlink()
+    except FileNotFoundError:
+        pass
 
     logger.info(
         "Waiting for benchmark to complete (files: %s, timeout: %ds)...",
@@ -93,8 +263,8 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
                 )
             await asyncio.sleep(0.1)
 
-    merged: dict = {}
-    for i, p in enumerate(rank_paths):
+    rank_data: list[tuple[int, Path, dict]] = []
+    for dp_rank, p in zip(dp_ranks, rank_paths):
         with open(p) as f:
             data = json.load(f)
         if data.get("valid") is False:
@@ -104,34 +274,16 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
                 f"skipped_points={data.get('skipped_points')} "
                 f"missing_phases={data.get('missing_phases')}"
             )
-        if i == 0:
-            merged = data
-            for r in merged.get("results", []):
-                r["point"]["dp_rank"] = dp_start
-        else:
-            dp_rank = dp_start + i
-            for r in data.get("results", []):
-                r["point"]["dp_rank"] = dp_rank
-            merged.setdefault("results", []).extend(data.get("results", []))
-            merged_coverage = merged.get("coverage")
-            rank_coverage = data.get("coverage")
-            if isinstance(merged_coverage, dict) and isinstance(rank_coverage, dict):
-                for key in (
-                    "expected_points",
-                    "completed_points",
-                    "skipped_points",
-                ):
-                    merged_coverage[key] = merged_coverage.get(
-                        key, 0
-                    ) + rank_coverage.get(key, 0)
-            merged.setdefault("skipped_points", []).extend(
-                data.get("skipped_points", [])
-            )
+        rank_data.append((dp_rank, p, data))
+
+    merged = _merge_benchmark_rank_results(rank_data, merged_path)
+    _write_json_atomic(merged_path, merged)
 
     logger.info(
-        "Benchmark complete, %d points across %d rank(s)",
+        "Benchmark complete, %d rank-points across %d rank(s); merged results: %s",
         len(merged.get("results", [])),
         len(rank_paths),
+        merged_path,
     )
     return merged
 
