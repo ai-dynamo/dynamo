@@ -157,6 +157,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
+        if self.router_hints and self.router_mode != "kv":
+            raise ValueError("--router-hints requires --router-mode=kv")
         self.apply_admission_control()
 
 

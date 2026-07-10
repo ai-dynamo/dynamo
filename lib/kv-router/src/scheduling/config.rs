@@ -107,6 +107,7 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
         router_queue_threshold = ?config.router_queue_threshold,
         router_policy_config = ?config.router_policy_config,
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
+        router_hints = config.router_hints,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
     config
@@ -176,6 +177,9 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
         config.router_predicted_ttl_secs = Some(value);
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_HINTS") {
+        config.router_hints = value;
     }
 
     config
@@ -410,6 +414,7 @@ struct KvRouterConfigSerde {
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
+    router_hints: bool,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -444,6 +449,7 @@ impl Default for KvRouterConfigSerde {
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
+            router_hints: config.router_hints,
         }
     }
 }
@@ -586,6 +592,10 @@ pub struct KvRouterConfig {
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub router_predicted_ttl_secs: Option<f64>,
+
+    /// Whether to attach compact router_hint extra args for eligible remote KV reuse decisions.
+    #[serde(default)]
+    pub router_hints: bool,
 }
 
 impl Default for KvRouterConfig {
@@ -620,6 +630,7 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
+            router_hints: false,
         }
     }
 }
@@ -669,6 +680,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
+            router_hints: compat.router_hints,
         })
     }
 }
@@ -875,6 +887,7 @@ mod tests {
             ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
             ("DYN_ROUTER_TRACK_PREFILL_TOKENS", "false"),
             ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
+            ("DYN_ROUTER_HINTS", "true"),
         ]);
 
         assert_eq!(config.overlap_score_credit, 0.25);
@@ -887,6 +900,7 @@ mod tests {
         assert!(config.router_track_output_blocks);
         assert!(!config.router_track_prefill_tokens);
         assert_eq!(config.router_queue_threshold, Some(4.5));
+        assert!(config.router_hints);
 
         let predicted = config_from_values(&[("DYN_ROUTER_PREDICTED_TTL_SECS", "60")]);
         assert_eq!(predicted.router_predicted_ttl_secs, Some(60.0));

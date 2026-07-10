@@ -312,6 +312,20 @@ def test_policy_config_cli_overrides_environment(
     assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
 
 
+def test_router_hints_cli_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_HINTS", "1")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    env_args = parser.parse_args([])
+    env_config = KvRouterConfigBase.from_cli_args(env_args)
+    assert env_config.kv_router_kwargs()["router_hints"] is True
+
+    cli_args = parser.parse_args(["--no-router-hints"])
+    cli_config = KvRouterConfigBase.from_cli_args(cli_args)
+    assert cli_config.kv_router_kwargs()["router_hints"] is False
+
+
 def test_load_aware_clears_predicted_ttl() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -323,6 +337,18 @@ def test_load_aware_clears_predicted_ttl() -> None:
 
     assert kwargs["use_kv_events"] is False
     assert kwargs["router_predicted_ttl_secs"] is None
+
+
+def test_load_aware_disables_router_hints() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--load-aware", "--router-hints"])
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    kwargs = config.kv_router_kwargs()
+
+    assert kwargs["router_hints"] is False
 
 
 def test_load_aware_preserves_deprecated_overlap_score_weight_env(monkeypatch) -> None:
@@ -355,6 +381,22 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     assert config.overlap_score_credit == 0.0
     assert config.use_kv_events is False
     assert config.router_assume_kv_reuse is False
+
+
+def test_router_hints_frontend_requires_kv_router_mode() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args(["--router-hints"]))
+    with pytest.raises(ValueError, match="--router-hints requires --router-mode=kv"):
+        config.validate()
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-mode", "kv", "--router-hints"])
+    )
+    config.validate()
+
+    assert config.router_hints is True
 
 
 def test_frontend_admission_control_defaults_to_none(monkeypatch) -> None:
