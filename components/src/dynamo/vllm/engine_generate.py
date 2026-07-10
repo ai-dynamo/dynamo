@@ -136,6 +136,12 @@ def build_prompt(request: Dict[str, Any]) -> Any:
 def _build_prompt(request: Dict[str, Any], vllm_tito: Dict[str, Any]) -> Any:
     token_ids = list(request.get("token_ids") or vllm_tito.get("token_ids") or [])
     cache_salt = vllm_tito.get("cache_salt")
+    if cache_salt is None:
+        raw_sampling = vllm_tito.get("sampling_params")
+        if isinstance(raw_sampling, dict):
+            # Prime passes request-level cache isolation through SamplingConfig
+            # extra_body. vLLM consumes it on the prompt, not SamplingParams.
+            cache_salt = raw_sampling.get("cache_salt")
     features = vllm_tito.get("features")
     if not isinstance(features, dict):
         prompt = TokensPrompt(prompt_token_ids=token_ids)
@@ -229,7 +235,7 @@ def _build_sampling_params(
         extensions["kv_transfer_params"] = caller_kv
 
     for key in provided_fields:
-        if key in ("extra_args", "vllm_xargs") or key not in raw_params:
+        if key in ("extra_args", "vllm_xargs", "cache_salt") or key not in raw_params:
             continue
         value = raw_params[key]
         if key == "structured_outputs" and isinstance(value, dict):

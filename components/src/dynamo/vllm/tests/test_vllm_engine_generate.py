@@ -162,6 +162,16 @@ def test_text_prompt_preserves_exact_tokens_and_cache_salt():
     assert prompt["cache_salt"] == "checkpoint-7"
 
 
+def test_prime_sampling_cache_salt_becomes_prompt_metadata():
+    adapter = EngineGenerateRequest.from_request(
+        _request({"max_tokens": 17, "cache_salt": "policy-v3"})
+    )
+
+    assert adapter is not None
+    assert adapter.build_prompt()["cache_salt"] == "policy-v3"
+    assert adapter.build_sampling_params({}, model_max_len=64).max_tokens == 17
+
+
 def test_multimodal_cache_hit_prompt_preserves_hashes_and_placeholders():
     request = _request(
         {},
