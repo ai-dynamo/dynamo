@@ -396,6 +396,7 @@ areas:
   - deploy/operator/internal/
   - deploy/operator/internal/cert/
   - deploy/operator/internal/common/
+  - deploy/operator/internal/config/
   - deploy/operator/internal/consts/
   - deploy/operator/internal/controller/
   - deploy/operator/internal/controller_common/

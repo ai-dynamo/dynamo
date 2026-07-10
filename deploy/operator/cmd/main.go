@@ -21,7 +21,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"os"
@@ -43,29 +42,24 @@ import (
 	"k8s.io/client-go/scale"
 	k8sCache "k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsfilters "sigs.k8s.io/controller-runtime/pkg/metrics/filters"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
 	semver "github.com/Masterminds/semver/v3"
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
+	configapi "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/config"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -87,31 +81,32 @@ import (
 )
 
 var (
-	crdScheme    = k8sruntime.NewScheme()
-	setupLog     = ctrl.Log.WithName("setup")
-	configScheme = k8sruntime.NewScheme()
+	scheme   = runtime.NewScheme()
+	setupLog = ctrl.Log.WithName("setup")
 )
 
-// LoadAndValidateOperatorConfig loads the operator configuration from a file,
-// applies defaults via the scheme, and validates it.
-func LoadAndValidateOperatorConfig(path string) (*configv1alpha1.OperatorConfiguration, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
-	}
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	codecFactory := serializer.NewCodecFactory(configScheme)
-	cfg := &configv1alpha1.OperatorConfiguration{}
-	if err := k8sruntime.DecodeInto(codecFactory.UniversalDecoder(), data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to decode config file %s: %w", path, err)
-	}
+	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
 
-	// Validate the configuration
-	if errs := configvalidation.ValidateOperatorConfiguration(cfg); len(errs) > 0 {
-		return nil, fmt.Errorf("config validation failed: %s", errs.ToAggregate().Error())
-	}
+	utilruntime.Must(nvidiacomv1beta1.AddToScheme(scheme))
 
-	return cfg, nil
+	utilruntime.Must(lwsscheme.AddToScheme(scheme))
+
+	utilruntime.Must(volcanoscheme.AddToScheme(scheme))
+
+	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
+
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
+
+	utilruntime.Must(admissionregistrationv1.AddToScheme(scheme))
+
+	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
+
+	utilruntime.Must(gaiev1.Install(scheme))
+
+	utilruntime.Must(configapi.AddToScheme(scheme))
 }
 
 func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
@@ -142,42 +137,12 @@ func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
 	return scalesGetter, nil
 }
 
-func initCRDSchemes() {
-	utilruntime.Must(clientgoscheme.AddToScheme(crdScheme))
-
-	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(crdScheme))
-
-	utilruntime.Must(nvidiacomv1beta1.AddToScheme(crdScheme))
-
-	utilruntime.Must(lwsscheme.AddToScheme(crdScheme))
-
-	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
-
-	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
-
-	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
-
-	utilruntime.Must(admissionregistrationv1.AddToScheme(crdScheme))
-
-	utilruntime.Must(istioclientsetscheme.AddToScheme(crdScheme))
-
-	utilruntime.Must(gaiev1.Install(crdScheme))
-	//+kubebuilder:scaffold:scheme
-}
-
-func initConfigScheme() {
-	utilruntime.Must(configv1alpha1.AddToScheme(configScheme))
-}
-
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
 
 //nolint:gocyclo
 func main() {
-	initCRDSchemes()
-	initConfigScheme()
-
 	var configFile string
 	var operatorVersion string
 	var operatorImage string
@@ -200,18 +165,6 @@ func main() {
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	if configFile == "" {
-		setupLog.Error(nil, "--config flag is required")
-		os.Exit(1)
-	}
-	// Load, default, and validate operator configuration
-	operatorCfg, err := LoadAndValidateOperatorConfig(configFile)
-	if err != nil {
-		setupLog.Error(err, "failed to load operator configuration", "configFile", configFile)
-		os.Exit(1)
-	}
-	setupLog.Info("Operator configuration loaded successfully", "configFile", configFile)
-
 	// Validate and normalize operator version to semver
 	if _, err := semver.NewVersion(operatorVersion); err != nil {
 		setupLog.Error(err, "operator-version is not valid semver",
@@ -233,59 +186,25 @@ func main() {
 
 	mainCtx := ctrl.SetupSignalHandler()
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
-	disableHTTP2 := func(c *tls.Config) {
-		setupLog.Info("disabling http/2")
-		c.NextProtos = []string{"http/1.1"}
+	if configFile == "" {
+		setupLog.Error(nil, "--config flag is required")
+		os.Exit(1)
 	}
 
-	tlsOpts := []func(*tls.Config){}
-	if !operatorCfg.Security.EnableHTTP2 {
-		tlsOpts = append(tlsOpts, disableHTTP2)
+	mgrOpts, operatorCfg, err := apply(configFile)
+	if err != nil {
+		setupLog.Error(err, "unable to load the configuration")
+		os.Exit(1)
 	}
 
-	webhookServer := webhook.NewServer(webhook.Options{
-		Host:    operatorCfg.Server.Webhook.Host,
-		Port:    operatorCfg.Server.Webhook.Port,
-		CertDir: operatorCfg.Server.Webhook.CertDir,
-		TLSOpts: tlsOpts,
-	})
-
-	metricsBindAddr := fmt.Sprintf("%s:%d", operatorCfg.Server.Metrics.BindAddress, operatorCfg.Server.Metrics.Port)
-	healthProbeAddr := fmt.Sprintf(
-		"%s:%d", operatorCfg.Server.HealthProbe.BindAddress, operatorCfg.Server.HealthProbe.Port,
-	)
-
-	mgrOpts := ctrl.Options{
-		Scheme: crdScheme,
-		Metrics: metricsserver.Options{
-			BindAddress:    metricsBindAddr,
-			SecureServing:  ptr.Deref(operatorCfg.Server.Metrics.Secure, true),
-			FilterProvider: metricsfilters.WithAuthenticationAndAuthorization,
-			TLSOpts:        tlsOpts,
-		},
-		WebhookServer:           webhookServer,
-		HealthProbeBindAddress:  healthProbeAddr,
-		LeaderElection:          operatorCfg.LeaderElection.Enabled,
-		LeaderElectionID:        operatorCfg.LeaderElection.ID,
-		LeaderElectionNamespace: operatorCfg.LeaderElection.Namespace,
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
+	if err != nil {
+		setupLog.Error(err, "unable to start manager")
+		os.Exit(1)
 	}
 
 	restrictedNamespace := operatorCfg.Namespace.Restricted
 	if restrictedNamespace != "" {
-		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
-			restrictedNamespace: {},
-		}
-		// PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
-		// Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
-		mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
-			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
-		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
 		banner := strings.Repeat("=", 80)
@@ -300,11 +219,6 @@ func main() {
 	} else {
 		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
-	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
-	}
 
 	// Initialize observability metrics
 	setupLog.Info("Initializing observability metrics")
@@ -312,7 +226,7 @@ func main() {
 
 	// Set up webhook certificate management.
 	// A direct (non-cached) client is needed because the manager's cache isn't started yet.
-	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: crdScheme})
+	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: scheme})
 	if err != nil {
 		setupLog.Error(err, "unable to create direct client for cert management")
 		os.Exit(1)
@@ -642,7 +556,7 @@ func main() {
 	// Register controllers synchronously before mgr.Start().
 	// Controllers don't depend on TLS certificates.
 	if err := registerControllers(
-		mgr, operatorCfg, runtimeConfig,
+		mgr, &operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
 		operatorImage, pullPolicy,
 	); err != nil {
@@ -650,7 +564,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
+	if err := registerWebhookHandlers(mgr, &operatorCfg, runtimeConfig, operatorVersion); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
 	}
@@ -660,12 +574,12 @@ func main() {
 	// conversion CAs immediately; manual mode waits for externally provided
 	// ca.crt and only patches conversion, leaving admission CA management
 	// out-of-band.
-	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
+	caInjector, err := internalcert.NewCABundleInjector(directClient, &operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
 		os.Exit(1)
 	}
-	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+	if operatorCfg.Server.Webhook.CertProvisionMode == configapi.CertProvisionModeAuto {
 		if err := caInjector.InjectAll(mainCtx); err != nil {
 			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
 			os.Exit(1)
@@ -700,7 +614,7 @@ func main() {
 
 func registerControllers(
 	mgr ctrl.Manager,
-	operatorCfg *configv1alpha1.OperatorConfiguration,
+	operatorCfg *configapi.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	dockerSecretRetriever *secrets.DockerSecretIndexer,
 	sshKeyManager *secret.SSHKeyManager,
@@ -816,7 +730,7 @@ func registerControllers(
 
 func registerWebhookHandlers(
 	mgr ctrl.Manager,
-	operatorCfg *configv1alpha1.OperatorConfiguration,
+	operatorCfg *configapi.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	operatorVersion string,
 ) error {
@@ -921,4 +835,18 @@ func registerWebhookHandlers(
 
 	setupLog.Info("Webhooks registered successfully")
 	return nil
+}
+
+func apply(configFile string) (ctrl.Options, configapi.OperatorConfiguration, error) {
+	options, cfg, err := config.Load(scheme, configFile)
+	if err != nil {
+		return options, cfg, err
+	}
+	cfgStr, err := config.Encode(scheme, &cfg)
+	if err != nil {
+		return options, cfg, err
+	}
+
+	setupLog.Info("Configuration loaded", "config", cfgStr)
+	return options, cfg, nil
 }
