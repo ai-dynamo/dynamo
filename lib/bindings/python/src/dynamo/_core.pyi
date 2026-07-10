@@ -1870,6 +1870,9 @@ class KvRouterConfig:
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
         router_policy_config: Optional[str] = None,
+        router_tracking_hash: Literal["public-xxh3-v1", "keyed-xxh3-v1"] = "public-xxh3-v1",
+        router_tracking_key_file: Optional[str | os.PathLike[str]] = None,
+        router_tracking_key_id: Optional[str] = None,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1891,6 +1894,12 @@ class KvRouterConfig:
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
             router_track_prefill_tokens: Include prompt-side prefill tokens in active load accounting (default: True).
+            router_tracking_hash: Tracking identity algorithm, "public-xxh3-v1" or
+                "keyed-xxh3-v1" (default: "public-xxh3-v1").
+            router_tracking_key_file: File containing exactly 32 raw provider-key bytes.
+                Required only for keyed tracking mode.
+            router_tracking_key_id: Provider-managed key epoch mixed into keyed scope
+                derivation. Required only for keyed tracking mode.
             router_prefill_load_model: Prompt-side prefill load model (default: "none").
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.

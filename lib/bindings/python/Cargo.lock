@@ -2140,6 +2140,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "axum",
+ "blake3",
  "chrono",
  "crossbeam-queue",
  "dashmap",

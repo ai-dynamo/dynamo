@@ -22,6 +22,8 @@ use clap::Parser;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::TrackingHashAlgorithm;
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
@@ -305,6 +307,18 @@ struct SelectServiceCli {
     /// Approximate byte budget across resident pending selections
     #[arg(long)]
     selection_cache_max_bytes: Option<usize>,
+
+    /// Hash function for router-derived active-sequence identities
+    #[arg(long)]
+    router_tracking_hash: Option<TrackingHashAlgorithm>,
+
+    /// File containing the 32-byte provider tracking key
+    #[arg(long)]
+    router_tracking_key_file: Option<std::path::PathBuf>,
+
+    /// Provider-managed tracking-key epoch identifier
+    #[arg(long)]
+    router_tracking_key_id: Option<String>,
 }
 
 #[cfg(all(test, feature = "select-service"))]
@@ -383,13 +397,23 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
+        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        if let Some(algorithm) = cli.router_tracking_hash {
+            kv_router_config.router_tracking_hash = algorithm;
+        }
+        if let Some(key_file) = cli.router_tracking_key_file {
+            kv_router_config.router_tracking_key_file = Some(key_file);
+        }
+        if let Some(key_id) = cli.router_tracking_key_id {
+            kv_router_config.router_tracking_key_id = Some(key_id);
+        }
         rt.block_on(selection::run_server(SelectionServiceConfig {
             port: cli.port,
             threads: cli.threads,
             indexer_peers: cli.indexer_peers,
             replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
-            kv_router_config: kv_router_config_from_dynamo_env(),
+            kv_router_config,
             selection_cache: selection_cache_config_from_overrides(
                 cli.selection_cache_ttl_secs,
                 cli.selection_cache_max_entries,
