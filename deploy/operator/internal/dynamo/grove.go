@@ -178,7 +178,13 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodClique not found", "resourceName", resourceName)
-			return false, "resource not found", v1beta1.ComponentReplicaStatus{}, v1beta1.DGDReadyReasonSomeResourcesNotReady, nil
+			// The backing PodClique is not created yet. Return a valid status
+			// entry (with the known kind and expected name) rather than an empty
+			// ComponentReplicaStatus{}
+			return false, "resource not found", v1beta1.ComponentReplicaStatus{
+				ComponentKind:  v1beta1.ComponentKindPodClique,
+				ComponentNames: []string{resourceName},
+			}, v1beta1.DGDReadyReasonSomeResourcesNotReady, nil
 		}
 		// A non-NotFound error is a transient failure to determine readiness,
 		// not a legitimate not-ready state. Return it so the reconcile retries
@@ -283,7 +289,13 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("PodCliqueScalingGroup not found", "resourceName", resourceName)
-			return false, "resource not found", v1beta1.ComponentReplicaStatus{}, v1beta1.DGDReadyReasonSomeResourcesNotReady, nil
+			// The backing PodCliqueScalingGroup is not created yet. Return a valid
+			// status entry (with the known kind and expected name) rather than an
+			// empty ComponentReplicaStatus{}
+			return false, "resource not found", v1beta1.ComponentReplicaStatus{
+				ComponentKind:  v1beta1.ComponentKindPodCliqueScalingGroup,
+				ComponentNames: []string{resourceName},
+			}, v1beta1.DGDReadyReasonSomeResourcesNotReady, nil
 		}
 		// A non-NotFound error is a transient failure to determine readiness,
 		// not a legitimate not-ready state. Return it so the reconcile retries

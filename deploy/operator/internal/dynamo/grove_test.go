@@ -419,7 +419,10 @@ func TestCheckPodCliqueReady(t *testing.T) {
 			wantReady:          false,
 			wantReasonContains: "resource not found",
 			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
-			wantServiceStatus:  v1beta1.ComponentReplicaStatus{},
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:  v1beta1.ComponentKindPodClique,
+				ComponentNames: []string{"missing-podclique"},
+			},
 		},
 		{
 			name:         "PodClique fully ready",
@@ -704,7 +707,10 @@ func TestCheckPCSGReady(t *testing.T) {
 			wantReady:          false,
 			wantReasonContains: "resource not found",
 			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
-			wantServiceStatus:  v1beta1.ComponentReplicaStatus{},
+			wantServiceStatus: v1beta1.ComponentReplicaStatus{
+				ComponentKind:  v1beta1.ComponentKindPodCliqueScalingGroup,
+				ComponentNames: []string{"missing-pcsg"},
+			},
 		},
 		{
 			name:         "PCSG fully ready",
@@ -1273,7 +1279,10 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			wantReady:              false,
 			wantReason:             "frontend: resource not found",
 			wantServiceStatuses: map[string]v1beta1.ComponentReplicaStatus{
-				"frontend": {},
+				"frontend": {
+					ComponentKind:  v1beta1.ComponentKindPodClique,
+					ComponentNames: []string{"test-dgd-0-frontend"},
+				},
 			},
 		},
 	}
