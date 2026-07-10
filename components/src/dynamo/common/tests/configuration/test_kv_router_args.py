@@ -459,6 +459,32 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     assert config.router_assume_kv_reuse is False
 
 
+def test_frontend_tokenizer_defaults_to_fastokens(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_TOKENIZER", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.tokenizer_backend == "fastokens"
+
+
+def test_frontend_tokenizer_env_and_cli_precedence(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_TOKENIZER", "default")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--tokenizer", "fastokens"])
+
+    config = FrontendConfig.from_cli_args(args)
+    config.validate()
+
+    assert config.tokenizer_backend == "fastokens"
+
+
 def test_frontend_admission_control_defaults_to_none(monkeypatch) -> None:
     """Default --admission-control is 'none': busy thresholds are cleared
     even though the underlying threshold flags have non-None defaults."""

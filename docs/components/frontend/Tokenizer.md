@@ -2,23 +2,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Tokenizer
+subtitle: Selects between the default fastokens and HuggingFace tokenizer backends for BPE models served through the Dynamo Frontend.
 ---
 
-The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenizer.json` models. `BPE` is the underlying tokenization algorithm, not a backend-specific feature: both the default HuggingFace path and the `fastokens` path can serve these models. The backend choice controls which implementation performs tokenization before requests are sent to the inference engine.
+The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenizer.json` models. `BPE` is the underlying tokenization algorithm, not a backend-specific feature: both the HuggingFace path and the default `fastokens` path can serve these models. The backend choice controls which implementation performs tokenization before requests are sent to the inference engine.
 
 ## Tokenizer Backends
 
-#### `default` HuggingFace Tokenizers
-
-The default backend uses the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) library (Rust).
-It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, post-processors, decoders, added tokens with special-token flags, and byte-fallback).
-
 #### `fastokens` High-Performance Encoder
 
-The `fastokens` backend uses the [`fastokens`](https://github.com/Atero-ai/fastokens) crate, a purpose-built encoder optimized for throughput on supported BPE `tokenizer.json` models.
+The default `fastokens` backend uses the [`fastokens`](https://github.com/Atero-ai/fastokens) crate, a purpose-built encoder optimized for throughput on supported BPE `tokenizer.json` models.
 It is a _hybrid_ backend: encoding uses `fastokens` while decoding falls back to HuggingFace so that incremental detokenization, byte-fallback, and special-token handling work correctly.
 
-Use this backend when tokenization is a measurable bottleneck, for example on high-concurrency prefill-heavy workloads.
+#### `default` HuggingFace Tokenizers
+
+The HuggingFace backend uses the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) library (Rust).
+It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, post-processors, decoders, added tokens with special-token flags, and byte-fallback).
+
+Use this backend when validating a new or unusual tokenizer and you want maximum compatibility first.
 
 #### Compatibility notes:
 
@@ -32,22 +33,22 @@ Set the backend with a CLI flag or environment variable. The CLI flag takes prec
 
 | CLI Argument | Env Var | Valid values | Default |
 |---|---|---|---|
-| `--tokenizer` | `DYN_TOKENIZER` | `default`, `fastokens` | `default` |
+| `--tokenizer` | `DYN_TOKENIZER` | `fastokens`, `default` | `fastokens` |
 
 **Examples:**
 
 ```bash
-# CLI flag
-python -m dynamo.frontend --tokenizer fastokens
+# Default fastokens backend
+python -m dynamo.frontend
 
-# Environment variable
-export DYN_TOKENIZER=fastokens
+# Explicit environment variable
+export DYN_TOKENIZER=default
 python -m dynamo.frontend
 ```
 
 ## Dynamo Frontend Behavior
 
-When `DYN_TOKENIZER=fastokens` is set:
+When `fastokens` is selected by default, by `--tokenizer fastokens`, or by `DYN_TOKENIZER=fastokens`:
 
 1. The frontend passes the environment variable to the Rust runtime.
 2. When building the tokenizer for a model, `ModelDeploymentCard::tokenizer()` attempts to load `fastokens::Tokenizer` from the same `tokenizer.json` file.
