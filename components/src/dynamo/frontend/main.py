@@ -50,6 +50,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV = "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE"
 
 
 def setup_engine_factory(
@@ -179,6 +180,9 @@ async def async_main():
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
+    os.environ[VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV] = (
+        "1" if config.enable_engine_apis else "0"
+    )
     dump_config(config.dump_config_to, config)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
