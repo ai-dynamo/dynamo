@@ -216,6 +216,12 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		fuzzAlphaDGDRStatus,
 		fuzzBetaDGDRSpec,
 		fuzzBetaDGDRStatus,
+		// PlacementStatus (v1alpha1 + v1beta1): keep the fuzz filler from
+		// drawing random bits for this pointer field. Placement conversion
+		// is exercised by TestDGD_RoundTrip_Status; excluding it here keeps
+		// the fuzz RNG stream stable across schema growth on DGDStatus.
+		func(p *v1beta1.PlacementStatus, _ randfill.Continue) {},
+		func(p *v1alpha1.PlacementStatus, _ randfill.Continue) {},
 		// v1beta1 Components: the listMapKey marker requires name
 		// to be non-empty and unique; MaxItems caps the length at 25.
 		// Enforce both so the input is admissible.
