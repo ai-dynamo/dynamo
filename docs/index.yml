@@ -53,6 +53,8 @@ navigation:
             path: reference/feature-matrix.md
           - page: Release Artifacts
             path: reference/release-artifacts.md
+          - page: Nightly Release Info
+            path: reference/nightly-release-info.md
           - page: Examples
             path: getting-started/examples.md
           - page: Glossary
