@@ -391,8 +391,8 @@ class GMSWorker(Worker):
         """vLLM wake implementation with GMS integration."""
         if os.getenv("DYN_SNAPSHOT_CONTROL_DIR"):
             from dynamo.vllm.snapshot_backend import (
-                GMSKVRestoreError,
                 GMSWeightRestoreError,
+                SnapshotTerminalError,
             )
 
             restore_kv_cache = tags is None or "kv_cache" in tags
@@ -414,9 +414,10 @@ class GMSWorker(Worker):
                 super().wake_up(tags)
             except GMSWeightRestoreError as exc:
                 self._fail_snapshot_weight_restore(exc)
-            except GMSKVRestoreError as exc:
+            except SnapshotTerminalError as exc:
                 logger.error(
-                    "Fatal: GMS KV restore left an uncertain memory layout: %s",
+                    "Fatal: terminal snapshot lifecycle failure (%s): %s",
+                    type(exc).__name__,
                     exc,
                 )
                 sys.exit(1)

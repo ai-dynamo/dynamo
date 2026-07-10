@@ -196,6 +196,35 @@ func TestRestoreAndUnlockProcessTreeSerialOrdering(t *testing.T) {
 	}
 }
 
+func TestRestoreAndUnlockProcessTreeSerialFailsFast(t *testing.T) {
+	pids := []int{303, 101, 202}
+	var calls []int
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		false,
+		func(_ context.Context, pid int) error {
+			calls = append(calls, pid)
+			return fmt.Errorf("restore error %d", pid)
+		},
+		func(context.Context, int) error {
+			t.Fatal("unlock called after restore failure")
+			return nil
+		},
+		func(context.Context, int) (string, error) {
+			return "", errors.New("unexpected state check")
+		},
+		logr.Discard(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "pid 303") {
+		t.Fatalf("error = %v, want first PID failure", err)
+	}
+	if len(calls) != 1 || calls[0] != 303 {
+		t.Fatalf("restore calls = %v, want [303]", calls)
+	}
+}
+
 func TestRestoreAndUnlockProcessTreeWaitsAndOrdersErrors(t *testing.T) {
 	pids := []int{303, 101, 202}
 	var completed atomic.Int32

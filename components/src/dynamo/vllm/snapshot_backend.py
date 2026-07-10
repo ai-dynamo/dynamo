@@ -54,43 +54,25 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
                 f"Cannot suspend GMS snapshot backend from {self._state}"
             )
 
-        checkpoint_prepare, checkpoint_restore = _checkpoint_hooks()
+        checkpoint_prepare, _ = _checkpoint_hooks()
         self._communicators_restored = False
         try:
             checkpoint_prepare()
-        except Exception as prepare_error:
-            try:
-                checkpoint_restore()
-            except Exception as rollback_error:
-                self._state = "SUSPENDED"
-                self._fatal_error = SnapshotRollbackError(
-                    "FlashInfer checkpoint preparation and rollback both failed",
-                    prepare_error,
-                    rollback_error,
-                )
-                raise self._fatal_error from rollback_error
-            self._communicators_restored = True
+        except Exception as exc:
             self._state = "SUSPENDED"
-            self._fatal_error = prepare_error
-            raise
+            self._fatal_error = SnapshotTerminalError(
+                f"FlashInfer checkpoint preparation failed: {exc}"
+            )
+            raise self._fatal_error from exc
 
-        touched_managers: list[tuple[str, Any]] = []
         try:
-            self._unmap_gms_tags(touched_managers)
-        except Exception as unmap_error:
-            try:
-                self._rollback_suspend(touched_managers, checkpoint_restore)
-            except Exception as rollback_error:
-                self._state = "SUSPENDED"
-                self._fatal_error = SnapshotRollbackError(
-                    "GMS unmap and rollback both failed",
-                    unmap_error,
-                    rollback_error,
-                )
-                raise self._fatal_error from rollback_error
+            self._unmap_gms_tags()
+        except Exception as exc:
             self._state = "SUSPENDED"
-            self._fatal_error = unmap_error
-            raise
+            self._fatal_error = SnapshotTerminalError(
+                f"GMS unmap failed after FlashInfer checkpoint preparation: {exc}"
+            )
+            raise self._fatal_error from exc
 
         self._restored_tags.clear()
         gc.collect()
@@ -99,7 +81,7 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
 
     def resume(self, tags: list[str] | None = None) -> None:
         if self._fatal_error is not None:
-            raise RuntimeError(
+            raise SnapshotTerminalError(
                 "GMS snapshot backend is unavailable after a failed suspend"
             ) from self._fatal_error
         restore_tags = _validated_restore_tags(tags)
@@ -118,15 +100,16 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
                 self._restored_tags == set(_get_gms_tags())
                 and not self._communicators_restored
             ):
-                _, checkpoint_restore = _checkpoint_hooks()
                 try:
+                    _, checkpoint_restore = _checkpoint_hooks()
                     checkpoint_restore()
                 except Exception as exc:
-                    self._fatal_error = exc
-                    raise
+                    raise SnapshotTerminalError(
+                        f"FlashInfer checkpoint restore failed: {exc}"
+                    ) from exc
                 self._communicators_restored = True
         except Exception as exc:
-            if isinstance(exc, GMSKVRestoreError):
+            if isinstance(exc, SnapshotTerminalError):
                 self._fatal_error = exc
             self._state = "SUSPENDED"
             raise
@@ -138,41 +121,17 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
         _validated_restore_tags((tag,))
         return tag in self._restored_tags
 
-    def _unmap_gms_tags(
-        self,
-        touched_managers: list[tuple[str, Any]] | None = None,
-    ) -> None:
+    def _unmap_gms_tags(self) -> None:
         from gpu_memory_service.client.torch.allocator import (
             get_gms_client_memory_manager,
         )
 
-        touched = touched_managers if touched_managers is not None else []
         for tag in _get_gms_tags():
             manager = get_gms_client_memory_manager(tag)
             assert manager is not None, f"GMS {tag} client is not initialized"
             assert not manager.is_unmapped, f"GMS {tag} is already unmapped"
-            touched.append((tag, manager))
             manager.unmap_all_vas()
             manager.abort()
-
-    def _rollback_suspend(
-        self,
-        touched_managers: list[tuple[str, Any]],
-        checkpoint_restore: Any,
-    ) -> None:
-        errors: list[tuple[str, Exception]] = []
-        for tag, manager in touched_managers:
-            try:
-                self._resume_gms_tag(tag, manager=manager, force_remap=True)
-                self._restored_tags.add(tag)
-            except Exception as exc:
-                errors.append((tag, exc))
-        if errors:
-            detail = "; ".join(f"{tag}: {error}" for tag, error in errors)
-            raise RuntimeError(f"failed to remap touched GMS managers: {detail}")
-
-        checkpoint_restore()
-        self._communicators_restored = True
 
     def _resume_gms_tags(self, tags: list[str] | None = None) -> None:
         for tag in _validated_restore_tags(tags):
@@ -183,7 +142,6 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
         tag: str,
         *,
         manager: Any | None = None,
-        force_remap: bool = False,
     ) -> None:
         from gpu_memory_service.client.torch.allocator import (
             get_gms_client_memory_manager,
@@ -194,7 +152,7 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
         if manager is None:
             manager = get_gms_client_memory_manager(tag)
         assert manager is not None, f"GMS {tag} client is not initialized"
-        if not force_remap and not manager.is_unmapped:
+        if not manager.is_unmapped:
             return
 
         reconnected = not manager.is_connected
@@ -221,24 +179,24 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
             manager.connect(RequestedLockType.RW)
 
         scratch = is_scratch(manager)
-        if scratch:
-            manager.prepare_scratch_for_reallocation()
-        if reconnected:
-            try:
+        try:
+            if scratch:
+                manager.prepare_scratch_for_reallocation()
+            if reconnected:
                 manager.reallocate_all_handles(tag=tag)
-            except Exception as exc:
-                if manager.is_connected:
-                    try:
-                        manager.abort()
-                    except Exception:
-                        logger.exception(
-                            "Failed to abort GMS %s after handle reallocation failure",
-                            tag,
-                        )
-                raise GMSKVRestoreError(
-                    f"GMS {tag} handle reallocation left an uncertain layout: {exc}"
-                ) from exc
-        manager.remap_all_vas()
+            manager.remap_all_vas()
+        except Exception as exc:
+            if manager.is_connected:
+                try:
+                    manager.abort()
+                except Exception:
+                    logger.exception(
+                        "Failed to abort GMS %s after destructive restore failure",
+                        tag,
+                    )
+            raise GMSKVRestoreError(
+                f"GMS {tag} restore left an uncertain memory layout: {exc}"
+            ) from exc
 
     @classmethod
     def preserves_communicators(cls) -> bool:
@@ -249,29 +207,16 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
         return True
 
 
-class SnapshotRollbackError(RuntimeError):
-    """A suspend failure whose rollback also failed."""
-
-    def __init__(
-        self,
-        message: str,
-        operation_error: Exception,
-        rollback_error: Exception,
-    ) -> None:
-        super().__init__(
-            f"{message}: operation error: {operation_error}; "
-            f"rollback error: {rollback_error}"
-        )
-        self.operation_error = operation_error
-        self.rollback_error = rollback_error
+class SnapshotTerminalError(RuntimeError):
+    """A snapshot lifecycle failure that requires worker termination."""
 
 
-class GMSWeightRestoreError(RuntimeError):
+class GMSWeightRestoreError(SnapshotTerminalError):
     """A fatal weight reconnect/remap failure."""
 
 
-class GMSKVRestoreError(RuntimeError):
-    """A fatal KV handle reallocation failure."""
+class GMSKVRestoreError(SnapshotTerminalError):
+    """A fatal destructive KV restoration failure."""
 
 
 def _get_gms_tags() -> tuple[str, ...]:

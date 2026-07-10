@@ -20,11 +20,13 @@ from dynamo.vllm.snapshot_backend import (  # noqa: E402
     DynamoGMSSnapshotBackend,
     GMSKVRestoreError,
     GMSWeightRestoreError,
+    SnapshotTerminalError,
 )
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -93,8 +95,7 @@ def test_nixl_registration_retries_after_post_wake_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retry_tags", [["kv_cache"], None])
-async def test_pending_nixl_registration_blocks_non_kv_wake(monkeypatch, retry_tags):
+async def test_pending_nixl_registration_blocks_non_kv_wake(monkeypatch):
     monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", "/run/dynamo/snapshot")
     worker = _snapshot_worker()
     kv_cache = MagicMock()
@@ -163,12 +164,12 @@ async def test_pending_nixl_registration_blocks_non_kv_wake(monkeypatch, retry_t
         engine_client.resume_generation.assert_not_awaited()
         endpoint.register_endpoint_instance.assert_not_awaited()
 
-        retry_result = await BaseWorkerHandler.wake_up(handler, {"tags": retry_tags})
+        retry_result = await BaseWorkerHandler.wake_up(handler, {})
 
     assert retry_result == {"status": "ok", "message": "Engine woke"}
     assert parent_wake.call_args_list == [
         call(worker, ["kv_cache"]),
-        call(worker, retry_tags),
+        call(worker, None),
     ]
     assert worker._register_kv_caches_with_nixl.call_count == 2
     assert worker._snapshot_nixl_registration_pending is False
@@ -281,7 +282,7 @@ def test_partial_kv_reallocation_is_fatal_and_never_published(monkeypatch):
     worker._register_kv_caches_with_nixl.assert_not_called()
     resume_serving.assert_not_called()
 
-    with pytest.raises(RuntimeError, match="unavailable after a failed suspend"):
+    with pytest.raises(SnapshotTerminalError, match="unavailable"):
         backend.resume(["kv_cache"])
 
 
@@ -334,3 +335,23 @@ def test_weight_timeout_cleans_connection_and_exits(monkeypatch):
         worker.wake_up(["weights"])
 
     weights.abort.assert_called_once_with()
+
+
+def test_flashinfer_restore_failure_terminates_worker(monkeypatch):
+    monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", "/run/dynamo/snapshot")
+    worker = _snapshot_worker()
+
+    with (
+        patch(
+            "gpu_memory_service.integrations.vllm.worker.get_gms_client_memory_manager",
+            return_value=None,
+        ),
+        patch.object(
+            Worker,
+            "wake_up",
+            autospec=True,
+            side_effect=SnapshotTerminalError("FlashInfer restore failed"),
+        ),
+        pytest.raises(SystemExit, match="1"),
+    ):
+        worker.wake_up()

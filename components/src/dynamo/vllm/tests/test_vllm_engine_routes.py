@@ -4,7 +4,7 @@
 import asyncio
 import sys
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -17,6 +17,7 @@ from dynamo.vllm.llm_engine import VllmLLMEngine  # noqa: E402
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -58,13 +59,18 @@ async def test_sleep_and_wake_delegate_to_engine_client():
     engine = _make_engine()
 
     sleep_result = await engine.engine_control("sleep", {"level": 2})
-    wake_result = await engine.engine_control("wake_up", {"tags": ["weights"]})
+    partial_result = await engine.engine_control("wake_up", {"tags": ["weights"]})
+    wake_result = await engine.engine_control("wake_up", {})
 
     assert sleep_result["status"] == "ok"
+    assert partial_result["complete"] is False
     assert wake_result["status"] == "ok"
     engine.engine_client.pause_generation.assert_awaited_once()
     engine.engine_client.sleep.assert_awaited_once_with(2)
-    engine.engine_client.wake_up.assert_awaited_once_with(["weights"])
+    assert engine.engine_client.wake_up.await_args_list == [
+        call(["weights"]),
+        call(),
+    ]
     engine.engine_client.resume_generation.assert_awaited_once()
 
 

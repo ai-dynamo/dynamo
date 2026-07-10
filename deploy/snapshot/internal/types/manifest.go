@@ -133,21 +133,27 @@ type CUDAManifest struct {
 	// `cuda-checkpoint --launch-job`, or the entrypoint was unknown, which
 	// is treated the same). When true, restore-side cuda-checkpoint
 	// operations must run serially; when false they may run concurrently.
-	// Manifests written before this field existed unmarshal to false and
-	// restore concurrently.
-	HasJobFile bool `yaml:"hasJobFile"`
+	// Manifests written before this field existed leave it nil and restore
+	// serially.
+	HasJobFile *bool `yaml:"hasJobFile,omitempty"`
 }
 
 func NewCUDAManifest(pids []int, sourceGPUUUIDs []string, hasJobFile bool) CUDAManifest {
 	return CUDAManifest{
 		PIDs:           append([]int(nil), pids...),
 		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
-		HasJobFile:     hasJobFile,
+		HasJobFile:     &hasJobFile,
 	}
 }
 
 func (m CUDAManifest) IsEmpty() bool {
 	return len(m.PIDs) == 0
+}
+
+// CanRestoreConcurrently is true only when the manifest explicitly records
+// that the workload has no shared cuda-checkpoint job file.
+func (m CUDAManifest) CanRestoreConcurrently() bool {
+	return m.HasJobFile != nil && !*m.HasJobFile
 }
 
 // WriteManifest writes a checkpoint manifest file in the checkpoint directory.

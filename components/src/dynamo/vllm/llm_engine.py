@@ -1266,7 +1266,13 @@ class VllmLLMEngine(LLMEngine):
             if not controller.is_paused and not needs_recovery:
                 return {"status": "ok", "message": "Engine already awake"}
             try:
-                await controller.resume(tags)
+                wake_complete = await controller.resume(tags)
+                if not wake_complete:
+                    return {
+                        "status": "ok",
+                        "message": "Engine partially woke; full wake required",
+                        "complete": False,
+                    }
                 controller.mark_resumed()
                 return {"status": "ok", "message": "Engine woke"}
             except Exception as e:

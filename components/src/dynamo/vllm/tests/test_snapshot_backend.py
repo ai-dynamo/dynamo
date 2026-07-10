@@ -13,7 +13,8 @@ import dynamo.vllm.snapshot_backend as snapshot_backend  # noqa: E402
 from dynamo.vllm.snapshot_backend import (  # noqa: E402
     GMS_BACKEND_NAME,
     DynamoGMSSnapshotBackend,
-    SnapshotRollbackError,
+    GMSKVRestoreError,
+    SnapshotTerminalError,
     register_dynamo_gms_snapshot_backend,
     select_dynamo_gms_snapshot_backend,
 )
@@ -21,6 +22,7 @@ from dynamo.vllm.snapshot_backend import (  # noqa: E402
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -82,7 +84,7 @@ def test_missing_checkpoint_hooks_has_actionable_error(monkeypatch):
 def test_suspend_orders_checkpoint_before_unmap():
     backend = DynamoGMSSnapshotBackend()
     calls = []
-    backend._unmap_gms_tags = lambda touched: calls.append("gms_unmap")
+    backend._unmap_gms_tags = lambda: calls.append("gms_unmap")
 
     with (
         patch.object(
@@ -106,21 +108,18 @@ def test_suspend_unmaps_all_canonical_gms_tags():
     weights = MagicMock(is_unmapped=False)
     kv_cache = MagicMock(is_unmapped=False)
     managers = {"weights": weights, "kv_cache": kv_cache}
-    touched = []
-
     with patch(
         "gpu_memory_service.client.torch.allocator.get_gms_client_memory_manager",
         side_effect=managers.__getitem__,
     ):
-        backend._unmap_gms_tags(touched)
+        backend._unmap_gms_tags()
 
-    assert touched == [("weights", weights), ("kv_cache", kv_cache)]
     for manager in managers.values():
         manager.unmap_all_vas.assert_called_once_with()
         manager.abort.assert_called_once_with()
 
 
-def test_failed_partial_unmap_remaps_every_touched_manager_fail_closed():
+def test_failed_partial_unmap_is_terminal_without_collective_rollback():
     backend = DynamoGMSSnapshotBackend()
     weights = MagicMock(is_unmapped=False)
     kv_cache = MagicMock(is_unmapped=False)
@@ -136,12 +135,6 @@ def test_failed_partial_unmap_remaps_every_touched_manager_fail_closed():
     weights.unmap_all_vas.side_effect = unmap_weights
     kv_cache.unmap_all_vas.side_effect = partially_unmap_kv_cache
     managers = {"weights": weights, "kv_cache": kv_cache}
-
-    def force_remap(_tag, *, manager, force_remap):
-        assert force_remap is True
-        manager.is_unmapped = False
-
-    backend._resume_gms_tag = MagicMock(side_effect=force_remap)
     checkpoint_restore = MagicMock()
 
     with (
@@ -154,56 +147,26 @@ def test_failed_partial_unmap_remaps_every_touched_manager_fail_closed():
             "_checkpoint_hooks",
             return_value=(MagicMock(), checkpoint_restore),
         ),
-        pytest.raises(RuntimeError, match="mid-manager unmap"),
+        pytest.raises(SnapshotTerminalError, match="mid-manager unmap"),
     ):
         backend.suspend()
 
-    assert backend._resume_gms_tag.call_args_list == [
-        call("weights", manager=weights, force_remap=True),
-        call("kv_cache", manager=kv_cache, force_remap=True),
-    ]
     weights.unmap_all_vas.assert_called_once_with()
     weights.abort.assert_called_once_with()
     kv_cache.unmap_all_vas.assert_called_once_with()
     kv_cache.abort.assert_not_called()
-    assert weights.is_unmapped is False
-    assert kv_cache.is_unmapped is False
-    checkpoint_restore.assert_called_once_with()
+    checkpoint_restore.assert_not_called()
     assert backend.state() == "SUSPENDED"
-    assert backend._communicators_restored is True
-    assert backend._fatal_error is unmap_error
+    assert backend._communicators_restored is False
+    assert isinstance(backend._fatal_error, SnapshotTerminalError)
 
-    with pytest.raises(RuntimeError, match="unavailable after a failed suspend"):
+    with pytest.raises(SnapshotTerminalError, match="unavailable"):
         backend.resume()
 
 
-def test_failed_unmap_and_rollback_raise_transaction_error():
+def test_failed_checkpoint_prepare_is_terminal_without_restore():
     backend = DynamoGMSSnapshotBackend()
-    manager = MagicMock(is_unmapped=False)
-    manager.unmap_all_vas.side_effect = RuntimeError("unmap failed")
-    backend._resume_gms_tag = MagicMock(side_effect=RuntimeError("remap failed"))
     checkpoint_restore = MagicMock()
-
-    with (
-        patch(
-            "gpu_memory_service.client.torch.allocator.get_gms_client_memory_manager",
-            return_value=manager,
-        ),
-        patch.object(
-            snapshot_backend,
-            "_checkpoint_hooks",
-            return_value=(MagicMock(), checkpoint_restore),
-        ),
-        pytest.raises(SnapshotRollbackError, match="rollback error: remap failed"),
-    ):
-        backend.suspend()
-
-    checkpoint_restore.assert_not_called()
-    assert backend.state() == "SUSPENDED"
-
-
-def test_failed_checkpoint_prepare_rollback_is_fail_closed():
-    backend = DynamoGMSSnapshotBackend()
 
     with (
         patch.object(
@@ -211,14 +174,16 @@ def test_failed_checkpoint_prepare_rollback_is_fail_closed():
             "_checkpoint_hooks",
             return_value=(
                 MagicMock(side_effect=RuntimeError("prepare failed")),
-                MagicMock(side_effect=RuntimeError("restore failed")),
+                checkpoint_restore,
             ),
         ),
-        pytest.raises(SnapshotRollbackError, match="prepare failed"),
+        pytest.raises(SnapshotTerminalError, match="prepare failed"),
     ):
         backend.suspend()
 
+    checkpoint_restore.assert_not_called()
     assert backend.state() == "SUSPENDED"
+    assert isinstance(backend._fatal_error, SnapshotTerminalError)
 
 
 def test_partial_wakes_restore_communicators_after_all_tags():
@@ -264,11 +229,11 @@ def test_flashinfer_restore_failure_is_fail_closed():
         "_checkpoint_hooks",
         return_value=(MagicMock(), checkpoint_restore),
     ):
-        with pytest.raises(RuntimeError, match="reattach failed"):
+        with pytest.raises(SnapshotTerminalError, match="reattach failed"):
             backend.resume()
         assert backend.state() == "SUSPENDED"
 
-        with pytest.raises(RuntimeError, match="unavailable after a failed suspend"):
+        with pytest.raises(SnapshotTerminalError, match="unavailable"):
             backend.resume()
 
     assert backend._resume_gms_tag.call_args_list == [
@@ -344,6 +309,34 @@ def test_restore_prepares_scratch_kv_before_reallocation():
         call.reallocate_all_handles(tag="kv_cache"),
         call.remap_all_vas(),
     ]
+
+
+@pytest.mark.parametrize(
+    ("failed_method", "message"),
+    [
+        ("prepare_scratch_for_reallocation", "prepare failed"),
+        ("remap_all_vas", "remap failed"),
+    ],
+)
+def test_destructive_kv_restore_failure_is_terminal(failed_method, message):
+    backend = DynamoGMSSnapshotBackend()
+    kv_cache = MagicMock(is_unmapped=True, is_connected=True)
+    getattr(kv_cache, failed_method).side_effect = RuntimeError(message)
+
+    with (
+        patch(
+            "gpu_memory_service.client.torch.allocator.get_gms_client_memory_manager",
+            return_value=kv_cache,
+        ),
+        patch(
+            "gpu_memory_service.client.torch.allocator.is_scratch",
+            return_value=True,
+        ),
+        pytest.raises(GMSKVRestoreError, match=message),
+    ):
+        backend._resume_gms_tag("kv_cache")
+
+    kv_cache.abort.assert_called_once_with()
 
 
 def test_unknown_partial_wake_tag_is_rejected():
