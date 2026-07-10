@@ -841,9 +841,9 @@ def sglang_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-# Use 2 system ports because some `sglang_configs` validate metrics on multiple ports.
-# This test iterates over all configs via `sglang_config_test`.
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+# Allocate 4 system ports: disaggregated_router runs 4 workers each needing a
+# unique DYN_SYSTEM_PORT; other configs use <=2 (extra ports are harmless).
+@pytest.mark.parametrize("num_system_ports", [4], indirect=True)
 def test_sglang_deployment(
     sglang_config_test,
     request,
