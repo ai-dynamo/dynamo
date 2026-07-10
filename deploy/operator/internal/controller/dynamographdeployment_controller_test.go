@@ -3995,6 +3995,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 	tests := []struct {
 		name                string
 		dgdSpec             v1alpha1.DynamoGraphDeploymentSpec
+		dgdAnnotations      map[string]string
 		existingDCDs        []client.Object
 		wantReconcileResult ReconcileResult
 	}{
@@ -4205,6 +4206,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 				},
 			},
+			dgdAnnotations: map[string]string{
+				commonconsts.AnnotationCurrentWorkerHash: "1b69c0d3",
+			},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -4245,6 +4249,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "decode",
 							Replicas:    ptr.To(int32(2)),
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3",
+							},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -4274,6 +4281,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "prefill",
 							Replicas:    ptr.To(int32(3)),
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3",
+							},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -4351,6 +4361,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 				},
 			},
+			dgdAnnotations: map[string]string{
+				commonconsts.AnnotationCurrentWorkerHash: "1b69c0d3",
+			},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -4391,6 +4404,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "decode",
 							Replicas:    ptr.To(int32(2)),
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3",
+							},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -4420,6 +4436,9 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "prefill",
 							Replicas:    ptr.To(int32(3)),
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3",
+							},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -4587,29 +4606,12 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 
 			dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
+					Name:        "test-dgd",
+					Namespace:   "default",
+					Annotations: tt.dgdAnnotations,
 				},
 				Spec: tt.dgdSpec,
 			})
-
-			// Full reconciliation initializes a fresh DGD with its v2 hash before calling this helper.
-			workerHash := betaDGDWorkersSpecHash(t, dgd)
-			dgd.Annotations = map[string]string{
-				commonconsts.AnnotationCurrentWorkerHash: workerHash,
-			}
-			for _, object := range tt.existingDCDs {
-				dcd, ok := object.(*v1beta1.DynamoComponentDeployment)
-				if !ok || !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
-					continue
-				}
-				dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
-				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{
-					ObjectMeta: metav1.ObjectMeta{
-						Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: workerHash},
-					},
-				}
-			}
 
 			var objects []client.Object
 			objects = append(objects, dgd)
