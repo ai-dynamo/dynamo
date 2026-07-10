@@ -288,7 +288,9 @@ func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 		return nil, fmt.Errorf("missing request body")
 	}
 
-	if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
+	if hasTokenizedPrompt(req) {
+		addTokenizedPrompt(requestBody, req.TokenizedPrompt.TokenIDs)
+	} else if req.Body.ChatCompletions != nil && len(req.Body.ChatCompletions.Messages) > 0 {
 		messages := make([]map[string]any, 0, len(req.Body.ChatCompletions.Messages))
 		anyNonEmpty := false
 		for _, msg := range req.Body.ChatCompletions.Messages {
@@ -329,8 +331,18 @@ func BuildOpenAIRequest(req *schedtypes.LLMRequest) (map[string]any, error) {
 	return requestBody, nil
 }
 
+func addTokenizedPrompt(requestBody map[string]any, tokenIDs []uint32) {
+	prompt := make([]uint32, len(tokenIDs))
+	copy(prompt, tokenIDs)
+	requestBody["prompt"] = prompt
+}
+
+func hasTokenizedPrompt(req *schedtypes.LLMRequest) bool {
+	return req != nil && req.TokenizedPrompt != nil && len(req.TokenizedPrompt.TokenIDs) > 0
+}
+
 func addCompletionPrompt(requestBody map[string]any, prompt schedtypes.Prompt) {
-	// Keep non-token completions on the legacy chat-shaped scorer path.
+	// Keep text completions on the legacy chat-shaped scorer path.
 	requestBody["messages"] = []map[string]any{
 		{
 			"role":    "user",

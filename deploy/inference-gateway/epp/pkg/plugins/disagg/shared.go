@@ -102,9 +102,9 @@ func uniformScores(endpoints []schedtypes.Endpoint, score float64) map[schedtype
 	return out
 }
 
-// setTokenizedPrompt stores pre-computed token IDs on the LLMRequest and
+// setTokenizedPrompt stores pre-computed token IDs on the GAIE LLMRequest and
 // injects nvext.token_data into the PayloadMap so it is forwarded to the
-// worker in the request body.
+// Dynamo frontend in the request body.
 //
 // The GAIE framework re-serializes the PayloadMap after scheduling/PreRequest
 // plugins run (PR #2854), so this mutation is included in the forwarded body.
@@ -117,6 +117,10 @@ func setTokenizedPrompt(req *schedtypes.LLMRequest, tokens []int64, logger logr.
 	tokenIDs := make([]uint32, len(tokens))
 	for i, t := range tokens {
 		tokenIDs[i] = uint32(t)
+	}
+
+	req.TokenizedPrompt = &schedtypes.TokenizedPrompt{
+		TokenIDs: tokenIDs,
 	}
 
 	// Inject into the PayloadMap so the body includes nvext.token_data.

@@ -115,6 +115,41 @@ func TestBuildOpenAIRequest_CompletionsTextPromptKeepsLegacyMessageShape(t *test
 	}
 }
 
+func TestBuildOpenAIRequest_TokenizedPromptUsesCompletionPromptShape(t *testing.T) {
+	req := &schedtypes.LLMRequest{
+		TargetModel: "test-model",
+		TokenizedPrompt: &schedtypes.TokenizedPrompt{
+			TokenIDs: []uint32{101, 102, 103},
+		},
+		Body: &schedtypes.LLMRequestBody{
+			Completions: &schedtypes.CompletionsRequest{
+				Prompt: schedtypes.Prompt{Raw: "hello"},
+			},
+		},
+	}
+
+	body, err := BuildOpenAIRequest(req)
+	if err != nil {
+		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
+	}
+
+	prompt, ok := body["prompt"].([]uint32)
+	if !ok {
+		t.Fatalf("expected tokenized prompt shape, got %#v", body["prompt"])
+	}
+	if len(prompt) != 3 || prompt[0] != 101 || prompt[1] != 102 || prompt[2] != 103 {
+		t.Fatalf("expected prompt token IDs [101 102 103], got %#v", prompt)
+	}
+	if _, ok := body["messages"]; ok {
+		t.Fatalf("did not expect tokenized prompt to also include messages: %v", body["messages"])
+	}
+
+	req.TokenizedPrompt.TokenIDs[0] = 999
+	if prompt[0] != 101 {
+		t.Fatalf("expected BuildOpenAIRequest to copy token IDs, got %#v", prompt)
+	}
+}
+
 func TestBuildOpenAIRequest_CompletionsStringArrayPromptKeepsLegacyMessageShape(t *testing.T) {
 	req := &schedtypes.LLMRequest{
 		TargetModel: "test-model",
