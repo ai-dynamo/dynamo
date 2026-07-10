@@ -31,7 +31,9 @@ to it — edit only the canonical copy. Reach for the right group first:
 **For developing Dynamo:**
 
 - `debug-session` — structured bug investigation with a persistent worklog
-- `dep-create` / `dep-status` / `dep-update` — create, track, and advance DEPs
+- `dep-create` — create or update Dynamo Enhancement Proposals as GitHub issues
+- `dep-status` — check DEP status and list DEPs by lifecycle state or area
+- `dep-update` — advance DEP lifecycle: triage, PIC assignment, review, approval
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
@@ -46,10 +48,12 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-troubleshoot` — diagnose failed or unhealthy deployments
 
 **Adding a skill:** the folder name must equal the frontmatter `name` (kebab-case); the
-`description` is third person and states what the skill does and when to use it; include
-`license: Apache-2.0` and a `metadata:` block with `author` and `tags`. Changes under
-`.agents/skills/` are validated by NVSkills CI — a maintainer comments `/nvskills-ci` on
-the PR.
+`description` is third person, states what the skill does and when to use it, and is at
+most 1024 characters; include `license: Apache-2.0` and a `metadata:` block with `author`
+and `tags`. List the skill in this section — the index must match `.agents/skills/`
+exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hook
+`validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
+a maintainer comments `/nvskills-ci` on the PR.
 
 ## Ecosystem
 

@@ -28,6 +28,7 @@ from dynamo.planner.errors import (
     DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
     ModelNameNotFoundError,
+    PlannerError,
     SubComponentNotFoundError,
 )
 from dynamo.planner.monitoring.dgd_services import (
@@ -100,6 +101,19 @@ def _deployment(*components):
     }
 
 
+def _deployment_with_worker_status(
+    component_kind, runtime_namespace=None, annotations=None
+):
+    worker_status = {"componentKind": component_kind}
+    if runtime_namespace is not None:
+        worker_status["runtimeNamespace"] = runtime_namespace
+    return {
+        "metadata": {"annotations": annotations or {}},
+        "spec": {"components": [_component("worker", "worker")]},
+        "status": {"components": {"worker": worker_status}},
+    }
+
+
 def test_kubernetes_connector_no_env_var():
     with patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"):
         with pytest.raises(DeploymentValidationError) as exc_info:
@@ -111,29 +125,134 @@ def test_kubernetes_connector_no_env_var():
     }
 
 
-def test_get_worker_runtime_namespace_with_current_hash(
+def test_get_worker_runtime_namespace_uses_status_runtime_namespace(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "PodClique",
+        runtime_namespace="runtime-from-status",
+        annotations={"nvidia.com/current-worker-hash": "abc123"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "runtime-from-status"
+    mock_kube_api.get_graph_deployment.assert_called_with("test-graph")
+
+
+def test_get_worker_runtime_namespace_falls_back_to_deployment_hash(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment",
+        annotations={"nvidia.com/current-worker-hash": "abc123"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-abc123"
+
+
+def test_get_worker_runtime_namespace_falls_back_to_worker_name_when_type_missing(
     kubernetes_connector, mock_kube_api
 ):
     mock_kube_api.get_graph_deployment.return_value = {
-        "metadata": {
-            "annotations": {
-                "nvidia.com/current-worker-hash": "abc123",
-            }
-        }
+        "metadata": {"annotations": {"nvidia.com/current-worker-hash": "abc123"}},
+        "spec": {"components": [_component("worker")]},
+        "status": {"components": {"worker": {"componentKind": "Deployment"}}},
     }
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
     assert namespace == "base-ns-abc123"
-    mock_kube_api.get_graph_deployment.assert_called_with("test-graph")
+
+
+def test_get_worker_runtime_namespace_explicit_type_overrides_worker_name_fallback(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = {
+        "metadata": {"annotations": {"nvidia.com/current-worker-hash": "abc123"}},
+        "spec": {
+            "components": [
+                _component("worker", "frontend"),
+                _component("serving", "worker"),
+            ]
+        },
+        "status": {
+            "components": {
+                "worker": {
+                    "componentKind": "Deployment",
+                    "runtimeNamespace": "base-ns",
+                },
+                "serving": {"componentKind": "Deployment"},
+            }
+        },
+    }
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-abc123"
+
+
+def test_get_worker_runtime_namespace_falls_back_to_v2_hash(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment",
+        annotations={"nvidia.com/current-worker-hash-v2": "v2abc"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-v2abc"
+
+
+def test_get_worker_runtime_namespace_uses_legacy_v1_before_v2(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment",
+        annotations={
+            "nvidia.com/current-worker-hash": "legacy",
+            "nvidia.com/current-worker-hash-v2": "v2abc",
+        },
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-legacy"
+
+
+def test_get_worker_runtime_namespace_falls_back_to_base_for_grove(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "PodCliqueScalingGroup",
+        annotations={"nvidia.com/current-worker-hash": "abc123"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns"
+
+
+def test_get_worker_runtime_namespace_falls_back_to_leader_worker_set_hash(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "LeaderWorkerSet",
+        annotations={"nvidia.com/current-worker-hash": "abc123"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-abc123"
 
 
 def test_get_worker_runtime_namespace_without_hash(kubernetes_connector, mock_kube_api):
-    mock_kube_api.get_graph_deployment.return_value = {
-        "metadata": {
-            "annotations": {},
-        }
-    }
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment"
+    )
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
@@ -141,48 +260,41 @@ def test_get_worker_runtime_namespace_without_hash(kubernetes_connector, mock_ku
 
 
 def test_get_worker_runtime_namespace_legacy_hash(kubernetes_connector, mock_kube_api):
+    mock_kube_api.get_graph_deployment.return_value = _deployment_with_worker_status(
+        "Deployment",
+        annotations={"nvidia.com/current-worker-hash": "legacy"},
+    )
+
+    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+    assert namespace == "base-ns-legacy"
+
+
+def test_get_worker_runtime_namespace_missing_status_with_hash_is_indeterminate(
+    kubernetes_connector, mock_kube_api
+):
     mock_kube_api.get_graph_deployment.return_value = {
         "metadata": {
-            "annotations": {
-                "nvidia.com/current-worker-hash": "legacy",
-            }
-        }
+            "annotations": {"nvidia.com/current-worker-hash": "abc123"},
+        },
+        "spec": {"components": [_component("worker", "worker")]},
+    }
+
+    with pytest.raises(PlannerError, match="runtime namespace is indeterminate"):
+        kubernetes_connector.get_worker_runtime_namespace("base-ns")
+
+
+def test_get_worker_runtime_namespace_missing_status_without_hash_uses_base(
+    kubernetes_connector, mock_kube_api
+):
+    mock_kube_api.get_graph_deployment.return_value = {
+        "metadata": {"annotations": {}},
+        "spec": {"components": [_component("worker", "worker")]},
     }
 
     namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
 
     assert namespace == "base-ns"
-
-
-def test_get_worker_runtime_namespace_with_v2_hash(kubernetes_connector, mock_kube_api):
-    mock_kube_api.get_graph_deployment.return_value = {
-        "metadata": {
-            "annotations": {
-                "nvidia.com/current-worker-hash-v2": "v2abc",
-            }
-        }
-    }
-
-    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
-
-    assert namespace == "base-ns-v2abc"
-
-
-def test_get_worker_runtime_namespace_with_legacy_v1_and_v2_hash(
-    kubernetes_connector, mock_kube_api
-):
-    mock_kube_api.get_graph_deployment.return_value = {
-        "metadata": {
-            "annotations": {
-                "nvidia.com/current-worker-hash": "legacy",
-                "nvidia.com/current-worker-hash-v2": "v2abc",
-            }
-        }
-    }
-
-    namespace = kubernetes_connector.get_worker_runtime_namespace("base-ns")
-
-    assert namespace == "base-ns-v2abc"
 
 
 def test_get_service_name_from_sub_component_type(kubernetes_connector):

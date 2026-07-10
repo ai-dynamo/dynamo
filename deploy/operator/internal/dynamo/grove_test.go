@@ -1321,6 +1321,14 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
 			g.Expect(reason).To(gomega.Equal(tt.wantReason))
+			for componentName, wantStatus := range tt.wantServiceStatuses {
+				component := betaDGD.GetComponentByName(componentName)
+				if component == nil {
+					continue
+				}
+				wantStatus.RuntimeNamespace = betaDGD.GetDynamoNamespaceForComponent(component)
+				tt.wantServiceStatuses[componentName] = wantStatus
+			}
 			g.Expect(serviceStatuses).To(gomega.Equal(tt.wantServiceStatuses))
 		})
 	}

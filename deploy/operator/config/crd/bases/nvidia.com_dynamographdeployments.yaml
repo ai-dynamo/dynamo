@@ -12051,6 +12051,13 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      runtimeNamespace:
+                        description: |-
+                          RuntimeNamespace is the effective Dynamo runtime namespace for this
+                          component. Worker components may include a generation suffix; non-workers and
+                          Grove-backed workers use the base namespace. During rolling updates, worker
+                          status keeps the old active revision namespace until cutover completes.
+                        type: string
                       scheduledReplicas:
                         description: |-
                           ScheduledReplicas is the number of replicas the backend scheduler has
@@ -21263,6 +21270,13 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      runtimeNamespace:
+                        description: |-
+                          runtimeNamespace is the effective Dynamo runtime namespace for this
+                          component. Worker components may include a generation suffix; non-workers and
+                          Grove-backed workers use the base namespace. During rolling updates, worker
+                          status keeps the old active revision namespace until cutover completes.
+                        type: string
                       scheduledReplicas:
                         description: |-
                           scheduledReplicas is the number of replicas the backend scheduler has

@@ -648,6 +648,13 @@ type ComponentReplicaStatus struct {
 	// +optional
 	ComponentNames []string `json:"componentNames,omitempty"`
 
+	// runtimeNamespace is the effective Dynamo runtime namespace for this
+	// component. Worker components may include a generation suffix; non-workers and
+	// Grove-backed workers use the base namespace. During rolling updates, worker
+	// status keeps the old active revision namespace until cutover completes.
+	// +optional
+	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
+
 	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`

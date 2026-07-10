@@ -139,8 +139,8 @@ func evaluateGroveComponents(ctx context.Context, client client.Client, dgd *v1b
 		if checkErr != nil {
 			return false, "", "", nil, fmt.Errorf("component %q: %w", componentName, checkErr)
 		}
+		componentStatus.RuntimeNamespace = dgd.GetDynamoNamespaceForComponent(component)
 		componentStatuses[componentName] = componentStatus
-
 		if !ok {
 			notReadyComponents = append(notReadyComponents, fmt.Sprintf("%s: %s", componentName, reason))
 			switch aggregatedReason {
