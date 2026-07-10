@@ -9,6 +9,7 @@ use super::{
 };
 use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::policy_config::PolicyProfile;
+use crate::scheduling::types::KvSchedulerError;
 
 pub type PolicyClassAdmissionStrategies = HashMap<String, Box<dyn PolicyClassAdmissionStrategy>>;
 
@@ -29,19 +30,44 @@ pub(crate) struct PolicyClassAdmissionController {
 }
 
 impl PolicyClassAdmissionController {
-    pub fn new(profile: &PolicyProfile, mut strategies: PolicyClassAdmissionStrategies) -> Self {
+    pub fn new(
+        profile: &PolicyProfile,
+        mut strategies: PolicyClassAdmissionStrategies,
+    ) -> Result<Self, KvSchedulerError> {
+        if let Some(class_name) = strategies.iter().find_map(|(class_name, strategy)| {
+            strategy
+                .reconcile_interval()
+                .is_some_and(|interval| interval.is_zero())
+                .then_some(class_name)
+        }) {
+            return Err(KvSchedulerError::InitFailed(format!(
+                "admission strategy for policy class {class_name:?} returned a zero reconcile interval"
+            )));
+        }
+
         let resolved = profile
             .classes()
             .iter()
-            .map(|class| strategies.remove(&class.name))
-            .collect();
+            .map(|class| {
+                let strategy = strategies.remove(&class.name);
+                if let Some(config) = &class.queue_admission
+                    && strategy.is_none()
+                {
+                    return Err(KvSchedulerError::InitFailed(format!(
+                        "policy class {:?} configures admission strategy {:?}, but no implementation was registered",
+                        class.name, config.strategy
+                    )));
+                }
+                Ok(strategy)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         for class_name in strategies.keys() {
             tracing::warn!(%class_name, "Ignoring admission strategy for unknown policy class");
         }
-        Self {
+        Ok(Self {
             strategies: resolved,
             next_id: 0,
-        }
+        })
     }
 
     pub fn has_strategy(&self, class_index: usize) -> bool {
@@ -137,5 +163,100 @@ impl PolicyClassAdmissionController {
                 action,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::config::RouterQueuePolicy;
+    use crate::scheduling::policy_config::RouterPolicyConfig;
+
+    struct ReadyStrategy;
+
+    impl PolicyClassAdmissionStrategy for ReadyStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Ready(super::super::WorkerPlacement::Any)
+        }
+    }
+
+    struct ZeroIntervalStrategy;
+
+    impl PolicyClassAdmissionStrategy for ZeroIntervalStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Bypass
+        }
+
+        fn reconcile_interval(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+    }
+
+    fn configured_profile() -> PolicyProfile {
+        RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard
+    policy_family: standard
+    cache_bucket: all
+    quantum: 1
+  - name: agents
+    queue_admission:
+      type: test
+    quantum: 1
+"#,
+        )
+        .unwrap()
+        .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+    }
+
+    #[test]
+    fn rejects_configured_class_without_strategy() {
+        let error = PolicyClassAdmissionController::new(
+            &configured_profile(),
+            PolicyClassAdmissionStrategies::new(),
+        )
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
+            message.contains("agents") && message.contains("test")));
+    }
+
+    #[test]
+    fn rejects_zero_reconcile_interval() {
+        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert(
+            profile.default_class().name.clone(),
+            Box::new(ZeroIntervalStrategy),
+        );
+
+        let error = PolicyClassAdmissionController::new(&profile, strategies)
+            .err()
+            .unwrap();
+
+        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
+            message.contains("zero reconcile interval")));
+    }
+
+    #[test]
+    fn accepts_programmatic_strategy_without_config() {
+        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert(
+            profile.default_class().name.clone(),
+            Box::new(ReadyStrategy),
+        );
+
+        let controller = PolicyClassAdmissionController::new(&profile, strategies).unwrap();
+
+        assert!(controller.has_strategy(0));
     }
 }

@@ -153,7 +153,7 @@ where
                 worker_type,
                 watch_worker_configs,
                 admission_strategies,
-            ),
+            )?,
         );
 
         let metrics_scheduler = Arc::clone(&inner);
