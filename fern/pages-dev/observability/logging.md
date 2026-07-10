@@ -381,6 +381,13 @@ stderr only; it does not export payload records over OTLP.
 - When requests are cancelled or fail, the record is
   still emitted with `payload.response` omitted, so those cases remain
   inspectable. A hard process crash before emission can lose a record.
+- When `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` is set, allowlisted headers
+  are included only in `event_type=request_payload` records as
+  `payload.http_request_headers` (case-insensitive; omitted when no listed
+  header is present); other record types do not include HTTP headers. Listed
+  headers with empty or non-UTF-8 values are also omitted. These
+  payload records are emitted to every configured sink. Captured values are
+  unredacted, so avoid allowlisting credential-bearing headers.
 - Each `otel` sink record maps to one OTLP `LogRecord`: scope
   `dynamo.request_trace`, body `request_payload`, with attributes `schema`,
   `event_type`, `rid`, `endpoint`, `model`, `streaming`, `payload_complete`,
@@ -397,6 +404,7 @@ Payload-related request trace variables:
 | `DYN_REQUEST_TRACE_SINKS` | Comma-separated sinks: `file`, `stderr`, `nats`, `otel`. | `file` |
 | `DYN_REQUEST_TRACE_NATS_SUBJECT` | Subject used by the `nats` sink. | `dynamo.request_trace.v1` |
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. | `4194304` (4 MiB) |
+| `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | Comma/whitespace-separated allowlist of HTTP request header names to record in `payload.http_request_headers`, case-insensitive. Only listed headers are captured. Applies to every sink. | unset (none) |
 
 <Warning>
 Deprecated. `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`,
