@@ -281,10 +281,13 @@ python -m dynamo.profiler --config /path/to/dgdr-spec.yaml
 `go install` writes the binary to `GOBIN`, or to `$(go env GOPATH)/bin` when
 `GOBIN` is unset. Add that directory to `PATH` if needed. Alternatively, set
 `DYNAMO_DGD_APPLY_OVERRIDES_BIN` to the binary's absolute path. The profiler
-does not download the binary at runtime.
+does not download the binary at runtime. Runs without `overrides.dgd` do not
+require the helper.
 
 Use a binary from the same Dynamo release as the profiler. The profiler checks
 the binary protocol before applying an override and rejects incompatible versions.
+For supported DGD versions and merge behavior, see
+[Generated DGD Overrides](../../kubernetes/dgdr.md#generated-dgd-overrides).
 
 Registry credentials are namespace-scoped. The operator chart's
 `imagePullSecrets` pull the operator Pod only. A profiling Job that needs

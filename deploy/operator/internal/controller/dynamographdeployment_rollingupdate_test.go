@@ -1277,6 +1277,7 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 					UpdatedReplicas:   2,
 					ReadyReplicas:     ptr.To(int32(2)),
 					AvailableReplicas: ptr.To(int32(2)),
+					RuntimeNamespace:  "dynamo-newhash1",
 				},
 			},
 			oldWorkerStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
@@ -1287,6 +1288,7 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 					UpdatedReplicas:   0,
 					ReadyReplicas:     ptr.To(int32(1)),
 					AvailableReplicas: ptr.To(int32(1)),
+					RuntimeNamespace:  "dynamo-oldhash1",
 				},
 			},
 			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
@@ -1297,6 +1299,7 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 					UpdatedReplicas:   2, // Only new are "updated"
 					ReadyReplicas:     ptr.To(int32(3)),
 					AvailableReplicas: ptr.To(int32(3)),
+					RuntimeNamespace:  "dynamo-oldhash1",
 				},
 			},
 		},
@@ -1325,13 +1328,26 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 			componentStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{},
 			oldWorkerStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
 				"prefill": {
-					ComponentKind:  "Deployment",
-					ComponentNames: []string{"dgd-prefill-oldhash1"},
-					Replicas:       2,
-					ReadyReplicas:  ptr.To(int32(2)),
+					ComponentKind:     "Deployment",
+					ComponentNames:    []string{"dgd-prefill-oldhash1"},
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(2)),
+					RuntimeNamespace:  "dynamo-oldhash1",
 				},
 			},
-			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{},
+			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+				"prefill": {
+					ComponentKind:     "Deployment",
+					ComponentNames:    []string{"dgd-prefill-oldhash1"},
+					Replicas:          2,
+					UpdatedReplicas:   0,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(2)),
+					RuntimeNamespace:  "dynamo-oldhash1",
+				},
+			},
 		},
 		{
 			name: "handles nil ReadyReplicas and AvailableReplicas on old",
@@ -1427,6 +1443,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 				Namespace: "default",
 				Labels: map[string]string{
 					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoNamespace:           "base",
 					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
 				},
 			},
@@ -1439,11 +1456,12 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 			},
 			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
 				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-					ComponentKind:   "Deployment",
-					ComponentNames:  []string{"test-dgd-prefill-oldhash1"},
-					Replicas:        1,
-					UpdatedReplicas: 0,
-					ReadyReplicas:   ptr.To(int32(1)),
+					ComponentKind:    "Deployment",
+					ComponentNames:   []string{"test-dgd-prefill-oldhash1"},
+					RuntimeNamespace: "base-oldhash1",
+					Replicas:         1,
+					UpdatedReplicas:  0,
+					ReadyReplicas:    ptr.To(int32(1)),
 				},
 			},
 		})
@@ -1464,6 +1482,102 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		assert.Equal(t, []string{"test-dgd-prefill-oldhash1"}, statuses["prefill"].ComponentNames)
 		assert.Equal(t, int32(1), statuses["prefill"].Replicas)
 		assert.Equal(t, ptr.To(int32(1)), statuses["prefill"].ReadyReplicas)
+		assert.Equal(t, "base-oldhash1", statuses["prefill"].RuntimeNamespace)
+	})
+
+	t.Run("multiple old generations selects newest nonzero target runtime namespace", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {
+				ComponentType: consts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(3)),
+			},
+		})
+
+		now := metav1.Now()
+		earlier := metav1.NewTime(now.Add(-1 * 60 * 1e9))
+
+		oldestDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "test-dgd-worker-hashaaaa",
+				Namespace:         "default",
+				CreationTimestamp: earlier,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoWorkerHash:          "hashaaaa",
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeWorker,
+					ServiceName:   "worker",
+					Replicas:      ptr.To(int32(0)),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+					ComponentKind:    "Deployment",
+					ComponentNames:   []string{"test-dgd-worker-hashaaaa"},
+					RuntimeNamespace: "base-hashaaaa",
+					Replicas:         0,
+					ReadyReplicas:    ptr.To(int32(0)),
+				},
+			},
+		})
+
+		newerOldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "test-dgd-worker-hashbbbb",
+				Namespace:         "default",
+				CreationTimestamp: now,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoNamespace:           "base",
+					consts.KubeLabelDynamoWorkerHash:          "hashbbbb",
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeWorker,
+					ServiceName:   "worker",
+					Replicas:      ptr.To(int32(2)),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+					ComponentKind:  "Deployment",
+					ComponentNames: []string{"test-dgd-worker-hashbbbb"},
+					Replicas:       2,
+					ReadyReplicas:  ptr.To(int32(2)),
+				},
+			},
+		})
+
+		r := createTestReconcilerWithStatus(dgd, withObjects(oldestDCD, newerOldDCD))
+		ctx := context.Background()
+
+		rollingUpdateCtx := dynamo.RollingUpdateContext{
+			NewWorkerHash:                      "hashcccc",
+			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 2},
+			OldWorkerReplicaTargetsByDCD: map[string]int32{
+				"test-dgd-worker-hashaaaa": 0,
+				"test-dgd-worker-hashbbbb": 2,
+			},
+		}
+
+		statuses, err := r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+
+		assert.Equal(t, int32(2), statuses["worker"].Replicas)
+		assert.Equal(t, ptr.To(int32(2)), statuses["worker"].ReadyReplicas)
+		assert.Equal(t, "base-hashbbbb", statuses["worker"].RuntimeNamespace)
+
+		rollingUpdateCtx.OldWorkerReplicaTargetsByDCD = map[string]int32{
+			"test-dgd-worker-hashaaaa": 0,
+			"test-dgd-worker-hashbbbb": 0,
+		}
+		statuses, err = r.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
+		require.NoError(t, err)
+		assert.Equal(t, "base-hashbbbb", statuses["worker"].RuntimeNamespace)
 	})
 
 	t.Run("old DCD not found - skips gracefully", func(t *testing.T) {
