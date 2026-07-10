@@ -38,9 +38,11 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 # driver/runtime, whose allocations vLLM's accounting doesn't track. The profiler
 # path supplies its own --gpu-memory-utilization 0.01 via $GPU_MEM_ARGS.
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+export DYN_FORWARDPASS_METRIC_PORT="${DYN_FORWARDPASS_METRIC_PORT:-$(allocate_free_port)}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + LMCache + Multiproc (1 GPU)" "$MODEL" "$HTTP_PORT"
+echo "Forward-pass metrics port: ${DYN_FORWARDPASS_METRIC_PORT}"
 
 python -m dynamo.frontend &
 
