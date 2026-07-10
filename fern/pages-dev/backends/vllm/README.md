@@ -53,7 +53,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | Feature | Status | Notes |
 |---------|--------|-------|
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ | Prefill/decode separation with NIXL KV transfer |
-| [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
+| [**KV-Aware Routing**](../../components/router/README.md) | ✅ | Requires explicit KV event publishing on workers for event-driven cache state |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
@@ -64,6 +64,29 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
 | [**LoRA**](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/lora/README.md) | ✅ | Dynamic loading/unloading from S3-compatible storage |
 | **GB200 Support** | ✅ | Container functional on main |
+
+## KV Routing Requirements
+
+<Info>
+Starting the frontend with `--router-mode kv` does not enable KV event
+publishing on vLLM workers. For event-driven cache-aware routing, enable
+publishing on every aggregated or prefill worker whose cache state the router
+should track:
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --enable-prefix-caching \
+  --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+```
+
+`endpoint` is the base ZMQ port, and vLLM offsets it by data-parallel rank.
+For worker processes that share a host or network namespace, reserve one port
+per rank and choose base ports whose resulting ranges do not overlap. If
+workers will not publish events, start the frontend with
+`--no-router-kv-events` for approximate cache prediction or `--load-aware` for
+load-only routing.
+</Info>
 
 ## Quick Start
 
