@@ -90,6 +90,7 @@ import uuid
 from collections import deque
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from itertools import count
 from typing import TYPE_CHECKING, Literal
 
@@ -111,7 +112,6 @@ from dynamo.common.forward_pass_metrics import (
     encode,
 )
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.constants import MAX_BENCHMARK_GRID_POINTS
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -126,6 +126,10 @@ DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
 ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
 ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
+
+
+def _utc_now_rfc3339() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
@@ -1271,6 +1275,10 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_pending_seed_salts: list[str] | None = None
         self._bench_grid_error: str | None = None
         self._bench_grid_digest: str | None = None
+        self._bench_started_at: str | None = None
+        self._bench_completed_at: str | None = None
+        self._bench_start_monotonic: float | None = None
+        self._bench_elapsed_seconds: float | None = None
         self._bench_feasible_max_decode_batch_size = 0
         self._bench_sync_pending = False
         self._bench_point_deadline = 0.0
@@ -1347,36 +1355,6 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_missing_phases.append("decode")
                 logger.warning("Benchmark decode phase generated no points")
         self._bench_expected_points = len(self._bench_grid)
-        if self._bench_expected_points > MAX_BENCHMARK_GRID_POINTS:
-            prefill_points = [
-                point for point in self._bench_grid if point.point_type == "prefill"
-            ]
-            decode_points = [
-                point for point in self._bench_grid if point.point_type == "decode"
-            ]
-            dimensions = (
-                "prefill("
-                f"P={len({p.total_prefill_tokens for p in prefill_points})}, "
-                f"Rp={len({p.batch_size for p in prefill_points})}, "
-                f"Kp={len({p.total_kv_read_tokens for p in prefill_points})}, "
-                f"points={len(prefill_points)}); "
-                "decode("
-                f"D={len({p.batch_size for p in decode_points})}, "
-                f"Kd={len({p.total_kv_read_tokens for p in decode_points})}, "
-                f"points={len(decode_points)})"
-            )
-            self._bench_grid_error = (
-                f"benchmark grid contains {self._bench_expected_points} points; "
-                f"maximum is {MAX_BENCHMARK_GRID_POINTS}; {dimensions}. "
-                "Reduce the configured engine limits, model length, KV-cache "
-                "capacity, or CUDA graph capture set. Sampling points are fixed "
-                "and are never dropped automatically."
-            )
-            logger.error(self._bench_grid_error)
-            self._bench_grid.clear()
-            self._bench_phase = _BenchPhase.DONE
-            return
-
         for benchmark_id, point in enumerate(self._bench_grid, start=1):
             point.benchmark_id = benchmark_id
         grid_payload = json.dumps(
@@ -2150,6 +2128,21 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- State machine --------------------------------------------------
 
+    def _bench_start_timing(self) -> None:
+        if getattr(self, "_bench_start_monotonic", None) is not None:
+            return
+        self._bench_started_at = _utc_now_rfc3339()
+        self._bench_start_monotonic = time.monotonic()
+
+    def _bench_finish_timing(self) -> None:
+        if getattr(self, "_bench_elapsed_seconds", None) is not None:
+            return
+        self._bench_start_timing()
+        start = self._bench_start_monotonic
+        assert start is not None
+        self._bench_elapsed_seconds = max(0.0, time.monotonic() - start)
+        self._bench_completed_at = _utc_now_rfc3339()
+
     def _bench_step(self) -> SchedulerOutput | None:
         """Advance the benchmark state machine.
 
@@ -2157,6 +2150,7 @@ class InstrumentedScheduler(AsyncScheduler):
         ``None`` when normal scheduling should handle the current step
         (prefill / warmup / cleanup cycles).
         """
+        self._bench_start_timing()
         self._bench_build_grid()
 
         if self._bench_phase == _BenchPhase.WARMUP:
@@ -2166,6 +2160,7 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._bench_phase == _BenchPhase.DECODE_SWEEP:
             return self._bench_step_decode()
         if self._bench_phase == _BenchPhase.DONE:
+            self._bench_finish_timing()
             self._bench_write_results()
             self._bench_deactivate()
             logger.info("Benchmark complete")
@@ -2511,12 +2506,22 @@ class InstrumentedScheduler(AsyncScheduler):
     # -- Results output -------------------------------------------------
 
     def _bench_write_results(self) -> None:
+        self._bench_finish_timing()
         completed_points = len(self._bench_results)
         skipped_points = len(self._bench_skipped_points)
         missing_phases = list(getattr(self, "_bench_missing_phases", []))
         error = getattr(self, "_bench_grid_error", None)
         dp_size = getattr(self, "_bench_dp_size", 1)
         iteration_groups = list(getattr(self, "_bench_iteration_groups", []))
+        measured_iteration_seconds = sum(
+            float(group.get("wall_time", 0.0)) for group in iteration_groups
+        )
+        elapsed_seconds = float(self._bench_elapsed_seconds or 0.0)
+        timing_valid = (
+            bool(self._bench_started_at)
+            and bool(self._bench_completed_at)
+            and measured_iteration_seconds <= elapsed_seconds + 1e-12
+        )
         output = {
             "schema_version": 2,
             "artifact_type": "rank",
@@ -2526,9 +2531,17 @@ class InstrumentedScheduler(AsyncScheduler):
             and all(group.get("complete") for group in iteration_groups)
             and skipped_points == 0
             and not missing_phases
-            and error is None,
+            and error is None
+            and timing_valid,
+            "timing_valid": timing_valid,
             "run_id": getattr(self, "_bench_run_id", None),
             "grid_digest": getattr(self, "_bench_grid_digest", None),
+            "timing": {
+                "started_at": self._bench_started_at,
+                "completed_at": self._bench_completed_at,
+                "benchmark_elapsed_seconds": elapsed_seconds,
+                "measured_iteration_seconds": measured_iteration_seconds,
+            },
             "dp": {
                 "rank": getattr(self, "_fpm_dp_rank", 0),
                 "size": dp_size,

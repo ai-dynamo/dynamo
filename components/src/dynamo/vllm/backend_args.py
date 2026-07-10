@@ -17,11 +17,7 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
-from .constants import (
-    MAX_BENCHMARK_GRID_POINTS,
-    DisaggregationMode,
-    EmbeddingTransferMode,
-)
+from .constants import DisaggregationMode, EmbeddingTransferMode
 
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -233,8 +229,7 @@ class DynamoVllmArgGroup(ArgGroup):
                 "{capture size, capture size + 1} boundary and continue "
                 "geometrically to the engine limit. KV-read axes use complete "
                 "power-of-two block ladders plus their exact feasible maxima. "
-                "The resolved grid is deterministic and limited to "
-                f"{MAX_BENCHMARK_GRID_POINTS} points."
+                "The resolved grid is deterministic and is never downsampled."
             ),
         )
         add_argument(

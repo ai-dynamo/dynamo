@@ -1103,7 +1103,7 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
     assert stub._bench_missing_phases == expected_missing_phases
 
 
-def test_benchmark_grid_cap_reports_expanded_dimension_counts():
+def test_benchmark_grid_has_no_point_cap():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_config = SimpleNamespace(mode="prefill")
     stub._bench_grid = deque()
@@ -1122,9 +1122,9 @@ def test_benchmark_grid_cap_reports_expanded_dimension_counts():
     InstrumentedScheduler._bench_build_grid(stub)
 
     assert stub._bench_expected_points == 4097
-    assert stub._bench_phase == _BenchPhase.DONE
-    assert not stub._bench_grid
-    assert "prefill(P=4097, Rp=1, Kp=1, points=4097)" in stub._bench_grid_error
+    assert len(stub._bench_grid) == 4097
+    assert [point.benchmark_id for point in stub._bench_grid] == list(range(1, 4098))
+    assert stub._bench_grid_error is None
 
 
 def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
@@ -1752,6 +1752,50 @@ def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
         {"point": point.__dict__, "reason": "seed_cache_validation_failed"}
     ]
     assert output["missing_phases"] == []
+
+
+def test_benchmark_timing_excludes_engine_startup_and_sums_measured_groups(
+    monkeypatch, tmp_path
+):
+    timestamps = iter(["2026-07-10T12:00:00Z", "2026-07-10T12:00:09Z"])
+    monotonic_times = iter([100.0, 109.0])
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_utc_now_rfc3339", lambda: next(timestamps)
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module.time,
+        "monotonic",
+        lambda: next(monotonic_times),
+    )
+
+    output_path = tmp_path / "benchmark.json"
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(output_path=str(output_path))
+    stub._bench_start_monotonic = None
+    stub._bench_started_at = None
+    stub._bench_completed_at = None
+    stub._bench_elapsed_seconds = None
+    stub._bench_expected_points = 0
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+    stub._bench_missing_phases = ["prefill"]
+    stub._bench_iteration_groups = [{"wall_time": 1.25}, {"wall_time": 2.5}]
+    stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.max_model_len = 128
+    stub.block_size = 8
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
+
+    InstrumentedScheduler._bench_start_timing(stub)
+    InstrumentedScheduler._bench_write_results(stub)
+
+    output = json.loads(output_path.read_text())
+    assert output["timing"] == {
+        "started_at": "2026-07-10T12:00:00Z",
+        "completed_at": "2026-07-10T12:00:09Z",
+        "benchmark_elapsed_seconds": 9.0,
+        "measured_iteration_seconds": 3.75,
+    }
 
 
 def test_benchmark_output_marks_requested_empty_phase_invalid(tmp_path):

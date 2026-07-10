@@ -7,6 +7,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import os
 import time as _time
 from collections.abc import Awaitable, Callable
@@ -172,6 +173,11 @@ def _merge_benchmark_rank_results(
             f"Self-benchmark ids are not a contiguous 1-based sequence: {expected_ids}"
         )
 
+    measured_iteration_seconds = sum(
+        float(group.get("wall_time", 0.0)) for group in reference_groups
+    )
+    rank_timings: list[tuple[int, dict]] = []
+
     for dp_rank, path, data in rank_data:
         if data.get("run_id") != run_id:
             raise RuntimeError(
@@ -198,6 +204,45 @@ def _merge_benchmark_rank_results(
             raise RuntimeError(
                 f"Self-benchmark synchronized iteration groups differ at {path}"
             )
+
+        timing = data.get("timing")
+        if not isinstance(timing, dict):
+            raise RuntimeError(f"Self-benchmark rank {dp_rank} is missing timing")
+        started_at = timing.get("started_at")
+        completed_at = timing.get("completed_at")
+        elapsed_seconds = timing.get("benchmark_elapsed_seconds")
+        measured_seconds = timing.get("measured_iteration_seconds")
+        if not isinstance(started_at, str) or not isinstance(completed_at, str):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has invalid timing timestamps"
+            )
+        if (
+            not isinstance(elapsed_seconds, (int, float))
+            or not math.isfinite(elapsed_seconds)
+            or elapsed_seconds < 0
+        ):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} has invalid elapsed timing"
+            )
+        if (
+            not isinstance(measured_seconds, (int, float))
+            or not math.isfinite(measured_seconds)
+            or not math.isclose(
+                measured_seconds,
+                measured_iteration_seconds,
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            )
+        ):
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} measured timing does not match "
+                "the synchronized iteration groups"
+            )
+        if measured_seconds > elapsed_seconds + 1e-12:
+            raise RuntimeError(
+                f"Self-benchmark rank {dp_rank} measured timing exceeds elapsed timing"
+            )
+        rank_timings.append((dp_rank, timing))
 
         results_by_id: dict[int, dict] = {}
         for result in data.get("results", []):
@@ -271,6 +316,19 @@ def _merge_benchmark_rank_results(
     merged["merged_output_path"] = str(merged_path)
     merged["results"] = flattened_results
     merged["iteration_groups"] = copy.deepcopy(reference_groups)
+    _, slowest_timing = max(
+        rank_timings,
+        key=lambda item: float(item[1]["benchmark_elapsed_seconds"]),
+    )
+    merged["timing"] = copy.deepcopy(slowest_timing)
+    merged["timing"]["benchmark_elapsed_seconds"] = max(
+        float(timing["benchmark_elapsed_seconds"]) for _, timing in rank_timings
+    )
+    merged["timing"]["measured_iteration_seconds"] = measured_iteration_seconds
+    merged["timing"]["rank_benchmark_elapsed_seconds"] = {
+        str(rank): float(timing["benchmark_elapsed_seconds"])
+        for rank, timing in rank_timings
+    }
     rank_point_count = len(expected_ids) * global_size
     merged["coverage"] = {
         "expected_points": rank_point_count,

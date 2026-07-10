@@ -104,6 +104,12 @@ async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_p
             "valid": True,
             "run_id": "run-1",
             "grid_digest": "grid-1",
+            "timing": {
+                "started_at": f"2026-07-10T12:00:0{dp_rank}Z",
+                "completed_at": f"2026-07-10T12:00:1{dp_rank}Z",
+                "benchmark_elapsed_seconds": 10.0 + dp_rank,
+                "measured_iteration_seconds": 0.02,
+            },
             "dp": {"rank": dp_rank, "size": 2},
             "coverage": {
                 "expected_points": 1,
@@ -140,6 +146,13 @@ async def test_wait_and_load_benchmark_aggregates_dp_coverage(monkeypatch, tmp_p
         "expected_points": 2,
         "completed_points": 2,
         "skipped_points": 0,
+    }
+    assert merged["timing"] == {
+        "started_at": "2026-07-10T12:00:01Z",
+        "completed_at": "2026-07-10T12:00:11Z",
+        "benchmark_elapsed_seconds": 11.0,
+        "measured_iteration_seconds": 0.02,
+        "rank_benchmark_elapsed_seconds": {"0": 10.0, "1": 11.0},
     }
     assert [result["point"]["dp_rank"] for result in merged["results"]] == [0, 1]
     assert merged["iteration_groups"] == [
@@ -196,6 +209,12 @@ async def test_wait_and_load_benchmark_external_dp_keeps_global_group(
                 "valid": True,
                 "run_id": "run-1",
                 "grid_digest": "grid-1",
+                "timing": {
+                    "started_at": "2026-07-10T12:00:00Z",
+                    "completed_at": "2026-07-10T12:00:10Z",
+                    "benchmark_elapsed_seconds": 10.0,
+                    "measured_iteration_seconds": 0.02,
+                },
                 "dp": {"rank": 0, "size": 2},
                 "coverage": {
                     "expected_points": 1,
