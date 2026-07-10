@@ -784,11 +784,14 @@ impl SelectionCore {
 
         let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
 
-        // The explicit form (worker_id) wins and discards any cached selection
-        // for the id, so a later replay cannot book stale state.
+        // The explicit form (worker_id) wins. When it also carries a
+        // selection_id, discard that cached selection so a later replay cannot
+        // book stale state; without one there is nothing to discard.
         if let Some(worker_id) = req.worker_id {
-            let cached_id = req.selection_id.as_deref().unwrap_or(&req.reservation_id);
-            self.selection_cache.take(&key, cached_id, Instant::now());
+            if let Some(selection_id) = req.selection_id.as_deref() {
+                self.selection_cache
+                    .take(&key, selection_id, Instant::now());
+            }
             return self.reserve_explicit(key, worker_id, req).await;
         }
 

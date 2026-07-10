@@ -93,8 +93,9 @@ impl SelectionCache {
         self.insert_at(selection_id, selection, now, now);
     }
 
-    /// Re-insert a selection taken earlier, keeping its original TTL anchor
-    /// (`inserted_at`) so a failed-booking retry loop cannot extend its life.
+    /// Re-insert a selection taken earlier for a failed booking, keeping its
+    /// original TTL anchor so retries cannot extend its life. A newer select
+    /// for the same id wins, so this is a no-op when the id is already present.
     pub(super) fn reinsert(
         &self,
         selection_id: String,
@@ -102,7 +103,12 @@ impl SelectionCache {
         inserted_at: Instant,
         now: Instant,
     ) {
-        self.insert_at(selection_id, selection, inserted_at, now);
+        let cache_key = (selection.key.clone(), selection_id);
+        let mut state = self.state.lock();
+        if state.entries.contains_key(&cache_key) {
+            return;
+        }
+        self.insert_locked(&mut state, cache_key, selection, inserted_at, now);
     }
 
     /// `inserted_at` anchors the entry's TTL (equal to `now` for a fresh insert,
@@ -116,6 +122,17 @@ impl SelectionCache {
     ) {
         let cache_key = (selection.key.clone(), selection_id);
         let mut state = self.state.lock();
+        self.insert_locked(&mut state, cache_key, selection, inserted_at, now);
+    }
+
+    fn insert_locked(
+        &self,
+        state: &mut State,
+        cache_key: CacheKey,
+        selection: PendingSelection,
+        inserted_at: Instant,
+        now: Instant,
+    ) {
         // Sweep expired entries from the front (oldest by anchor).
         while let Some(oldest) = state.order.keys().next().copied() {
             if now.duration_since(oldest.0) <= self.ttl {
@@ -280,6 +297,32 @@ mod tests {
 
         let past_original_ttl = t0 + TTL + Duration::from_secs(1);
         assert!(cache.take(&key(), "req-1", past_original_ttl).is_none());
+    }
+
+    #[test]
+    fn reinsert_yields_to_newer_selection() {
+        let cache = cache();
+        let t = Instant::now();
+        cache.insert("req-1".to_string(), pending(1), t);
+        let (old, old_at) = cache.take(&key(), "req-1", t).expect("entry present");
+        // A newer select repopulates the id while the failed replay is in flight.
+        cache.insert(
+            "req-1".to_string(),
+            pending(2),
+            t + Duration::from_millis(1),
+        );
+        // The failed replay must not clobber the newer selection.
+        cache.reinsert(
+            "req-1".to_string(),
+            old,
+            old_at,
+            t + Duration::from_millis(2),
+        );
+
+        let (survivor, _) = cache
+            .take(&key(), "req-1", t + Duration::from_millis(3))
+            .expect("entry present");
+        assert_eq!(survivor.worker.worker_id, 2);
     }
 
     #[test]

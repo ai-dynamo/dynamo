@@ -876,7 +876,7 @@ async fn failed_cached_booking_is_retryable() {
 }
 
 #[tokio::test]
-async fn explicit_reservation_discards_cached_entry() {
+async fn explicit_reservation_discards_by_selection_id_only() {
     let app = app();
     assert_eq!(
         register_worker(app.clone(), None).await.status(),
@@ -909,7 +909,8 @@ async fn explicit_reservation_discards_cached_entry() {
     .await;
     assert_eq!(replay.status(), StatusCode::NOT_FOUND);
 
-    // Without selection_id, an explicit booking discards by reservation_id.
+    // Without a selection_id, an explicit booking leaves the cache alone: it
+    // does not delete a pending selection that happens to share reservation_id.
     let select_response = post(
         app.clone(),
         "/select",
@@ -930,7 +931,7 @@ async fn explicit_reservation_discards_cached_entry() {
         r#"{"model_name":"model","selection_id":"req-2","reservation_id":"req-2b"}"#,
     )
     .await;
-    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+    assert_eq!(replay.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]

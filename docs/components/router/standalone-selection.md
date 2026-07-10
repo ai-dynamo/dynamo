@@ -207,6 +207,10 @@ Content-Type: application/json
 }
 ```
 
+- **Id namespace**: `selection_id` is client-chosen and scoped per
+  `(model_name, routing_group)`; use a distinct id per in-flight select. A new
+  `select` reusing a pending id replaces it (latest wins), and an explicit
+  booking discards only the selection named by its own `selection_id`.
 - **Required id**: A reservation with neither `selection_id` nor `worker_id`
   is rejected with `400`.
 - **Single-use**: The first successful booking consumes the entry; a repeat
