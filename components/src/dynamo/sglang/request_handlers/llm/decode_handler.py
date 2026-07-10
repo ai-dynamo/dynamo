@@ -15,7 +15,10 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.sglang._compat import filter_supported_async_generate_kwargs
+from dynamo.sglang._compat import (
+    filter_supported_async_generate_kwargs,
+    require_reasoning_kwargs,
+)
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -342,7 +345,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
-        require_reasoning = request.get("require_reasoning", False)
         logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
 
@@ -388,8 +390,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 **decode_mm_kwargs,
                 sampling_params=sampling_params,
-                require_reasoning=require_reasoning,
                 stream=True,
+                **require_reasoning_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
@@ -457,9 +459,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 image_data=image_data,
                 video_data=video_data,
-                require_reasoning=require_reasoning,
                 sampling_params=sampling_params,
                 stream=True,
+                **require_reasoning_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,

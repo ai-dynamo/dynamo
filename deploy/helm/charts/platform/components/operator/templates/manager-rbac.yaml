@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+{{- $managerRoleFile := required "generated manager RBAC role is missing" (.Files.Get "files/manager-role.yaml") }}
+{{- $managerRole := $managerRoleFile | fromYaml }}
+# Helm selects a namespaced Role or cluster-wide ClusterRole for the generated rules.
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.namespaceRestriction.enabled }}
 kind: Role
@@ -26,50 +29,24 @@ metadata:
   labels:
   {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
-- apiGroups:
-  - ""
-  resources:
-  - configmaps
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
+{{- $managerRole.rules | toYaml | nindent 0 }}
+# WARNING: +kubebuilder:rbac markers are the default source for operator RBAC.
+# Add rules below only when they are inherently Helm-specific and cannot be
+# represented by markers. Audit them separately from controller reconciliation RBAC.
 - apiGroups:
   - ""
   resources:
   - persistentvolumeclaims
   verbs:
-  - create
-  - delete
-  - get
-  - list
   - patch
   - update
-  - watch
 - apiGroups:
   - ""
   resources:
   - secrets
   verbs:
-  - create
   - delete
-  - get
-  - list
   - patch
-  - update
-  - watch
-- apiGroups:
-  - discovery.k8s.io
-  resources:
-  - endpointslices
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - ""
   resources:
@@ -83,25 +60,8 @@ rules:
   resources:
   - serviceaccounts
   verbs:
-  - create
   - delete
-  - get
-  - list
   - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - services
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
@@ -127,192 +87,12 @@ rules:
   - update
   - watch
 - apiGroups:
-  - grove.io
-  resources:
-  - podcliquesets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - grove.io
-  resources:
-  - podcliques
-  - podcliquescalinggroups
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - grove.io
-  resources:
-  - podcliques/scale
-  - podcliquescalinggroups/scale
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - apps
-  resources:
-  - deployments
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - autoscaling
-  resources:
-  - horizontalpodautoscalers
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - batch
-  resources:
-  - jobs
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - events
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - ""
   resources:
   - pods
   verbs:
   - create
-  - delete
-  - deletecollection
-  - get
-  - list
-  - patch
   - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - pods/log
-  verbs:
-  - get
-- apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-{{- $serviceMesh := .Values.dynamo.serviceMesh | default dict }}
-{{- $hasServiceMesh := and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh }}
-{{- $serviceMeshProviderIstio := and $hasServiceMesh (eq ($serviceMesh.provider | default "istio") "istio") }}
-{{- if or .Values.istioVirtualServiceEnabled $serviceMeshProviderIstio }}
-- apiGroups:
-  - networking.istio.io
-  resources:
-  - destinationrules
-  - virtualservices
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-{{- end }}
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingressclasses
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - networking.k8s.io
-  resources:
-  - ingresses
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - resource.k8s.io
-  resources:
-  - resourceclaimtemplates
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - inference.networking.k8s.io
-  resources:
-  - inferencepools
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
 - apiGroups:
   - inference.networking.x-k8s.io
   resources:
@@ -326,12 +106,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints
-  - dynamocomponentdeployments
-  - dynamographdeploymentrequests
-  - dynamographdeployments
-  - dynamographdeploymentscalingadapters
-  - dynamomodels
   - dynamoworkermetadatas
   verbs:
   - create
@@ -341,41 +115,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamocheckpoints/finalizers
-  - dynamocomponentdeployments/finalizers
-  - dynamographdeploymentrequests/finalizers
-  - dynamographdeployments/finalizers
-  - dynamomodels/finalizers
-  - podsnapshots/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - nvidia.com
-  resources:
-  - podsnapshots
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamocheckpoints/status
-  - dynamocomponentdeployments/status
-  - dynamographdeploymentrequests/status
-  - dynamographdeployments/status
-  - dynamographdeploymentscalingadapters/status
-  - dynamomodels/status
-  - podsnapshots/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - nvidia.com
   resources:
@@ -403,68 +142,23 @@ rules:
   verbs:
   - create
   - delete
-  - get
-  - list
   - patch
   - update
-  - watch
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - rolebindings
   verbs:
-  - create
-  - delete
-  - get
-  - list
   - patch
-  - update
-  - watch
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - roles
   verbs:
-  - create
   - delete
-  - get
-  - list
   - patch
-  - update
-  - watch
-- apiGroups:
-  - leaderworkerset.x-k8s.io
-  resources:
-  - leaderworkersets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - scheduling.volcano.sh
-  resources:
-  - podgroups
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - apps
-  resources:
-  - daemonsets
-  verbs:
-  - get
-  - list
-  - watch
 ---
+# Helm binds the selected manager role kind to this release's controller ServiceAccount.
 apiVersion: rbac.authorization.k8s.io/v1
 {{- if .Values.namespaceRestriction.enabled }}
 kind: RoleBinding
@@ -494,12 +188,11 @@ subjects:
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
 ---
-# ClusterRole for Grove ClusterTopology access
-# This is always a ClusterRole since ClusterTopology resources are cluster-scoped
+# Helm keeps ClusterTopologyBinding access separate because a namespace-restricted Role cannot grant it.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopology-reader
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopologybinding-reader
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: dynamo-operator
@@ -509,17 +202,17 @@ rules:
 - apiGroups:
   - grove.io
   resources:
-  - clustertopologies
+  - clustertopologybindings
   verbs:
   - get
   - list
   - watch
 ---
-# ClusterRoleBinding for Grove ClusterTopology access
+# Helm binds the separate cluster-scoped ClusterTopologyBinding grant to the controller ServiceAccount.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopology-reader-binding
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopologybinding-reader-binding
   labels:
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: dynamo-operator
@@ -528,14 +221,13 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopology-reader
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-clustertopologybinding-reader
 subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
 ---
-# ClusterRole for kai-scheduler queue access
-# This is always a ClusterRole since Queue resources are cluster-scoped
+# Helm keeps Queue access separate because a namespace-restricted Role cannot grant it.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -554,7 +246,7 @@ rules:
   - get
   - list
 ---
-# ClusterRoleBinding for kai-scheduler queue access
+# Helm binds the separate cluster-scoped Queue grant to the controller ServiceAccount.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -573,8 +265,7 @@ subjects:
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
 ---
-# ClusterRole for DRA DeviceClass access
-# This is always a ClusterRole since DeviceClass resources are cluster-scoped
+# Helm keeps DeviceClass access separate because a namespace-restricted Role cannot grant it.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -594,7 +285,7 @@ rules:
   - list
   - watch
 ---
-# ClusterRoleBinding for DRA DeviceClass access
+# Helm binds the separate cluster-scoped DeviceClass grant to the controller ServiceAccount.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -613,9 +304,7 @@ subjects:
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
   namespace: '{{ .Release.Namespace }}'
 ---
-# ClusterRole for PodSnapshotContent access
-# This is always a ClusterRole since PodSnapshotContent resources are cluster-scoped,
-# so it must not be folded into the namespace-restricted Role above.
+# Helm keeps PodSnapshotContent access separate because a namespace-restricted Role cannot grant it.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -647,7 +336,7 @@ rules:
   - patch
   - update
 ---
-# ClusterRoleBinding for PodSnapshotContent access
+# Helm binds the separate cluster-scoped PodSnapshotContent grant to the controller ServiceAccount.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

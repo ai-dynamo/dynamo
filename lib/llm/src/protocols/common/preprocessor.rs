@@ -54,6 +54,14 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_name: Option<String>,
 
+    /// Cache namespace for request-scoped KV cache isolation.
+    #[serde(
+        default,
+        rename = "cache_salt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_namespace: Option<String>,
+
     /// Priority jump in seconds for queue ordering.
     /// A positive value decreases the effective arrival time, moving the request
     /// ahead in the scheduler queue.
@@ -212,11 +220,6 @@ pub struct PreprocessedRequest {
     #[serde(default)]
     pub annotations: Vec<String>,
 
-    /// Whether to require reasoning for the request
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub require_reasoning: Option<bool>,
-
     /// Routing hints for worker targeting (backend_instance_id, prefill/decode worker IDs, dp_rank)
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -263,6 +266,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Whether the backend should allow a reasoning phase before enforcing
+    /// guided output. SGLang consumes this as its per-request
+    /// `require_reasoning` engine argument.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_reasoning: bool,
 
     /// Router-specific parameters forwarded from `nvext.router`.
     /// Consumed by router implementations (e.g. the global router) and ignored
@@ -463,6 +473,36 @@ mod tests {
         assert!(back.is_probe);
     }
 
+    /// Covers the wire contract for the backend reasoning gate: old payloads
+    /// default to false, false is omitted, and true survives serialization.
+    #[test]
+    fn require_reasoning_serde_round_trip() {
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+
+        let normal = serde_json::to_value(&req).unwrap();
+        assert!(
+            !normal
+                .as_object()
+                .unwrap()
+                .contains_key("require_reasoning")
+        );
+        let back: PreprocessedRequest = serde_json::from_value(normal).unwrap();
+        assert!(!back.require_reasoning);
+
+        req.require_reasoning = true;
+        let guided = serde_json::to_value(&req).unwrap();
+        assert_eq!(guided["require_reasoning"], true);
+        let back: PreprocessedRequest = serde_json::from_value(guided).unwrap();
+        assert!(back.require_reasoning);
+    }
+
     /// Canary payloads carry only engine-relevant fields. All other required
     /// fields (`model`, `stop_conditions`, `sampling_options`, etc.) must
     /// pick up `serde(default)` so the runtime's `JsonProbeAdapter` can
@@ -530,5 +570,21 @@ mod tests {
             !json.as_object().unwrap().contains_key("encoder_result"),
             "encoder_result must be absent from wire when None; got {json}"
         );
+    }
+
+    #[test]
+    fn routing_hints_cache_namespace_serializes_as_cache_salt() {
+        let hints = RoutingHints {
+            cache_namespace: Some("tenant-a".to_string()),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&hints).unwrap();
+
+        assert_eq!(value["cache_salt"], "tenant-a");
+        assert!(value.get("cache_namespace").is_none());
+
+        let decoded: RoutingHints = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.cache_namespace.as_deref(), Some("tenant-a"));
     }
 }
