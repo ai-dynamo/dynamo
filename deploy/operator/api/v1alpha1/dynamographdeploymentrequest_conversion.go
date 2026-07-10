@@ -150,8 +150,8 @@ func restoreDGDRHubAnnotations(obj metav1.Object) (*v1beta1.DynamoGraphDeploymen
 	if raw, ok := getAnnFromObj(obj, legacyAnnDGDRProfilingJobName); ok && raw != "" {
 		if restoredStatus == nil {
 			restoredStatus = &v1beta1.DynamoGraphDeploymentRequestStatus{}
+			restoredStatus.ProfilingJobName = raw
 		}
-		restoredStatus.ProfilingJobName = raw
 	}
 	return restoredSpec, restoredStatus
 }
@@ -1199,24 +1199,6 @@ func dgdrAlphaRestoredStateMatchesLiveDGD(state DGDRState, deployment *Deploymen
 		return dgdName == ""
 	}
 	return deployment.Name == dgdName
-}
-
-// restoreDGDRDeploymentStatus ignores stale deployment-status overlays after hub-side status edits.
-func restoreDGDRDeploymentStatus(raw string, src *v1beta1.DynamoGraphDeploymentRequestStatus) (DeploymentStatus, DGDRState, bool) {
-	var payload dgdrDeploymentStatusAnnotation
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return DeploymentStatus{}, "", false
-	}
-	if !isValidDGDRRequestState(payload.RequestState) {
-		return DeploymentStatus{}, "", false
-	}
-	if payload.Name != src.DGDName {
-		return DeploymentStatus{}, "", false
-	}
-	if !dgdrAlphaStatusMatchesHubPhase(payload.RequestState, &payload.DeploymentStatus, src.Phase) {
-		return DeploymentStatus{}, "", false
-	}
-	return payload.DeploymentStatus, payload.RequestState, true
 }
 
 func isValidDGDRRequestState(state DGDRState) bool {

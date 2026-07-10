@@ -473,6 +473,27 @@ func TestDGDRReadsLegacyHubProfilingJobName(t *testing.T) {
 	}
 }
 
+func TestDGDRStructuralStatusTakesPrecedenceOverLegacyProfilingJobName(t *testing.T) {
+	structuralStatus, err := json.Marshal(v1beta1.DynamoGraphDeploymentRequestStatus{
+		ProfilingJobName: "structural-job",
+	})
+	if err != nil {
+		t.Fatalf("marshal structural status: %v", err)
+	}
+	metadata := &metav1.ObjectMeta{Annotations: map[string]string{
+		annDGDRStatus:                 string(structuralStatus),
+		legacyAnnDGDRProfilingJobName: "stale-legacy-job",
+	}}
+
+	_, restoredStatus := restoreDGDRHubAnnotations(metadata)
+	if restoredStatus == nil {
+		t.Fatal("structural status was not restored")
+	}
+	if got := restoredStatus.ProfilingJobName; got != "structural-job" {
+		t.Fatalf("ProfilingJobName = %q, want structural-job", got)
+	}
+}
+
 func TestDGDRLegacyProfilingConfigDoesNotOverrideLiveHubFields(t *testing.T) {
 	legacyBlob, err := json.Marshal(map[string]any{
 		"sla": map[string]any{
@@ -742,56 +763,4 @@ func mustDGDRJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal JSON: %v", err)
 	}
 	return data
-}
-
-func TestRestoreDGDRDeploymentStatusValidatesRequestState(t *testing.T) {
-	hubStatus := &v1beta1.DynamoGraphDeploymentRequestStatus{
-		Phase:   v1beta1.DGDRPhaseReady,
-		DGDName: "demo-dgd",
-	}
-	deploymentStatus := DeploymentStatus{
-		Name:    "demo-dgd",
-		Created: true,
-	}
-	validPayload, err := json.Marshal(dgdrDeploymentStatusAnnotation{
-		DeploymentStatus: deploymentStatus,
-		RequestState:     DGDRStateDeploymentDeleted,
-	})
-	if err != nil {
-		t.Fatalf("marshal valid payload: %v", err)
-	}
-	legacyPayload, err := json.Marshal(deploymentStatus)
-	if err != nil {
-		t.Fatalf("marshal legacy payload: %v", err)
-	}
-	invalidPayload, err := json.Marshal(dgdrDeploymentStatusAnnotation{
-		DeploymentStatus: deploymentStatus,
-		RequestState:     DGDRState("NotAState"),
-	})
-	if err != nil {
-		t.Fatalf("marshal invalid payload: %v", err)
-	}
-
-	t.Run("valid", func(t *testing.T) {
-		gotDeployment, gotState, ok := restoreDGDRDeploymentStatus(string(validPayload), hubStatus)
-		if !ok {
-			t.Fatal("restoreDGDRDeploymentStatus() rejected valid payload")
-		}
-		if gotState != DGDRStateDeploymentDeleted {
-			t.Fatalf("state = %q, want %q", gotState, DGDRStateDeploymentDeleted)
-		}
-		if diff := cmp.Diff(deploymentStatus, gotDeployment); diff != "" {
-			t.Fatalf("deployment mismatch (-want +got):\n%s", diff)
-		}
-	})
-	t.Run("legacy", func(t *testing.T) {
-		if _, _, ok := restoreDGDRDeploymentStatus(string(legacyPayload), hubStatus); ok {
-			t.Fatal("restoreDGDRDeploymentStatus() accepted legacy payload without requestState")
-		}
-	})
-	t.Run("invalid", func(t *testing.T) {
-		if _, _, ok := restoreDGDRDeploymentStatus(string(invalidPayload), hubStatus); ok {
-			t.Fatal("restoreDGDRDeploymentStatus() accepted invalid requestState")
-		}
-	})
 }
