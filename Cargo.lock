@@ -2514,6 +2514,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "slotmap",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
