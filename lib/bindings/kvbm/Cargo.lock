@@ -1558,6 +1558,7 @@ dependencies = [
  "seqlock",
  "serde",
  "serde_yaml",
+ "slotmap",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
