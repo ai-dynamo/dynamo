@@ -4181,7 +4181,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			},
 		},
 		{
-			name: "multiple services - all DCDs ready",
+			name: "multiple services - fresh v2 DCDs all ready",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -4327,7 +4327,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			},
 		},
 		{
-			name: "multiple services - some DCDs ready, some not ready",
+			name: "multiple services - fresh v2 DCDs partially ready",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -4592,6 +4592,24 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 				Spec: tt.dgdSpec,
 			})
+
+			// Full reconciliation initializes a fresh DGD with its v2 hash before calling this helper.
+			workerHash := betaDGDWorkersSpecHash(t, dgd)
+			dgd.Annotations = map[string]string{
+				commonconsts.AnnotationCurrentWorkerHash: workerHash,
+			}
+			for _, object := range tt.existingDCDs {
+				dcd, ok := object.(*v1beta1.DynamoComponentDeployment)
+				if !ok || !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+					continue
+				}
+				dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{
+						Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: workerHash},
+					},
+				}
+			}
 
 			var objects []client.Object
 			objects = append(objects, dgd)
