@@ -20,9 +20,24 @@ pub const DEFAULT_TEST_BLOCK_COUNT: usize = 10;
 
 /// Common test block sizes for parameterized testing
 ///
-/// These cover the full range of valid block sizes from 1 to 4096,
+/// These cover the full range of valid block sizes from 1 to
+/// [`MAX_LOGICAL_BLOCK_SIZE_TOKENS`],
 /// all being powers of 2 as required by the validation.
-pub const TEST_BLOCK_SIZES: &[usize] = &[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+pub const TEST_BLOCK_SIZES: &[usize] = &[
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    MAX_LOGICAL_BLOCK_SIZE_TOKENS,
+];
 
 /// Small set of block sizes for focused testing
 pub const COMMON_TEST_BLOCK_SIZES: &[usize] = &[1, 4, 16, 64];
