@@ -32,6 +32,7 @@ const (
 	maxRootfsPathLength     = 4096
 	maxDeletedFiles         = 1_000_000
 	maxRootfsEntries        = 1_000_000
+	maxSkippedSocketSamples = 10
 	maxXattrListBytes       = 64 << 10
 	maxXattrNames           = 1024
 	maxXattrNameLength      = 255
@@ -64,6 +65,8 @@ type rootfsStats struct {
 	entries             int64
 	bytes               int64
 	ignoredOverlayAttrs map[string]int
+	skippedSockets      int64
+	skippedSocketSample []string
 }
 
 type rootfsEntry struct {
@@ -125,8 +128,10 @@ func CaptureRootfsDiff(
 		exclusions,
 		bindMountDests,
 		true,
+		true,
 		allowSourceOverlayXattrs,
 	)
+	logSkippedSourceSockets(log, stats)
 	if err != nil {
 		return "", fmt.Errorf("scan overlay upperdir: %w", err)
 	}
@@ -272,6 +277,7 @@ func applyRootfsDiff(
 		types.OverlaySettings{},
 		nil,
 		false,
+		false,
 		rejectAllRootfsXattrs,
 	)
 	if err != nil {
@@ -341,6 +347,7 @@ func scanRootfs(
 	exclusions types.OverlaySettings,
 	bindMountDests []string,
 	skipWhiteouts bool,
+	skipSockets bool,
 	xattrPolicy rootfsXattrPolicy,
 ) ([]rootfsEntry, rootfsStats, []string, error) {
 	patterns, err := exclusionPatterns(exclusions, bindMountDests)
@@ -410,6 +417,16 @@ func scanRootfs(
 			return fmt.Errorf("rootfs entry %s crosses a mount boundary", rel)
 		}
 		mode := uint32(stat.Mode)
+		if shouldSkipRootfsEntry(mode, skipSockets) {
+			stats.skippedSockets++
+			stats.skippedSocketSample = append(stats.skippedSocketSample, rel)
+			sort.Strings(stats.skippedSocketSample)
+			if len(stats.skippedSocketSample) > maxSkippedSocketSamples {
+				stats.skippedSocketSample =
+					stats.skippedSocketSample[:maxSkippedSocketSamples]
+			}
+			return nil
+		}
 		if skipWhiteouts && strings.HasPrefix(dirEntry.Name(), ".wh.") {
 			if dirEntry.Name() == ".wh..wh..opq" {
 				return fmt.Errorf(
@@ -489,7 +506,7 @@ func scanRootfs(
 		return nil
 	})
 	if err != nil {
-		return nil, rootfsStats{}, nil, err
+		return nil, stats, nil, err
 	}
 	sort.Strings(deleted)
 	return entries, stats, deleted, nil
@@ -501,6 +518,7 @@ func scanRootfsFD(
 	exclusions types.OverlaySettings,
 	bindMountDests []string,
 	skipWhiteouts bool,
+	skipSockets bool,
 	xattrPolicy rootfsXattrPolicy,
 ) ([]rootfsEntry, rootfsStats, []string, error) {
 	return scanRootfs(
@@ -509,8 +527,13 @@ func scanRootfsFD(
 		exclusions,
 		bindMountDests,
 		skipWhiteouts,
+		skipSockets,
 		xattrPolicy,
 	)
+}
+
+func shouldSkipRootfsEntry(mode uint32, skipSockets bool) bool {
+	return skipSockets && mode&unix.S_IFMT == unix.S_IFSOCK
 }
 
 func rootfsFDPath(fd int) string {
@@ -678,6 +701,17 @@ func logIgnoredOverlayXattrs(log logr.Logger, counts map[string]int) {
 	log.Info(
 		"Ignored source overlay xattrs for benchmark-compatible rootfs capture",
 		"xattr_name_counts", names,
+	)
+}
+
+func logSkippedSourceSockets(log logr.Logger, stats rootfsStats) {
+	if stats.skippedSockets == 0 {
+		return
+	}
+	log.Info(
+		"Skipped source Unix-domain sockets for benchmark-compatible rootfs capture",
+		"skipped_socket_count", stats.skippedSockets,
+		"skipped_socket_path_sample", stats.skippedSocketSample,
 	)
 }
 

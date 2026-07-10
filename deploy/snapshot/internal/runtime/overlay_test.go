@@ -7,6 +7,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	"golang.org/x/sys/unix"
 
@@ -202,6 +205,7 @@ func TestCopyRootfsCancellationLoops(t *testing.T) {
 			types.OverlaySettings{},
 			nil,
 			false,
+			false,
 			rejectAllRootfsXattrs,
 		)
 		if err != nil {
@@ -235,6 +239,7 @@ func TestCopyRootfsCancellationLoops(t *testing.T) {
 			source,
 			types.OverlaySettings{},
 			nil,
+			false,
 			false,
 			rejectAllRootfsXattrs,
 		)
@@ -868,6 +873,203 @@ func TestCaptureRootfsRejectsUnsupportedEntries(t *testing.T) {
 	})
 }
 
+func TestCaptureRootfsSkipsSourceSockets(t *testing.T) {
+	source := t.TempDir()
+	checkpoint := t.TempDir()
+	target := t.TempDir()
+	writeTestFile(t, filepath.Join(source, "file"), []byte("data"))
+	if err := os.Mkdir(filepath.Join(source, "tmp"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	socketPaths := []string{
+		"tmp/z.sock",
+		"tmp/y.sock",
+		"tmp/x.sock",
+		"tmp/w.sock",
+		"tmp/v.sock",
+		"tmp/u.sock",
+		"tmp/t.sock",
+		"tmp/s.sock",
+		"tmp/r.sock",
+		"tmp/q.sock",
+		"tmp/p.sock",
+		"tmp-.sock",
+	}
+	for _, socketPath := range socketPaths {
+		createTestUnixSocket(t, filepath.Join(source, socketPath))
+	}
+
+	var socketLogs []testInfoLog
+	log := logr.New(testInfoLogSink(func(message string, keysAndValues ...any) {
+		if strings.Contains(message, "Skipped source Unix-domain sockets") {
+			socketLogs = append(socketLogs, testInfoLog{
+				message:       message,
+				keysAndValues: append([]any(nil), keysAndValues...),
+			})
+		}
+	}))
+	if _, err := CaptureRootfsDiff(
+		context.Background(),
+		source,
+		checkpoint,
+		types.OverlaySettings{},
+		nil,
+		2,
+		log,
+	); err != nil {
+		t.Fatalf("CaptureRootfsDiff: %v", err)
+	}
+	if len(socketLogs) != 1 {
+		t.Fatalf("socket skip logs = %d, want 1", len(socketLogs))
+	}
+	sortedPaths := append([]string(nil), socketPaths...)
+	slices.Sort(sortedPaths)
+	wantLog := testInfoLog{
+		message: "Skipped source Unix-domain sockets for benchmark-compatible rootfs capture",
+		keysAndValues: []any{
+			"skipped_socket_count", int64(len(socketPaths)),
+			"skipped_socket_path_sample", sortedPaths[:maxSkippedSocketSamples],
+		},
+	}
+	if !reflect.DeepEqual(socketLogs[0], wantLog) {
+		t.Fatalf("socket skip log = %#v, want %#v", socketLogs[0], wantLog)
+	}
+	for _, socketPath := range socketPaths {
+		_, err := os.Lstat(
+			filepath.Join(checkpoint, rootfsDirectoryFilename, socketPath),
+		)
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("socket %q present in artifact: %v", socketPath, err)
+		}
+	}
+	if err := ApplyRootfsDiff(
+		context.Background(),
+		checkpoint,
+		target,
+		2,
+		testr.New(t),
+	); err != nil {
+		t.Fatalf("ApplyRootfsDiff: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(target, "file"))
+	if err != nil || string(data) != "data" {
+		t.Fatalf("restored file = %q, %v", data, err)
+	}
+}
+
+func TestCaptureRootfsLogsSkippedSocketsBeforeScanFailure(t *testing.T) {
+	source := t.TempDir()
+	createTestUnixSocket(t, filepath.Join(source, "a.sock"))
+	if err := unix.Mkfifo(filepath.Join(source, "z.fifo"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var socketLogs []testInfoLog
+	log := logr.New(testInfoLogSink(func(message string, keysAndValues ...any) {
+		if strings.Contains(message, "Skipped source Unix-domain sockets") {
+			socketLogs = append(socketLogs, testInfoLog{
+				message:       message,
+				keysAndValues: append([]any(nil), keysAndValues...),
+			})
+		}
+	}))
+	_, err := CaptureRootfsDiff(
+		context.Background(),
+		source,
+		t.TempDir(),
+		types.OverlaySettings{},
+		nil,
+		1,
+		log,
+	)
+	if err == nil || !strings.Contains(err.Error(), "unsupported rootfs entry") {
+		t.Fatalf("CaptureRootfsDiff() error = %v", err)
+	}
+	if len(socketLogs) != 1 {
+		t.Fatalf("socket skip logs = %d, want 1", len(socketLogs))
+	}
+	wantValues := []any{
+		"skipped_socket_count", int64(1),
+		"skipped_socket_path_sample", []string{"a.sock"},
+	}
+	if !reflect.DeepEqual(socketLogs[0].keysAndValues, wantValues) {
+		t.Fatalf(
+			"socket skip log values = %#v, want %#v",
+			socketLogs[0].keysAndValues,
+			wantValues,
+		)
+	}
+}
+
+func TestApplyRootfsRejectsStoredSocket(t *testing.T) {
+	source := t.TempDir()
+	checkpoint := t.TempDir()
+	writeTestFile(t, filepath.Join(source, "file"), []byte("data"))
+	captureRootfsForTest(t, source, checkpoint)
+	createTestUnixSocket(
+		t,
+		filepath.Join(checkpoint, rootfsDirectoryFilename, "socket"),
+	)
+	err := ApplyRootfsDiff(
+		context.Background(),
+		checkpoint,
+		t.TempDir(),
+		1,
+		testr.New(t),
+	)
+	if err == nil || !strings.Contains(err.Error(), "unsupported rootfs entry socket") {
+		t.Fatalf("ApplyRootfsDiff() error = %v", err)
+	}
+}
+
+func TestShouldSkipRootfsEntrySpecialFiles(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        uint32
+		skipSockets bool
+		want        bool
+	}{
+		{
+			name:        "source socket",
+			mode:        unix.S_IFSOCK | 0755,
+			skipSockets: true,
+			want:        true,
+		},
+		{
+			name: "stored socket",
+			mode: unix.S_IFSOCK | 0755,
+		},
+		{
+			name:        "source fifo",
+			mode:        unix.S_IFIFO | 0755,
+			skipSockets: true,
+		},
+		{
+			name:        "source character device",
+			mode:        unix.S_IFCHR | 0755,
+			skipSockets: true,
+		},
+		{
+			name:        "source block device",
+			mode:        unix.S_IFBLK | 0755,
+			skipSockets: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldSkipRootfsEntry(
+				test.mode,
+				test.skipSockets,
+			); got != test.want {
+				t.Fatalf(
+					"shouldSkipRootfsEntry() = %v, want %v",
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
 func TestCaptureRootfsCancellation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1358,6 +1560,7 @@ func TestScanRootfsRejectsMountBoundary(t *testing.T) {
 		types.OverlaySettings{},
 		exclusions,
 		false,
+		false,
 		rejectAllRootfsXattrs,
 	)
 	if err == nil || !strings.Contains(err.Error(), "mount boundary") {
@@ -1385,6 +1588,45 @@ func writeTestFile(t *testing.T, path string, data []byte) {
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func createTestUnixSocket(t *testing.T, path string) {
+	t.Helper()
+	fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if err := unix.Bind(fd, &unix.SockaddrUnix{Name: path}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type testInfoLog struct {
+	message       string
+	keysAndValues []any
+}
+
+type testInfoLogSink func(string, ...any)
+
+func (testInfoLogSink) Init(logr.RuntimeInfo) {}
+
+func (testInfoLogSink) Enabled(int) bool {
+	return true
+}
+
+func (sink testInfoLogSink) Info(_ int, message string, keysAndValues ...any) {
+	sink(message, keysAndValues...)
+}
+
+func (testInfoLogSink) Error(error, string, ...any) {}
+
+func (sink testInfoLogSink) WithValues(...any) logr.LogSink {
+	return sink
+}
+
+func (sink testInfoLogSink) WithName(string) logr.LogSink {
+	return sink
 }
 
 func writeDeletedFiles(t *testing.T, checkpoint string, paths []string) {
