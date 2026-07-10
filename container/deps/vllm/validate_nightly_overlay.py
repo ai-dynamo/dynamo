@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 EXPECTED_BASE_COMMIT = "2c17d33f4291a55b447317640c81eb61077b1b00"
-EXPECTED_VLLM_HEAD = "ec308a7178bc77dbc90c0673309dac0eb4e2959d"
+EXPECTED_VLLM_HEAD = "40c177671946e3fa7c8544e14a68ec84afecf10c"
 EXPECTED_FLASHINFER_SHA = "f2f9646ec388d9f178b2fbda6ae0ec4246d8e7dc"
 EXPECTED_AMD64_DIGEST = (
     "sha256:1ebb205a272a55abb60b09ecbf2adc63831ef2377910afd527478de720788cd8"
@@ -31,7 +31,13 @@ OVERLAY_PATHS = (
     "vllm/distributed/device_communicators/cuda_communicator.py",
     "vllm/distributed/device_communicators/flashinfer_all_reduce.py",
     "vllm/distributed/parallel_state.py",
+    "vllm/envs.py",
+    "vllm/utils/mem_utils.py",
+    "vllm/v1/attention/backends/flashinfer.py",
+    "vllm/v1/engine/core.py",
+    "vllm/v1/worker/gpu/attn_utils.py",
     "vllm/v1/worker/gpu_model_runner.py",
+    "vllm/v1/worker/gpu_worker.py",
 )
 
 

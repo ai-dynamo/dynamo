@@ -21,11 +21,11 @@ on:
       vllm_git_ref:
         description: 'Exact vLLM overlay branch'
         type: string
-        default: 'schwinns/snapshot-gms-nightly-2c17d33f-fi0615-20260710'
+        default: 'schwinns/snapshot-gms-known-good-2c17d33-fi0615-20260710'
       vllm_git_sha:
         description: 'Exact vLLM overlay commit'
         type: string
-        default: 'ec308a7178bc77dbc90c0673309dac0eb4e2959d'
+        default: '40c177671946e3fa7c8544e14a68ec84afecf10c'
       flashinfer_git_url:
         description: 'Exact FlashInfer repository'
         type: string
@@ -44,7 +44,7 @@ on:
         options:
           - auto
           - python-overlay
-        default: auto
+        default: python-overlay
       vllm_runtime_base_image:
         description: 'Exact upstream vLLM runtime image'
         type: string
