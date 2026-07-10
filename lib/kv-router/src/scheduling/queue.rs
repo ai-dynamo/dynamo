@@ -690,7 +690,7 @@ impl<
             (class_index, Some(snapshot))
         };
 
-        if let Some(request_id) = request.mode.tracked_request_id()
+        if let Some(request_id) = request.mode.admission_request_id()
             && self.tracked_admissions.contains_key(request_id)
         {
             request.respond(Err(KvSchedulerError::BookingFailed(format!(
@@ -699,7 +699,8 @@ impl<
             return false;
         }
 
-        let mut admission = if request.mode.is_tracked() && self.admission.has_strategy(class_index)
+        let mut admission = if request.mode.admission_request_id().is_some()
+            && self.admission.has_strategy(class_index)
         {
             let allowed_worker_ids = request.allowed_worker_ids.clone();
             let pinned_worker = request.pinned_worker;
@@ -1970,6 +1971,22 @@ mod tests {
         (req, rx)
     }
 
+    fn make_admission_request(
+        request_id: &str,
+        isl_tokens: usize,
+    ) -> (
+        SchedulingRequest,
+        tokio::sync::oneshot::Receiver<
+            Result<SchedulingResponse, crate::scheduling::types::KvSchedulerError>,
+        >,
+    ) {
+        let (mut request, response) = make_request(request_id, isl_tokens);
+        request.mode = ScheduleMode::TrackedWithAdmission {
+            request_id: request_id.to_owned(),
+        };
+        (request, response)
+    }
+
     #[derive(Default)]
     struct GateState {
         deferred: Option<AdmissionId>,
@@ -2110,7 +2127,7 @@ policy_classes:
         let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReconcileGate {
             state: Arc::clone(&state),
         }));
-        let (mut request, response) = make_request("deferred", 64);
+        let (mut request, response) = make_admission_request("deferred", 64);
         request.policy_class = Some("agents".to_owned());
         request.session_id = Some("session-a".to_owned());
 
@@ -2160,7 +2177,7 @@ policy_classes:
         let (queue, _slots) = make_queue_with_admission_strategy(Box::new(ReconcileGate {
             state: Arc::clone(&state),
         }));
-        let (mut request, response) = make_request("cancelled", 64);
+        let (mut request, response) = make_admission_request("cancelled", 64);
         request.policy_class = Some("agents".to_owned());
         request.session_id = Some("session-a".to_owned());
 
@@ -2284,12 +2301,26 @@ policy_classes:
     }
 
     #[tokio::test]
+    async fn legacy_tracked_request_bypasses_admission() {
+        let state = Arc::new(StdMutex::new(GateState::default()));
+        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate { state }));
+        let (mut request, response) = make_request("legacy", 64);
+        request.policy_class = Some("agents".to_owned());
+
+        queue.enqueue(request).await;
+        let selected = response.await.unwrap().unwrap();
+
+        assert!(selected.request_progress.is_none());
+        slots.free(&"legacy".to_owned(), decay_now()).unwrap();
+    }
+
+    #[tokio::test]
     async fn bypassed_request_has_no_admission_lifecycle() {
         let events = Arc::new(AtomicUsize::new(0));
         let (queue, slots) = make_queue_with_admission_strategy(Box::new(BypassGate {
             events: Arc::clone(&events),
         }));
-        let (mut request, response) = make_request("bypassed", 64);
+        let (mut request, response) = make_admission_request("bypassed", 64);
         request.policy_class = Some("agents".to_owned());
         {
             queue.enqueue(request).await;
@@ -2353,12 +2384,12 @@ policy_classes:
     async fn lifecycle_action_drains_without_an_unrelated_update() {
         let (queue, slots) =
             make_queue_with_admission_strategy(Box::<FinishReleaseGate>::default());
-        let (mut first, first_response) = make_request("first-admitted", 64);
+        let (mut first, first_response) = make_admission_request("first-admitted", 64);
         first.policy_class = Some("agents".to_owned());
         queue.enqueue(first).await;
         first_response.await.unwrap().unwrap();
 
-        let (mut second, second_response) = make_request("second-deferred", 64);
+        let (mut second, second_response) = make_admission_request("second-deferred", 64);
         second.policy_class = Some("agents".to_owned());
         queue.enqueue(second).await;
         assert_eq!(queue.pending_count(), 1);
@@ -2428,12 +2459,12 @@ policy_classes:
             );
         }
 
-        let (mut pinned, pinned_response) = make_request("pinned-deferred", 64);
+        let (mut pinned, pinned_response) = make_admission_request("pinned-deferred", 64);
         pinned.policy_class = Some("agents".to_owned());
         pinned.pinned_worker = Some(WorkerWithDpRank::new(0, 0));
         queue.enqueue(pinned).await;
 
-        let (mut runnable, runnable_response) = make_request("runnable-shared", 64);
+        let (mut runnable, runnable_response) = make_admission_request("runnable-shared", 64);
         runnable.policy_class = Some("agents".to_owned());
         queue.enqueue(runnable).await;
         assert_eq!(queue.pending_count(), 2);
@@ -2475,7 +2506,7 @@ policy_classes:
         queue.enqueue(blocker).await;
         blocker_response.await.unwrap().unwrap();
 
-        let (mut cancelled, cancelled_response) = make_request("cancelled-ready", 64);
+        let (mut cancelled, cancelled_response) = make_admission_request("cancelled-ready", 64);
         cancelled.policy_class = Some("agents".to_owned());
         let cancellation = queue.cancellation_guard(Some("cancelled-ready")).unwrap();
         queue.enqueue(cancelled).await;
@@ -2498,7 +2529,7 @@ policy_classes:
         let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReconcileGate {
             state: Arc::clone(&state),
         }));
-        let (mut request, response) = make_request("backend-abort", 64);
+        let (mut request, response) = make_admission_request("backend-abort", 64);
         request.policy_class = Some("agents".to_owned());
 
         queue.enqueue(request).await;

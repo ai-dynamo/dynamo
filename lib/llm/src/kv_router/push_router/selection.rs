@@ -76,7 +76,7 @@ impl KvPushRouter {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
         let outcome = self
             .chooser
-            .find_best_match_details_with_policy_class(
+            .find_best_match_details_with_admission(
                 Some(args.context_id),
                 args.routing_parts.token_ids,
                 args.routing_parts.block_mm_infos,
