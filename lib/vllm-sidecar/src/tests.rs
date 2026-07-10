@@ -49,7 +49,10 @@ struct FakeConfig {
     tokens: u32,
     model_id: String,
     served_model_name: String,
+    reasoning_parser: String,
+    tool_call_parser: String,
     supports_lora: bool,
+    serve_prime_rl: bool,
     text_only_flush: bool,
     drain_error: bool,
 }
@@ -61,7 +64,10 @@ impl Default for FakeConfig {
             tokens: 4,
             model_id: "fake-model".to_string(),
             served_model_name: "fake-served".to_string(),
+            reasoning_parser: "deepseek_r1".to_string(),
+            tool_call_parser: "hermes".to_string(),
             supports_lora: false,
+            serve_prime_rl: true,
             text_only_flush: false,
             drain_error: false,
         }
@@ -342,8 +348,8 @@ impl OpenEngine for FakeOpenEngine {
             }),
             supports_lora: Some(self.cfg.supports_lora),
             supports_multimodal: Some(false),
-            reasoning_parser: String::new(),
-            tool_call_parser: String::new(),
+            reasoning_parser: self.cfg.reasoning_parser.clone(),
+            tool_call_parser: self.cfg.tool_call_parser.clone(),
         }))
     }
 
@@ -538,6 +544,7 @@ fn spawn_fake_engine(cfg: FakeConfig) -> FakeHandle {
     let svc_lora_name = last_lora_name.clone();
     let svc_adapters = adapters.clone();
     let svc_distributed_update = last_distributed_update.clone();
+    let serve_prime_rl = cfg.serve_prime_rl;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -558,19 +565,27 @@ fn spawn_fake_engine(cfg: FakeConfig) -> FakeHandle {
                 last_lora_name: svc_lora_name,
                 adapters: svc_adapters,
             };
-            tonic::transport::Server::builder()
-                .add_service(OpenEngineServer::new(svc))
-                .add_service(PrimeRlEngineServer::new(FakePrimeRlEngine {
-                    last_distributed_update: svc_distributed_update,
-                }))
-                .serve_with_incoming_shutdown(
-                    tokio_stream::wrappers::TcpListenerStream::new(listener),
-                    async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            if serve_prime_rl {
+                tonic::transport::Server::builder()
+                    .add_service(OpenEngineServer::new(svc))
+                    .add_service(PrimeRlEngineServer::new(FakePrimeRlEngine {
+                        last_distributed_update: svc_distributed_update,
+                    }))
+                    .serve_with_incoming_shutdown(incoming, async move {
                         let _ = shutdown_rx.await;
-                    },
-                )
-                .await
-                .expect("serve fake engine");
+                    })
+                    .await
+                    .expect("serve fake engine");
+            } else {
+                tonic::transport::Server::builder()
+                    .add_service(OpenEngineServer::new(svc))
+                    .serve_with_incoming_shutdown(incoming, async move {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("serve fake engine");
+            }
         });
     });
 
@@ -602,7 +617,11 @@ fn test_transport() -> TransportConfig {
 }
 
 fn engine_for(handle: &FakeHandle, mode: DisaggregationMode) -> VllmSidecarEngine {
-    VllmSidecarEngine::new(handle.endpoint.clone(), test_transport(), mode)
+    VllmSidecarEngine::new(handle.endpoint.clone(), test_transport(), mode, true)
+}
+
+fn engine_without_rl(handle: &FakeHandle, mode: DisaggregationMode) -> VllmSidecarEngine {
+    VllmSidecarEngine::new(handle.endpoint.clone(), test_transport(), mode, false)
 }
 
 fn fresh_ctx() -> Arc<dyn AsyncEngineContext> {
@@ -723,6 +742,36 @@ async fn start_advertises_discovered_metadata() {
     assert_eq!(llm.max_num_batched_tokens, Some(8192));
     assert!(llm.bootstrap_host.is_none());
 
+    engine.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn rl_enabled_start_rejects_openengine_without_prime_extension() {
+    let handle = spawn_fake_engine(FakeConfig {
+        serve_prime_rl: false,
+        ..FakeConfig::default()
+    });
+    let engine = engine_for(&handle, DisaggregationMode::Aggregated);
+
+    let error = engine
+        .start(0)
+        .await
+        .expect_err("RL-enabled sidecar must require PrimeRlEngine");
+
+    assert!(error.message().contains("prime_rl.engine.v1.PrimeRlEngine"));
+}
+
+#[tokio::test]
+async fn rl_disabled_start_accepts_canonical_openengine_only() {
+    let handle = spawn_fake_engine(FakeConfig {
+        serve_prime_rl: false,
+        ..FakeConfig::default()
+    });
+    let engine = engine_without_rl(&handle, DisaggregationMode::Aggregated);
+
+    let config = engine.start(0).await.expect("canonical OpenEngine start");
+
+    assert_eq!(config.model, "fake-model");
     engine.cleanup().await.unwrap();
 }
 
@@ -1482,6 +1531,8 @@ fn from_args_discovers_aggregated_role() {
     assert_eq!(config.disaggregation_mode, DisaggregationMode::Aggregated);
     assert_eq!(config.model_name, "fake-model");
     assert_eq!(config.served_model_name.as_deref(), Some("fake-served"));
+    assert_eq!(config.reasoning_parser.as_deref(), Some("deepseek_r1"));
+    assert_eq!(config.tool_call_parser.as_deref(), Some("hermes"));
 }
 
 #[test]

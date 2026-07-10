@@ -97,8 +97,8 @@ python -m dynamo.frontend &
 vllm-rs serve "$MODEL" \
     --port "$VLLM_RS_HTTP_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
-    --openengine-host "$OPENENGINE_HOST" \
-    --openengine-port "$OPENENGINE_PORT" \
+    --engine-rpc-host "$OPENENGINE_HOST" \
+    --engine-rpc-port "$OPENENGINE_PORT" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     "${EXTRA_ARGS[@]}" &

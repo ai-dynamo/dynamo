@@ -35,7 +35,7 @@ use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
     HEALTH_CHECK_KEY, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
     LlmRegistration, LoraAdapter, MultimodalData, PreprocessedRequest, PromptLogprobEntry,
-    StopReason, TopLogprob, WorkerConfig, usage,
+    StopReason, TopLogprob, WorkerConfig, rl_enabled, usage,
 };
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::stream::BoxStream;
@@ -65,6 +65,8 @@ pub struct VllmSidecarEngine {
     cancel: CancellationToken,
     /// Set when the out-of-process OpenEngine server can no longer serve.
     fatal: watch::Sender<Option<String>>,
+    /// Require and publish the Prime RL control-plane extension.
+    require_prime_rl: bool,
 }
 
 impl VllmSidecarEngine {
@@ -74,6 +76,7 @@ impl VllmSidecarEngine {
         endpoint: impl Into<String>,
         transport: TransportConfig,
         disaggregation_mode: DisaggregationMode,
+        require_prime_rl: bool,
     ) -> Self {
         let (fatal, _) = watch::channel(None);
         Self {
@@ -84,6 +87,7 @@ impl VllmSidecarEngine {
             served_model_name: OnceCell::new(),
             cancel: CancellationToken::new(),
             fatal,
+            require_prime_rl,
         }
     }
 
@@ -105,6 +109,10 @@ impl VllmSidecarEngine {
 
         let served_model_name = (!discovery.model.served_model_name.is_empty())
             .then(|| discovery.model.served_model_name.clone());
+        let reasoning_parser = (!discovery.model.reasoning_parser.is_empty())
+            .then(|| discovery.model.reasoning_parser.clone());
+        let tool_call_parser = (!discovery.model.tool_call_parser.is_empty())
+            .then(|| discovery.model.tool_call_parser.clone());
 
         tracing::info!(
             %endpoint,
@@ -122,10 +130,12 @@ impl VllmSidecarEngine {
             disaggregation_mode,
             model_name: discovery.model.model_id.clone(),
             served_model_name,
+            tool_call_parser,
+            reasoning_parser,
             ..Default::default()
         };
 
-        let engine = Self::new(endpoint, transport, disaggregation_mode);
+        let engine = Self::new(endpoint, transport, disaggregation_mode, rl_enabled());
         Ok((engine, config))
     }
 
@@ -180,6 +190,10 @@ impl LLMEngine for VllmSidecarEngine {
         let mut control = pool.control_client();
         self.await_ready(&mut control).await?;
         let discovery = client::discover(&mut control).await?;
+        if self.require_prime_rl {
+            client::verify_prime_rl(&mut pool.prime_rl_client(), self.transport.connect_timeout)
+                .await?;
+        }
 
         // The role is the engine's authoritative `kv_role`; it must not have
         // flipped between bootstrap and now (that would mean the worker
@@ -585,6 +599,9 @@ impl LLMEngine for VllmSidecarEngine {
         &self,
         endpoint: dynamo_runtime::component::Endpoint,
     ) -> Result<(), DynamoError> {
+        if !self.require_prime_rl {
+            return Ok(());
+        }
         let pool = self
             .pool
             .get()

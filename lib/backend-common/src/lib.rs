@@ -20,6 +20,7 @@ pub mod error;
 mod lora;
 pub mod metrics;
 mod publisher;
+mod rl;
 pub mod run;
 pub mod snapshot_publisher;
 pub mod telemetry;
@@ -46,3 +47,8 @@ pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
 pub use run::{run, run_raw};
 pub use snapshot_publisher::SnapshotPublisher;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};
+
+/// Whether this worker is configured to publish the Prime RL request-plane endpoint.
+pub fn rl_enabled() -> bool {
+    rl::enabled()
+}

@@ -21,6 +21,7 @@ use tonic::transport::{Channel, Endpoint};
 use crate::args::TransportConfig;
 use crate::proto as pb;
 use crate::proto::open_engine_client::OpenEngineClient;
+use crate::proto::prime_rl as prime_pb;
 use crate::proto::prime_rl::prime_rl_engine_client::PrimeRlEngineClient;
 
 /// Connected OpenEngine client over a tonic [`Channel`].
@@ -147,6 +148,42 @@ pub async fn discover(client: &mut Client) -> Result<Discovery, DynamoError> {
         .map_err(|s| status_to_dynamo("GetModelInfo", s))?
         .into_inner();
     Ok(Discovery { engine, model })
+}
+
+/// Verify the optional Prime RL control-plane extension before publishing any
+/// RL discovery or admin routes.
+pub async fn verify_prime_rl(
+    client: &mut PrimeRlClient,
+    request_timeout: std::time::Duration,
+) -> Result<(), DynamoError> {
+    let response = tokio::time::timeout(
+        request_timeout,
+        client.liveness_probe(prime_pb::LivenessProbeRequest {}),
+    )
+    .await
+    .map_err(|_| {
+        backend(
+            BackendError::ConnectionTimeout,
+            format!("PrimeRlEngine.LivenessProbe timed out after {request_timeout:?}"),
+        )
+    })?
+    .map_err(|status| {
+        if status.code() == tonic::Code::Unimplemented {
+            cannot_connect(
+                "OpenEngine server does not implement required prime_rl.engine.v1.PrimeRlEngine",
+            )
+        } else {
+            status_to_dynamo("PrimeRlEngine.LivenessProbe", status)
+        }
+    })?
+    .into_inner();
+    if response.status != "ok" {
+        return Err(cannot_connect(format!(
+            "PrimeRlEngine.LivenessProbe returned status {:?}: {}",
+            response.status, response.message
+        )));
+    }
+    Ok(())
 }
 
 const OPENENGINE_SCHEMA_REVISION: u32 = 1;

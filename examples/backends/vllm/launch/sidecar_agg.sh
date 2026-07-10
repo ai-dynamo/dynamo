@@ -12,7 +12,7 @@
 #
 # `vllm-rs serve` is the Rust vLLM frontend: it self-manages a headless Python
 # EngineCore subprocess and mounts the OpenEngine v1 gRPC service on
-# --openengine-port. The Dynamo sidecar (dynamo-vllm-sidecar) never imports
+# --engine-rpc-port. The Dynamo sidecar (dynamo-vllm-sidecar) never imports
 # vllm; it is given ONLY the OpenEngine endpoint and discovers the model, role,
 # parallelism, and KV config from the engine over OpenEngine RPCs.
 
@@ -71,8 +71,8 @@ python -m dynamo.frontend &
 vllm-rs serve "$MODEL" \
     --port "$VLLM_RS_HTTP_PORT" \
     --max-model-len "$MAX_MODEL_LEN" \
-    --openengine-host "$OPENENGINE_HOST" \
-    --openengine-port "$OPENENGINE_PORT" \
+    --engine-rpc-host "$OPENENGINE_HOST" \
+    --engine-rpc-port "$OPENENGINE_PORT" \
     --enforce-eager \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     "${EXTRA_ARGS[@]}" &

@@ -81,8 +81,8 @@ python -m dynamo.frontend &
 # two instances must have identical KV-cache configs or NIXL refuses the xfer).
 CUDA_VISIBLE_DEVICES=0 vllm-rs serve "$MODEL" \
     --port "$DECODE_HTTP_PORT" \
-    --openengine-host 127.0.0.1 \
-    --openengine-port "$DECODE_OE_PORT" \
+    --engine-rpc-host 127.0.0.1 \
+    --engine-rpc-port "$DECODE_OE_PORT" \
     --enforce-eager \
     --disable-hybrid-kv-cache-manager \
     --kv-transfer-config "$DECODE_KV_TRANSFER_CONFIG" &
@@ -100,8 +100,8 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 # fire through MultiConnector -> startup AssertionError without this flag.
 CUDA_VISIBLE_DEVICES=1 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 vllm-rs serve "$MODEL" \
     --port "$PREFILL_HTTP_PORT" \
-    --openengine-host 127.0.0.1 \
-    --openengine-port "$PREFILL_OE_PORT" \
+    --engine-rpc-host 127.0.0.1 \
+    --engine-rpc-port "$PREFILL_OE_PORT" \
     --enforce-eager \
     --disable-hybrid-kv-cache-manager \
     --kv-transfer-config "$PREFILL_KV_TRANSFER_CONFIG" \

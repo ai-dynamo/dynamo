@@ -44,9 +44,9 @@ spec:
               - vllm-rs
               - serve
               - Qwen/Qwen3-0.6B
-              - --openengine-host
+              - --engine-rpc-host
               - 127.0.0.1
-              - --openengine-port
+              - --engine-rpc-port
               - "50051"
               - --enforce-eager
               - --kv-transfer-config
@@ -81,9 +81,9 @@ spec:
               - vllm-rs
               - serve
               - Qwen/Qwen3-0.6B
-              - --openengine-host
+              - --engine-rpc-host
               - 127.0.0.1
-              - --openengine-port
+              - --engine-rpc-port
               - "50051"
               - --enforce-eager
               - --kv-transfer-config

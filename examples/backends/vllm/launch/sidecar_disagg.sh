@@ -54,8 +54,8 @@ python -m dynamo.frontend &
 # --enforce-eager is for quick startup; drop it for production.
 CUDA_VISIBLE_DEVICES=0 vllm-rs serve "$MODEL" \
     --port "$DECODE_HTTP_PORT" \
-    --openengine-host 127.0.0.1 \
-    --openengine-port "$DECODE_OE_PORT" \
+    --engine-rpc-host 127.0.0.1 \
+    --engine-rpc-port "$DECODE_OE_PORT" \
     --enforce-eager \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}' &
 
@@ -68,8 +68,8 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 # KV events published so KV-aware routing can observe the prefill cache.
 CUDA_VISIBLE_DEVICES=1 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 vllm-rs serve "$MODEL" \
     --port "$PREFILL_HTTP_PORT" \
-    --openengine-host 127.0.0.1 \
-    --openengine-port "$PREFILL_OE_PORT" \
+    --engine-rpc-host 127.0.0.1 \
+    --engine-rpc-port "$PREFILL_OE_PORT" \
     --enforce-eager \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &

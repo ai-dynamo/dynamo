@@ -858,7 +858,7 @@ impl Worker {
                 model_type,
                 self.config.model_input,
                 None,
-                Some(worker_type.clone()),
+                Some(worker_type),
                 needs.clone(),
             )
             .await
@@ -1006,6 +1006,29 @@ impl Worker {
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
+        let rl_endpoint = if crate::rl::enabled() {
+            match crate::rl::serve_endpoint(&endpoint) {
+                Ok(rl_endpoint) => Some(rl_endpoint),
+                Err(error) => {
+                    self.orchestrator_steps(&endpoint).await;
+                    return Err(err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("RL endpoint setup: {error}"),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let rl_endpoint_handle = rl_endpoint.as_ref().map(|rl| rl.endpoint.clone());
+        let rl_serve = async move {
+            match rl_endpoint {
+                Some(endpoint) => endpoint.future.await,
+                None => std::future::pending::<anyhow::Result<()>>().await,
+            }
+        };
+        tokio::pin!(rl_serve);
+
         let lora_serve = async move {
             match lora_serve_fut {
                 Some(future) => future.await,
@@ -1020,7 +1043,7 @@ impl Worker {
         };
         tokio::pin!(engine_watch);
 
-        let engine_watch_result = tokio::select! {
+        let terminal_result: Option<Result<(), DynamoError>> = tokio::select! {
             biased;
             result = &mut serve_fut => {
                 match result {
@@ -1031,30 +1054,44 @@ impl Worker {
                         tracing::info!(
                             "Endpoint completed gracefully; running shutdown orchestration"
                         );
+                        None
                     }
                     // Serve errored; cleanup_once in run() is the safety net.
                     Err(e) => {
-                        return Err(err(
+                        Some(Err(err(
                             ErrorType::Backend(BackendError::Unknown),
                             format!("serve: {e}"),
-                        ));
+                        )))
                     }
                 }
-                None
             }
             result = &mut lora_serve => {
                 match result {
                     Ok(()) => {
                         tracing::warn!("LoRA control endpoints completed unexpectedly");
+                        None
                     }
                     Err(error) => {
-                        return Err(err(
+                        Some(Err(err(
                             ErrorType::Backend(BackendError::Unknown),
                             format!("LoRA endpoint serve: {error}"),
-                        ));
+                        )))
                     }
                 }
-                None
+            }
+            result = &mut rl_serve => {
+                match result {
+                    Ok(()) => {
+                        tracing::warn!("RL discovery endpoint completed unexpectedly");
+                        None
+                    }
+                    Err(error) => {
+                        Some(Err(err(
+                            ErrorType::Backend(BackendError::Unknown),
+                            format!("RL endpoint serve: {error}"),
+                        )))
+                    }
+                }
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
@@ -1078,8 +1115,13 @@ impl Worker {
             }
         };
 
+        if let Some(rl_endpoint) = rl_endpoint_handle
+            && let Err(error) = rl_endpoint.unregister_endpoint_instance().await
+        {
+            tracing::warn!(%error, "RL discovery endpoint unregister failed");
+        }
         self.orchestrator_steps(&endpoint).await;
-        if let Some(result) = engine_watch_result {
+        if let Some(result) = terminal_result {
             result?;
         }
         Ok(())
