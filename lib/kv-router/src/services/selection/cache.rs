@@ -49,8 +49,8 @@ struct Entry {
     generation: u64,
 }
 
-/// Pending selections are scoped to their (model, tenant), like every other
-/// selection-service structure.
+/// Pending selections are scoped by `(SelectionKey, selection_id)`, where
+/// `SelectionKey` is the (model, routing_group) scope.
 type CacheKey = (SelectionKey, String);
 
 struct State {
@@ -163,16 +163,16 @@ impl SelectionCache {
         }
     }
 
-    /// Remove and return the pending selection for `(key, reservation_id)` with
+    /// Remove and return the pending selection for `(key, selection_id)` with
     /// its original TTL anchor (for a possible [`reinsert`](Self::reinsert)). An
     /// entry older than the TTL is treated as already gone (and dropped).
     pub(super) fn take(
         &self,
         key: &SelectionKey,
-        reservation_id: &str,
+        selection_id: &str,
         now: Instant,
     ) -> Option<(PendingSelection, Instant)> {
-        let cache_key = (key.clone(), reservation_id.to_string());
+        let cache_key = (key.clone(), selection_id.to_string());
         let entry = self.state.lock().entries.remove(&cache_key)?;
         if now.duration_since(entry.inserted_at) > self.ttl {
             return None;
