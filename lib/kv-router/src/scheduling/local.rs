@@ -278,7 +278,7 @@ where
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let mut cancellation_guard = self
             .queue
-            .cancellation_guard(request.mode.tracked_request_id());
+            .cancellation_guard(request.mode.admission_request_id());
         let track_prefill_tokens = request
             .router_config_override
             .as_ref()
@@ -1494,7 +1494,7 @@ mod tests {
         )
         .unwrap();
         scheduler
-            .schedule_request(request(ScheduleMode::Tracked {
+            .schedule_request(request(ScheduleMode::TrackedWithAdmission {
                 request_id: "req-1".to_owned(),
             }))
             .await
@@ -1555,7 +1555,7 @@ mod tests {
             let scheduler = Arc::clone(&scheduler);
             tokio::spawn(async move {
                 scheduler
-                    .schedule_request(request(ScheduleMode::Tracked {
+                    .schedule_request(request(ScheduleMode::TrackedWithAdmission {
                         request_id: "cancelled-pending".to_owned(),
                     }))
                     .await

@@ -528,12 +528,101 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_inner(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn find_best_match_details_with_admission(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_inner(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn find_best_match_details_with_policy_class_inner(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        use_admission: bool,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states {
+        let mode = if update_states && use_admission {
+            ScheduleMode::TrackedWithAdmission {
+                request_id: context_id.expect("validated above").to_string(),
+            }
+        } else if update_states {
             ScheduleMode::Tracked {
                 request_id: context_id.expect("validated above").to_string(),
             }
