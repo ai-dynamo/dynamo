@@ -10,7 +10,10 @@ use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use crate::protocols::BlockExtraInfo;
 
 use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
-use super::filter::{BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField};
+use super::filter::{
+    BlockStoredPositionSeven, BlockStoredTrailingField, KvCacheEventMetadata,
+    KvCacheEventTrailingField,
+};
 use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, RawKvEvent};
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
@@ -182,7 +185,15 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 // Position 5 was lora_id in older formats; consume and discard for compat.
                 let _lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
-                let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
+                let position_seven: Option<BlockStoredPositionSeven> =
+                    seq.next_element()?.unwrap_or(None);
+                let (lora_name, explicit_cache_namespace) = match position_seven {
+                    Some(BlockStoredPositionSeven::LoraName(lora_name)) => (Some(lora_name), None),
+                    Some(BlockStoredPositionSeven::Metadata(metadata)) => {
+                        (None, metadata.cache_salt)
+                    }
+                    None => (None, None),
+                };
                 let extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>> =
                     seq.next_element()?.unwrap_or(None);
                 let mut block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> = None;
@@ -204,8 +215,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
-                let cache_namespace =
-                    extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref());
+                let cache_namespace = explicit_cache_namespace.or_else(|| {
+                    extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
+                });
                 let block_mm_infos =
                     block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
                 let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);

@@ -47,6 +47,7 @@ from dynamo.sglang._compat import start_profile_compat
 from dynamo.sglang.args import Config
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_utils import cache_salt_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -1013,9 +1014,11 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             request, use_tokenizer=self.use_sglang_tokenizer
         )
 
-        return {
+        input_param = {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+        input_param.update(cache_salt_kwargs(self.engine, request))
+        return input_param
 
     @staticmethod
     def _get_guided_decoding_params(

@@ -39,7 +39,9 @@ from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
+from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.request_utils import cache_salt_kwargs, request_cache_salt
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 try:
@@ -66,6 +68,88 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_request_cache_salt_precedence_and_empty_fallback():
+    assert (
+        request_cache_salt(
+            {
+                "routing": {"cache_salt": "tenant-routing"},
+                "nvext": {"cache_salt": "tenant-top"},
+                "extra_args": {"nvext": {"cache_salt": "tenant-extra"}},
+            }
+        )
+        == "tenant-routing"
+    )
+    assert (
+        request_cache_salt(
+            {
+                "routing": {"cache_salt": ""},
+                "nvext": {"cache_salt": "tenant-top"},
+                "extra_args": {"nvext": {"cache_salt": "tenant-extra"}},
+            }
+        )
+        == "tenant-top"
+    )
+    assert (
+        request_cache_salt(
+            {
+                "routing": {"cache_salt": ""},
+                "nvext": {"cache_salt": ""},
+                "extra_args": {"nvext": {"cache_salt": "tenant-extra"}},
+            }
+        )
+        == "tenant-extra"
+    )
+    assert request_cache_salt({}) is None
+
+
+def test_cache_salt_kwargs_require_supported_engine():
+    class NewEngine:
+        async def async_generate(self, cache_salt=None):
+            pass
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None):
+            pass
+
+    request = {"routing": {"cache_salt": "tenant-a"}}
+    assert cache_salt_kwargs(NewEngine(), request) == {"cache_salt": "tenant-a"}
+    with pytest.raises(ValueError, match="Engine.async_generate accepts cache_salt"):
+        cache_salt_kwargs(OldEngine(), request)
+    assert cache_salt_kwargs(OldEngine(), {}) == {}
+
+
+def test_cache_salt_forwarded_by_worker_and_unified_input_paths():
+    class NewEngine:
+        async def async_generate(self, cache_salt=None):
+            pass
+
+    class InputParamManager:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is False
+            return request["token_ids"]
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {"cache_salt": "tenant-a"},
+    }
+    worker = SimpleNamespace(
+        input_param_manager=InputParamManager(),
+        use_sglang_tokenizer=False,
+        engine=NewEngine(),
+    )
+    unified = SimpleNamespace(
+        _input_param_manager=InputParamManager(),
+        _use_sglang_tokenizer=False,
+        engine=NewEngine(),
+    )
+
+    expected = {"input_ids": [1, 2, 3], "cache_salt": "tenant-a"}
+    assert BaseWorkerHandler._get_input_param(worker, request) == expected
+    assert sglang_llm_engine.SglangLLMEngine._get_input_param(unified, request) == (
+        expected
+    )
 
 
 def _make_sglang_config(**overrides):

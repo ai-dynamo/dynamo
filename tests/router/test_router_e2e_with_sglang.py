@@ -14,6 +14,7 @@ import pytest
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
     run_basic_router_test,
+    run_cache_salt_isolation_test,
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
     run_router_decisions_test,
@@ -279,6 +280,33 @@ def test_sglang_kv_router_basic(
         request_plane=request_plane,
         block_size=PAGE_SIZE,
         model_name=MODEL_NAME,
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
+@pytest.mark.pre_merge
+@pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.timeout(300)
+def test_sglang_cache_salt_isolation(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    run_cache_salt_isolation_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=MODEL_NAME,
+        block_size=PAGE_SIZE,
+        component_name="backend",
     )
 
 

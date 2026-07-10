@@ -52,6 +52,94 @@ fn test_deserialize_bigram_block_stored_sequence() {
 }
 
 #[derive(Serialize)]
+struct SglangBlockStoredMetadataFixture {
+    cache_salt: &'static str,
+}
+
+#[test]
+fn test_deserialize_sglang_cache_salt_metadata_at_position_seven() {
+    let raw_event = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Some(SglangBlockStoredMetadataFixture {
+            cache_salt: "tenant-a",
+        }),
+    );
+    let encoded = to_vec(&raw_event).unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    let RawKvEvent::BlockStored {
+        cache_namespace,
+        lora_name,
+        ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+    assert_eq!(lora_name, None);
+}
+
+#[test]
+fn test_sglang_metadata_takes_precedence_over_extra_keys_fallback() {
+    let raw_event = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Some(SglangBlockStoredMetadataFixture {
+            cache_salt: "tenant-a",
+        }),
+        Some(vec![Some(vec!["dynamo-cache-salt:tenant-b"])]),
+    );
+    let encoded = to_vec(&raw_event).unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
+fn test_deserialize_vllm_lora_name_at_position_seven() {
+    let raw_event = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Some("adapter-a"),
+    );
+    let encoded = to_vec(&raw_event).unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    let RawKvEvent::BlockStored {
+        cache_namespace,
+        lora_name,
+        ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace, None);
+    assert_eq!(lora_name.as_deref(), Some("adapter-a"));
+}
+
+#[derive(Serialize)]
 struct MapBlockStoredFixture {
     #[serde(rename = "type")]
     event_type: &'static str,
