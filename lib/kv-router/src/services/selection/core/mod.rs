@@ -33,7 +33,7 @@ use crate::services::indexer::recovery;
 use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
 
-use super::cache::{PendingSelection, SelectionCache};
+use super::cache::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::input::PromptRequest;
@@ -105,6 +105,7 @@ pub struct SelectionServiceConfig {
     pub replica_sync_port: Option<u16>,
     pub replica_sync_peers: Vec<String>,
     pub kv_router_config: crate::config::KvRouterConfig,
+    pub selection_cache: SelectionCacheConfig,
 }
 
 pub struct SelectionCore {
@@ -126,8 +127,16 @@ impl SelectionCore {
         kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
+        cache_config: SelectionCacheConfig,
     ) -> Self {
-        Self::new_inner(kv_router_config, indexer_threads, cancel_token, None, true)
+        Self::new_inner(
+            kv_router_config,
+            indexer_threads,
+            cancel_token,
+            None,
+            true,
+            cache_config,
+        )
     }
 
     pub(super) fn new_managed(
@@ -135,6 +144,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
+        cache_config: SelectionCacheConfig,
     ) -> Self {
         Self::new_inner(
             kv_router_config,
@@ -142,6 +152,7 @@ impl SelectionCore {
             cancel_token,
             replica_config,
             false,
+            cache_config,
         )
     }
 
@@ -151,6 +162,7 @@ impl SelectionCore {
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
         signal_indexer_ready: bool,
+        cache_config: SelectionCacheConfig,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
         let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
@@ -167,7 +179,7 @@ impl SelectionCore {
             kv_router_config,
             cancel_token,
             replica_config,
-            selection_cache: SelectionCache::default(),
+            selection_cache: SelectionCache::new(&cache_config),
         }
     }
 
@@ -1284,7 +1296,12 @@ mod tests {
     #[test]
     fn parent_cancel_cancels_core() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(test_config(false), 1, parent.clone());
+        let core = SelectionCore::new_local(
+            test_config(false),
+            1,
+            parent.clone(),
+            SelectionCacheConfig::default(),
+        );
 
         assert!(!core.cancel_token.is_cancelled());
         parent.cancel();
@@ -1294,7 +1311,12 @@ mod tests {
     #[test]
     fn shutdown_keeps_parent_alive() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(test_config(false), 1, parent.clone());
+        let core = SelectionCore::new_local(
+            test_config(false),
+            1,
+            parent.clone(),
+            SelectionCacheConfig::default(),
+        );
 
         core.shutdown();
 
@@ -1305,7 +1327,12 @@ mod tests {
     #[tokio::test]
     async fn shutdown_cancels_listeners() {
         let parent = CancellationToken::new();
-        let core = SelectionCore::new_local(test_config(true), 1, parent);
+        let core = SelectionCore::new_local(
+            test_config(true),
+            1,
+            parent,
+            SelectionCacheConfig::default(),
+        );
 
         let record = core
             .upsert_worker(worker_with_kv_events(1))
@@ -1320,7 +1347,12 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_moves_global_worker_id_between_routing_groups() {
-        let core = SelectionCore::new_local(test_config(true), 1, CancellationToken::new());
+        let core = SelectionCore::new_local(
+            test_config(true),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
         let mut group_a = worker_with_kv_events(1);
         group_a.routing_group = "group-a".to_string();
         core.upsert_worker(group_a).await.expect("group A upsert");
@@ -1369,7 +1401,12 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_reports_not_ready_and_rejects_new_work() {
-        let core = SelectionCore::new_local(test_config(false), 1, CancellationToken::new());
+        let core = SelectionCore::new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         assert!(core.ready().ready);
 
@@ -1435,6 +1472,7 @@ mod tests {
             config,
             1,
             CancellationToken::new(),
+            SelectionCacheConfig::default(),
         ));
 
         let record = core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -1468,6 +1506,7 @@ mod tests {
             config,
             1,
             CancellationToken::new(),
+            SelectionCacheConfig::default(),
         ));
 
         for worker_id in [1, 2] {

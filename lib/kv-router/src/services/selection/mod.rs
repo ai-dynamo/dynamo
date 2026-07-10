@@ -19,6 +19,7 @@ mod types;
 mod tests;
 
 pub use crate::services::common::replica_sync::ReplicaPeerError;
+pub use cache::SelectionCacheConfig;
 pub use core::{SelectionCore, SelectionServiceConfig};
 pub use error::SelectionError;
 pub use server::{AppState, run_server};

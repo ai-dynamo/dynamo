@@ -30,6 +30,32 @@ const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);
 /// reached when many selects go unclaimed (e.g. a crashed client).
 const SELECTION_CACHE_MAX_ENTRIES: usize = 4096;
 
+/// Upper bound on resident bytes (approximate: sequence hashes plus id
+/// strings). Bounds memory when prompts are large, since request bodies can
+/// reach several MiB and the entry cap alone does not.
+const SELECTION_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+/// Runtime-tunable bounds for the pending-selection cache.
+#[derive(Debug, Clone)]
+pub struct SelectionCacheConfig {
+    /// Lifetime of an unclaimed pending selection.
+    pub ttl: Duration,
+    /// Maximum number of resident pending selections.
+    pub max_entries: usize,
+    /// Approximate byte budget across resident pending selections.
+    pub max_bytes: usize,
+}
+
+impl Default for SelectionCacheConfig {
+    fn default() -> Self {
+        Self {
+            ttl: SELECTION_CACHE_TTL,
+            max_entries: SELECTION_CACHE_MAX_ENTRIES,
+            max_bytes: SELECTION_CACHE_MAX_BYTES,
+        }
+    }
+}
+
 /// Booking inputs captured by `select`, replayed by a later `create_reservation`
 /// without re-sending the prompt. Single-use, hence not `Clone`.
 pub(super) struct PendingSelection {
@@ -47,11 +73,22 @@ struct Entry {
     selection: PendingSelection,
     inserted_at: Instant,
     generation: u64,
+    bytes: usize,
 }
 
 /// Pending selections are scoped by `(SelectionKey, selection_id)`, where
 /// `SelectionKey` is the (model, routing_group) scope.
 type CacheKey = (SelectionKey, String);
+
+/// Approximate resident bytes of an entry: the variable-length sequence hashes
+/// plus the id and scope strings.
+fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
+    selection.sequence_hashes.len() * std::mem::size_of::<SequenceHash>()
+        + key.1.len()
+        + key.0.model_name.len()
+        + key.0.routing_group.len()
+        + selection.lora_name.as_deref().map_or(0, str::len)
+}
 
 struct State {
     entries: HashMap<CacheKey, Entry>,
@@ -59,30 +96,28 @@ struct State {
     /// eviction; `generation` breaks `Instant` ties.
     order: BTreeMap<(Instant, u64), CacheKey>,
     next_generation: u64,
+    total_bytes: usize,
 }
 
 /// Maps `(SelectionKey, selection_id)` -> the booking inputs computed during `select`.
 pub(super) struct SelectionCache {
     ttl: Duration,
     max_entries: usize,
+    max_bytes: usize,
     state: Mutex<State>,
 }
 
-impl Default for SelectionCache {
-    fn default() -> Self {
-        Self::new(SELECTION_CACHE_TTL, SELECTION_CACHE_MAX_ENTRIES)
-    }
-}
-
 impl SelectionCache {
-    fn new(ttl: Duration, max_entries: usize) -> Self {
+    pub(super) fn new(config: &SelectionCacheConfig) -> Self {
         Self {
-            ttl,
-            max_entries,
+            ttl: config.ttl,
+            max_entries: config.max_entries,
+            max_bytes: config.max_bytes,
             state: Mutex::new(State {
                 entries: HashMap::new(),
                 order: BTreeMap::new(),
                 next_generation: 0,
+                total_bytes: 0,
             }),
         }
     }
@@ -139,36 +174,40 @@ impl SelectionCache {
                 break;
             }
             if let Some(key) = state.order.remove(&oldest) {
-                state.entries.remove(&key);
+                if let Some(evicted) = state.entries.remove(&key) {
+                    state.total_bytes = state.total_bytes.saturating_sub(evicted.bytes);
+                }
             }
         }
-        // Replacing a live selection for this key drops its old order entry.
-        if let Some(old) = state
-            .entries
-            .get(&cache_key)
-            .map(|e| (e.inserted_at, e.generation))
-        {
-            state.order.remove(&old);
-        }
+        let bytes = entry_bytes(&cache_key, &selection);
         let generation = state.next_generation;
         state.next_generation += 1;
         state
             .order
             .insert((inserted_at, generation), cache_key.clone());
-        state.entries.insert(
+        state.total_bytes = state.total_bytes.saturating_add(bytes);
+        // Replacing a live selection drops its old order entry and byte count.
+        if let Some(old) = state.entries.insert(
             cache_key,
             Entry {
                 selection,
                 inserted_at,
                 generation,
+                bytes,
             },
-        );
-        // Enforce the cap by evicting the oldest entries.
-        while state.entries.len() > self.max_entries {
+        ) {
+            state.order.remove(&(old.inserted_at, old.generation));
+            state.total_bytes = state.total_bytes.saturating_sub(old.bytes);
+        }
+        // Evict oldest-first while over the entry cap or byte budget. An entry
+        // larger than the whole budget is evicted immediately (not cached).
+        while state.entries.len() > self.max_entries || state.total_bytes > self.max_bytes {
             let Some((_, key)) = state.order.pop_first() else {
                 break;
             };
-            state.entries.remove(&key);
+            if let Some(evicted) = state.entries.remove(&key) {
+                state.total_bytes = state.total_bytes.saturating_sub(evicted.bytes);
+            }
         }
     }
 
@@ -185,6 +224,7 @@ impl SelectionCache {
         let mut state = self.state.lock();
         let entry = state.entries.remove(&cache_key)?;
         state.order.remove(&(entry.inserted_at, entry.generation));
+        state.total_bytes = state.total_bytes.saturating_sub(entry.bytes);
         if now.duration_since(entry.inserted_at) > self.ttl {
             return None;
         }
@@ -209,8 +249,16 @@ mod tests {
     const TTL: Duration = Duration::from_secs(10);
     const CAP: usize = 2;
 
+    fn cache_with(max_entries: usize, max_bytes: usize) -> SelectionCache {
+        SelectionCache::new(&SelectionCacheConfig {
+            ttl: TTL,
+            max_entries,
+            max_bytes,
+        })
+    }
+
     fn cache() -> SelectionCache {
-        SelectionCache::new(TTL, CAP)
+        cache_with(CAP, usize::MAX)
     }
 
     fn key() -> SelectionKey {
@@ -283,6 +331,23 @@ mod tests {
     }
 
     #[test]
+    fn byte_budget_evicts_oldest() {
+        // Budget holds two entries; the entry cap is not the binding limit.
+        let per = entry_bytes(&(key(), "a".to_string()), &pending(1));
+        let cache = cache_with(1024, 2 * per);
+        let t = Instant::now();
+        cache.insert("a".to_string(), pending(1), t);
+        cache.insert("b".to_string(), pending(2), t + Duration::from_millis(1));
+        cache.insert("c".to_string(), pending(3), t + Duration::from_millis(2));
+
+        let now = t + Duration::from_millis(3);
+        assert_eq!(cache.len(), 2);
+        assert!(cache.take(&key(), "a", now).is_none());
+        assert!(cache.take(&key(), "b", now).is_some());
+        assert!(cache.take(&key(), "c", now).is_some());
+    }
+
+    #[test]
     fn reinsert_preserves_original_ttl_anchor() {
         let cache = cache();
         let t0 = Instant::now();
@@ -327,7 +392,7 @@ mod tests {
 
     #[test]
     fn order_index_bounded_by_live_entries_under_pinned_front() {
-        let cache = SelectionCache::new(TTL, 1024);
+        let cache = cache_with(1024, usize::MAX);
         let t = Instant::now();
         // One live entry pinned at the front, never taken.
         cache.insert("pinned".to_string(), pending(0), t);

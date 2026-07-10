@@ -29,8 +29,9 @@ use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionError, SelectionService as RustSelectionService,
-    SelectionServiceBuilder, SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
+    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
+    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
+    WorkerPatchRequest, WorkerRequest,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -354,6 +355,7 @@ where
             replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
             kv_router_config: kv_router_config_from_dynamo_env(),
+            selection_cache: RsSelectionCacheConfig::default(),
         }))
     }
 
@@ -386,6 +388,35 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
     })
 }
 
+/// Bounds for the in-flight selection cache. Each field defaults to the
+/// service default when omitted.
+#[cfg(feature = "select-service")]
+#[pyclass]
+#[derive(Clone, Default)]
+pub(crate) struct SelectionCacheConfig {
+    inner: RsSelectionCacheConfig,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl SelectionCacheConfig {
+    #[new]
+    #[pyo3(signature = (*, ttl_secs = None, max_entries = None, max_bytes = None))]
+    fn new(ttl_secs: Option<f64>, max_entries: Option<usize>, max_bytes: Option<usize>) -> Self {
+        let mut inner = RsSelectionCacheConfig::default();
+        if let Some(ttl_secs) = ttl_secs {
+            inner.ttl = std::time::Duration::from_secs_f64(ttl_secs);
+        }
+        if let Some(max_entries) = max_entries {
+            inner.max_entries = max_entries;
+        }
+        if let Some(max_bytes) = max_bytes {
+            inner.max_bytes = max_bytes;
+        }
+        Self { inner }
+    }
+}
+
 /// In-process handle to a managed Dynamo `SelectionService`.
 #[cfg(feature = "select-service")]
 #[pyclass]
@@ -398,13 +429,14 @@ pub(crate) struct SelectionService {
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None))]
     fn new(
         py: Python<'_>,
         indexer_threads: usize,
         indexer_peers: Option<Vec<String>>,
         replica_sync_port: Option<u16>,
         replica_sync_peers: Option<Vec<String>>,
+        selection_cache: Option<SelectionCacheConfig>,
     ) -> PyResult<Self> {
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
         if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
@@ -414,7 +446,8 @@ impl SelectionService {
         }
         let mut builder = SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
             .indexer_threads(indexer_threads)
-            .indexer_peers(indexer_peers.unwrap_or_default());
+            .indexer_peers(indexer_peers.unwrap_or_default())
+            .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }

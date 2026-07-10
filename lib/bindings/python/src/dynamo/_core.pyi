@@ -658,12 +658,34 @@ class MultimodalEmbeddingCachePublisher:
         """
         ...
 
+class SelectionCacheConfig:
+    """
+    Bounds for the in-flight selection cache. Each field defaults to the
+    service default when omitted.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_secs: Optional[float] = None,
+        max_entries: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+    ) -> None: ...
+
 class SelectionService:
     """
     In-process handle to a runtime-free Dynamo selection core.
     """
 
-    def __init__(self, *, indexer_threads: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        indexer_threads: int = 4,
+        indexer_peers: Optional[list[str]] = None,
+        replica_sync_port: Optional[int] = None,
+        replica_sync_peers: Optional[list[str]] = None,
+        selection_cache: Optional[SelectionCacheConfig] = None,
+    ) -> None:
         """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
         ...
 

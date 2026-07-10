@@ -213,6 +213,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::replay::PlannerReplayBridge>()?;
     #[cfg(feature = "select-service")]
     m.add_class::<llm::kv::SelectionService>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::SelectionCacheConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::kv::MultimodalEmbeddingCachePublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API

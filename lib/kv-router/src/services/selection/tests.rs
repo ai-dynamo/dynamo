@@ -1088,6 +1088,7 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         replica_sync_port: Some(port_a),
         replica_sync_peers: Vec::new(),
         kv_router_config: test_config(),
+        selection_cache: SelectionCacheConfig::default(),
     };
     let service_a = Arc::new(config_a.service_builder().build().await.unwrap());
     let service_b = Arc::new(
