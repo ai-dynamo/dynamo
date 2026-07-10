@@ -32,10 +32,11 @@ use crate::services::indexer::backend::Indexer;
 use crate::services::indexer::recovery;
 use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
+use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
-use super::input::PromptRequest;
+use super::input::{PromptRequest, TrackingHashInput};
 use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
@@ -117,6 +118,7 @@ pub struct SelectionCore {
     /// Booking inputs captured by `select`, keyed by `selection_id`, so a later
     /// `create_reservation` can replay them without re-sending the prompt.
     selection_cache: SelectionCache,
+    tracking_hash: Arc<TrackingHashContext>,
 }
 
 impl SelectionCore {
@@ -128,14 +130,29 @@ impl SelectionCore {
         cancel_token: CancellationToken,
         cache_config: SelectionCacheConfig,
     ) -> Self {
-        Self::new_inner(
+        Self::try_new_local(kv_router_config, indexer_threads, cancel_token, cache_config)
+            .expect("selection tracking hash configuration must be valid")
+    }
+
+    pub fn try_new_local(
+        kv_router_config: crate::config::KvRouterConfig,
+        indexer_threads: usize,
+        cancel_token: CancellationToken,
+        cache_config: SelectionCacheConfig,
+    ) -> anyhow::Result<Self> {
+        kv_router_config
+            .validate_config()
+            .map_err(anyhow::Error::msg)?;
+        let tracking_hash = Arc::new(TrackingHashContext::from_config(&kv_router_config)?);
+        Ok(Self::new_inner(
             kv_router_config,
             indexer_threads,
             cancel_token,
             None,
             true,
             cache_config,
-        )
+            tracking_hash,
+        ))
     }
 
     pub(super) fn new_managed(
@@ -144,6 +161,7 @@ impl SelectionCore {
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
         cache_config: SelectionCacheConfig,
+        tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
         Self::new_inner(
             kv_router_config,
@@ -152,6 +170,7 @@ impl SelectionCore {
             replica_config,
             false,
             cache_config,
+            tracking_hash,
         )
     }
 
@@ -162,6 +181,7 @@ impl SelectionCore {
         replica_config: Option<ReplicaSyncConfig>,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
+        tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
         let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
@@ -179,6 +199,7 @@ impl SelectionCore {
             cancel_token,
             replica_config,
             selection_cache: SelectionCache::new(&cache_config),
+            tracking_hash,
         }
     }
 
@@ -689,7 +710,14 @@ impl SelectionCore {
             sequence_hashes,
             isl_tokens,
             overlap,
-        } = self.prepare_selection_inputs(&entry, &prompt).await?;
+        } = self
+            .prepare_selection_inputs(
+                &entry,
+                &prompt,
+                self.kv_router_config
+                    .assume_kv_reuse(router_config_override.as_ref()),
+            )
+            .await?;
         let mode = if book {
             ScheduleMode::Tracked {
                 request_id: selection_id.clone().ok_or_else(|| {
@@ -897,9 +925,16 @@ impl SelectionCore {
         req: ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
         let entry = self.ready_entry(&key)?;
-        let normalized = req
-            .prompt
-            .normalize_for_reservation(entry.block_size, entry.is_eagle)?;
+        let normalized = req.prompt.normalize_for_reservation(
+            entry.is_eagle,
+            TrackingHashInput {
+                context: &self.tracking_hash,
+                scope: tracking_scope(&entry),
+                assume_kv_reuse: self
+                    .kv_router_config
+                    .assume_kv_reuse(req.router_config_override.as_ref()),
+            },
+        )?;
         let prefill_load_hint = req
             .effective_prefill_tokens
             .map(|tokens| {
@@ -1071,7 +1106,14 @@ impl SelectionCore {
     ) -> Result<Vec<PotentialLoad>, SelectionError> {
         let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
-        let prepared = self.prepare_selection_inputs(&entry, &req.prompt).await?;
+        let prepared = self
+            .prepare_selection_inputs(
+                &entry,
+                &req.prompt,
+                self.kv_router_config
+                    .assume_kv_reuse(req.router_config_override.as_ref()),
+            )
+            .await?;
         let track_prefill_tokens = req
             .router_config_override
             .as_ref()
@@ -1091,13 +1133,13 @@ impl SelectionCore {
     ) -> Result<OverlapScoresResponse, SelectionError> {
         let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
-        let normalized = req
+        let block_hashes = req
             .prompt
-            .normalize_for_selection(entry.block_size, entry.is_eagle)?;
-        let num_blocks = normalized.block_hashes.len();
+            .block_hashes_for_indexer(entry.block_size, entry.is_eagle)?;
+        let num_blocks = block_hashes.len();
         let tiered = entry
             .indexer
-            .find_tiered_matches(normalized.block_hashes)
+            .find_tiered_matches(block_hashes)
             .await
             .map_err(|error| SelectionError::Internal(error.to_string()))?;
         let schedulable_workers = self.schedulable_worker_ranks(&key);
@@ -1118,8 +1160,16 @@ impl SelectionCore {
         &self,
         entry: &SelectionEntry,
         prompt: &PromptRequest,
+        assume_kv_reuse: bool,
     ) -> Result<PreparedSelectionInputs, SelectionError> {
-        let normalized = prompt.normalize_for_selection(entry.block_size, entry.is_eagle)?;
+        let normalized = prompt.normalize_for_selection(
+            entry.is_eagle,
+            TrackingHashInput {
+                context: &self.tracking_hash,
+                scope: tracking_scope(entry),
+                assume_kv_reuse,
+            },
+        )?;
         let tiered = if normalized.block_hashes.is_empty() {
             TieredMatchDetails::default()
         } else {
@@ -1151,6 +1201,14 @@ impl SelectionCore {
             }
         }
         workers
+    }
+}
+
+fn tracking_scope(entry: &SelectionEntry) -> TrackingHashScope<'_> {
+    TrackingHashScope {
+        model_name: &entry.key.model_name,
+        routing_group: &entry.key.routing_group,
+        block_size: entry.block_size,
     }
 }
 

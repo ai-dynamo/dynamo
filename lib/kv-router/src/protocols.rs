@@ -91,11 +91,21 @@ pub fn compute_block_hash_for_seq(
     kv_block_size: u32,
     options: BlockHashOptions<'_>,
 ) -> Vec<LocalBlockHash> {
+    compute_block_hash_for_seq_with_seed(tokens, kv_block_size, options, block_hash_seed(options))
+}
+
+/// Compute local block hashes with an explicit XXH3 seed while preserving the
+/// canonical token, multimodal, and Eagle encodings used by the public hash path.
+pub(crate) fn compute_block_hash_for_seq_with_seed(
+    tokens: &[u32],
+    kv_block_size: u32,
+    options: BlockHashOptions<'_>,
+    seed: u64,
+) -> Vec<LocalBlockHash> {
     if kv_block_size == 0 {
         return Vec::new();
     }
 
-    let seed = block_hash_seed(options);
     let is_eagle_flag = options.is_eagle.unwrap_or(false);
     let stride = kv_block_size as usize;
     let window_size = if is_eagle_flag { stride + 1 } else { stride };
@@ -157,6 +167,26 @@ pub fn compute_next_seq_hash(
 /// - The first block's sequence hash equals its block hash
 /// - Subsequent blocks' sequence hash = hash([parent_sequence_hash, current_block_hash], seed)
 pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<SequenceHash> {
+    compute_seq_hash_for_block_with(block_hashes, compute_next_seq_hash)
+}
+
+/// Compute rolling sequence hashes with an explicit XXH3 chain seed.
+pub(crate) fn compute_seq_hash_for_block_with_seed(
+    block_hashes: &[LocalBlockHash],
+    seed: u64,
+) -> Vec<SequenceHash> {
+    compute_seq_hash_for_block_with(block_hashes, |parent, block| {
+        let mut bytes = [0_u8; 16];
+        bytes[..8].copy_from_slice(&parent.to_le_bytes());
+        bytes[8..].copy_from_slice(&block.0.to_le_bytes());
+        xxh3::xxh3_64_with_seed(&bytes, seed)
+    })
+}
+
+fn compute_seq_hash_for_block_with(
+    block_hashes: &[LocalBlockHash],
+    next_hash: impl Fn(SequenceHash, LocalBlockHash) -> SequenceHash,
+) -> Vec<SequenceHash> {
     if block_hashes.is_empty() {
         return Vec::new();
     }
@@ -166,7 +196,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 
     for i in 1..block_hashes.len() {
         let parent_seq_hash = sequence_hashes[i - 1];
-        sequence_hashes.push(compute_next_seq_hash(parent_seq_hash, block_hashes[i]));
+        sequence_hashes.push(next_hash(parent_seq_hash, block_hashes[i]));
     }
 
     sequence_hashes

@@ -20,7 +20,8 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
-    SequenceRequest, WorkerLoadProjection, WorkerSelector, scheduling::TierOverlapBlocks,
+    SequenceRequest, TrackingHashContext, TrackingHashScope, WorkerLoadProjection, WorkerSelector,
+    scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -202,6 +203,7 @@ pub(crate) struct OfflineReplayRouter {
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
+    tracking_hash: TrackingHashContext,
 }
 
 impl OfflineReplayRouter {
@@ -212,6 +214,7 @@ impl OfflineReplayRouter {
         num_workers: usize,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
+        let tracking_hash = TrackingHashContext::from_config(&config)?;
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
@@ -236,6 +239,7 @@ impl OfflineReplayRouter {
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
+            tracking_hash,
         })
     }
 
@@ -503,8 +507,9 @@ impl OfflineReplayRouter {
                     Some(replay_hashes.sequence_hashes)
                 } else {
                     self.config.compute_seq_hashes_for_tracking(
+                        &self.tracking_hash,
+                        self.tracking_hash_scope(),
                         &request.tokens,
-                        self.block_size,
                         None,
                         BlockHashOptions::default(),
                         None,
@@ -515,8 +520,9 @@ impl OfflineReplayRouter {
             None => {
                 let overlaps = self.indexer.find_matches_for_request(&request.tokens, None);
                 let token_seq = self.config.compute_seq_hashes_for_tracking(
+                    &self.tracking_hash,
+                    self.tracking_hash_scope(),
                     &request.tokens,
-                    self.block_size,
                     None,
                     BlockHashOptions::default(),
                     None,
@@ -540,6 +546,14 @@ impl OfflineReplayRouter {
             policy_class: request.policy_class.clone(),
             session_id,
         })
+    }
+
+    fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
+        TrackingHashScope {
+            model_name: "replay",
+            routing_group: "default",
+            block_size: self.block_size,
+        }
     }
 
     fn admit_request(
