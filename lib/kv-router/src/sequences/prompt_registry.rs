@@ -219,6 +219,12 @@ impl PromptRegistry {
         self.maybe_cleanup();
     }
 
+    /// Apply one per-worker sequence mutation in lifecycle order.
+    ///
+    /// `delta` generation and application must remain serialized by the worker
+    /// slot's `sequences.write()` lock. Removals must be applied before stores
+    /// because expiry is evaluated before the new request is acquired, and both
+    /// path boundaries describe that exact intermediate state.
     pub(super) fn apply_membership_delta_and_load_without_cleanup(
         &self,
         worker: WorkerWithDpRank,

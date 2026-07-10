@@ -247,25 +247,25 @@ impl PromptMembershipTrie {
             "prompt store suffix must start inside a non-empty path"
         );
 
-        let mut current = {
+        let mut current = self.root.read().children.get(&path[0]).cloned();
+        if current.is_none() {
             let mut root = self.root.write();
-            match root.children.get(&path[0]).cloned() {
-                Some(node) => node,
-                None => {
-                    if new_suffix_start != 0 {
-                        tracing::warn!(
-                            ?worker,
-                            new_suffix_start,
-                            "prompt store prefix is missing from the trie"
-                        );
-                        return;
-                    }
-                    root.children
-                        .insert(path[0], Self::new_path_node(worker, path.to_vec()));
+            current = root.children.get(&path[0]).cloned();
+            if current.is_none() {
+                if new_suffix_start != 0 {
+                    tracing::warn!(
+                        ?worker,
+                        new_suffix_start,
+                        "prompt store prefix is missing from the trie"
+                    );
                     return;
                 }
+                root.children
+                    .insert(path[0], Self::new_path_node(worker, path.to_vec()));
+                return;
             }
-        };
+        }
+        let mut current = current.expect("root child was inserted or observed");
 
         let mut path_pos = 0;
         loop {
@@ -902,6 +902,41 @@ mod tests {
             assert_eq!(
                 trie.compute_overlap_depths(Some(&[1, 2, 3, 9])),
                 FxHashMap::from_iter([(worker_a, 3), (worker_b, 2), (worker_c, 4)])
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_first_root_insertion_preserves_both_workers() {
+        for _ in 0..128 {
+            let trie = Arc::new(PromptMembershipTrie::new());
+            let worker_a = worker(1, 0);
+            let worker_b = worker(2, 0);
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+
+            let left = {
+                let trie = Arc::clone(&trie);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    trie.store_path(worker_a, &[1, 2, 3], 0);
+                })
+            };
+            let right = {
+                let trie = Arc::clone(&trie);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    trie.store_path(worker_b, &[1, 2, 3], 0);
+                })
+            };
+            barrier.wait();
+            left.join().unwrap();
+            right.join().unwrap();
+
+            assert_eq!(
+                trie.compute_overlap_depths(Some(&[1, 2, 3])),
+                FxHashMap::from_iter([(worker_a, 3), (worker_b, 3)])
             );
         }
     }
