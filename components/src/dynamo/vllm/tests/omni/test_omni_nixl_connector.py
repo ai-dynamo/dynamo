@@ -129,16 +129,15 @@ def test_nixl_connector_object_roundtrip(fake_nixl):
             "outputs": [{"token_ids": [1, 2], "text": "hi", "finish_reason": "stop"}],
             "multimodal_output": {"sr": 16000},
         }
-        ok, size, metadata = connector.put(
-            "1", "router", f"req-obj-{uuid4().hex}", payload
-        )
+        request_id = f"req-obj-{uuid4().hex}"
+        ok, size, metadata = connector.put("1", "router", request_id, payload)
 
         assert ok is True
         assert metadata is not None
         assert size > 0
         assert metadata["kind"] == "serialized_obj"
 
-        out = connector.get("1", "router", "req-obj", metadata=metadata)
+        out = connector.get("1", "router", request_id, metadata=metadata)
         assert out is not None
         received, _ = out
         assert received == payload
