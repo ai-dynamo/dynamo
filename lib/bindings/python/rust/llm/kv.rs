@@ -572,11 +572,11 @@ impl SelectionService {
     fn prefill_complete<'p>(
         &self,
         py: Python<'p>,
-        reservation_id: String,
+        selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            core.prefill_complete(&reservation_id)
+            core.prefill_complete(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
             Ok(())
@@ -584,14 +584,10 @@ impl SelectionService {
     }
 
     /// Record one decode output block for a reservation, advancing its decode load.
-    #[pyo3(signature = (reservation_id, *, decay_fraction = None))]
-    fn add_output_block(
-        &self,
-        reservation_id: String,
-        decay_fraction: Option<f64>,
-    ) -> PyResult<()> {
+    #[pyo3(signature = (selection_id, *, decay_fraction = None))]
+    fn add_output_block(&self, selection_id: String, decay_fraction: Option<f64>) -> PyResult<()> {
         self.inner
-            .add_output_block(&reservation_id, decay_fraction)
+            .add_output_block(&selection_id, decay_fraction)
             .map_err(selection_to_pyerr)
     }
 
@@ -599,11 +595,11 @@ impl SelectionService {
     fn free_reservation<'p>(
         &self,
         py: Python<'p>,
-        reservation_id: String,
+        selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            core.free_reservation(&reservation_id)
+            core.free_reservation(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
             Ok(())
