@@ -38,6 +38,7 @@ mod vllm {
             4,
             4,
             &manager,
+            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Admit { .. }));
@@ -59,6 +60,7 @@ mod vllm {
             4,
             4,
             &manager,
+            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Wait));
@@ -77,6 +79,7 @@ mod vllm {
             4,
             4,
             &manager,
+            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Reject));
@@ -244,6 +247,7 @@ mod vllm {
             3,
             4,
             &manager,
+            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Admit { .. }));
@@ -271,6 +275,7 @@ mod vllm {
             3,
             4,
             &manager,
+            false,
         );
 
         assert!(matches!(decision, AdmissionDecision::Wait));

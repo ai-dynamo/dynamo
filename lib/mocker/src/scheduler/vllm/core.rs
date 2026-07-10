@@ -1415,6 +1415,7 @@ impl VllmCore {
                                 self.args.num_gpu_blocks,
                                 self.args.block_size,
                                 &self.kv_manager,
+                                self.args.aic_nextn.is_some(),
                             )
                         }
                     }
@@ -1725,9 +1726,13 @@ impl VllmCore {
             prefill_cost
                 .map(|cost| cost.cached_tokens)
                 .unwrap_or_else(|| {
-                    self.kv_manager
-                        .get_prefill_cost(&request.sequence)
-                        .cached_tokens
+                    policy::apply_mtp_prefix_recompute(
+                        self.args.scheduling_policy(),
+                        self.args.block_size,
+                        self.args.aic_nextn.is_some(),
+                        self.kv_manager.get_prefill_cost(&request.sequence),
+                    )
+                    .cached_tokens
                 })
         } else {
             0

@@ -42,6 +42,31 @@ pub(super) fn generation_complete(sequence: &ActiveSequence, max_model_len: Opti
     remaining_generation_tokens(sequence, max_model_len) == 0
 }
 
+/// Apply vLLM's EAGLE/MTP prefix-cache rule.
+///
+/// The drafter needs hidden states from the final matched block, so vLLM
+/// removes one block from every non-empty prefix-cache hit and recomputes it
+/// during prefill. Keep that backend-specific accounting here rather than in
+/// the shared scheduler core.
+pub(super) fn apply_mtp_prefix_recompute(
+    policy: SchedulingPolicy,
+    block_size: usize,
+    mtp_enabled: bool,
+    mut prefill_cost: PrefillCost,
+) -> PrefillCost {
+    if policy != SchedulingPolicy::Vllm || !mtp_enabled || prefill_cost.cached_tokens < block_size {
+        return prefill_cost;
+    }
+
+    prefill_cost.cached_tokens -= block_size;
+    prefill_cost.new_tokens += block_size;
+    prefill_cost.new_blocks += 1;
+    prefill_cost.active_cached_tokens = prefill_cost
+        .active_cached_tokens
+        .min(prefill_cost.cached_tokens);
+    prefill_cost
+}
+
 /// Decide whether the FIFO head can enter the shared scheduler core.
 ///
 /// vLLM reserves only the current known sequence. TRT-LLM
@@ -55,6 +80,7 @@ pub(super) fn decide_waiting_admission<'a>(
     num_gpu_blocks: usize,
     block_size: usize,
     kv_manager: &KvManager,
+    mtp_enabled: bool,
 ) -> AdmissionDecision {
     if is_fresh {
         match policy {
@@ -73,7 +99,12 @@ pub(super) fn decide_waiting_admission<'a>(
         }
     }
 
-    let prefill_cost = kv_manager.get_prefill_cost(sequence);
+    let prefill_cost = apply_mtp_prefix_recompute(
+        policy,
+        block_size,
+        mtp_enabled,
+        kv_manager.get_prefill_cost(sequence),
+    );
     let available = match policy {
         SchedulingPolicy::Vllm => num_gpu_blocks.saturating_sub(kv_manager.num_active_blocks()),
         SchedulingPolicy::TrtllmGuaranteedNoEvict => {
