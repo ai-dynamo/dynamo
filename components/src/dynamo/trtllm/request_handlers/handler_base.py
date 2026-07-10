@@ -1050,16 +1050,21 @@ class HandlerBase(BaseGenerativeHandler):
         max_tokens = request["stop_conditions"]["max_tokens"]
         if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
-        elif self.max_seq_len is not None:
-            if self.multimodal_processor and processed_input is not None:
-                logging.debug(
-                    "Skipping dynamic max_tokens default for multimodal request..."
-                )
-            else:
-                token_ids = request.get("token_ids", [])
-                input_length = len(token_ids)
-                dynamic_default = max(1, self.max_seq_len - input_length)
-                sampling_params.max_tokens = dynamic_default
+        else:
+            has_images = self._request_has_images(processed_input)
+            expanded_prompt_len = (
+                processed_input.get("expanded_prompt_len")
+                if isinstance(processed_input, dict)
+                else None
+            )
+            default_max_tokens = self._default_max_tokens(
+                self.max_seq_len,
+                request.get("token_ids", []),
+                has_images,
+                expanded_prompt_len,
+            )
+            if default_max_tokens is not None:
+                sampling_params.max_tokens = default_max_tokens
 
         stop_conditions = request["stop_conditions"]
         ignore_eos = stop_conditions.get("ignore_eos")
@@ -1379,6 +1384,47 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Initiate graceful shutdown
             await self._initiate_shutdown(e)
+
+    @staticmethod
+    def _request_has_images(processed_input) -> bool:
+        """Whether the processed input carries image content, as opposed to a
+        text-only request served by a multimodal worker.
+
+        This distinction drives max_tokens sizing: only image requests have
+        unexpanded placeholders in token_ids, so only they need the expanded
+        length; text requests use len(token_ids) directly.
+        """
+        return bool(
+            isinstance(processed_input, dict)
+            and (
+                processed_input.get("multi_modal_data")
+                or processed_input.get("multi_modal_embeddings")
+            )
+        )
+
+    @staticmethod
+    def _default_max_tokens(
+        max_seq_len: Optional[int],
+        token_ids: list,
+        has_images: bool,
+        expanded_prompt_len: Optional[int],
+    ) -> Optional[int]:
+        """Default for an omitted max_tokens: fill the model's remaining context.
+
+        For image requests, token_ids hold unexpanded placeholders, so sizing uses
+        expanded_prompt_len (placeholders replaced by their per-image token counts);
+        when that is unavailable, returns None to defer to the engine default rather
+        than overestimate. Text requests (including text-only requests to a
+        multimodal worker) use len(token_ids) directly. Returns None when no default
+        applies.
+        """
+        if max_seq_len is None:
+            return None
+        if has_images:
+            if not expanded_prompt_len:
+                return None
+            return max(1, max_seq_len - expanded_prompt_len)
+        return max(1, max_seq_len - len(token_ids))
 
     @staticmethod
     def _override_sampling_params(sampling_params, request: dict) -> SamplingParams:
