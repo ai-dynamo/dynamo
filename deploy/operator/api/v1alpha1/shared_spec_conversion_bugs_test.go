@@ -251,6 +251,7 @@ func TestBugDGD_SpokeMainContainerNameOnlyRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeDGDWorkersSpecHash(in) error = %v", err)
 	}
+
 	hub := &v1beta1.DynamoGraphDeployment{}
 	if err := in.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
@@ -295,6 +296,7 @@ func TestBugDGD_SpokeMultipleCompilationCacheVolumeMountsRoundTrip(t *testing.T)
 	if err != nil {
 		t.Fatalf("ComputeDGDWorkersSpecHash(in) error = %v", err)
 	}
+
 	hub := &v1beta1.DynamoGraphDeployment{}
 	if err := in.ConvertTo(hub); err != nil {
 		t.Fatalf("ConvertTo() error = %v", err)
