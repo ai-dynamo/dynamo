@@ -3,7 +3,11 @@
 
 //! Single-threaded compressed radix tree for KV cache routing.
 
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::VecDeque,
+    rc::{Rc, Weak},
+};
 
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
@@ -20,6 +24,12 @@ pub(crate) struct RadixBlock {
     children: FxHashMap<LocalBlockHash, SharedRadixBlock>,
     /// Once a node has children it is never eligible for leaf extension again.
     internal: bool,
+    /// Back-link to the parent node (dangling for the root). Needed so a node
+    /// whose blocks have all been removed can be detached from the parent's
+    /// `children` map; without it dead nodes stay allocated forever, retaining
+    /// their `edge` Vec and `edge_index` map (unbounded memory growth on
+    /// unique-heavy traffic even though the lookup tables stay bounded).
+    parent: Weak<RefCell<RadixBlock>>,
 }
 
 impl RadixBlock {
@@ -28,6 +38,7 @@ impl RadixBlock {
             state: NodeState::empty(),
             children: FxHashMap::default(),
             internal: true,
+            parent: Weak::new(),
         }
     }
 
@@ -36,6 +47,7 @@ impl RadixBlock {
             state: NodeState::for_blocks(blocks, worker),
             children: FxHashMap::default(),
             internal: false,
+            parent: Weak::new(),
         }
     }
 
@@ -311,6 +323,7 @@ impl RadixTree {
                 }
 
                 let child = Rc::new(RefCell::new(RadixBlock::for_blocks(remaining, worker)));
+                child.borrow_mut().parent = Rc::downgrade(&parent);
                 {
                     let mut parent_ref = parent.borrow_mut();
                     parent_ref.internal = true;
@@ -369,6 +382,7 @@ impl RadixTree {
 
                 let tail = &remaining[match_len..];
                 let tail_node = Rc::new(RefCell::new(RadixBlock::for_blocks(tail, worker)));
+                tail_node.borrow_mut().parent = Rc::downgrade(&child);
                 {
                     let mut child_ref = child.borrow_mut();
                     child_ref.internal = true;
@@ -438,6 +452,46 @@ impl RadixTree {
         None
     }
 
+    /// Detach `node` from its parent's `children` map if it no longer holds any
+    /// workers and has no children, cascading upward while ancestors become
+    /// empty too. Stops at the root (dangling parent link).
+    ///
+    /// `apply_removed` / worker removal clear worker state and lookup entries
+    /// (bounding the tracked-blocks gauge), but without this the node itself
+    /// stays reachable from its parent forever — every unique stored chain
+    /// permanently retains its `edge` Vec and `edge_index` map.
+    fn detach_if_dead(node: &SharedRadixBlock) {
+        let mut current = node.clone();
+        loop {
+            let (parent, key) = {
+                let node_ref = current.borrow();
+                if node_ref.state.has_any_workers() || !node_ref.children.is_empty() {
+                    return;
+                }
+                let Some(parent) = node_ref.parent.upgrade() else {
+                    return; // root, or already detached
+                };
+                // The root is the only node with an empty edge; a child's slot in
+                // the parent map is keyed by the first local hash of its edge.
+                let Some(&(key, _)) = node_ref.state.edge.first() else {
+                    return;
+                };
+                (parent, key)
+            };
+            {
+                let mut parent_ref = parent.borrow_mut();
+                match parent_ref.children.get(&key) {
+                    Some(child) if Rc::ptr_eq(child, &current) => {
+                        parent_ref.children.remove(&key);
+                    }
+                    // Slot vacated or reused by a newer node: nothing to detach.
+                    _ => return,
+                }
+            }
+            current = parent;
+        }
+    }
+
     fn split_node(&mut self, node: &SharedRadixBlock, pos: usize) {
         let suffix = {
             let mut node_ref = node.borrow_mut();
@@ -483,7 +537,12 @@ impl RadixTree {
                 },
                 children: std::mem::take(&mut node_ref.children),
                 internal: node_ref.internal,
+                parent: Rc::downgrade(node),
             }));
+            // The children moved into the suffix node must point at their new parent.
+            for grandchild in suffix.borrow().children.values() {
+                grandchild.borrow_mut().parent = Rc::downgrade(&suffix);
+            }
             node_ref.children.insert(suffix_first_local, suffix.clone());
             node_ref.internal = true;
             suffix
@@ -591,6 +650,7 @@ impl RadixTree {
                 lookup.remove(&stale_hash);
                 eagerly_removed.insert(stale_hash);
             }
+            Self::detach_if_dead(&node);
         }
 
         first_error.map_or(Ok(()), Err)
@@ -613,9 +673,12 @@ impl RadixTree {
                 if !seen.insert(Rc::as_ptr(&node)) {
                     continue;
                 }
-                let mut node_ref = node.borrow_mut();
-                node_ref.state.drop_worker(worker);
-                node_ref.clear_children_if_unreachable();
+                {
+                    let mut node_ref = node.borrow_mut();
+                    node_ref.state.drop_worker(worker);
+                    node_ref.clear_children_if_unreachable();
+                }
+                Self::detach_if_dead(&node);
             }
             if keep_worker {
                 self.lookup.insert(worker_key, FxHashMap::default());
@@ -637,9 +700,12 @@ impl RadixTree {
             if !seen.insert(Rc::as_ptr(&node)) {
                 continue;
             }
-            let mut node_ref = node.borrow_mut();
-            node_ref.state.drop_worker(worker);
-            node_ref.clear_children_if_unreachable();
+            {
+                let mut node_ref = node.borrow_mut();
+                node_ref.state.drop_worker(worker);
+                node_ref.clear_children_if_unreachable();
+            }
+            Self::detach_if_dead(&node);
         }
     }
 
@@ -772,7 +838,9 @@ mod tests {
 
     use super::*;
     use crate::indexer::WorkerKvQueryResponse;
-    use crate::test_utils::{create_store_event, make_store_event, snapshot_events};
+    use crate::test_utils::{
+        create_remove_event, create_store_event, make_store_event, snapshot_events,
+    };
 
     #[test]
     fn rejects_self_referencing_store() {
@@ -891,6 +959,114 @@ mod tests {
         assert!(
             serde_json::to_vec(&compact).unwrap().len()
                 < serde_json::to_vec(&uncompressed).unwrap().len()
+        );
+    }
+
+    /// `create_store_event` assigns external hash `i * 100` to local hash `i`,
+    /// matching `create_remove_event`.
+    #[test]
+    fn removing_all_blocks_detaches_dead_nodes() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(create_store_event(0, 0, vec![1, 2, 3, 4], None))
+            .unwrap();
+        assert_eq!(tree.edge_lengths_for_test(), vec![4]);
+
+        tree.apply_event(create_remove_event(0, 1, vec![4, 3, 2, 1]))
+            .unwrap();
+
+        assert_eq!(tree.current_size(), 0);
+        assert!(
+            tree.edge_lengths_for_test().is_empty(),
+            "dead nodes must be detached from the tree, not just from the lookup"
+        );
+    }
+
+    #[test]
+    fn detach_cascades_through_split_ancestors() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(create_store_event(0, 0, vec![1, 2, 3, 4], None))
+            .unwrap();
+        // Forks at [1,2] -> splits into [1,2] with children [3,4] and [5].
+        tree.apply_event(create_store_event(
+            0,
+            1,
+            vec![5],
+            Some(ExternalSequenceBlockHash(200)),
+        ))
+        .unwrap();
+        assert_eq!(tree.edge_lengths_for_test(), vec![1, 2, 2]);
+
+        // Removing leaf-to-root must leave nothing behind, including the
+        // split interior node once both its children are gone.
+        tree.apply_event(create_remove_event(0, 2, vec![5]))
+            .unwrap();
+        assert_eq!(tree.edge_lengths_for_test(), vec![2, 2]);
+        tree.apply_event(create_remove_event(0, 3, vec![4, 3, 2, 1]))
+            .unwrap();
+
+        assert_eq!(tree.current_size(), 0);
+        assert!(tree.edge_lengths_for_test().is_empty());
+    }
+
+    #[test]
+    fn detach_spares_nodes_still_covered_by_another_worker() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(create_store_event(0, 0, vec![1, 2], None))
+            .unwrap();
+        tree.apply_event(create_store_event(1, 1, vec![1, 2], None))
+            .unwrap();
+
+        tree.apply_event(create_remove_event(0, 2, vec![2, 1]))
+            .unwrap();
+        assert_eq!(
+            tree.edge_lengths_for_test(),
+            vec![2],
+            "node still covered by worker 1 must survive"
+        );
+        assert_eq!(
+            tree.tree_size_for_worker(WorkerWithDpRank::new(1, 0)),
+            Some(2)
+        );
+
+        tree.apply_event(create_remove_event(1, 3, vec![2, 1]))
+            .unwrap();
+        assert!(tree.edge_lengths_for_test().is_empty());
+    }
+
+    #[test]
+    fn remove_worker_detaches_its_nodes() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(create_store_event(0, 0, vec![1, 2, 3], None))
+            .unwrap();
+        tree.apply_event(create_store_event(1, 1, vec![7, 8], None))
+            .unwrap();
+
+        tree.remove_worker(0);
+        assert_eq!(
+            tree.edge_lengths_for_test(),
+            vec![2],
+            "only worker 1's chain should remain"
+        );
+
+        tree.remove_worker(1);
+        assert!(tree.edge_lengths_for_test().is_empty());
+    }
+
+    #[test]
+    fn store_after_detach_recreates_the_chain() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(create_store_event(0, 0, vec![1, 2], None))
+            .unwrap();
+        tree.apply_event(create_remove_event(0, 1, vec![2, 1]))
+            .unwrap();
+        assert!(tree.edge_lengths_for_test().is_empty());
+
+        tree.apply_event(create_store_event(0, 2, vec![1, 2], None))
+            .unwrap();
+        assert_eq!(tree.edge_lengths_for_test(), vec![2]);
+        assert_eq!(
+            tree.tree_size_for_worker(WorkerWithDpRank::new(0, 0)),
+            Some(2)
         );
     }
 }
