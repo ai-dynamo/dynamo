@@ -387,9 +387,9 @@ func admissionTarget(object map[string]any) (admissionResourceTarget, error) {
 	}
 	var resource string
 	switch kind {
-	case "DynamoComponentDeployment":
+	case admissionDCDKind:
 		resource = "dynamocomponentdeployments"
-	case "DynamoGraphDeployment":
+	case admissionDGDKind:
 		resource = "dynamographdeployments"
 	default:
 		return admissionResourceTarget{}, fmt.Errorf("unsupported admission kind %q", kind)

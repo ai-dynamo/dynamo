@@ -32,6 +32,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
+const (
+	admissionDCDKind = "DynamoComponentDeployment"
+	admissionDGDKind = "DynamoGraphDeployment"
+)
+
 func admissionUnstructured(t *testing.T, deployment runtime.Object) map[string]any {
 	t.Helper()
 	request, err := runtime.DefaultUnstructuredConverter.ToUnstructured(deployment)
@@ -44,16 +49,16 @@ func admissionUnstructured(t *testing.T, deployment runtime.Object) map[string]a
 		switch deployment.(type) {
 		case *nvidiacomv1alpha1.DynamoGraphDeployment:
 			request["apiVersion"] = nvidiacomv1alpha1.GroupVersion.String()
-			request["kind"] = "DynamoGraphDeployment"
+			request["kind"] = admissionDGDKind
 		case *nvidiacomv1beta1.DynamoGraphDeployment:
 			request["apiVersion"] = nvidiacomv1beta1.GroupVersion.String()
-			request["kind"] = "DynamoGraphDeployment"
+			request["kind"] = admissionDGDKind
 		case *nvidiacomv1alpha1.DynamoComponentDeployment:
 			request["apiVersion"] = nvidiacomv1alpha1.GroupVersion.String()
-			request["kind"] = "DynamoComponentDeployment"
+			request["kind"] = admissionDCDKind
 		case *nvidiacomv1beta1.DynamoComponentDeployment:
 			request["apiVersion"] = nvidiacomv1beta1.GroupVersion.String()
-			request["kind"] = "DynamoComponentDeployment"
+			request["kind"] = admissionDCDKind
 		default:
 			t.Fatalf("unsupported admission object type %T", deployment)
 		}
