@@ -34,6 +34,17 @@ If you run more than one benchmark in the same namespace, also update `metadata.
 
 The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace via `aiperf --custom-dataset-type mooncake_trace`. Each JSONL line describes one request (`input_length`, `output_length`, `hash_ids`). The traces are token-length-only, so model-agnostic — this recipe reuses the traces shipped with the Kimi-K2.6 recipe in [../../kimi-k2.6/perf/traces/](../../kimi-k2.6/perf/traces/).
 
+> **Note:** The trace files are stored in **Git LFS** — a plain `git clone` leaves ~132-byte pointer files.
+> Fetch the actual data before staging:
+>
+> ```bash
+> git lfs install
+> git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
+> ```
+>
+> A real trace file is several MB (`ls -lh`); if the first line starts with `version https://git-lfs...`,
+> it is still a pointer.
+
 **Only the agentic 15% subset is needed** — the recipes target the agentic workload (64k/400/90%-KV), and the 15% subset keeps run time short while preserving the KV-hit-rate:
 
 ```text
@@ -80,6 +91,7 @@ kubectl run pvc-helper -n ${NAMESPACE} \
   --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
   --command -- sleep 3600
 
+git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"   # traces are Git LFS objects
 kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/traces
 kubectl cp ../../kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
   ${NAMESPACE}/pvc-helper:/model-cache/traces/

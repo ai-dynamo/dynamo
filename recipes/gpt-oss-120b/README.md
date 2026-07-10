@@ -108,8 +108,9 @@ Recipes are optimized for the following configuration, at the target user intera
 | Agentic  | 64k        | 400        | 90%               | 50                |
 
 The benchmark reuses the Mooncake-format traces shipped with the Kimi-K2.6 recipe
-([../kimi-k2.6/perf/traces/](../kimi-k2.6/perf/traces/)); only the **agentic 15% subset** is needed — see
-[perf/README.md](perf/README.md) for details.
+([../kimi-k2.6/perf/traces/](../kimi-k2.6/perf/traces/)); only the **agentic 15% subset** is needed. The traces
+are stored in Git LFS — run `git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"` to fetch the actual
+files before staging. See [perf/README.md](perf/README.md) for details.
 
 ## Performance results
 
