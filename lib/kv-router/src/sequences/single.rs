@@ -239,12 +239,8 @@ impl ActiveSequences {
             return PromptMembershipDelta::default();
         };
 
-        let RequestState {
-            blocks,
-            expected_output_tokens,
-            ..
-        } = request_state;
-        let _ = expected_output_tokens;
+        let blocks = request_state.blocks;
+        let _ = request_state.expected_output_tokens;
         let mut membership_delta = PromptMembershipDelta::default();
         membership_delta.push_remove(self.blocks.release(blocks));
 

@@ -127,9 +127,6 @@ impl BlockTracker {
             "random output hash unexpectedly collided with a live block"
         );
 
-        self.nodes.reserve(1);
-        self.unique_blocks.reserve(1);
-
         let parent = chain.tail;
         let depth = parent.map_or(1, |node_id| {
             self.nodes
