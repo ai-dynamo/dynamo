@@ -1129,14 +1129,10 @@ func selectOldWorkerRuntimeNamespace(
 		}
 	}
 
-	fallback := ""
-	for _, dcd := range dcds {
-		if namespace := oldWorkerRuntimeNamespace(dcd); namespace != "" {
-			fallback = namespace
-			break
-		}
+	if len(dcds) == 0 {
+		return ""
 	}
-	return fallback
+	return oldWorkerRuntimeNamespace(dcds[0])
 }
 
 func oldWorkerRuntimeNamespace(dcd nvidiacomv1beta1.DynamoComponentDeployment) string {
