@@ -75,6 +75,7 @@ esac
 # driver/runtime, whose allocations vLLM's accounting doesn't track. The profiler
 # path supplies its own --gpu-memory-utilization 0.01 via $GPU_MEM_ARGS.
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+export DYN_FORWARDPASS_METRIC_PORT="${DYN_FORWARDPASS_METRIC_PORT:-$(allocate_free_port)}"
 
 # Start vLLM worker with vision model
 # --enforce-eager: Quick deployment (remove for production)

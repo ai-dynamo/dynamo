@@ -105,21 +105,32 @@ async fn wait_for_health(base_url: &str) {
     }
 }
 
-/// Build a registry seeded with one indexer for `(model, tenant)` and feed
+/// Build a registry seeded with one indexer for `(model, routing group)` and feed
 /// `events` through `apply_event_routed`. This bypasses the ZMQ listener path
 /// so we can drive HTTP queries against deterministic state.
 async fn registry_with_events(
     model: &str,
-    tenant: &str,
+    routing_group: &str,
     block_size: u32,
     events: Vec<RouterEvent>,
 ) -> Arc<WorkerRegistry> {
     let registry = Arc::new(WorkerRegistry::new(1));
     registry.signal_ready();
+    add_group_events(&registry, model, routing_group, block_size, events).await;
+    registry
+}
+
+async fn add_group_events(
+    registry: &WorkerRegistry,
+    model: &str,
+    routing_group: &str,
+    block_size: u32,
+    events: Vec<RouterEvent>,
+) {
     let indexer = registry.get_or_create_indexer(
         IndexerKey {
             model_name: model.to_string(),
-            tenant_id: tenant.to_string(),
+            routing_group: routing_group.to_string(),
         },
         block_size,
     );
@@ -130,14 +141,13 @@ async fn registry_with_events(
     // first query lands; otherwise the test races the indexer worker.
     if let Some(entry) = registry.get_indexer(&IndexerKey {
         model_name: model.to_string(),
-        tenant_id: tenant.to_string(),
+        routing_group: routing_group.to_string(),
     }) {
         let dump = entry.indexer.dump_events().await.expect("dump events");
         // dump_events provides the FIFO barrier we need; we don't care about
         // its contents here.
         drop(dump);
     }
-    registry
 }
 
 /// Spawn the HTTP server with `state` on a random localhost port and return
@@ -184,7 +194,7 @@ fn make_app_state(registry: Arc<WorkerRegistry>) -> Arc<AppState> {
 async fn query_by_hash_returns_per_instance_tier_breakdown() {
     const BLOCK_SIZE: u32 = 4;
     const MODEL: &str = "test-model";
-    const TENANT: &str = "default";
+    const ROUTING_GROUP: &str = "default";
 
     // Worker 7: 2 device blocks + 1 host-pinned extension.
     // Worker 8: 2 device blocks, no lower-tier.
@@ -193,7 +203,7 @@ async fn query_by_hash_returns_per_instance_tier_breakdown() {
         store_event(8, 0, 1, &[], &[11, 12], StorageTier::Device),
         store_event(7, 0, 2, &[11, 12], &[13], StorageTier::HostPinned),
     ];
-    let registry = registry_with_events(MODEL, TENANT, BLOCK_SIZE, events).await;
+    let registry = registry_with_events(MODEL, ROUTING_GROUP, BLOCK_SIZE, events).await;
     let state = make_app_state(registry);
     let (base_url, cancel, task) = spawn_indexer_http(state).await;
 
@@ -203,7 +213,7 @@ async fn query_by_hash_returns_per_instance_tier_breakdown() {
         .json(&json!({
             "block_hashes": [11_i64, 12, 13],
             "model_name": MODEL,
-            "tenant_id": TENANT,
+            "routing_group": ROUTING_GROUP,
         }))
         .send()
         .await
@@ -262,7 +272,7 @@ async fn query_by_hash_returns_per_instance_tier_breakdown() {
         .json(&json!({
             "block_hashes": [11_i64, 12, 13],
             "model_name": MODEL,
-            "tenant_id": TENANT,
+            "routing_group": ROUTING_GROUP,
             "cache_salt": null,
         }))
         .send()
@@ -274,13 +284,72 @@ async fn query_by_hash_returns_per_instance_tier_breakdown() {
     task.await.expect("server task join");
 }
 
+#[tokio::test]
+async fn query_by_hash_isolates_routing_groups_and_ignores_legacy_tenant_id() {
+    const BLOCK_SIZE: u32 = 4;
+    const MODEL: &str = "test-model";
+    let registry = registry_with_events(
+        MODEL,
+        "default",
+        BLOCK_SIZE,
+        vec![store_event(7, 0, 1, &[], &[11], StorageTier::Device)],
+    )
+    .await;
+    add_group_events(
+        &registry,
+        MODEL,
+        "group-b",
+        BLOCK_SIZE,
+        vec![store_event(8, 0, 1, &[], &[11], StorageTier::Device)],
+    )
+    .await;
+    let (base_url, cancel, task) = spawn_indexer_http(make_app_state(registry)).await;
+    let client = reqwest::Client::new();
+
+    let legacy_only: serde_json::Value = client
+        .post(format!("{base_url}/query_by_hash"))
+        .json(&json!({
+            "block_hashes": [11_i64],
+            "model_name": MODEL,
+            "tenant_id": "group-b",
+        }))
+        .send()
+        .await
+        .expect("legacy tenant-only query")
+        .json()
+        .await
+        .expect("legacy tenant-only response");
+    assert_eq!(legacy_only["scores"]["7"]["0"], BLOCK_SIZE);
+    assert!(legacy_only["scores"].get("8").is_none());
+
+    let explicit_group: serde_json::Value = client
+        .post(format!("{base_url}/query_by_hash"))
+        .json(&json!({
+            "block_hashes": [11_i64],
+            "model_name": MODEL,
+            "routing_group": "group-b",
+            "tenant_id": "default",
+        }))
+        .send()
+        .await
+        .expect("explicit routing-group query")
+        .json()
+        .await
+        .expect("explicit routing-group response");
+    assert_eq!(explicit_group["scores"]["8"]["0"], BLOCK_SIZE);
+    assert!(explicit_group["scores"].get("7").is_none());
+
+    cancel.cancel();
+    task.await.expect("server task join");
+}
+
 /// `/query` owns token hashing, so equal tokens under different cache salts must match only the
 /// worker whose stored blocks used the same salt.
 #[tokio::test]
 async fn query_isolates_cache_salts() {
     const BLOCK_SIZE: u32 = 4;
     const MODEL: &str = "test-model";
-    const TENANT: &str = "default";
+    const ROUTING_GROUP: &str = "default";
     let tokens = vec![1_u32, 2, 3, 4, 5, 6, 7, 8];
 
     let hashes_a = compute_block_hash_for_seq(
@@ -317,7 +386,7 @@ async fn query_isolates_cache_salts() {
             StorageTier::Device,
         ),
     ];
-    let registry = registry_with_events(MODEL, TENANT, BLOCK_SIZE, events).await;
+    let registry = registry_with_events(MODEL, ROUTING_GROUP, BLOCK_SIZE, events).await;
     let state = make_app_state(registry);
     let (base_url, cancel, task) = spawn_indexer_http(state).await;
     let client = reqwest::Client::new();
@@ -328,7 +397,7 @@ async fn query_isolates_cache_salts() {
             .json(&json!({
                 "token_ids": tokens.clone(),
                 "model_name": MODEL,
-                "tenant_id": TENANT,
+                "routing_group": ROUTING_GROUP,
                 "cache_salt": salt,
             }))
             .send()
@@ -348,8 +417,8 @@ async fn query_isolates_cache_salts() {
 #[tokio::test]
 async fn query_by_hash_rejects_cache_salt() {
     const MODEL: &str = "test-model";
-    const TENANT: &str = "default";
-    let registry = registry_with_events(MODEL, TENANT, 4, Vec::new()).await;
+    const ROUTING_GROUP: &str = "default";
+    let registry = registry_with_events(MODEL, ROUTING_GROUP, 4, Vec::new()).await;
     let state = make_app_state(registry);
     let (base_url, cancel, task) = spawn_indexer_http(state).await;
     let client = reqwest::Client::new();
@@ -360,7 +429,7 @@ async fn query_by_hash_rejects_cache_salt() {
             .json(&json!({
                 "block_hashes": [11_i64, 12],
                 "model_name": MODEL,
-                "tenant_id": TENANT,
+                "routing_group": ROUTING_GROUP,
                 "cache_salt": cache_salt,
             }))
             .send()
@@ -379,7 +448,7 @@ async fn query_by_hash_rejects_cache_salt() {
     task.await.expect("server task join");
 }
 
-/// `/query` against an unknown `(model, tenant)` must return 404 with an
+/// `/query` against an unknown `(model, routing group)` must return 404 with an
 /// error body, not 500 or a panic.
 #[tokio::test]
 async fn query_returns_404_for_unknown_model() {
@@ -418,14 +487,14 @@ async fn query_returns_404_for_unknown_model() {
 async fn duplicate_store_warning_is_exported() {
     const BLOCK_SIZE: u32 = 4;
     const MODEL: &str = "test-model";
-    const TENANT: &str = "default";
+    const ROUTING_GROUP: &str = "default";
 
     let state = Arc::new(AppState::new(4).expect("create app state"));
     state.registry.signal_ready();
 
     let key = IndexerKey {
         model_name: MODEL.to_string(),
-        tenant_id: TENANT.to_string(),
+        routing_group: ROUTING_GROUP.to_string(),
     };
     let indexer = state
         .registry
@@ -524,7 +593,7 @@ fn send_live_message(pub_socket: &zmq::Socket, seq: u64, payload: &[u8]) {
         .expect("send_multipart");
 }
 
-/// Poll `/query` against `(model, tenant)` until `instances[instance_id].cpu`
+/// Poll `/query` against `(model, routing group)` until `instances[instance_id].cpu`
 /// reaches `expected_cpu_tokens`, or panic on timeout. The listener applies
 /// events asynchronously after `/register`, so the first few queries may see
 /// the indexer still cold; this loop is the e2e-test equivalent of awaiting
@@ -532,7 +601,7 @@ fn send_live_message(pub_socket: &zmq::Socket, seq: u64, payload: &[u8]) {
 async fn await_instance_cpu(
     base_url: &str,
     model: &str,
-    tenant: &str,
+    routing_group: &str,
     instance_id: u64,
     token_ids: Vec<u32>,
     expected_cpu_tokens: u64,
@@ -542,7 +611,7 @@ async fn await_instance_cpu(
     let body = json!({
         "token_ids": token_ids,
         "model_name": model,
-        "tenant_id": tenant,
+        "routing_group": routing_group,
     });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let key = instance_id.to_string();
@@ -586,7 +655,7 @@ async fn await_instance_cpu(
 async fn zmq_published_tiered_events_appear_in_http_query() {
     const BLOCK_SIZE: u32 = 4;
     const MODEL: &str = "test-model";
-    const TENANT: &str = "default";
+    const ROUTING_GROUP: &str = "default";
     const INSTANCE_ID: u64 = 7;
 
     // Spin up the HTTP server with an empty registry.
@@ -613,7 +682,7 @@ async fn zmq_published_tiered_events_appear_in_http_query() {
             "instance_id": INSTANCE_ID,
             "endpoint": zmq_endpoint,
             "model_name": MODEL,
-            "tenant_id": TENANT,
+            "routing_group": ROUTING_GROUP,
             "block_size": BLOCK_SIZE,
             "dp_rank": 0,
         }))
@@ -663,7 +732,7 @@ async fn zmq_published_tiered_events_appear_in_http_query() {
     let body = await_instance_cpu(
         &base_url,
         MODEL,
-        TENANT,
+        ROUTING_GROUP,
         INSTANCE_ID,
         full_tokens,
         // Cumulative through host = 2 blocks * BLOCK_SIZE tokens.
