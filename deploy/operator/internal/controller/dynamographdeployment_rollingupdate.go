@@ -119,7 +119,7 @@ func workerHashForDCDGeneration(current, desired workerGenerationHashes) string 
 
 func workerHashesForCompletedGeneration(newWorkerHash string, desired workerGenerationHashes) workerGenerationHashes {
 	if newWorkerHash == desired.v2 {
-		return workerGenerationHashes{v1: desired.v2}
+		return workerGenerationHashes{v2: desired.v2}
 	}
 	return desired
 }
@@ -151,7 +151,7 @@ func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 }
 
 // initializeWorkerHashIfNeeded establishes the DGD's active worker generation.
-// New DGDs store the canonical v2 worker hash in current-worker-hash. DGDs created before
+// New DGDs store only the canonical v2 worker hash. DGDs created before
 // managed rolling updates may already have worker DCDs without a hash label; in
 // that case we label those DCDs with the legacy sentinel and let the normal
 // rolling update path migrate from that sentinel to the desired compatibility hash.
@@ -237,8 +237,6 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 
 	var next workerGenerationHashes
 	switch {
-	case current.v1 == "" && current.v2 == desired.v2:
-		next = workerGenerationHashes{v1: current.v2}
 	case current.v1 != "" && current.v2 == "" && current.v1 != desired.v2:
 		v1Hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
 		if err != nil {
@@ -333,10 +331,8 @@ func (r *DynamoGraphDeploymentReconciler) supportsManagedRollingUpdate(
 	return !r.isGrovePathway(dgd) && !dgd.HasAnyMultinodeComponent()
 }
 
-// getCurrentWorkerHash returns the active worker generation stored on the DGD.
-// During a rolling update this is the previous serving hash; it is not advanced
-// to the desired hash until the new generation is ready and the old generation
-// has drained. Empty means this DGD has not initialized rolling-update state.
+// getCurrentWorkerHash returns the v1 worker generation stored on the DGD.
+// It is empty after the DGD has converged to a v2-only generation.
 func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) string {
@@ -355,9 +351,8 @@ func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHashV2(
 	return dgd.Annotations[consts.AnnotationCurrentWorkerHashV2]
 }
 
-// setCurrentWorkerHashes stores one active generation. The historical v1 field
-// maps to current-worker-hash and may contain either a v1 bridge identity or the
-// canonical v2 identity. The v2 field is the optional bridge fingerprint.
+// setCurrentWorkerHashes stores the v1 and v2 generation values on the DGD.
+// A bridged generation has both; a canonical v2 generation has only v2.
 func (r *DynamoGraphDeploymentReconciler) setCurrentWorkerHashes(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	hashes workerGenerationHashes,

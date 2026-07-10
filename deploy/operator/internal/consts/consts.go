@@ -76,8 +76,8 @@ const (
 	KubeLabelDynamoDiscoveryBackend = "nvidia.com/dynamo-discovery-backend"
 	KubeLabelDynamoDiscoveryEnabled = "nvidia.com/dynamo-discovery-enabled"
 	// KubeLabelDynamoWorkerHash identifies a worker generation on DCDs and pods.
-	// The parent DGD records the active label value in
-	// AnnotationCurrentWorkerHash.
+	// The parent DGD records the active label value in one of the worker-hash
+	// annotations below.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
@@ -241,17 +241,17 @@ const (
 	// drained.
 	//
 	// For a DGD bridged from 1.2, AnnotationCurrentWorkerHash contains the v1 hash
-	// used as the active DCD label. AnnotationCurrentWorkerHashV2 contains only
-	// the v2 fingerprint for the same worker spec; it is not a DCD annotation.
-	// Fresh DGDs and generations completed on v2 store the v2 DCD label in
-	// AnnotationCurrentWorkerHash and omit AnnotationCurrentWorkerHashV2.
+	// used as the active DCD label and AnnotationCurrentWorkerHashV2 contains the
+	// v2 fingerprint for the same worker spec. Fresh DGDs and generations
+	// completed on v2 omit AnnotationCurrentWorkerHash and store the active v2 DCD
+	// label in AnnotationCurrentWorkerHashV2.
 
-	// AnnotationCurrentWorkerHash stores, on the DGD, the worker-hash label value
-	// of its active DCD generation.
+	// AnnotationCurrentWorkerHash stores, on the DGD, the v1 worker-hash label
+	// value of a bridged generation.
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
 
-	// AnnotationCurrentWorkerHashV2 stores, on a bridged DGD, the v2 fingerprint
-	// for its worker spec. It is not a DCD annotation.
+	// AnnotationCurrentWorkerHashV2 stores, on the DGD, the v2 worker-spec hash.
+	// After v2 convergence it is also the active DCD worker-hash label value.
 	AnnotationCurrentWorkerHashV2 = "nvidia.com/current-worker-hash-v2"
 
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update

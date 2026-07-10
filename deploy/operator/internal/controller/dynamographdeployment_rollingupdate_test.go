@@ -255,14 +255,14 @@ func TestCanonicalWorkerHashLifecycle_FirstDeploySpecChangeAndCompletion(t *test
 	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
 	require.NoError(t, err)
 
-	// Verify the hash was set
-	hash := r.getCurrentWorkerHash(dgd)
+	// Verify only the v2 hash was set.
+	hash := r.getCurrentWorkerHashV2(dgd)
 	assert.NotEmpty(t, hash, "Hash should be set after initialization")
+	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
 
 	// Fresh deployments store one canonical v2 hash.
 	expectedV2Hash := betaDGDWorkersSpecHash(t, dgd)
 	assert.Equal(t, expectedV2Hash, hash)
-	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHashV2)
 
 	// A later worker change rolls directly from one canonical v2 generation to the next.
 	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Env = append(
@@ -285,8 +285,8 @@ func TestCanonicalWorkerHashLifecycle_FirstDeploySpecChangeAndCompletion(t *test
 	require.NotEqual(t, newLegacyHash, rollingCtx.NewWorkerHash)
 
 	require.NoError(t, r.completeRollingUpdate(ctx, dgd, newV2Hash))
-	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	require.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHashV2)
+	require.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
+	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 }
 
 func TestInitializeWorkerHashIfNeeded_AlreadyInitialized(t *testing.T) {
@@ -502,8 +502,8 @@ func TestLegacyAlphaHashCompatibility_V2OnlyChangeUsesNewV2Generation(t *testing
 	require.NotEqual(t, newLegacyHash, rollingCtx.NewWorkerHash)
 
 	require.NoError(t, r.completeRollingUpdate(context.Background(), dgd, newV2Hash))
-	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	require.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHashV2)
+	require.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
+	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 }
 
 func TestUnsupportedPathwayMigratesV1OnlyAndConvergesToCanonicalV2(t *testing.T) {
@@ -548,8 +548,8 @@ func TestUnsupportedPathwayMigratesV1OnlyAndConvergesToCanonicalV2(t *testing.T)
 	desired, err := r.desiredWorkerHashes(dgd)
 	require.NoError(t, err)
 	completed := r.workerHashesForUnsupportedPathway(dgd, desired)
-	require.Equal(t, newV2Hash, completed.v1)
-	require.Empty(t, completed.v2)
+	require.Empty(t, completed.v1)
+	require.Equal(t, newV2Hash, completed.v2)
 
 	r.setCurrentWorkerHashes(dgd, completed)
 	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
@@ -3350,7 +3350,8 @@ func TestReconcileRollingUpdate_StaleAnnotationUpdatesAfterAllNewWorkersReady(t 
 	err := r.reconcileRollingUpdate(context.Background(), dgd)
 	require.NoError(t, err)
 
-	assert.Equal(t, newHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
+	assert.Equal(t, newHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
 }
 

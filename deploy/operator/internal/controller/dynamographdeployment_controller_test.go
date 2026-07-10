@@ -4207,7 +4207,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			dgdAnnotations: map[string]string{
-				commonconsts.AnnotationCurrentWorkerHash: "1b69c0d3",
+				commonconsts.AnnotationCurrentWorkerHashV2: "1b69c0d3",
 			},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
@@ -4362,7 +4362,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			dgdAnnotations: map[string]string{
-				commonconsts.AnnotationCurrentWorkerHash: "1b69c0d3",
+				commonconsts.AnnotationCurrentWorkerHashV2: "1b69c0d3",
 			},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
