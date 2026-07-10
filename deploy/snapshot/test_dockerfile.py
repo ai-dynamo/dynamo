@@ -42,3 +42,14 @@ def test_runtime_variants_select_available_gnutls_package():
         assert "echo libgnutls30t64" in stage
         assert "echo libgnutls30" in stage
         assert '"${gnutls_package}"' in stage
+
+
+def test_snapshot_agent_does_not_install_tar():
+    dockerfile = DOCKERFILE.read_text()
+    agent = _stage(
+        dockerfile,
+        "FROM ${AGENT_BASE_IMAGE} AS agent",
+        "FROM ${BASE_IMAGE} AS placeholder",
+    )
+
+    assert "\n    tar \\" not in agent

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -48,6 +50,15 @@ func TestRootfsDirectoryRoundTrip(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(checkpoint, "rootfs-diff.tar")); err == nil {
 		t.Fatal("tar artifact must not be created")
+	}
+	deletedData, err := os.ReadFile(
+		filepath.Join(checkpoint, deletedFilesFilename),
+	)
+	if err != nil {
+		t.Fatalf("read empty deletion metadata: %v", err)
+	}
+	if string(deletedData) != "[]" {
+		t.Fatalf("empty deletion metadata = %s, want []", deletedData)
 	}
 	if err := ApplyRootfsDiff(
 		context.Background(),
@@ -99,6 +110,46 @@ func TestRootfsDirectoryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCaptureDeletedFilesRejectsMalformedWhiteouts(t *testing.T) {
+	for _, directory := range []string{"", "nested"} {
+		for _, suffix := range []string{"", ".", ".."} {
+			name := "top-level"
+			if directory != "" {
+				name = directory
+			}
+			t.Run(name+"/"+suffix, func(t *testing.T) {
+				source := t.TempDir()
+				checkpoint := t.TempDir()
+				parent := filepath.Join(source, directory)
+				if err := os.MkdirAll(parent, 0755); err != nil {
+					t.Fatal(err)
+				}
+				writeTestFile(t, filepath.Join(parent, ".wh."+suffix), nil)
+				_, err := CaptureRootfsDiff(
+					context.Background(),
+					source,
+					checkpoint,
+					types.OverlaySettings{},
+					nil,
+					1,
+					testr.New(t),
+				)
+				if err == nil || !strings.Contains(err.Error(), "unsafe whiteout target") {
+					t.Fatalf("CaptureRootfsDiff() error = %v", err)
+				}
+				if info, err := os.Stat(parent); err != nil || !info.IsDir() {
+					t.Fatalf("whiteout removed its parent %q: %v", parent, err)
+				}
+				if _, err := os.Lstat(
+					filepath.Join(checkpoint, deletedFilesFilename),
+				); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("deletion metadata was published: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestCopyRegularFilesCancellationAndError(t *testing.T) {
 	source := t.TempDir()
 	target := t.TempDir()
@@ -132,6 +183,74 @@ func TestCopyRegularFilesCancellationAndError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "open source") {
 		t.Fatalf("copyRegularFiles worker error = %v", err)
 	}
+}
+
+func TestCopyRootfsCancellationLoops(t *testing.T) {
+	t.Run("symlinks", func(t *testing.T) {
+		source := t.TempDir()
+		target := t.TempDir()
+		if err := os.Symlink("target", filepath.Join(source, "a")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("target", filepath.Join(source, "b")); err != nil {
+			t.Fatal(err)
+		}
+		entries, _, _, err := scanRootfs(
+			context.Background(),
+			source,
+			types.OverlaySettings{},
+			nil,
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := newCancelOnErrCallContext(4)
+		err = copyRootfs(ctx, source, target, entries, 1, false)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("copyRootfs() error = %v, want context.Canceled", err)
+		}
+		if _, err := os.Lstat(filepath.Join(target, "a")); err != nil {
+			t.Fatalf("first symlink was not copied: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(target, "b")); !errors.Is(
+			err,
+			os.ErrNotExist,
+		) {
+			t.Fatalf("second symlink was published after cancellation: %v", err)
+		}
+	})
+
+	t.Run("reverse directory metadata", func(t *testing.T) {
+		source := t.TempDir()
+		target := t.TempDir()
+		directory := filepath.Join(source, "directory")
+		if err := os.Mkdir(directory, 0500); err != nil {
+			t.Fatal(err)
+		}
+		entries, _, _, err := scanRootfs(
+			context.Background(),
+			source,
+			types.OverlaySettings{},
+			nil,
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := newCancelOnErrCallContext(3)
+		err = copyRootfs(ctx, source, target, entries, 1, false)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("copyRootfs() error = %v, want context.Canceled", err)
+		}
+		info, err := os.Stat(filepath.Join(target, "directory"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() == 0500 {
+			t.Fatal("directory metadata was published after cancellation")
+		}
+	})
 }
 
 func TestApplyRootfsDiffSkipsExisting(t *testing.T) {
@@ -222,7 +341,7 @@ func TestRootfsArtifactValidation(t *testing.T) {
 				}
 				data, err := json.Marshal(rootfsMetadata{
 					Format:  rootfsDirectoryFormat,
-					Version: 2,
+					Version: rootfsDirectoryVersion + 1,
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -411,19 +530,70 @@ func TestCaptureRootfsRejectsUnsupportedEntries(t *testing.T) {
 }
 
 func TestCaptureRootfsCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := CaptureRootfsDiff(
-		ctx,
-		t.TempDir(),
-		t.TempDir(),
-		types.OverlaySettings{},
-		nil,
-		4,
-		testr.New(t),
-	)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("CaptureRootfsDiff() error = %v, want context.Canceled", err)
+	tests := []struct {
+		name    string
+		trigger func(string) context.Context
+	}{
+		{
+			name: rootfsDirectoryFilename,
+			trigger: func(checkpoint string) context.Context {
+				return newCancelWhenPathExistsContext(
+					filepath.Join(checkpoint, rootfsDirectoryFilename),
+				)
+			},
+		},
+		{
+			name: deletedFilesFilename,
+			trigger: func(checkpoint string) context.Context {
+				return newCancelWhenPathExistsContext(
+					filepath.Join(checkpoint, deletedFilesFilename),
+				)
+			},
+		},
+		{
+			name: rootfsMetadataFilename,
+			trigger: func(checkpoint string) context.Context {
+				return newCancelWhenPathPrefixExistsContext(
+					checkpoint,
+					".rootfs-meta-",
+				)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := t.TempDir()
+			checkpoint := t.TempDir()
+			writeTestFile(t, filepath.Join(source, "file"), []byte("data"))
+			ctx := test.trigger(checkpoint)
+			_, err := CaptureRootfsDiff(
+				ctx,
+				source,
+				checkpoint,
+				types.OverlaySettings{},
+				nil,
+				4,
+				testr.New(t),
+			)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf(
+					"CaptureRootfsDiff() error = %v, want context.Canceled",
+					err,
+				)
+			}
+			for _, name := range []string{
+				rootfsDirectoryFilename,
+				deletedFilesFilename,
+				rootfsMetadataFilename,
+			} {
+				if _, err := os.Lstat(filepath.Join(checkpoint, name)); !errors.Is(
+					err,
+					os.ErrNotExist,
+				) {
+					t.Fatalf("%s was published after cancellation: %v", name, err)
+				}
+			}
+		})
 	}
 }
 
@@ -500,6 +670,204 @@ func TestApplyDeletedFiles(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(target, "old")); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("deleted directory exists: %v", err)
+		}
+	})
+}
+
+func TestDeletedFilesMetadataValidation(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		checkpoint := t.TempDir()
+		writeRootfsContract(t, checkpoint, 0)
+		if err := os.Remove(
+			filepath.Join(checkpoint, deletedFilesFilename),
+		); err != nil {
+			t.Fatal(err)
+		}
+		err := ApplyRootfsDiff(
+			context.Background(),
+			checkpoint,
+			t.TempDir(),
+			1,
+			testr.New(t),
+		)
+		if err == nil || !strings.Contains(err.Error(), "open deleted files metadata") {
+			t.Fatalf("ApplyRootfsDiff() error = %v", err)
+		}
+	})
+
+	t.Run("count mismatch", func(t *testing.T) {
+		checkpoint := t.TempDir()
+		writeRootfsContract(t, checkpoint, 1)
+		writeTestFile(
+			t,
+			filepath.Join(checkpoint, deletedFilesFilename),
+			[]byte("[]"),
+		)
+		err := ApplyRootfsDiff(
+			context.Background(),
+			checkpoint,
+			t.TempDir(),
+			1,
+			testr.New(t),
+		)
+		if err == nil || !strings.Contains(err.Error(), "count mismatch") {
+			t.Fatalf("ApplyRootfsDiff() error = %v", err)
+		}
+	})
+
+	t.Run("missing presence marker", func(t *testing.T) {
+		checkpoint := t.TempDir()
+		if err := os.Mkdir(
+			filepath.Join(checkpoint, rootfsDirectoryFilename),
+			0755,
+		); err != nil {
+			t.Fatal(err)
+		}
+		writeTestJSON(t, filepath.Join(checkpoint, rootfsMetadataFilename), rootfsMetadata{
+			Format:  rootfsDirectoryFormat,
+			Version: rootfsDirectoryVersion,
+		})
+		writeTestFile(
+			t,
+			filepath.Join(checkpoint, deletedFilesFilename),
+			[]byte("[]"),
+		)
+		err := ApplyRootfsDiff(
+			context.Background(),
+			checkpoint,
+			t.TempDir(),
+			1,
+			testr.New(t),
+		)
+		if err == nil || !strings.Contains(
+			err.Error(),
+			"invalid rootfs directory artifact counts",
+		) {
+			t.Fatalf("ApplyRootfsDiff() error = %v", err)
+		}
+	})
+}
+
+func TestReadDeletedFilesRejectsUnsafeFiles(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string)
+	}{
+		{
+			name: "symlink",
+			setup: func(t *testing.T, checkpoint string) {
+				t.Helper()
+				if err := os.Symlink(
+					"/dev/null",
+					filepath.Join(checkpoint, deletedFilesFilename),
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "fifo",
+			setup: func(t *testing.T, checkpoint string) {
+				t.Helper()
+				if err := unix.Mkfifo(
+					filepath.Join(checkpoint, deletedFilesFilename),
+					0600,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, checkpoint string) {
+				t.Helper()
+				if err := os.Mkdir(
+					filepath.Join(checkpoint, deletedFilesFilename),
+					0700,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "oversize",
+			setup: func(t *testing.T, checkpoint string) {
+				t.Helper()
+				file, err := os.Create(
+					filepath.Join(checkpoint, deletedFilesFilename),
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Truncate(maxDeletedFilesSize + 1); err != nil {
+					file.Close()
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			checkpoint := t.TempDir()
+			test.setup(t, checkpoint)
+			if _, err := readDeletedFiles(checkpoint, 0); err == nil {
+				t.Fatal("readDeletedFiles() accepted unsafe deletion metadata")
+			}
+		})
+	}
+}
+
+func TestDeletedFilesLimits(t *testing.T) {
+	t.Run("path length", func(t *testing.T) {
+		data, err := json.Marshal([]string{
+			strings.Repeat("a", maxRootfsPathLength+1),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parseDeletedFiles(data); err == nil ||
+			!strings.Contains(err.Error(), "unsafe rootfs path") {
+			t.Fatalf("parseDeletedFiles() error = %v", err)
+		}
+	})
+
+	t.Run("deletion count", func(t *testing.T) {
+		var data strings.Builder
+		data.Grow(4*maxDeletedFiles + 3)
+		data.WriteByte('[')
+		for i := 0; i <= maxDeletedFiles; i++ {
+			if i > 0 {
+				data.WriteByte(',')
+			}
+			data.WriteString(`"a"`)
+		}
+		data.WriteByte(']')
+		if _, err := parseDeletedFiles([]byte(data.String())); err == nil ||
+			!strings.Contains(err.Error(), "more than") {
+			t.Fatalf("parseDeletedFiles() error = %v", err)
+		}
+	})
+
+	t.Run("rootfs entry count", func(t *testing.T) {
+		checkpoint := t.TempDir()
+		if err := os.Mkdir(
+			filepath.Join(checkpoint, rootfsDirectoryFilename),
+			0755,
+		); err != nil {
+			t.Fatal(err)
+		}
+		writeTestJSON(t, filepath.Join(checkpoint, rootfsMetadataFilename), rootfsMetadata{
+			Format:              rootfsDirectoryFormat,
+			Version:             rootfsDirectoryVersion,
+			Entries:             maxRootfsEntries + 1,
+			DeletedFilesPresent: true,
+		})
+		if _, err := readRootfsMetadata(checkpoint); err == nil ||
+			!strings.Contains(err.Error(), "invalid rootfs directory artifact counts") {
+			t.Fatalf("readRootfsMetadata() error = %v", err)
 		}
 	})
 }
@@ -625,9 +993,123 @@ func writeTestFile(t *testing.T, path string, data []byte) {
 
 func writeDeletedFiles(t *testing.T, checkpoint string, paths []string) {
 	t.Helper()
-	data, err := json.Marshal(paths)
+	if _, err := os.Stat(
+		filepath.Join(checkpoint, rootfsDirectoryFilename),
+	); errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(
+			filepath.Join(checkpoint, rootfsDirectoryFilename),
+			0755,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTestJSON(t, filepath.Join(checkpoint, deletedFilesFilename), paths)
+	writeTestJSON(t, filepath.Join(checkpoint, rootfsMetadataFilename), rootfsMetadata{
+		Format:              rootfsDirectoryFormat,
+		Version:             rootfsDirectoryVersion,
+		DeletedFilesPresent: true,
+		Deletions:           int64(len(paths)),
+	})
+}
+
+func writeRootfsContract(t *testing.T, checkpoint string, deletions int64) {
+	t.Helper()
+	if err := os.Mkdir(
+		filepath.Join(checkpoint, rootfsDirectoryFilename),
+		0755,
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeTestJSON(t, filepath.Join(checkpoint, rootfsMetadataFilename), rootfsMetadata{
+		Format:              rootfsDirectoryFormat,
+		Version:             rootfsDirectoryVersion,
+		DeletedFilesPresent: true,
+		Deletions:           deletions,
+	})
+	writeTestFile(
+		t,
+		filepath.Join(checkpoint, deletedFilesFilename),
+		[]byte("[]"),
+	)
+}
+
+func writeTestJSON(t *testing.T, path string, value any) {
+	t.Helper()
+	data, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, filepath.Join(checkpoint, deletedFilesFilename), data)
+	writeTestFile(t, path, data)
+}
+
+type cancelWhenPathExistsContext struct {
+	context.Context
+	cancel context.CancelFunc
+	once   sync.Once
+	exists func() bool
+}
+
+func newCancelWhenPathExistsContext(trigger string) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cancelWhenPathExistsContext{
+		Context: ctx,
+		cancel:  cancel,
+		exists: func() bool {
+			_, err := os.Lstat(trigger)
+			return err == nil
+		},
+	}
+}
+
+func newCancelWhenPathPrefixExistsContext(
+	directory string,
+	prefix string,
+) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cancelWhenPathExistsContext{
+		Context: ctx,
+		cancel:  cancel,
+		exists: func() bool {
+			entries, err := os.ReadDir(directory)
+			if err != nil {
+				return false
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), prefix) {
+					return true
+				}
+			}
+			return false
+		},
+	}
+}
+
+func (c *cancelWhenPathExistsContext) Err() error {
+	if c.exists() {
+		c.once.Do(c.cancel)
+	}
+	return c.Context.Err()
+}
+
+type cancelOnErrCallContext struct {
+	context.Context
+	cancel context.CancelFunc
+	call   int32
+	count  atomic.Int32
+}
+
+func newCancelOnErrCallContext(call int32) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cancelOnErrCallContext{
+		Context: ctx,
+		cancel:  cancel,
+		call:    call,
+	}
+}
+
+func (c *cancelOnErrCallContext) Err() error {
+	if c.count.Add(1) == c.call {
+		c.cancel()
+	}
+	return c.Context.Err()
 }

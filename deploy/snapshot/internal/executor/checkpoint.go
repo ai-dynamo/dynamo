@@ -107,11 +107,8 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	// Remove any previous checkpoint with the same identity hash, then
 	// promote the staged checkpoint directory into place.
 	finalizeStart := time.Now()
-	if err := os.RemoveAll(finalDir); err != nil {
-		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
-	}
-	if err := os.Rename(tmpDir, finalDir); err != nil {
-		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
+	if err := promoteCheckpoint(ctx, tmpDir, finalDir); err != nil {
+		return err
 	}
 	phaseTimings.FinalizeDuration = time.Since(finalizeStart)
 
@@ -134,6 +131,22 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 		)
 	}
 
+	return nil
+}
+
+func promoteCheckpoint(ctx context.Context, tmpDir, finalDir string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("checkpoint canceled before promotion: %w", err)
+	}
+	if err := os.RemoveAll(finalDir); err != nil {
+		return fmt.Errorf("failed to remove previous checkpoint directory: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("checkpoint canceled before promotion: %w", err)
+	}
+	if err := os.Rename(tmpDir, finalDir); err != nil {
+		return fmt.Errorf("failed to finalize checkpoint directory: %w", err)
+	}
 	return nil
 }
 

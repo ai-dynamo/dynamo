@@ -26,15 +26,21 @@ const (
 	rootfsDirectoryFilename = "rootfs-diff"
 	rootfsMetadataFilename  = "rootfs-diff.meta.json"
 	rootfsDirectoryFormat   = "dynamo-rootfs-directory"
-	rootfsDirectoryVersion  = 1
+	rootfsDirectoryVersion  = 2
 	maxMetadataSize         = 4096
+	maxDeletedFilesSize     = 64 << 20
+	maxRootfsPathLength     = 4096
+	maxDeletedFiles         = 1_000_000
+	maxRootfsEntries        = 1_000_000
 )
 
 type rootfsMetadata struct {
-	Format  string `json:"format"`
-	Version int    `json:"version"`
-	Entries int64  `json:"entries"`
-	Bytes   int64  `json:"bytes"`
+	Format              string `json:"format"`
+	Version             int    `json:"version"`
+	Entries             int64  `json:"entries"`
+	Bytes               int64  `json:"bytes"`
+	DeletedFilesPresent bool   `json:"deletedFilesPresent"`
+	Deletions           int64  `json:"deletions"`
 }
 
 type rootfsExclusion struct {
@@ -126,24 +132,42 @@ func CaptureRootfsDiff(
 	}
 
 	finalPath := filepath.Join(checkpointDir, rootfsDirectoryFilename)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if err := os.Rename(staging, finalPath); err != nil {
 		return "", fmt.Errorf("publish rootfs directory: %w", err)
 	}
 	removeStaging = false
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(finalPath)
+			_ = os.Remove(filepath.Join(checkpointDir, deletedFilesFilename))
+			_ = os.Remove(filepath.Join(checkpointDir, rootfsMetadataFilename))
+		}
+	}()
 	metadata := rootfsMetadata{
-		Format:  rootfsDirectoryFormat,
-		Version: rootfsDirectoryVersion,
-		Entries: stats.entries,
-		Bytes:   stats.bytes,
+		Format:              rootfsDirectoryFormat,
+		Version:             rootfsDirectoryVersion,
+		Entries:             stats.entries,
+		Bytes:               stats.bytes,
+		DeletedFilesPresent: true,
+		Deletions:           int64(len(deleted)),
 	}
-	if err := publishDeletedFiles(checkpointDir, deleted); err != nil {
-		_ = os.RemoveAll(finalPath)
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if err := writeRootfsMetadata(checkpointDir, metadata); err != nil {
-		_ = os.RemoveAll(finalPath)
+	if err := publishDeletedFiles(ctx, checkpointDir, deleted); err != nil {
 		return "", err
 	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := writeRootfsMetadata(ctx, checkpointDir, metadata); err != nil {
+		return "", err
+	}
+	published = true
 	log.Info(
 		"Captured directory rootfs diff",
 		"configured_workers", workers,
@@ -169,6 +193,9 @@ func ApplyRootfsDiff(
 	}
 	metadata, err := readRootfsMetadata(checkpointPath)
 	if err != nil {
+		return err
+	}
+	if _, err := readDeletedFiles(checkpointPath, metadata.Deletions); err != nil {
 		return err
 	}
 	artifactPath := filepath.Join(checkpointPath, rootfsDirectoryFilename)
@@ -266,6 +293,7 @@ func scanRootfs(
 	entries := make([]rootfsEntry, 0, 1024)
 	stats := rootfsStats{}
 	var deleted []string
+	var totalEntries int64
 	err = filepath.WalkDir(root, func(
 		entryPath string,
 		dirEntry os.DirEntry,
@@ -284,6 +312,13 @@ func scanRootfs(
 		if rel == "." {
 			return nil
 		}
+		if totalEntries >= maxRootfsEntries {
+			return fmt.Errorf(
+				"rootfs contains more than %d entries",
+				maxRootfsEntries,
+			)
+		}
+		totalEntries++
 		if err := validateRelativePath(rel); err != nil {
 			return err
 		}
@@ -312,12 +347,26 @@ func scanRootfs(
 			if mode&unix.S_IFMT != unix.S_IFREG {
 				return fmt.Errorf("unsupported native whiteout %s", rel)
 			}
+			target := strings.TrimPrefix(dirEntry.Name(), ".wh.")
+			if target == "" || target == "." || target == ".." {
+				return fmt.Errorf(
+					"unsafe whiteout target %q at %s",
+					target,
+					rel,
+				)
+			}
 			deletedPath := filepath.Join(
 				filepath.Dir(rel),
-				strings.TrimPrefix(dirEntry.Name(), ".wh."),
+				target,
 			)
 			if err := validateRelativePath(deletedPath); err != nil {
 				return err
+			}
+			if len(deleted) >= maxDeletedFiles {
+				return fmt.Errorf(
+					"rootfs contains more than %d deletions",
+					maxDeletedFiles,
+				)
 			}
 			deleted = append(deleted, deletedPath)
 			return nil
@@ -512,6 +561,9 @@ func copyRootfs(
 		createdDirs[entry.path] = created
 	}
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if entry.mode&unix.S_IFMT != unix.S_IFLNK {
 			continue
 		}
@@ -535,6 +587,9 @@ func copyRootfs(
 		return err
 	}
 	for i := len(entries) - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		entry := entries[i]
 		if entry.mode&unix.S_IFMT != unix.S_IFDIR ||
 			!createdDirs[entry.path] {
@@ -898,12 +953,42 @@ func statxNsec(timestamp unix.StatxTimestamp) int64 {
 }
 
 func writeRootfsMetadata(
+	ctx context.Context,
 	checkpointDir string,
 	metadata rootfsMetadata,
 ) error {
-	file, err := os.CreateTemp(checkpointDir, ".rootfs-meta-")
+	data, err := json.Marshal(metadata)
 	if err != nil {
-		return fmt.Errorf("create rootfs completion metadata: %w", err)
+		return fmt.Errorf("marshal rootfs completion metadata: %w", err)
+	}
+	if len(data) > maxMetadataSize {
+		return fmt.Errorf(
+			"rootfs completion metadata exceeds %d bytes",
+			maxMetadataSize,
+		)
+	}
+	if err := writeAtomicFile(
+		ctx,
+		checkpointDir,
+		".rootfs-meta-",
+		rootfsMetadataFilename,
+		data,
+	); err != nil {
+		return fmt.Errorf("publish rootfs completion metadata: %w", err)
+	}
+	return nil
+}
+
+func writeAtomicFile(
+	ctx context.Context,
+	directory string,
+	prefix string,
+	name string,
+	data []byte,
+) error {
+	file, err := os.CreateTemp(directory, prefix)
+	if err != nil {
+		return err
 	}
 	tempPath := file.Name()
 	defer os.Remove(tempPath)
@@ -911,30 +996,30 @@ func writeRootfsMetadata(
 		file.Close()
 		return err
 	}
-	if err := json.NewEncoder(file).Encode(metadata); err != nil {
+	if _, err := file.Write(data); err != nil {
 		file.Close()
-		return fmt.Errorf("write rootfs completion metadata: %w", err)
+		return err
 	}
 	if err := file.Sync(); err != nil {
 		file.Close()
-		return fmt.Errorf("sync rootfs completion metadata: %w", err)
+		return err
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("close rootfs completion metadata: %w", err)
+		return err
 	}
-	if err := os.Rename(
-		tempPath,
-		filepath.Join(checkpointDir, rootfsMetadataFilename),
-	); err != nil {
-		return fmt.Errorf("publish rootfs completion metadata: %w", err)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	parentFD, err := openRoot(checkpointDir, false)
+	if err := os.Rename(tempPath, filepath.Join(directory, name)); err != nil {
+		return err
+	}
+	parentFD, err := openRoot(directory, false)
 	if err != nil {
-		return fmt.Errorf("open checkpoint directory: %w", err)
+		return err
 	}
 	defer unix.Close(parentFD)
 	if err := unix.Fsync(parentFD); err != nil {
-		return fmt.Errorf("sync checkpoint directory: %w", err)
+		return err
 	}
 	return nil
 }
@@ -1048,7 +1133,12 @@ func readRootfsMetadata(checkpointPath string) (rootfsMetadata, error) {
 			metadata.Version,
 		)
 	}
-	if metadata.Entries < 0 || metadata.Bytes < 0 {
+	if metadata.Entries < 0 ||
+		metadata.Entries > maxRootfsEntries ||
+		metadata.Bytes < 0 ||
+		!metadata.DeletedFilesPresent ||
+		metadata.Deletions < 0 ||
+		metadata.Deletions > maxDeletedFiles {
 		return rootfsMetadata{}, fmt.Errorf(
 			"invalid rootfs directory artifact counts",
 		)
@@ -1056,20 +1146,40 @@ func readRootfsMetadata(checkpointPath string) (rootfsMetadata, error) {
 	return metadata, nil
 }
 
-func publishDeletedFiles(checkpointDir string, deleted []string) error {
-	if len(deleted) == 0 {
-		return nil
+func publishDeletedFiles(
+	ctx context.Context,
+	checkpointDir string,
+	deleted []string,
+) error {
+	if deleted == nil {
+		deleted = []string{}
+	}
+	if len(deleted) > maxDeletedFiles {
+		return fmt.Errorf("more than %d deleted files", maxDeletedFiles)
+	}
+	for _, entryPath := range deleted {
+		if err := validateRelativePath(entryPath); err != nil {
+			return fmt.Errorf("invalid deleted file entry: %w", err)
+		}
 	}
 	data, err := json.Marshal(deleted)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(
-		filepath.Join(checkpointDir, deletedFilesFilename),
+	if len(data) > maxDeletedFilesSize {
+		return fmt.Errorf(
+			"deleted files metadata exceeds %d bytes",
+			maxDeletedFilesSize,
+		)
+	}
+	if err := writeAtomicFile(
+		ctx,
+		checkpointDir,
+		".deleted-files-",
+		deletedFilesFilename,
 		data,
-		0644,
 	); err != nil {
-		return fmt.Errorf("write deleted files: %w", err)
+		return fmt.Errorf("publish deleted files: %w", err)
 	}
 	return nil
 }
@@ -1080,25 +1190,13 @@ func ApplyDeletedFiles(
 	targetRoot string,
 	log logr.Logger,
 ) error {
-	data, err := os.ReadFile(filepath.Join(checkpointPath, deletedFilesFilename))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	metadata, err := readRootfsMetadata(checkpointPath)
 	if err != nil {
-		return fmt.Errorf("read deleted files: %w", err)
+		return err
 	}
-	var deleted []string
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&deleted); err != nil {
-		return fmt.Errorf("parse deleted files: %w", err)
-	}
-	if deleted == nil {
-		return fmt.Errorf("parse deleted files: expected a JSON array")
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return fmt.Errorf("parse deleted files: trailing data")
+	deleted, err := readDeletedFiles(checkpointPath, metadata.Deletions)
+	if err != nil {
+		return err
 	}
 	rootFD, err := openRoot(targetRoot, true)
 	if err != nil {
@@ -1125,6 +1223,98 @@ func ApplyDeletedFiles(
 	}
 	log.Info("Deleted files applied", "count", count)
 	return nil
+}
+
+func readDeletedFiles(
+	checkpointPath string,
+	expected int64,
+) ([]string, error) {
+	checkpointFD, err := openRoot(checkpointPath, false)
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint directory: %w", err)
+	}
+	defer unix.Close(checkpointFD)
+	deletedFD, err := unix.Openat(
+		checkpointFD,
+		deletedFilesFilename,
+		unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK,
+		0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open deleted files metadata: %w", err)
+	}
+	file := os.NewFile(uintptr(deletedFD), deletedFilesFilename)
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(deletedFD, &stat); err != nil {
+		return nil, fmt.Errorf("stat deleted files metadata: %w", err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG ||
+		stat.Size < 0 ||
+		stat.Size > maxDeletedFilesSize {
+		return nil, fmt.Errorf(
+			"%s is not valid deletion metadata",
+			deletedFilesFilename,
+		)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxDeletedFilesSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read deleted files metadata: %w", err)
+	}
+	if len(data) > maxDeletedFilesSize {
+		return nil, fmt.Errorf(
+			"deleted files metadata exceeds %d bytes",
+			maxDeletedFilesSize,
+		)
+	}
+	deleted, err := parseDeletedFiles(data)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(deleted)) != expected {
+		return nil, fmt.Errorf(
+			"deleted files metadata count mismatch: marker=%d file=%d",
+			expected,
+			len(deleted),
+		)
+	}
+	return deleted, nil
+}
+
+func parseDeletedFiles(data []byte) ([]string, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("parse deleted files: %w", err)
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '[' {
+		return nil, fmt.Errorf("parse deleted files: expected a JSON array")
+	}
+	deleted := make([]string, 0)
+	for decoder.More() {
+		if len(deleted) >= maxDeletedFiles {
+			return nil, fmt.Errorf(
+				"parse deleted files: more than %d entries",
+				maxDeletedFiles,
+			)
+		}
+		var entryPath string
+		if err := decoder.Decode(&entryPath); err != nil {
+			return nil, fmt.Errorf("parse deleted files: %w", err)
+		}
+		if err := validateRelativePath(entryPath); err != nil {
+			return nil, fmt.Errorf("invalid deleted file entry: %w", err)
+		}
+		deleted = append(deleted, entryPath)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, fmt.Errorf("parse deleted files: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("parse deleted files: trailing data")
+	}
+	return deleted, nil
 }
 
 func validateRemoval(rootFD int, entryPath string) error {
@@ -1227,7 +1417,8 @@ func walkDirectoryAt(parentFD int, name string, remove bool) error {
 }
 
 func validateRelativePath(entryPath string) error {
-	if entryPath == "" || entryPath == "." ||
+	if len(entryPath) > maxRootfsPathLength ||
+		entryPath == "" || entryPath == "." ||
 		filepath.IsAbs(entryPath) ||
 		filepath.Clean(entryPath) != entryPath {
 		return fmt.Errorf("unsafe rootfs path %q", entryPath)

@@ -173,7 +173,6 @@ RUN apt-get update && \
     iptables \
     procps \
     uuid-runtime \
-    tar \
     ca-certificates \
     util-linux \
     && rm -rf /var/lib/apt/lists/*
