@@ -176,7 +176,7 @@ sglang_configs = {
         script_name="disagg_router.sh",
         marks=[
             pytest.mark.router,
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_4,
             pytest.mark.timeout(470),  # parity with sglang disaggregated configs
             pytest.mark.nightly,  # heavy e2e launch scenario; runs on nightly multi-gpu lane
         ],
