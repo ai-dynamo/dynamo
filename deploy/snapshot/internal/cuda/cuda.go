@@ -428,8 +428,9 @@ func restoreAndUnlockProcessTree(
 	return timings, nil
 }
 
-// runPIDOperations runs op for each PID, serially or one goroutine per PID,
-// and joins failures in input PID order.
+// runPIDOperations runs op for each PID serially or one goroutine per PID.
+// Serial execution fails fast; concurrent execution joins failures in input
+// PID order.
 func runPIDOperations(ctx context.Context, pids []int, action string, concurrent bool, op func(context.Context, int) error) error {
 	errs := make([]error, len(pids))
 	wrap := func(pid int, err error) error {
@@ -440,10 +441,12 @@ func runPIDOperations(ctx context.Context, pids []int, action string, concurrent
 	}
 
 	if !concurrent {
-		for i, pid := range pids {
-			errs[i] = wrap(pid, op(ctx, pid))
+		for _, pid := range pids {
+			if err := wrap(pid, op(ctx, pid)); err != nil {
+				return err
+			}
 		}
-		return errors.Join(errs...)
+		return nil
 	}
 
 	var wg sync.WaitGroup

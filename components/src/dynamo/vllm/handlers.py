@@ -353,6 +353,9 @@ class VllmEnginePauseController:
                 await self._engine_client.wake_up()
             else:
                 await self._engine_client.wake_up(tags)
+                # Tagged restores are intentionally staged. Keep generation
+                # and routing paused until a final untagged wake.
+                return False
         if self._generation_paused:
             await self._engine_client.resume_generation()
             self._generation_paused = False
@@ -1433,7 +1436,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._pause_controller.resume(tags)
+                wake_complete = await self._pause_controller.resume(tags)
+                if not wake_complete:
+                    return {
+                        "status": "ok",
+                        "message": "Engine partially woke; full wake required",
+                        "complete": False,
+                    }
                 if self.generate_endpoint is not None:
                     await self.generate_endpoint.register_endpoint_instance()
                     logger.info(
@@ -3292,14 +3301,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(

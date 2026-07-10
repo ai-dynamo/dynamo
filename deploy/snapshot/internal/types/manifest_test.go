@@ -86,16 +86,42 @@ func TestManifestRoundTrip(t *testing.T) {
 	if len(loaded.CUDA.SourceGPUUUIDs) != 2 || loaded.CUDA.SourceGPUUUIDs[0] != "GPU-aaa" {
 		t.Errorf("CUDA.SourceGPUUUIDs = %v", loaded.CUDA.SourceGPUUUIDs)
 	}
-	if !loaded.CUDA.HasJobFile {
+	if loaded.CUDA.HasJobFile == nil || !*loaded.CUDA.HasJobFile {
 		t.Error("CUDA.HasJobFile should be true")
+	}
+	if loaded.CUDA.CanRestoreConcurrently() {
+		t.Error("CUDA restore should be serial when hasJobFile is true")
 	}
 }
 
-func TestCUDAManifestHasJobFileDefaultsToFalse(t *testing.T) {
+func TestCUDAManifestExplicitFalseRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	original := NewCheckpointManifest(
+		"sha256:abc123",
+		CRIUDumpManifest{},
+		SourcePodManifest{},
+		OverlayManifest{},
+	)
+	original.CUDA = NewCUDAManifest([]int{42}, []string{"GPU-aaa"}, false)
+
+	if err := WriteManifest(dir, original); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+	loaded, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if loaded.CUDA.HasJobFile == nil || *loaded.CUDA.HasJobFile {
+		t.Fatalf("CUDA.HasJobFile = %v, want explicit false", loaded.CUDA.HasJobFile)
+	}
+	if !loaded.CUDA.CanRestoreConcurrently() {
+		t.Error("CUDA restore should be concurrent when hasJobFile is explicitly false")
+	}
+}
+
+func TestLegacyCUDAManifestRestoresSerially(t *testing.T) {
 	dir := t.TempDir()
 
-	// A manifest written before the hasJobFile field existed unmarshals to
-	// false, meaning restore treats it as having no job file.
 	content := []byte(`checkpointId: sha256:abc123
 cudaRestore:
   pids: [42]
@@ -109,8 +135,11 @@ cudaRestore:
 	if err != nil {
 		t.Fatalf("ReadManifest: %v", err)
 	}
-	if loaded.CUDA.HasJobFile {
-		t.Error("CUDA.HasJobFile should default to false when absent")
+	if loaded.CUDA.HasJobFile != nil {
+		t.Errorf("CUDA.HasJobFile = %v, want absent", *loaded.CUDA.HasJobFile)
+	}
+	if loaded.CUDA.CanRestoreConcurrently() {
+		t.Error("legacy CUDA manifest must restore serially")
 	}
 }
 
