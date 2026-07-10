@@ -82,7 +82,7 @@ kubectl wait --for=condition=Complete job/glm52-bench \
   -n ${NAMESPACE} --timeout=10800s
 ```
 
-The Job uses `nvcr.io/nvstaging/ai-dynamo/aiperf:0.11.0rc1` directly and does
+The Job uses `nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0` directly and does
 not install or patch AIPerf at runtime.
 
 ### 4. Fetch artifacts

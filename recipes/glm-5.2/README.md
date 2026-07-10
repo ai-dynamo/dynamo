@@ -1,6 +1,6 @@
 # GLM-5.2 Recipes
 
-Recipes for `[GLM-5.2](https://huggingface.co/zai-org/GLM-5.2)`.
+Recipes for [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2).
 
 ## Configurations
 
@@ -29,22 +29,19 @@ Dynamo + SGLang deployment profiles for the B200 agentic workload:
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see[Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
-2. **Hugging Face token** with access to `nvidia/GLM-5.2-NVFP4`:
-  ```bash
-   export NAMESPACE=your-namespace
-   kubectl create secret generic hf-token-secret \
-     --from-literal=HF_TOKEN="your-token" \
-     -n ${NAMESPACE}
-  ```
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
+2. **Hugging Face token** with access to `nvidia/GLM-5.2-NVFP4`.
 
 ## Quick Start
 
-### 1. Create namespace
+### 1. Create namespace and secret
 
 ```bash
 export NAMESPACE=your-namespace
 kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
 ```
 
 ### 2. Create storage
@@ -78,7 +75,7 @@ kubectl apply -f sglang/${MODE}-${SKU}-agentic/deploy.yaml -n ${NAMESPACE}
 
 ### 5. Benchmark
 
-See `[perf/README.md](perf/README.md)` for the full benchmark workflow — trace staging on the PVC, running the AIPerf trace-replay Job, running a concurrency sweep, and fetching artifacts.
+See [perf/README.md](perf/README.md) for the full benchmark workflow — trace staging on the PVC, running the AIPerf trace-replay Job, running a concurrency sweep, and fetching artifacts.
 
 ## Optimization targets
 
@@ -88,7 +85,7 @@ See `[perf/README.md](perf/README.md)` for the full benchmark workflow — trace
 | Agentic  | 64k        | 400        | 90%               | 50                |
 
 
-Modified Mooncake traces are provided to showcase the value of KV-aware routing and CPU offloading, see `[perf/README.md](perf/README.md)` for details.
+Modified Mooncake traces are provided to showcase the value of KV-aware routing and CPU offloading, see [perf/README.md](perf/README.md) for details.
 
 ## Performance results
 
@@ -103,6 +100,5 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 
 ## Limitations
 
-- B200 recipes support up to 500K context lengths, and H200 recipes up to 250K. The full 1M context length is not supported out of the box.
+- B200 recipes support up to 500K context lengths. The full 1M context length is not supported out of the box.
 - Structured decoding requires reasoning to be disabled (`"chat_template_kwargs": {"enable_thinking": false}`) for the output to be populated in the `content` field instead of the `reasoning_content` field.
-
