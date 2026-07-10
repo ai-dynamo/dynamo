@@ -49,6 +49,7 @@ def _make_lora_engine(enable_lora: bool = True, endpoint=None) -> VllmLLMEngine:
             enable_lora=enable_lora,
             model="/models/base",
             block_size=16,
+            max_loras=4,
         ),
         disaggregation_mode=DisaggregationMode.AGGREGATED,
         served_model_name="base-model",
@@ -270,6 +271,100 @@ async def test_load_lora_happy_path(monkeypatch):
     register.assert_awaited_once()
     assert register.await_args.kwargs["lora_name"] == "adapterA"
     assert engine.loaded_loras["adapterA"].id == 123
+
+
+@pytest.mark.asyncio
+async def test_prefill_load_lora_defers_engine_activation(monkeypatch):
+    """Prefill records and advertises the adapter without eagerly loading it.
+
+    The first inference supplies the cached path through ``LoRARequest`` and
+    lets vLLM activate the adapter on demand. Decode and aggregated workers
+    continue to preload so they are ready to generate immediately.
+    """
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    register, _ = _patch_discovery(monkeypatch)
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "success"
+    engine.engine_client.add_lora.assert_not_awaited()
+    assert engine.loaded_loras["adapterA"] == LoRAInfo(id=123, path="/cache/adapter")
+    register.assert_awaited_once()
+    assert register.await_args.kwargs["worker_type"] == WorkerType.Prefill
+    assert register.await_args.kwargs["needs"] == [[WorkerType.Decode]]
+    assert register.await_args.kwargs["max_gpu_lora_count"] == 4
+
+
+@pytest.mark.asyncio
+async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    register, _ = _patch_discovery(monkeypatch)
+    register.side_effect = RuntimeError("discovery is down")
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "error"
+    assert "adapterA" not in engine.loaded_loras
+    engine.engine_client.add_lora.assert_not_awaited()
+    engine.engine_client.remove_lora.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefill_inference_uses_lifecycle_registered_lora(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    engine._default_sampling_params = SimpleNamespace()
+    engine._model_max_len = None
+    engine._dp_range = None
+    engine._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model=engine.engine_args.model,
+        enable_multimodal=False,
+    )
+    _patch_discovery(monkeypatch)
+
+    load_result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+    assert load_result["status"] == "success"
+    engine.engine_client.add_lora.assert_not_awaited()
+
+    captured: dict = {}
+
+    async def _empty_gen():
+        return
+        yield  # pragma: no cover
+
+    def _fake_generate(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return _empty_gen()
+
+    engine.engine_client.generate = _fake_generate
+    monkeypatch.setattr(
+        llm_engine_mod,
+        "build_sampling_params",
+        lambda *a, **k: SimpleNamespace(extra_args=None, max_tokens=10, min_tokens=0),
+    )
+    monkeypatch.setattr(
+        llm_engine_mod.telemetry, "engine_trace_kwargs", lambda context: {}
+    )
+
+    _ = [
+        chunk
+        async for chunk in engine.generate(
+            {"token_ids": [1, 2], "model": "adapterA"},
+            SimpleNamespace(id=lambda: "req-1"),
+        )
+    ]
+
+    lora_request = captured["kwargs"]["lora_request"]
+    assert lora_request.lora_name == "adapterA"
+    assert lora_request.lora_path == "/cache/adapter"
 
 
 @pytest.mark.asyncio
