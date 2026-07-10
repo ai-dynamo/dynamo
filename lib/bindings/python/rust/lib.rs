@@ -1352,22 +1352,24 @@ impl Client {
         self.router.client.instance_ids()
     }
 
-    /// Get the TCP transport addresses of this endpoint's current instances.
+    /// Get the TCP transport addresses of this endpoint's current instances,
+    /// keyed by instance id.
     ///
-    /// Returns the TCP transport string (e.g. "host:port/.../<endpoint>") for
-    /// each currently-registered instance. This lets a caller reach the peer
+    /// Returns a dict mapping each currently-registered instance's id (as
+    /// returned by ``instance_ids``) to its TCP transport string (e.g.
+    /// "host:port/.../<endpoint>"). This lets a caller reach the peer
     /// worker's node -- for example a startup RDMA connectivity check -- via a
     /// dynamo API instead of reading the discovery/etcd registry layout
     /// directly. Non-TCP transports (e.g. NATS) are skipped. This is a snapshot
     /// of the watched instance set (like ``instance_ids``); combine with
     /// ``wait_for_instances`` if you need to block until instances exist.
-    fn instance_tcp_addresses(&self) -> Vec<String> {
+    fn instance_tcp_addresses(&self) -> std::collections::HashMap<u64, String> {
         self.router
             .client
             .instances()
             .into_iter()
             .filter_map(|instance| match instance.transport {
-                rs::component::TransportType::Tcp(addr) => Some(addr),
+                rs::component::TransportType::Tcp(addr) => Some((instance.instance_id, addr)),
                 _ => None,
             })
             .collect()
