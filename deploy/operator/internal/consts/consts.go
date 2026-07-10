@@ -77,9 +77,9 @@ const (
 	KubeLabelDynamoDiscoveryEnabled = "nvidia.com/dynamo-discovery-enabled"
 	// KubeLabelDynamoWorkerHash is the worker generation label on worker DCDs
 	// and worker pods. During v1/v2 hash compatibility the label key remains
-	// stable and the value may be either the active v1 hash or the active v2 hash
-	// recorded on the parent DGD. Older operators understand only the v1 value,
-	// so v1-compatible releases continue to generate new DCDs with the v1 value.
+	// stable. Its value is the active generation identity in
+	// AnnotationCurrentWorkerHash, which may be a bridged v1 hash or a canonical
+	// v2 hash.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
@@ -242,24 +242,19 @@ const (
 	// these annotations remain on the previously serving worker generation until
 	// the new generation is fully ready and old workers have drained.
 	//
-	// The compatibility contract is intentionally additive: existing annotation
-	// and label keys keep their old meaning. AnnotationCurrentWorkerHash stores
-	// the v1alpha1-compatible worker hash so a downgrade can still understand the
-	// active generation. AnnotationCurrentWorkerHashV2 stores the v2 worker hash
-	// for the same active generation. A worker DCD whose
-	// KubeLabelDynamoWorkerHash value matches either annotation is current. While
-	// v1 compatibility is required, generated worker DCDs use the v1 hash as the
-	// label value. If a worker change is visible only to v2, the controller
-	// removes the v1 annotation and rolls to a v2-labeled DCD because the v1 hash
-	// can no longer prove pod-template compatibility. A future v2-only release
-	// can start using the v2 value with the same label key and keep accepting the
-	// v1 annotation until the next v2 generation change drains old workers.
+	// AnnotationCurrentWorkerHash stores the active DCD generation identity. For
+	// a bridged 1.2 generation it contains the v1alpha1-compatible hash and
+	// AnnotationCurrentWorkerHashV2 stores the v2 fingerprint for the same spec.
+	// Fresh and completed canonical generations instead store the v2 identity in
+	// AnnotationCurrentWorkerHash and omit AnnotationCurrentWorkerHashV2. Existing
+	// bridge annotations remain unchanged until a real worker change selects and
+	// completes a canonical v2 generation, avoiding a rollout during upgrade.
 
-	// AnnotationCurrentWorkerHash stores the active v1alpha1-compatible worker
-	// generation hash.
+	// AnnotationCurrentWorkerHash stores the active worker generation identity.
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"
 
-	// AnnotationCurrentWorkerHashV2 stores the active v2 worker generation hash.
+	// AnnotationCurrentWorkerHashV2 stores the v2 fingerprint for a bridged v1
+	// generation and is absent for a canonical v2 generation.
 	AnnotationCurrentWorkerHashV2 = "nvidia.com/current-worker-hash-v2"
 
 	// LegacyWorkerHash is a sentinel value used during migration from pre-rolling-update
