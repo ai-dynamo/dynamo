@@ -12,6 +12,7 @@ import pytest
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.worker_endpoints import WorkerEndpointSet
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
@@ -19,7 +20,6 @@ from dynamo.vllm.worker_factory import (
     _engine_generate_prefill_endpoint_path,
     _wait_and_load_benchmark,
 )
-from dynamo.vllm.worker_endpoints import WorkerEndpointSet
 
 pytestmark = [
     pytest.mark.unit,

@@ -593,9 +593,9 @@ def setup_vllm_engine(
         bench = config._benchmark_additional_config
         if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
             short_id = fpm_worker_id[-8:]
-            os.environ[ENV_FPM_BENCHMARK_OUTPUT_PATH] = (
-                f"/tmp/benchmark_results_{short_id}.json"
-            )
+            os.environ[
+                ENV_FPM_BENCHMARK_OUTPUT_PATH
+            ] = f"/tmp/benchmark_results_{short_id}.json"
         vllm_config.additional_config["benchmark"] = bench
         logger.info("Benchmark config injected into additional_config")
 

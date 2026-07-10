@@ -186,9 +186,8 @@ class GenerationResponseContext:
 class ResponseAdapter(Protocol):
     preserve_missing_logprob_rows: bool
 
-    def adapt(
-        self, output: Dict[str, Any], context: GenerationResponseContext
-    ) -> None: ...
+    def adapt(self, output: Dict[str, Any], context: GenerationResponseContext) -> None:
+        ...
 
 
 class LegacyResponseAdapter:

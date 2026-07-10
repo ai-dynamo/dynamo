@@ -4,7 +4,6 @@
 import asyncio
 import base64
 import importlib
-import io
 import inspect
 import logging
 import os
@@ -2782,9 +2781,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[output_idx] = (
-                        total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
-                    )
+                    total_output_tokens_by_index[
+                        output_idx
+                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
                     finish_reason = getattr(output, "finish_reason", None)
                     stop_reason = getattr(output, "stop_reason", None)
                     if not token_ids and not finish_reason and not stop_reason:
@@ -3154,10 +3153,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if kv_params is not None:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = (
-                _merge_kv_transfer_params(
-                    sampling_params.extra_args.get("kv_transfer_params"), kv_params
-                )
+            sampling_params.extra_args[
+                "kv_transfer_params"
+            ] = _merge_kv_transfer_params(
+                sampling_params.extra_args.get("kv_transfer_params"), kv_params
             )
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
@@ -3251,9 +3250,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"]["prompt_tokens_details"] = (
-                                prefill_prompt_tokens_details
-                            )
+                            tok["completion_usage"][
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
 
                         if want_engine_data:
                             _accumulate_engine_data(
@@ -3648,9 +3647,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
         if expanded_prompt_token_ids is not None:
-            disaggregated_params["expanded_prompt_token_ids"] = (
-                expanded_prompt_token_ids
-            )
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 

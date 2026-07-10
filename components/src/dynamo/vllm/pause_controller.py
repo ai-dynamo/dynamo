@@ -71,8 +71,10 @@ class VllmEnginePauseController:
 
     @property
     def needs_sleep_recovery(self) -> bool:
-        return self._memory_state_unknown or self._generation_pause_unknown or (
-            self._sleep_owner and not self._memory_sleeping
+        return (
+            self._memory_state_unknown
+            or self._generation_pause_unknown
+            or (self._sleep_owner and not self._memory_sleeping)
         )
 
     @property
@@ -305,7 +307,11 @@ class VllmEnginePauseController:
         self._rl_mode = mode
         self._rl_clear_cache = clear_cache
 
-        if self._sleep_owner and self._generation_paused and not self._generation_pause_unknown:
+        if (
+            self._sleep_owner
+            and self._generation_paused
+            and not self._generation_pause_unknown
+        ):
             self._rl_drained = mode in ("wait", "abort") and self._generation_drained
             return changed
         if self.is_rl_drained:
