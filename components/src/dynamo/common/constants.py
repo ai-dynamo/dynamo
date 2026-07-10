@@ -5,6 +5,8 @@
 
 from enum import Enum
 
+ROUTER_HINT_RUNTIME_CAPABILITY_KEY = "router_hint"
+
 
 class DisaggregationMode(Enum):
     """Disaggregation mode for LLM workers."""
