@@ -828,10 +828,11 @@ impl SelectionCore {
     }
 
     /// Book a reservation replaying exactly what the matching `select`
-    /// captured; request fields other than the ids are ignored. A failure
-    /// before booking re-inserts the selection (keeping its original TTL
-    /// anchor), so a retry sees the real error and can still book once it
-    /// clears.
+    /// captured; request fields other than the ids are ignored. The selection
+    /// is consumed only when the booking lands: any failure before that
+    /// (worker not ready or gone, scheduler conflict) re-inserts it with its
+    /// original TTL anchor, so a retry sees the real error and can still book
+    /// once it clears.
     async fn reserve_from_cached_selection(
         &self,
         req: ReservationRequest,
@@ -839,31 +840,39 @@ impl SelectionCore {
         pending: PendingSelection,
         inserted_at: Instant,
     ) -> Result<ReservationResponse, SelectionError> {
-        match self.resolve_cached_booking(&pending) {
-            Ok((entry, endpoint, prefill_load_hint)) => {
-                let track_prefill_tokens = pending.track_prefill_tokens;
-                self.finalize_reservation(
-                    entry,
-                    endpoint,
-                    ReservationBooking {
-                        key: pending.key,
-                        reservation_id: req.reservation_id,
-                        worker: pending.worker,
-                        sequence_hashes: pending.sequence_hashes,
-                        prefill_load_hint: track_prefill_tokens.then_some(prefill_load_hint),
-                        expected_output_tokens: pending.expected_output_tokens,
-                        track_prefill_tokens,
-                        lora_name: pending.lora_name,
-                    },
-                )
-                .await
-            }
-            Err(error) => {
-                self.selection_cache
-                    .reinsert(selection_id, pending, inserted_at, Instant::now());
-                Err(error)
-            }
+        let result = self.book_cached_selection(&pending, req).await;
+        if result.is_err() {
+            self.selection_cache
+                .reinsert(selection_id, pending, inserted_at, Instant::now());
         }
+        result
+    }
+
+    /// Resolve and book a cached selection, borrowing `pending` so the caller
+    /// can re-insert it on failure. Clones only the fields the scheduler booking
+    /// consumes; the rest of `pending` stays whole for a re-insert.
+    async fn book_cached_selection(
+        &self,
+        pending: &PendingSelection,
+        req: ReservationRequest,
+    ) -> Result<ReservationResponse, SelectionError> {
+        let (entry, endpoint, prefill_load_hint) = self.resolve_cached_booking(pending)?;
+        let track_prefill_tokens = pending.track_prefill_tokens;
+        self.finalize_reservation(
+            entry,
+            endpoint,
+            ReservationBooking {
+                key: pending.key.clone(),
+                reservation_id: req.reservation_id,
+                worker: pending.worker,
+                sequence_hashes: pending.sequence_hashes.clone(),
+                prefill_load_hint: track_prefill_tokens.then_some(prefill_load_hint),
+                expected_output_tokens: pending.expected_output_tokens,
+                track_prefill_tokens,
+                lora_name: pending.lora_name.clone(),
+            },
+        )
+        .await
     }
 
     /// Resolve everything a cached booking needs (ready entry, schedulable
@@ -875,7 +884,7 @@ impl SelectionCore {
     ) -> Result<(Arc<SelectionEntry>, String, PrefillLoadHint), SelectionError> {
         let entry = self.ready_entry(&pending.key)?;
         // Validate the full cached worker/rank against current topology so a
-        // rank a PATCH removed during the window is rejected (and re-armed).
+        // rank a PATCH removed during the window is rejected (and re-inserted).
         let endpoint = self
             .catalog
             .schedulable_worker_endpoint(pending.worker, &pending.key)
@@ -952,7 +961,8 @@ impl SelectionCore {
     }
 
     /// Register the booking with the scheduler. All fallible resolution happens
-    /// in the caller, so this consumes the selection only when it will land.
+    /// in the caller; the scheduler add here is the last step that can fail, and
+    /// the cached path re-inserts its selection if it does.
     async fn finalize_reservation(
         &self,
         entry: Arc<SelectionEntry>,

@@ -889,6 +889,52 @@ async fn failed_cached_booking_is_retryable() {
 }
 
 #[tokio::test]
+async fn cached_booking_reinserts_when_scheduler_booking_fails() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+    let select_response = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","selection_id":"sel-1","token_ids":[1,2,3,4]}"#,
+    )
+    .await;
+    assert_eq!(select_response.status(), StatusCode::OK);
+
+    // Book reservation_id "dup" explicitly (no selection_id, so the cached
+    // "sel-1" is untouched) to occupy that id in the scheduler.
+    let occupy = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","reservation_id":"dup","worker_id":1,"sequence_hashes":[1],"isl_tokens":4}"#,
+    )
+    .await;
+    assert_eq!(occupy.status(), StatusCode::CREATED);
+
+    // Replaying "sel-1" under the same "dup" id resolves (worker still
+    // schedulable) but fails at the scheduler with a duplicate conflict.
+    let conflict = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sel-1","reservation_id":"dup"}"#,
+    )
+    .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+    // The booking never landed, so the selection must survive: the same replay
+    // under a fresh reservation_id books without re-sending the prompt.
+    let retried = post(
+        app,
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"sel-1","reservation_id":"res-ok"}"#,
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn cached_reservation_rejects_stale_dp_rank() {
     let app = app();
     assert_eq!(
@@ -924,7 +970,7 @@ async fn cached_reservation_rejects_stale_dp_rank() {
     .await;
     assert_eq!(stale.status(), StatusCode::NOT_FOUND);
 
-    // Restoring the rank re-arms the pending selection: the same replay books.
+    // Restoring the rank re-inserts the pending selection: the same replay books.
     assert!(
         patch(
             app.clone(),

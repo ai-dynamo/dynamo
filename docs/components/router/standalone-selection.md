@@ -216,7 +216,7 @@ Content-Type: application/json
 - **Single-use**: The first successful booking consumes the entry; a repeat
   replay returns `404` (`no pending selection`).
 - **Retryable on failure**: A booking that fails before landing (worker no
-  longer schedulable, service not ready) re-arms the entry, so the same call
+  longer schedulable, service not ready) re-inserts the entry, so the same call
   can be retried once the condition clears.
 - **Bounded window**: Entries expire after 120 seconds, and each selector
   retains at most 4096 pending selections, evicting oldest first.
