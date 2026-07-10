@@ -17,27 +17,27 @@ on:
       vllm_git_url:
         description: 'Exact vLLM overlay repository'
         type: string
-        default: ''
+        default: 'https://github.com/galletas1712/vllm.git'
       vllm_git_ref:
         description: 'Exact vLLM overlay branch'
         type: string
-        default: ''
+        default: 'schwinns/snapshot-gms-nightly-2c17d33f-fi0615-20260710'
       vllm_git_sha:
         description: 'Exact vLLM overlay commit'
         type: string
-        default: ''
+        default: 'ec308a7178bc77dbc90c0673309dac0eb4e2959d'
       flashinfer_git_url:
         description: 'Exact FlashInfer repository'
         type: string
-        default: ''
+        default: 'https://github.com/galletas1712/flashinfer.git'
       flashinfer_git_ref:
         description: 'Exact FlashInfer branch'
         type: string
-        default: ''
+        default: 'schwinns/flashinfer-v0615-snapshot-hooks-20260710'
       flashinfer_git_sha:
         description: 'Exact FlashInfer commit'
         type: string
-        default: ''
+        default: 'f2f9646ec388d9f178b2fbda6ae0ec4246d8e7dc'
       vllm_install_mode:
         description: 'vLLM installation mode'
         type: choice
@@ -48,7 +48,7 @@ on:
       vllm_runtime_base_image:
         description: 'Exact upstream vLLM runtime image'
         type: string
-        default: 'vllm/vllm-openai@sha256:184914ac7c32e4aa7789bb686bfaa0817dd56dbdc8ee05fc0ec671aa0b1792f0'
+        default: 'vllm/vllm-openai@sha256:5bda7078b1bb17f74d369e3ded63115a77d5ea5eeb9eab6ca9a52d108f9a262d'
       snapshot_criu_repo:
         description: 'CRIU repository used for the snapshot placeholder'
         type: string
@@ -121,7 +121,7 @@ jobs:
         VLLM_GIT_SHA=${{ inputs.vllm_git_sha }}
         VLLM_INSTALL_MODE=${{ inputs.vllm_install_mode }}
         VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
-        BASELINE_SBOM_FILE=${{ inputs.vllm_install_mode == 'python-overlay' && 'vllm-openai@184914ac' || 'cuda@2ab6381d' }}
+        BASELINE_SBOM_FILE=${{ inputs.vllm_install_mode == 'python-overlay' && 'vllm-openai@5bda7078' || 'cuda@2ab6381d' }}
     secrets: inherit
 
   snapshot-agent:

@@ -14,11 +14,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-EXPECTED_BASE_COMMIT = "69715823df89b11ee684b84066390cbb9092d5c1"
-EXPECTED_VLLM_HEAD = "17355f6f668857d9b85e0e7714529b42757e0730"
-EXPECTED_FLASHINFER_SHA = "330cc8e1a09f59c1241084459f3df3204b9b8327"
+EXPECTED_BASE_COMMIT = "2c17d33f4291a55b447317640c81eb61077b1b00"
+EXPECTED_VLLM_HEAD = "ec308a7178bc77dbc90c0673309dac0eb4e2959d"
+EXPECTED_FLASHINFER_SHA = "f2f9646ec388d9f178b2fbda6ae0ec4246d8e7dc"
 EXPECTED_AMD64_DIGEST = (
-    "sha256:1fd4323d0aafe8d92b4a4b568ad33661ecaf3bfc7f40860c95d09fed4e6ccd58"
+    "sha256:1ebb205a272a55abb60b09ecbf2adc63831ef2377910afd527478de720788cd8"
 )
 BASELINE_PATH = Path("/opt/dynamo/nightly-base-provenance.json")
 OVERLAY_PROVENANCE_PATH = Path("/opt/dynamo/vllm-overlay-provenance.txt")
@@ -31,14 +31,7 @@ OVERLAY_PATHS = (
     "vllm/distributed/device_communicators/cuda_communicator.py",
     "vllm/distributed/device_communicators/flashinfer_all_reduce.py",
     "vllm/distributed/parallel_state.py",
-    "vllm/envs.py",
-    "vllm/model_executor/warmup/kernel_warmup.py",
-    "vllm/utils/mem_utils.py",
-    "vllm/v1/attention/backends/flashinfer.py",
-    "vllm/v1/engine/core.py",
-    "vllm/v1/worker/gpu/attn_utils.py",
     "vllm/v1/worker/gpu_model_runner.py",
-    "vllm/v1/worker/gpu_worker.py",
 )
 
 
