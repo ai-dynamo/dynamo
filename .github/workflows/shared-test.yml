@@ -188,6 +188,9 @@ jobs:
         # Run from the container's baked-in workspace, not the GHA checkout,
         # so the sanity check reflects what the image actually ships.
         working-directory: /workspace
+        env:
+          # Clear the Datadog step's host .dd_civis_env PYTHONPATH; inspect the image only.
+          PYTHONPATH: ""
         run: |
           set +e
           python ./dev/sanity_check.py --runtime-check --no-gpu-check
