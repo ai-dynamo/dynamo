@@ -15,6 +15,10 @@ inputs:
     description: 'Dockerfile target to build. Defaults to agent for snapshot and the default target for operator.'
     required: false
     default: ''
+  platform:
+    description: 'Optional Docker build platform(s). Defaults to linux/amd64,linux/arm64 for operator and linux/amd64 for all other components.'
+    required: false
+    default: ''
   builder_name:
     description: 'Buildx builder name'
     required: true
@@ -61,7 +65,9 @@ runs:
       id: settings
       shell: bash
       run: |
-        if [[ "${{ inputs.component }}" == "operator" ]]; then
+        if [[ -n "${{ inputs.platform }}" ]]; then
+          echo "build_platforms=${{ inputs.platform }}" >> $GITHUB_OUTPUT
+        elif [[ "${{ inputs.component }}" == "operator" ]]; then
           echo "build_platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
         else
           echo "build_platforms=linux/amd64" >> $GITHUB_OUTPUT

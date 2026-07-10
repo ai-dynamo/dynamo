@@ -18,7 +18,7 @@ endif
 
 # CONTAINER_TOOL defines the container tool to be used for building images.
 CONTAINER_TOOL ?= docker
-# Snapshot runtime images ship cuda-checkpoint and are amd64-only.
+# Target platform for snapshot runtime image builds.
 RUNTIME_IMAGE_PLATFORM ?= linux/amd64
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
@@ -65,13 +65,13 @@ build: fmt vet ## Build snapshot-agent binary.
 ##@ Docker
 
 .PHONY: docker-build-agent
-docker-build-agent: ## Build snapshot-agent docker image (linux/amd64 only).
+docker-build-agent: ## Build snapshot-agent docker image for RUNTIME_IMAGE_PLATFORM.
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target agent \
 		$(CRIU_BUILD_ARGS) \
 		-t ${IMG} .
 
 .PHONY: docker-build-placeholder
-docker-build-placeholder: ## Build placeholder image for checkpoint restore (linux/amd64 only). Requires PLACEHOLDER_BASE_IMG.
+docker-build-placeholder: ## Build placeholder image for checkpoint restore. Requires PLACEHOLDER_BASE_IMG.
 ifndef PLACEHOLDER_BASE_IMG
 	$(error PLACEHOLDER_BASE_IMG is required. Example: make docker-build-placeholder PLACEHOLDER_BASE_IMG=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1-cuda13)
 endif
