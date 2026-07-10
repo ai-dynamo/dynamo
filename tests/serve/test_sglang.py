@@ -168,9 +168,8 @@ sglang_configs = {
         ],
     ),
     "disaggregated_router": SGLangConfig(
-        # Disaggregated serving with KV-aware routing (2 prefill + 2 decode).
-        # Uses disagg_router.sh; the frontend runs in --router-mode kv and
-        # activates its internal prefill router automatically.
+        # Disaggregated serving + KV-aware routing (2 prefill + 2 decode);
+        # frontend --router-mode kv drives the internal prefill router.
         name="disaggregated_router",
         directory=sglang_dir,
         script_name="disagg_router.sh",
@@ -186,9 +185,8 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # Disagg workers expose fewer sglang:* metrics (~14 vs ~25 for
-            # aggregated); validate the prefill worker's metrics endpoint
-            # (mirrors disaggregated_same_gpu).
+            # Disagg workers expose fewer sglang:* metrics; check the
+            # prefill worker's endpoint (mirrors disaggregated_same_gpu).
             metric_payload_default(
                 min_num_requests=6,
                 backend="sglang_disagg",
