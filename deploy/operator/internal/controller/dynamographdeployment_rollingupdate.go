@@ -136,8 +136,9 @@ func (r *DynamoGraphDeploymentReconciler) workerHashesForUnsupportedPathway(
 // generation recorded on the DGD.
 //
 // During v1/v2 compatibility a worker DCD is current if its worker-hash label
-// matches either the active generation in current-worker-hash or its v2
-// fingerprint in current-worker-hash-v2.
+// matches either current-worker-hash (v1) or current-worker-hash-v2. This keeps
+// the existing annotation/label meaning downgrade-safe while allowing the
+// controller to record the v2 hash that will become primary later.
 func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, error) {
@@ -217,8 +218,8 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	return nil
 }
 
-// migrateCurrentWorkerHashIfNeeded completes partially persisted 1.2 hash state
-// without rolling workers.
+// migrateCurrentWorkerHashIfNeeded fills in additive v2 worker-hash state while
+// the v1 hash still represents the active worker generation.
 func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -226,7 +227,10 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	logger := log.FromContext(ctx)
 
 	current := r.currentWorkerHashes(dgd)
-	if current.empty() || current.v1 == consts.LegacyWorkerHash {
+	if current.empty() {
+		return nil
+	}
+	if current.v1 == consts.LegacyWorkerHash {
 		return nil
 	}
 
@@ -236,35 +240,35 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	}
 
 	var next workerGenerationHashes
+	var eventMessage string
 	switch {
-	case current.v1 != "" && current.v2 == "" && current.v1 != desired.v2:
-		v1Hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
-		if err != nil {
-			return fmt.Errorf("failed to compute v1 worker hash: %w", err)
-		}
-		if current.v1 != v1Hash {
-			return nil
-		}
-		next = workerGenerationHashes{v1: current.v1, v2: desired.v2}
+	case current.v1 == desired.v1 && current.v2 == "" && current.v1 != desired.v2:
+		next = current
+		next.v2 = desired.v2
+		eventMessage = "Recorded compatible v1 and v2 worker hash annotations without rolling workers"
 	default:
 		return nil
 	}
 
+	if next == current {
+		return nil
+	}
 	r.setCurrentWorkerHashes(dgd, next)
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to migrate worker hash annotations: %w", err)
 	}
-	logger.Info("Migrated worker hash annotations", "v1Hash", next.v1, "v2Hash", next.v2)
-	r.Recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashMigrated",
-		"Completed worker hash migration without rolling workers")
+	logger.Info("Migrated worker hash annotations",
+		"v1Hash", next.v1,
+		"v2Hash", next.v2)
+	r.Recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashMigrated", eventMessage)
 
 	return nil
 }
 
 // activeWorkerHashForDCDGeneration returns the hash used for generated worker
 // DCD names and worker-hash labels in this reconcile. Existing bridge generations
-// keep their v1 identity until a worker change selects v2; canonical generations
-// continue directly from one v2 identity to the next.
+// keep their v1 identity until a worker change selects v2. Already v2-labeled
+// generations preserve that value.
 func (r *DynamoGraphDeploymentReconciler) activeWorkerHashForDCDGeneration(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired workerGenerationHashes,
@@ -351,8 +355,9 @@ func (r *DynamoGraphDeploymentReconciler) getCurrentWorkerHashV2(
 	return dgd.Annotations[consts.AnnotationCurrentWorkerHashV2]
 }
 
-// setCurrentWorkerHashes stores the v1 and v2 generation values on the DGD.
-// A bridged generation has both; a canonical v2 generation has only v2.
+// setCurrentWorkerHashes stores the active worker hashes for one generation.
+// Empty fields are deleted, which is how v2-only generations intentionally drop
+// the downgrade-compatible v1 annotation.
 func (r *DynamoGraphDeploymentReconciler) setCurrentWorkerHashes(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	hashes workerGenerationHashes,

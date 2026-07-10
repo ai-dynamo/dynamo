@@ -502,11 +502,11 @@ func TestLegacyAlphaHashCompatibility_V2OnlyChangeUsesNewV2Generation(t *testing
 	require.NotEqual(t, newLegacyHash, rollingCtx.NewWorkerHash)
 
 	require.NoError(t, r.completeRollingUpdate(context.Background(), dgd, newV2Hash))
-	require.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
+	require.Empty(t, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 }
 
-func TestUnsupportedPathwayMigratesV1OnlyAndConvergesToCanonicalV2(t *testing.T) {
+func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
 			ComponentType: consts.ComponentTypeWorker,
@@ -1525,7 +1525,6 @@ func TestGetExistingRestartAnnotationsDCD(t *testing.T) {
 				ComponentType: consts.ComponentTypeWorker,
 			},
 		})
-		// A spec change selects the new canonical v2 hash instead of the stale current identity.
 		computedHash := betaDGDWorkersSpecHash(t, dgd)
 		dgd.Annotations = map[string]string{
 			consts.AnnotationCurrentWorkerHash: "oldhash",
@@ -1861,6 +1860,14 @@ func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, consts.LegacyWorkerHash, updatedDCD.Labels[consts.KubeLabelDynamoWorkerHash],
 		"Legacy DCD should have worker hash label backfilled")
+
+	desired, err := r.desiredWorkerHashes(dgd)
+	require.NoError(t, err)
+	require.NoError(t, r.completeRollingUpdate(ctx, dgd, desired.v1))
+
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	require.False(t, trigger)
 }
 
 func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
@@ -3198,26 +3205,6 @@ func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
 	require.NoError(t, err)
 	// Should auto-complete
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-}
-
-func TestLegacyMigrationCompletesWithoutV2Reroll(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: consts.LegacyWorkerHash,
-	}
-	r := createTestReconcilerWithStatus(dgd)
-
-	desired, err := r.desiredWorkerHashes(dgd)
-	require.NoError(t, err)
-	require.NoError(t, r.completeRollingUpdate(context.Background(), dgd, desired.v1))
-	require.Equal(t, desired.v1, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	require.Equal(t, desired.v2, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-
-	trigger, err := r.shouldTriggerRollingUpdate(dgd)
-	require.NoError(t, err)
-	require.False(t, trigger)
 }
 
 func TestReconcileRollingUpdate_NewRollingUpdate(t *testing.T) {

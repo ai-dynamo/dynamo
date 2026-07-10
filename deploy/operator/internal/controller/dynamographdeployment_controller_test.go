@@ -4182,7 +4182,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			},
 		},
 		{
-			name: "multiple services - fresh v2 DCDs all ready",
+			name: "multiple services - all DCDs ready",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -4206,9 +4206,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 				},
 			},
-			dgdAnnotations: map[string]string{
-				commonconsts.AnnotationCurrentWorkerHashV2: "1b69c0d3",
-			},
+			dgdAnnotations: map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: "1b69c0d3"},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -4249,9 +4247,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "decode",
 							Replicas:    ptr.To(int32(2)),
-							Labels: map[string]string{
-								commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3",
-							},
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -4281,9 +4277,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "prefill",
 							Replicas:    ptr.To(int32(3)),
-							Labels: map[string]string{
-								commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3",
-							},
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -4337,7 +4331,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			},
 		},
 		{
-			name: "multiple services - fresh v2 DCDs partially ready",
+			name: "multiple services - some DCDs ready, some not ready",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -4361,9 +4355,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 				},
 			},
-			dgdAnnotations: map[string]string{
-				commonconsts.AnnotationCurrentWorkerHashV2: "1b69c0d3",
-			},
+			dgdAnnotations: map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: "1b69c0d3"},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -4404,9 +4396,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "decode",
 							Replicas:    ptr.To(int32(2)),
-							Labels: map[string]string{
-								commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3",
-							},
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -4436,9 +4426,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "prefill",
 							Replicas:    ptr.To(int32(3)),
-							Labels: map[string]string{
-								commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3",
-							},
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "1b69c0d3"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -4510,6 +4498,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 					},
 				},
 			},
+			dgdAnnotations: map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: "cabcd5c9"},
 			existingDCDs: []client.Object{
 				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -4550,6 +4539,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 							ServiceName: "decode",
 							Replicas:    ptr.To(int32(2)),
+							Labels:      map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "cabcd5c9"},
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
