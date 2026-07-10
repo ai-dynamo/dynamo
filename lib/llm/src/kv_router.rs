@@ -15,9 +15,9 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
-        overlap::cache_hit_estimates_from_tiered_matches,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestOutcome,
+        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
+        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
@@ -79,6 +79,7 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
+        request_progress: Option<RequestProgressUpdater>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -698,6 +699,7 @@ where
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
             routing_hashes,
+            request_progress: response.request_progress,
         })
     }
 
@@ -807,8 +809,22 @@ where
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
+    pub async fn mark_dispatched(&self, request_id: &str) {
+        self.scheduler.mark_dispatched(request_id).await;
+    }
+
+    /// Legacy slot cleanup. Admission-managed requests should use [`Self::finish`].
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
+    }
+
+    /// Release request state and report its terminal admission outcome.
+    pub async fn finish(
+        &self,
+        request_id: &str,
+        outcome: RequestOutcome,
+    ) -> Result<(), SequenceError> {
+        self.scheduler.finish(request_id, outcome).await
     }
 
     /// Number of requests currently parked in the scheduler queue.
