@@ -1318,8 +1318,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_grid_built = False
         self._bench_expected_points = 0
         self._bench_drain_pending = False
-        self._bench_pending_seed_point: BenchmarkPoint | None = None
-        self._bench_pending_seed_salts: list[str] | None = None
+        self._bench_prefix_cache_cleared = False
         self._bench_grid_error: str | None = None
         self._bench_grid_digest: str | None = None
         self._bench_started_at: str | None = None
@@ -1931,6 +1930,49 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- Request injection / cleanup ------------------------------------
 
+    def _bench_cache_fake_prefixes(
+        self,
+        prefix_lengths: Sequence[int],
+        cache_salts: Sequence[str],
+    ) -> bool:
+        """Register block-aligned synthetic prefixes without running a model."""
+        if len(prefix_lengths) != len(cache_salts):
+            raise ValueError("cache_salts must match prefix_lengths")
+
+        seed_requests: list[Request] = []
+        for index, (prefix_tokens, cache_salt) in enumerate(
+            zip(prefix_lengths, cache_salts)
+        ):
+            req = Request(
+                request_id=f"__bench_fake_prefix_{self._bench_seq + index}",
+                prompt_token_ids=[0] * prefix_tokens,
+                sampling_params=SamplingParams(max_tokens=1),
+                pooling_params=None,
+                block_hasher=self._bench_block_hasher,
+                cache_salt=cache_salt,
+            )
+            new_blocks = self.kv_cache_manager.allocate_slots(
+                req,
+                prefix_tokens,
+                full_sequence_must_fit=True,
+            )
+            if new_blocks is None:
+                for allocated_req in seed_requests:
+                    self.kv_cache_manager.free(allocated_req)
+                if not self.kv_cache_manager.reset_prefix_cache():
+                    raise RuntimeError(
+                        "failed to roll back partial fake prefix-cache allocation"
+                    )
+                return False
+            seed_requests.append(req)
+
+        self._bench_seq += len(seed_requests)
+        for req in seed_requests:
+            # Blocks remain hash-cached with refcount zero. The measured request
+            # immediately reacquires them before allocating its new-token slots.
+            self.kv_cache_manager.free(req)
+        return True
+
     def _bench_inject_prefill(
         self,
         prompt_lens: Sequence[int],
@@ -2112,6 +2154,17 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_active_req_ids.clear()
         self._schedule_times.clear()
 
+    def _bench_clear_prefix_cache(self) -> None:
+        """Remove all synthetic prefix entries before normal serving starts."""
+        if self._bench_prefix_cache_cleared:
+            return
+        if not self.kv_cache_manager.reset_prefix_cache():
+            raise RuntimeError(
+                "failed to clear synthetic prefix cache after self-benchmark"
+            )
+        self._bench_prefix_cache_cleared = True
+        logger.info("Benchmark synthetic prefix cache cleared")
+
     def _bench_synchronize_output(self, output: SchedulerOutput) -> None:
         """Release one measured point only after every ADP rank is ready."""
         if not self._bench_sync_pending or output.total_num_scheduled_tokens <= 0:
@@ -2226,6 +2279,7 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._bench_phase == _BenchPhase.DECODE_SWEEP:
             return self._bench_step_decode()
         if self._bench_phase == _BenchPhase.DONE:
+            self._bench_clear_prefix_cache()
             self._bench_finish_timing()
             self._bench_write_results()
             self._bench_deactivate()
@@ -2283,62 +2337,9 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_save_current_point()
             if still_alive:
                 return None
-            if self._bench_pending_seed_point is not None:
-                # The seed pass exists only to populate prefix cache for the
-                # measured request. Drain the async pipeline before reusing its
-                # cache salt, and never record the seed's forward-pass metrics.
-                self._bench_cleanup_requests()
-                self._bench_drain_pending = True
-                return None
             self._bench_save_current_point()
             self._bench_cleanup_requests()
             self._bench_drain_pending = True
-            return None
-
-        if self._bench_pending_seed_point is not None:
-            point = self._bench_pending_seed_point
-            cache_salts = self._bench_pending_seed_salts
-            self._bench_pending_seed_point = None
-            self._bench_pending_seed_salts = None
-            assert cache_salts is not None
-
-            new_token_lengths = self._bench_prefill_new_token_lengths(
-                point.total_prefill_tokens, point.batch_size
-            )
-            kv_read_lengths = self._bench_prefill_kv_read_lengths(
-                point.total_kv_read_tokens, point.batch_size
-            )
-            prompt_lengths = [
-                new_tokens + kv_read_tokens
-                for new_tokens, kv_read_tokens in zip(
-                    new_token_lengths, kv_read_lengths
-                )
-            ]
-
-            self._bench_current_point = point
-            self._bench_current_fpms = []
-            injected = self._bench_inject_prefill(
-                prompt_lens=prompt_lengths,
-                max_tokens=1,
-                cache_salts=cache_salts,
-                expected_kv_read_tokens=kv_read_lengths,
-            )
-            if injected != point.batch_size:
-                self._bench_current_point = None
-                self._bench_skip_point(point, "seed_cache_validation_failed")
-                logger.warning(
-                    "Skipping benchmark prefill point after KV-read seed miss: %s",
-                    point,
-                )
-                return None
-
-            self._bench_sync_pending = True
-            logger.info(
-                "Benchmark prefill: total_tokens=%d total_kv_reads=%d batch_size=%d",
-                point.total_prefill_tokens,
-                point.total_kv_read_tokens,
-                point.batch_size,
-            )
             return None
 
         next_point = self._bench_pop_next("prefill")
@@ -2363,26 +2364,51 @@ class InstrumentedScheduler(AsyncScheduler):
                 f"__bench_kv_seed_{self._bench_seq}_{index}"
                 for index in range(point.batch_size)
             ]
-            injected = self._bench_inject_prefill(
-                prompt_lens=[
+            if not self._bench_cache_fake_prefixes(
+                prefix_lengths=[
                     self._bench_seed_prompt_len(kv_read_tokens)
                     for kv_read_tokens in kv_read_lengths
                 ],
-                max_tokens=1,
                 cache_salts=cache_salts,
-            )
-            if injected != point.batch_size:
-                self._bench_skip_point(point, "seed_injection_failed")
+            ):
+                self._bench_skip_point(point, "fake_prefix_cache_allocation_failed")
                 logger.warning(
-                    "Skipping benchmark prefill point after KV-read seed "
-                    "injection failed: %s",
+                    "Skipping benchmark prefill point after fake prefix-cache "
+                    "allocation failed: %s",
                     point,
                 )
                 return None
-            self._bench_pending_seed_point = point
-            self._bench_pending_seed_salts = cache_salts
+
+            # vLLM blocks same-step prefix hits until the producer's forward
+            # pass completes. Synthetic blocks have no producer, so advance
+            # only the cache manager's step guard before validating the hit.
+            self.kv_cache_manager.new_step_starts()
+
+            self._bench_current_point = point
+            injected = self._bench_inject_prefill(
+                prompt_lens=[
+                    new_tokens + kv_read_tokens
+                    for new_tokens, kv_read_tokens in zip(
+                        new_token_lengths, kv_read_lengths
+                    )
+                ],
+                max_tokens=1,
+                cache_salts=cache_salts,
+                expected_kv_read_tokens=kv_read_lengths,
+            )
+            if injected != point.batch_size:
+                self._bench_current_point = None
+                self._bench_skip_point(point, "fake_prefix_cache_validation_failed")
+                logger.warning(
+                    "Skipping benchmark prefill point after fake prefix-cache "
+                    "validation failed: %s",
+                    point,
+                )
+                return None
+            self._bench_sync_pending = True
             logger.info(
-                "Benchmark prefill seed: total_kv_tokens=%d batch_size=%d",
+                "Benchmark prefill: total_tokens=%d total_kv_reads=%d batch_size=%d",
+                point.total_prefill_tokens,
                 point.total_kv_read_tokens,
                 point.batch_size,
             )

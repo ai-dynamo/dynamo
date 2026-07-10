@@ -17,7 +17,7 @@ import threading
 import uuid
 from collections import deque
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 from vllm.config import CUDAGraphMode  # noqa: E402
@@ -1699,7 +1699,7 @@ def test_prefill_kv_read_validation_does_not_record_prefix_cache_stats():
     get_computed_blocks.assert_not_called()
 
 
-def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
+def test_prefill_kv_read_uses_fake_cache_and_measures_immediately():
     point = BenchmarkPoint(
         point_type="prefill",
         total_prefill_tokens=25,
@@ -1712,13 +1712,13 @@ def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
     stub._bench_active_req_ids = set()
     stub._bench_current_point = None
     stub._bench_current_fpms = []
-    stub._bench_pending_seed_point = None
-    stub._bench_pending_seed_salts = None
     stub._bench_drain_pending = False
     stub._bench_seq = 7
     stub._bench_hash_block_size = 8
     stub._schedule_times = deque()
     stub.requests = {}
+    stub._bench_sync_pending = False
+    stub.kv_cache_manager = SimpleNamespace(new_step_starts=MagicMock())
 
     calls = []
 
@@ -1728,36 +1728,31 @@ def test_prefill_kv_read_seed_drains_then_measures_with_distinct_salts():
         return len(kwargs["prompt_lens"])
 
     stub._bench_inject_prefill = inject
-    stub._bench_cleanup_requests = stub._bench_active_req_ids.clear
+    stub._bench_cache_fake_prefixes = MagicMock(return_value=True)
 
     InstrumentedScheduler._bench_step_prefill(stub)
 
-    assert stub._bench_current_point is None
-    assert stub._bench_pending_seed_point is point
-    assert calls[0]["prompt_lens"] == [16, 16, 8]
-    assert calls[0]["max_tokens"] == 1
-    seed_salts = calls[0]["cache_salts"]
+    assert stub._bench_current_point is point
+    seed_salts = stub._bench_cache_fake_prefixes.call_args.kwargs["cache_salts"]
     assert len(seed_salts) == point.batch_size
     assert len(set(seed_salts)) == point.batch_size
-
-    # Simulate the seed finishing. The next step requests an async drain.
-    stub.requests.clear()
-    InstrumentedScheduler._bench_step_prefill(stub)
-    assert stub._bench_drain_pending is True
-    assert len(calls) == 1
-
-    # After the drain, heterogeneous prompts preserve both iteration totals.
-    InstrumentedScheduler._bench_step_prefill(stub)
-    assert stub._bench_current_point is point
-    assert calls[1] == {
-        "prompt_lens": [25, 24, 16],
-        "max_tokens": 1,
-        "cache_salts": seed_salts,
-        "expected_kv_read_tokens": [16, 16, 8],
-    }
+    stub._bench_cache_fake_prefixes.assert_called_once_with(
+        prefix_lengths=[16, 16, 8],
+        cache_salts=seed_salts,
+    )
+    stub.kv_cache_manager.new_step_starts.assert_called_once_with()
+    assert calls == [
+        {
+            "prompt_lens": [25, 24, 16],
+            "max_tokens": 1,
+            "cache_salts": seed_salts,
+            "expected_kv_read_tokens": [16, 16, 8],
+        }
+    ]
+    assert stub._bench_sync_pending is True
 
 
-def test_prefill_kv_read_validation_miss_skips_measured_point():
+def test_prefill_fake_cache_validation_miss_skips_measured_point():
     point = BenchmarkPoint(
         point_type="prefill",
         total_prefill_tokens=25,
@@ -1765,30 +1760,131 @@ def test_prefill_kv_read_validation_miss_skips_measured_point():
         batch_size=3,
     )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_grid = deque()
+    stub._bench_grid = deque([point])
     stub._bench_config = SimpleNamespace(mode="prefill")
     stub._bench_active_req_ids = set()
     stub._bench_current_point = None
     stub._bench_current_fpms = []
-    stub._bench_pending_seed_point = point
-    stub._bench_pending_seed_salts = ["seed-0", "seed-1", "seed-2"]
     stub._bench_drain_pending = False
+    stub._bench_seq = 0
     stub._bench_hash_block_size = 8
     stub._schedule_times = deque()
     stub._bench_skipped_points = []
+    stub.kv_cache_manager = SimpleNamespace(new_step_starts=MagicMock())
+    stub._bench_cache_fake_prefixes = MagicMock(return_value=True)
     stub._bench_inject_prefill = MagicMock(return_value=0)
 
     InstrumentedScheduler._bench_step_prefill(stub)
 
     assert stub._bench_current_point is None
-    assert stub._bench_pending_seed_point is None
-    assert stub._bench_skipped_points[0].reason == "seed_cache_validation_failed"
+    assert stub._bench_skipped_points[0].reason == "fake_prefix_cache_validation_failed"
+    seed_salts = stub._bench_cache_fake_prefixes.call_args.kwargs["cache_salts"]
     stub._bench_inject_prefill.assert_called_once_with(
         prompt_lens=[25, 24, 16],
         max_tokens=1,
-        cache_salts=["seed-0", "seed-1", "seed-2"],
+        cache_salts=seed_salts,
         expected_kv_read_tokens=[16, 16, 8],
     )
+
+
+def test_fake_prefix_cache_allocates_caches_and_releases_blocks(monkeypatch):
+    created_requests = []
+
+    class FakeRequest:
+        def __init__(self, request_id, prompt_token_ids, cache_salt, **kwargs):
+            self.request_id = request_id
+            self.prompt_token_ids = prompt_token_ids
+            self.cache_salt = cache_salt
+            created_requests.append(self)
+
+    monkeypatch.setattr(instrumented_scheduler_module, "Request", FakeRequest)
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "SamplingParams", lambda **kwargs: object()
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 4
+    stub._bench_block_hasher = None
+    stub.kv_cache_manager = SimpleNamespace(
+        allocate_slots=MagicMock(side_effect=[object(), object(), object()]),
+        free=MagicMock(),
+        reset_prefix_cache=MagicMock(return_value=True),
+    )
+
+    assert InstrumentedScheduler._bench_cache_fake_prefixes(
+        stub,
+        prefix_lengths=[16, 16, 8],
+        cache_salts=["salt-0", "salt-1", "salt-2"],
+    )
+
+    assert [req.request_id for req in created_requests] == [
+        "__bench_fake_prefix_4",
+        "__bench_fake_prefix_5",
+        "__bench_fake_prefix_6",
+    ]
+    assert [len(req.prompt_token_ids) for req in created_requests] == [16, 16, 8]
+    assert stub.kv_cache_manager.allocate_slots.call_args_list == [
+        call(created_requests[0], 16, full_sequence_must_fit=True),
+        call(created_requests[1], 16, full_sequence_must_fit=True),
+        call(created_requests[2], 8, full_sequence_must_fit=True),
+    ]
+    assert stub.kv_cache_manager.free.call_args_list == [
+        call(created_requests[0]),
+        call(created_requests[1]),
+        call(created_requests[2]),
+    ]
+    stub.kv_cache_manager.reset_prefix_cache.assert_not_called()
+    assert stub._bench_seq == 7
+
+
+def test_fake_prefix_cache_rolls_back_partial_allocation(monkeypatch):
+    class FakeRequest:
+        def __init__(self, request_id, **kwargs):
+            self.request_id = request_id
+
+    monkeypatch.setattr(instrumented_scheduler_module, "Request", FakeRequest)
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "SamplingParams", lambda **kwargs: object()
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 0
+    stub._bench_block_hasher = None
+    stub.kv_cache_manager = SimpleNamespace(
+        allocate_slots=MagicMock(side_effect=[object(), None]),
+        free=MagicMock(),
+        reset_prefix_cache=MagicMock(return_value=True),
+    )
+
+    assert not InstrumentedScheduler._bench_cache_fake_prefixes(
+        stub,
+        prefix_lengths=[8, 8],
+        cache_salts=["salt-0", "salt-1"],
+    )
+
+    stub.kv_cache_manager.free.assert_called_once()
+    stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
+    assert stub._bench_seq == 0
+
+
+def test_benchmark_clear_prefix_cache_is_required_and_idempotent():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_prefix_cache_cleared = False
+    stub.kv_cache_manager = SimpleNamespace(
+        reset_prefix_cache=MagicMock(return_value=True)
+    )
+
+    InstrumentedScheduler._bench_clear_prefix_cache(stub)
+    InstrumentedScheduler._bench_clear_prefix_cache(stub)
+
+    stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
+    assert stub._bench_prefix_cache_cleared is True
+
+    failed = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    failed._bench_prefix_cache_cleared = False
+    failed.kv_cache_manager = SimpleNamespace(
+        reset_prefix_cache=MagicMock(return_value=False)
+    )
+    with pytest.raises(RuntimeError, match="failed to clear synthetic prefix cache"):
+        InstrumentedScheduler._bench_clear_prefix_cache(failed)
 
 
 def test_prefill_batch_validation_is_atomic(monkeypatch):
