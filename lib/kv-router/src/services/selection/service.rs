@@ -200,9 +200,9 @@ impl SelectionService {
     pub fn list_workers(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<WorkerCatalogRecord> {
-        self.core.list_workers(model_name, tenant_id)
+        self.core.list_workers(model_name, routing_group)
     }
 
     pub async fn select(&self, req: SelectRequest) -> Result<SelectResponse, SelectionError> {
@@ -264,9 +264,9 @@ impl SelectionService {
     pub fn loads(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<ModelLoadResponse> {
-        self.core.loads(model_name, tenant_id)
+        self.core.loads(model_name, routing_group)
     }
 
     pub async fn potential_loads(

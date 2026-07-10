@@ -498,6 +498,71 @@ def _prompt_token_ids_for_engine_data(
     return list(prompt_token_ids or [])
 
 
+def _prompt_token_count_for_validation(
+    request: Dict[str, Any],
+    embedding_sequence_length: int | None = None,
+    prompt_token_count: int | None = None,
+) -> int | None:
+    """Return the prompt length used for max-model-length validation."""
+    if prompt_token_count is not None:
+        return prompt_token_count
+    if embedding_sequence_length is not None:
+        return embedding_sequence_length
+
+    extra_args = request.get("extra_args") or {}
+    if isinstance(extra_args, dict):
+        expanded_token_ids = extra_args.get("expanded_token_ids")
+        if expanded_token_ids:
+            return len(expanded_token_ids)
+    if "token_ids" in request:
+        return len(request.get("token_ids") or [])
+    return None
+
+
+def _explicit_max_tokens_budget_error(
+    request: Dict[str, Any],
+    model_max_len: int | None,
+    embedding_sequence_length: int | None = None,
+    prompt_token_count: int | None = None,
+) -> str | None:
+    if model_max_len is None or model_max_len <= 0:
+        return None
+
+    stop_conditions = request.get("stop_conditions") or {}
+    max_tokens = stop_conditions.get("max_tokens")
+    if max_tokens is None:
+        max_tokens = request.get("max_tokens")
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
+        return None
+
+    prompt_tokens = _prompt_token_count_for_validation(
+        request,
+        embedding_sequence_length=embedding_sequence_length,
+        prompt_token_count=prompt_token_count,
+    )
+    if prompt_tokens is None:
+        return None
+
+    requested_tokens = prompt_tokens + max_tokens
+    if requested_tokens <= model_max_len:
+        return None
+
+    return (
+        f"This model's maximum context length is {model_max_len} tokens. "
+        f"However, you requested {requested_tokens} tokens "
+        f"({prompt_tokens} in the messages, {max_tokens} in the completion). "
+        "Please reduce the length of the messages or completion."
+    )
+
+
+def _prompt_token_count_for_text_mode(
+    input_param_manager: InputParamManager, input_data: Any
+) -> int:
+    if isinstance(input_data, list):
+        return len(input_data)
+    return len(input_param_manager.tokenizer.encode(input_data))
+
+
 def _flatten_logprobs(
     log_probs: Any,
 ) -> Optional[list[float]]:
@@ -763,8 +828,7 @@ def build_sampling_params(
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
-    token_ids = request.get("token_ids", [])
-    input_length = len(token_ids)
+    input_length = _prompt_token_count_for_validation(request) or 0
     if model_max_len is not None and provided_max_tokens is None:
         # Ensure at least 1 token generation by default when possible
         dynamic_default = max(1, model_max_len - input_length)
@@ -2835,6 +2899,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         _apply_nvext_cache_salt(request, prompt)
 
+        budget_error = _explicit_max_tokens_budget_error(
+            request,
+            self.model_max_len,
+            embedding_sequence_length=embedding_sequence_length,
+        )
+        if budget_error is not None:
+            logger.error("Request %s: %s", request_id, budget_error)
+            yield {
+                "finish_reason": f"error: {budget_error}",
+                "index": 0,
+                "token_ids": [],
+            }
+            return
+
         # Build sampling params from request
         sampling_params = build_sampling_params(
             request,
@@ -2956,6 +3034,35 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prompt = TextPrompt(prompt=input_data)
 
         _apply_nvext_cache_salt(request, prompt)
+
+        request_max_tokens = request.get("max_tokens")
+        prompt_token_count = (
+            _prompt_token_count_for_text_mode(self.input_param_manager, input_data)
+            if isinstance(request_max_tokens, int)
+            and not isinstance(request_max_tokens, bool)
+            else None
+        )
+        budget_error = _explicit_max_tokens_budget_error(
+            request,
+            self.model_max_len,
+            prompt_token_count=prompt_token_count,
+        )
+        if budget_error is not None:
+            logger.error("Request %s: %s", request_id, budget_error)
+            yield {
+                "id": request.get("id") or request.get("request_id", request_id),
+                "created": int(time.time()),
+                "object": "chat.completion.chunk",
+                "model": request.get("model", "unknown"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": f"error: {budget_error}",
+                    }
+                ],
+            }
+            return
 
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(

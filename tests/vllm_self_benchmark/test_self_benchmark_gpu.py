@@ -80,10 +80,12 @@ pytestmark = [
 ]
 
 
-# Tight benchmark sweeps keep wall time short. Granularity 2 covers
-# both batch=1 and batch>1 (the case that regressed) and both
-# ctx=block_size and ctx=max-model-len cases.
+# Tight benchmark sweeps keep wall time short. Three ISL samples provide a
+# middle, cache-hit-capable prefill that fits batch>1 in the fixed E2E KV
+# budget; two samples cover the remaining prefill/decode axes and both
+# ctx=block_size and ctx=max-model-len decode cases.
 _BENCH_GRANULARITY = "2"
+_PREFILL_BENCH_GRANULARITY = "3"
 _BENCH_WARMUP_ITERATIONS = "2"
 
 # Match the cancellation tests' worker config. max-model-len is a bit
@@ -105,6 +107,11 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
         f"benchmark mode in JSON ({actual_mode}) does not match "
         f"expected ({expected_mode})"
     )
+    assert data.get("valid") is True, (
+        f"benchmark reported incomplete coverage: coverage={data.get('coverage')} "
+        f"skipped_points={data.get('skipped_points')} "
+        f"missing_phases={data.get('missing_phases')}"
+    )
 
     results = data.get("results") or []
     assert (
@@ -119,13 +126,52 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
             f"execute that batch (regression in _bench_inject_fake_decode "
             f"or the empty-frame schedule branch)"
         )
-        for fpm in fpms:
+        for fpm_index, fpm in enumerate(fpms):
             wall_time = fpm.get("wall_time", 0.0)
             assert wall_time > 0, (
                 f"point {point} FPM has non-positive wall_time={wall_time}; "
                 f"the benchmark recorded a heartbeat instead of a real "
                 f"forward-pass measurement"
             )
+
+            if point["point_type"] == "prefill":
+                scheduled = fpm.get("scheduled_requests") or {}
+                assert scheduled.get("num_prefill_requests", 0) > 0, (
+                    f"prefill point {point} captured a non-prefill FPM: "
+                    f"scheduled_requests={scheduled}"
+                )
+                if fpm_index == 0:
+                    batch_size = point.get("batch_size", 1)
+                    kv_reads_per_request = point.get("kv_read_tokens", 0)
+                    assert scheduled.get("num_prefill_requests") == batch_size, (
+                        f"point {point} measured the wrong prefill batch size: "
+                        f"scheduled_requests={scheduled}"
+                    )
+                    assert scheduled.get("sum_prefill_kv_tokens") == (
+                        batch_size * kv_reads_per_request
+                    ), (
+                        f"point {point} measured the wrong initial KV reads: "
+                        f"scheduled_requests={scheduled}"
+                    )
+            else:
+                scheduled = fpm.get("scheduled_requests") or {}
+                assert scheduled.get("num_decode_requests", 0) > 0, (
+                    f"decode point {point} captured a non-decode FPM: "
+                    f"scheduled_requests={scheduled}"
+                )
+                if fpm_index == 0:
+                    batch_size = point.get("batch_size", 1)
+                    context_length = point["context_length"]
+                    assert scheduled.get("num_decode_requests") == batch_size, (
+                        f"point {point} measured the wrong decode batch size: "
+                        f"scheduled_requests={scheduled}"
+                    )
+                    assert scheduled.get("sum_decode_kv_tokens") == (
+                        batch_size * context_length
+                    ), (
+                        f"point {point} measured the wrong decode context: "
+                        f"scheduled_requests={scheduled}"
+                    )
     return data
 
 
@@ -188,6 +234,10 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             "--benchmark-mode",
             bench_mode,
             "--benchmark-prefill-granularity",
+            _PREFILL_BENCH_GRANULARITY,
+            "--benchmark-prefill-kv-read-granularity",
+            _BENCH_GRANULARITY,
+            "--benchmark-prefill-batch-granularity",
             _BENCH_GRANULARITY,
             "--benchmark-decode-length-granularity",
             _BENCH_GRANULARITY,
@@ -383,6 +433,25 @@ def test_self_benchmark_agg_serves_after_bench(
             assert (
                 "prefill" in point_types and "decode" in point_types
             ), f"agg benchmark missing point types: got {point_types}"
+            prefill_kv_reads = sorted(
+                r["point"].get("kv_read_tokens", 0)
+                for r in data["results"]
+                if r["point"]["point_type"] == "prefill"
+            )
+            assert any(kv_reads > 0 for kv_reads in prefill_kv_reads), (
+                "agg prefill sweep did not exercise a prefix-cache hit: "
+                f"kv_read_tokens={prefill_kv_reads}"
+            )
+            prefill_hit_batches = sorted(
+                r["point"]["batch_size"]
+                for r in data["results"]
+                if r["point"]["point_type"] == "prefill"
+                and r["point"].get("kv_read_tokens", 0) > 0
+            )
+            assert any(b > 1 for b in prefill_hit_batches), (
+                "agg prefill sweep did not exercise batch>1 after KV reads: "
+                f"batch_sizes={prefill_hit_batches}"
+            )
             decode_batches = sorted(
                 r["point"]["batch_size"]
                 for r in data["results"]
@@ -461,6 +530,22 @@ def test_self_benchmark_disagg_serves_after_bench(
                 assert (
                     "prefill" in p_types
                 ), f"prefill benchmark missing prefill points: {p_types}"
+                prefill_kv_reads = sorted(
+                    r["point"].get("kv_read_tokens", 0) for r in p_data["results"]
+                )
+                assert any(kv_reads > 0 for kv_reads in prefill_kv_reads), (
+                    "disaggregated prefill sweep did not exercise a prefix-cache "
+                    f"hit: kv_read_tokens={prefill_kv_reads}"
+                )
+                prefill_hit_batches = sorted(
+                    r["point"]["batch_size"]
+                    for r in p_data["results"]
+                    if r["point"].get("kv_read_tokens", 0) > 0
+                )
+                assert any(b > 1 for b in prefill_hit_batches), (
+                    "disaggregated prefill sweep did not exercise batch>1 after "
+                    f"KV reads: batch_sizes={prefill_hit_batches}"
+                )
 
                 # End-to-end: a real chat completion that traverses
                 # both workers (prefill on one, decode on the other).
