@@ -61,6 +61,7 @@ use super::RouteDoc;
 /// Worker type label values for Prometheus timing metrics
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
+const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -519,6 +520,7 @@ pub enum ErrorType {
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     model: String,
+    span: tracing::Span,
     // Per-model metric handles resolved once at construction. The collector lives for a
     // single request and `model` is fixed, so caching these avoids re-hashing the `model`
     // label via `with_label_values` on every chunk (and, for ITL, on every output token —
@@ -526,7 +528,8 @@ pub struct ResponseMetricCollector {
     // shares the underlying metric with its vec, so observations are equivalent.
     output_tokens_counter: prometheus::IntCounter,
     time_to_first_token: prometheus::Histogram,
-    inter_token_latency: prometheus::Histogram,
+    inter_token_latency: prometheus::local::LocalHistogram,
+    itl_pending_tokens: u64,
     input_sequence_length: prometheus::Histogram,
     cached_tokens: prometheus::Histogram,
     // Per-model multimodal count histogram handles, resolved once at construction.
@@ -1385,6 +1388,9 @@ impl InflightGuard {
     pub fn error_type(&self) -> &ErrorType {
         &self.error_type
     }
+    pub(crate) fn span(&self) -> &tracing::Span {
+        &self.span
+    }
     pub fn elapsed_ms(&self) -> u128 {
         self.timer.elapsed().as_millis()
     }
@@ -1545,7 +1551,10 @@ impl ResponseMetricCollector {
         // per-chunk / per-token hot path in `observe_response` does no label hashing.
         let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
         let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
-        let inter_token_latency = metrics.inter_token_latency.with_label_values(&[&model]);
+        let inter_token_latency = metrics
+            .inter_token_latency
+            .with_label_values(&[&model])
+            .local();
         let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
         let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
         let images_per_request = metrics.images_per_request.with_label_values(&[&model]);
@@ -1554,9 +1563,11 @@ impl ResponseMetricCollector {
         ResponseMetricCollector {
             metrics,
             model,
+            span: tracing::Span::current(),
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
+            itl_pending_tokens: 0,
             input_sequence_length,
             cached_tokens,
             images_per_request,
@@ -1617,6 +1628,27 @@ impl ResponseMetricCollector {
         }
         if self.decode_worker_type.is_none() {
             self.decode_worker_type = decode_worker_type;
+        }
+    }
+
+    fn set_worker_info_from_metrics(&mut self, metrics: &LLMMetricAnnotation) {
+        if self.prefill_worker_id.is_none() {
+            self.prefill_worker_id = metrics.prefill_worker_id;
+        }
+        if self.prefill_dp_rank.is_none() {
+            self.prefill_dp_rank = metrics.prefill_dp_rank;
+        }
+        if self.prefill_worker_type.is_none() {
+            self.prefill_worker_type = metrics.prefill_worker_type.clone();
+        }
+        if self.decode_worker_id.is_none() {
+            self.decode_worker_id = metrics.decode_worker_id;
+        }
+        if self.decode_dp_rank.is_none() {
+            self.decode_dp_rank = metrics.decode_dp_rank;
+        }
+        if self.decode_worker_type.is_none() {
+            self.decode_worker_type = metrics.decode_worker_type.clone();
         }
     }
 
@@ -1749,6 +1781,11 @@ impl ResponseMetricCollector {
             for _ in 0..num_tokens {
                 self.inter_token_latency.observe(itl);
             }
+            self.itl_pending_tokens = self.itl_pending_tokens.saturating_add(num_tokens as u64);
+            if self.itl_pending_tokens >= ITL_LOCAL_FLUSH_TOKENS {
+                self.inter_token_latency.flush();
+                self.itl_pending_tokens = 0;
+            }
 
             // Update per-worker ITL gauge - attributed to decode worker.
             // Use stored worker_type (from routing time) to avoid MDC lookup.
@@ -1787,6 +1824,9 @@ impl ResponseMetricCollector {
 
 impl Drop for ResponseMetricCollector {
     fn drop(&mut self) {
+        self.inter_token_latency.flush();
+        self.itl_pending_tokens = 0;
+
         if !self.detokenize_latency_total.is_zero() && self.detokenize_count_total > 0 {
             let avg_detokenize_latency_ms = (self.detokenize_latency_total.as_secs_f64() * 1000.0)
                 / self.detokenize_count_total as f64;
@@ -1808,9 +1848,9 @@ impl Drop for ResponseMetricCollector {
                 .observe(self.osl as f64);
         }
 
-        // Record request summary on the enclosing span.
-        // InflightGuard::Drop and on_response logs will inherit these.
-        let span = tracing::Span::current();
+        // Record the request summary on the span retained when the collector was
+        // created. Streaming response bodies are not ambiently instrumented.
+        let span = &self.span;
         span.record("input_tokens", self.isl as u32);
         span.record("output_tokens", self.osl as u32);
         // Only record once observed, so requests that never carried a metrics
@@ -1904,14 +1944,7 @@ fn observe_llm_metrics(
         metrics.detokenize_total_latency,
         metrics.detokenize_count,
     );
-    response_collector.set_worker_info(
-        metrics.prefill_worker_id,
-        metrics.prefill_dp_rank,
-        metrics.prefill_worker_type.clone(),
-        metrics.decode_worker_id,
-        metrics.decode_dp_rank,
-        metrics.decode_worker_type.clone(),
-    );
+    response_collector.set_worker_info_from_metrics(metrics);
 
     if response_collector.is_first_token()
         && metrics.chunk_tokens > 0
@@ -2347,6 +2380,16 @@ mod tests {
         // Second chunk (4 tokens): ITL observed once per token via the cached handle.
         collector.observe_response(42, 4);
 
+        // ITL observations are request-local until the batch threshold or drop.
+        assert_eq!(
+            metrics
+                .inter_token_latency
+                .with_label_values(&[model])
+                .get_sample_count(),
+            0
+        );
+        drop(collector);
+
         let ttft = metrics.time_to_first_token.with_label_values(&[model]);
         assert_eq!(ttft.get_sample_count(), 1, "TTFT observed once");
 
@@ -2366,6 +2409,109 @@ mod tests {
             .with_label_values(&[model])
             .get();
         assert_eq!(out, 7, "output tokens = 3 + 4 via cached counter handle");
+    }
+
+    #[test]
+    fn test_local_itl_histogram_flushes_at_threshold_and_drop() {
+        use prometheus::core::Collector;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "local-itl-flush-model";
+        let global = metrics.inter_token_latency.with_label_values(&[model]);
+
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.observe_response(10, 1); // TTFT only.
+        collector.observe_response(10, 63);
+        assert_eq!(
+            global.get_sample_count(),
+            0,
+            "a partial local batch must remain unpublished"
+        );
+
+        collector.observe_response(10, 1);
+        assert_eq!(
+            global.get_sample_count(),
+            ITL_LOCAL_FLUSH_TOKENS,
+            "the 64th pending ITL sample must flush the local histogram"
+        );
+
+        collector.observe_response(10, 7);
+        assert_eq!(
+            global.get_sample_count(),
+            ITL_LOCAL_FLUSH_TOKENS,
+            "the next partial batch must remain local"
+        );
+        drop(collector);
+
+        assert_eq!(global.get_sample_count(), 71);
+        assert!(global.get_sample_sum() > 0.0);
+
+        let families = global.collect();
+        let histogram = families[0].get_metric()[0].get_histogram();
+        let last_bucket = histogram.get_bucket().last().unwrap();
+        assert_eq!(
+            last_bucket.cumulative_count(),
+            global.get_sample_count(),
+            "flushing must update histogram buckets as well as count and sum"
+        );
+    }
+
+    #[test]
+    fn test_worker_metadata_is_latched_without_replacement() {
+        let metrics = Arc::new(Metrics::new());
+        let mut collector = metrics.create_response_collector("worker-latch-model");
+        let first = LLMMetricAnnotation {
+            prefill_worker_id: Some(11),
+            prefill_dp_rank: Some(1),
+            prefill_worker_type: Some("prefill-first".to_string()),
+            decode_worker_id: Some(22),
+            decode_dp_rank: Some(2),
+            decode_worker_type: Some("decode-first".to_string()),
+            ..Default::default()
+        };
+        collector.set_worker_info_from_metrics(&first);
+
+        let later = LLMMetricAnnotation {
+            prefill_worker_id: Some(33),
+            prefill_dp_rank: Some(3),
+            prefill_worker_type: Some("prefill-later".to_string()),
+            decode_worker_id: Some(44),
+            decode_dp_rank: Some(4),
+            decode_worker_type: Some("decode-later".to_string()),
+            ..Default::default()
+        };
+        collector.set_worker_info_from_metrics(&later);
+
+        assert_eq!(collector.prefill_worker_id, Some(11));
+        assert_eq!(collector.prefill_dp_rank, Some(1));
+        assert_eq!(
+            collector.prefill_worker_type.as_deref(),
+            Some("prefill-first")
+        );
+        assert_eq!(collector.decode_worker_id, Some(22));
+        assert_eq!(collector.decode_dp_rank, Some(2));
+        assert_eq!(
+            collector.decode_worker_type.as_deref(),
+            Some("decode-first")
+        );
+    }
+
+    #[test]
+    fn test_response_collector_retains_creation_span() {
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let metrics = Arc::new(Metrics::new());
+            let span = tracing::info_span!("response-collector-test-span");
+            let expected_id = span.id();
+            let collector = {
+                let _entered = span.enter();
+                metrics.create_response_collector("span-model")
+            };
+
+            assert_eq!(collector.span.id(), expected_id);
+            assert_ne!(tracing::Span::current().id(), expected_id);
+        });
     }
 
     #[test]

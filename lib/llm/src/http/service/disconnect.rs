@@ -216,6 +216,7 @@ fn monitor_for_disconnects_with_timeout(
     inactivity_timeout: Option<Duration>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
+    let request_span = inflight_guard.span().clone();
 
     // Default to Cancelled: if the stream is dropped unexpectedly (e.g. client
     // disconnect causing a broken-pipe on the SSE write), the guard will report
@@ -243,7 +244,7 @@ fn monitor_for_disconnects_with_timeout(
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
-                            tracing::error!("Streaming error: {err}");
+                            tracing::error!(parent: &request_span, "Streaming error: {err}");
                             // Emit a structured OpenAI-style error frame + `data: [DONE]`
                             // so naive `data:`-line parsers see both the error and a
                             // stream terminator. Body derived from SanitizedError so
@@ -277,8 +278,9 @@ fn monitor_for_disconnects_with_timeout(
                     // Mark as cancelled when context is stopped (client disconnect or timeout)
                     inflight_guard.mark_error(ErrorType::Cancelled);
                     // Token counts (input_tokens, output_tokens) are recorded on
-                    // the enclosing span by ResponseMetricCollector::Drop.
+                    // the retained request span by ResponseMetricCollector::Drop.
                     tracing::warn!(
+                        parent: &request_span,
                         request_id = %inflight_guard.request_id(),
                         model = %inflight_guard.model(),
                         endpoint = %inflight_guard.endpoint(),
@@ -304,6 +306,7 @@ fn monitor_for_disconnects_with_timeout(
                     inflight_guard.mark_error(ErrorType::ResponseTimeout);
                     stream_handle.disarm();
                     tracing::warn!(
+                        parent: &request_span,
                         request_id = %inflight_guard.request_id(),
                         model = %inflight_guard.model(),
                         endpoint = %inflight_guard.endpoint(),

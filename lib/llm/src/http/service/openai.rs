@@ -1601,11 +1601,15 @@ fn push_dispatch_event(
     event_name: &str,
     payload: &impl serde::Serialize,
     out: &mut Vec<Result<Event, axum::Error>>,
+    request_span: &tracing::Span,
 ) {
     match serde_json::to_string(payload) {
         Ok(json) => out.push(Ok(Event::default().event(event_name).data(json))),
         Err(e) => {
-            tracing::warn!("streaming_{event_name}: failed to serialize: {e}");
+            tracing::warn!(
+                parent: request_span,
+                "streaming_{event_name}: failed to serialize: {e}"
+            );
         }
     }
 }
@@ -1671,6 +1675,7 @@ fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
     dispatched_ids: &mut HashSet<String>,
     out: &mut Vec<Result<Event, axum::Error>>,
+    request_span: &tracing::Span,
 ) {
     let Some(data) = &response.data else {
         return;
@@ -1697,7 +1702,7 @@ fn streaming_tool_dispatch_events(
                     choice_index: choice.index,
                     tool_call: chunk,
                 };
-                push_dispatch_event("tool_call_dispatch", &payload, out);
+                push_dispatch_event("tool_call_dispatch", &payload, out, request_span);
             }
         }
     }
@@ -1713,6 +1718,7 @@ fn accumulate_reasoning_dispatch(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
     buffers: &mut HashMap<u32, String>,
     out: &mut Vec<Result<Event, axum::Error>>,
+    request_span: &tracing::Span,
 ) {
     let Some(data) = &response.data else {
         return;
@@ -1736,7 +1742,7 @@ fn accumulate_reasoning_dispatch(
                 index: choice.index,
                 reasoning_content: buffer.as_str(),
             };
-            push_dispatch_event("reasoning_dispatch", &payload, out);
+            push_dispatch_event("reasoning_dispatch", &payload, out, request_span);
             buffer.clear();
         }
     }
@@ -1906,6 +1912,7 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
         let mut dispatched_tool_ids: HashSet<String> = HashSet::new();
+        let request_span = tracing::Span::current();
 
         // Optionally prepend extra SSE events before each regular chunk:
         //   - `event: tool_call_dispatch`  — complete tool call detected early (tool dispatch)
@@ -1926,6 +1933,7 @@ async fn chat_completions(
                         &response,
                         &mut dispatched_tool_ids,
                         &mut events,
+                        &request_span,
                     );
                 }
                 if reasoning_dispatch_enabled {
@@ -1933,6 +1941,7 @@ async fn chat_completions(
                         &response,
                         &mut reasoning_buffer,
                         &mut events,
+                        &request_span,
                     );
                 }
 
@@ -3197,33 +3206,38 @@ async fn video_stream(
 
     // Map each annotated NvVideosResponse to an MJPEG boundary chunk.
     // The backend yields one response per frame with the JPEG in data[0].b64_json.
-    let mjpeg_stream = stream.filter_map(|annotated| async move {
-        let ann = match annotated.ok() {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!("Video stream error: {e}");
-                return None;
-            }
-        };
-        let response = ann.data?;
-        let frame = response.data.into_iter().next()?;
-        let b64 = frame.b64_json?;
-        let jpeg_bytes = match base64::prelude::BASE64_STANDARD.decode(&b64) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("Failed to decode frame base64: {e}");
-                return None;
-            }
-        };
-        let header = format!(
-            "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-            jpeg_bytes.len()
-        );
-        let mut chunk = Vec::with_capacity(header.len() + jpeg_bytes.len() + 2);
-        chunk.extend_from_slice(header.as_bytes());
-        chunk.extend_from_slice(&jpeg_bytes);
-        chunk.extend_from_slice(b"\r\n");
-        Some(Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)))
+    let request_span = tracing::Span::current();
+    let frame_span = request_span.clone();
+    let mjpeg_stream = stream.filter_map(move |annotated| {
+        let request_span = frame_span.clone();
+        async move {
+            let ann = match annotated.ok() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!(parent: &request_span, "Video stream error: {e}");
+                    return None;
+                }
+            };
+            let response = ann.data?;
+            let frame = response.data.into_iter().next()?;
+            let b64 = frame.b64_json?;
+            let jpeg_bytes = match base64::prelude::BASE64_STANDARD.decode(&b64) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(parent: &request_span, "Failed to decode frame base64: {e}");
+                    return None;
+                }
+            };
+            let header = format!(
+                "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+                jpeg_bytes.len()
+            );
+            let mut chunk = Vec::with_capacity(header.len() + jpeg_bytes.len() + 2);
+            chunk.extend_from_slice(header.as_bytes());
+            chunk.extend_from_slice(&jpeg_bytes);
+            chunk.extend_from_slice(b"\r\n");
+            Some(Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)))
+        }
     });
 
     // Arm the stream handle and monitor for client disconnects or context cancellation.
@@ -3247,7 +3261,7 @@ async fn video_stream(
                     }
                 }
                 _ = ctx.stopped() => {
-                    tracing::trace!("Context stopped; breaking MJPEG stream");
+                    tracing::trace!(parent: &request_span, "Context stopped; breaking MJPEG stream");
                     inflight.mark_error(ErrorType::Cancelled);
                     break;
                 }
@@ -5188,7 +5202,12 @@ mod tests {
         dispatched_ids: &mut HashSet<String>,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
-        streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
+        streaming_tool_dispatch_events(
+            response,
+            dispatched_ids,
+            &mut events,
+            &tracing::Span::none(),
+        );
         events
     }
 
@@ -5197,7 +5216,7 @@ mod tests {
         buffers: &mut HashMap<u32, String>,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
-        accumulate_reasoning_dispatch(response, buffers, &mut events);
+        accumulate_reasoning_dispatch(response, buffers, &mut events, &tracing::Span::none());
         events
     }
 
