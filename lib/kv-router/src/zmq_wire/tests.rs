@@ -148,6 +148,106 @@ fn test_deserialize_map_block_events_locality_symmetrically() {
     }
 }
 
+/// A `locality` key explicitly set to msgpack nil must decode like an
+/// absent field: the map visitor reads it as `Option<Locality>`
+/// (nil -> `None`) and `unwrap_or(None)` folds it into the absent case, so
+/// FS/OBJ events carrying a nil field stay fail-closed downstream.
+#[test]
+fn test_deserialize_map_block_events_nil_locality_as_absent() {
+    #[derive(Serialize)]
+    struct NilLocalityBlockStored {
+        #[serde(rename = "type")]
+        event_type: &'static str,
+        block_hashes: Vec<BlockHashValue>,
+        parent_block_hash: Option<BlockHashValue>,
+        token_ids: Vec<u32>,
+        block_size: usize,
+        // No `skip_serializing_if`: `None` encodes an explicit msgpack nil.
+        locality: Option<&'static str>,
+    }
+
+    #[derive(Serialize)]
+    struct NilLocalityBlockRemoved {
+        #[serde(rename = "type")]
+        event_type: &'static str,
+        block_hashes: Vec<BlockHashValue>,
+        locality: Option<&'static str>,
+    }
+
+    let encoded_events = [
+        to_vec_named(&NilLocalityBlockStored {
+            event_type: "BlockStored",
+            block_hashes: vec![BlockHashValue::Unsigned(11)],
+            parent_block_hash: None,
+            token_ids: vec![10, 11],
+            block_size: 2,
+            locality: None,
+        })
+        .unwrap(),
+        to_vec_named(&NilLocalityBlockRemoved {
+            event_type: "BlockRemoved",
+            block_hashes: vec![BlockHashValue::Unsigned(11)],
+            locality: None,
+        })
+        .unwrap(),
+    ];
+
+    for encoded in encoded_events {
+        let event: RawKvEvent = from_slice(&encoded).unwrap();
+        let locality = match event {
+            RawKvEvent::BlockStored { locality, .. }
+            | RawKvEvent::BlockRemoved { locality, .. } => locality,
+            other => panic!("expected block event, got {other:?}"),
+        };
+        assert_eq!(
+            locality, None,
+            "explicit nil must behave exactly like an absent field"
+        );
+    }
+}
+
+/// Locality matching is case-sensitive UPPERCASE: `"local"` / `"Remote"`
+/// fall into the `#[serde(other)]` bucket and convert to a Shared placement
+/// (fail closed), never to a local one.
+#[test]
+fn test_deserialize_mixed_case_locality_decodes_unknown_and_converts_shared() {
+    let worker = WorkerWithDpRank::new(3, 0);
+
+    for wire_value in ["local", "Remote"] {
+        let encoded_events = [
+            to_vec_named(&MapBlockStoredFixture {
+                locality: Some(wire_value),
+                ..Default::default()
+            })
+            .unwrap(),
+            to_vec_named(&MapBlockRemovedFixture {
+                event_type: "BlockRemoved",
+                block_hashes: vec![BlockHashValue::Unsigned(11)],
+                locality: Some(wire_value),
+            })
+            .unwrap(),
+        ];
+
+        for encoded in encoded_events {
+            let event: RawKvEvent = from_slice(&encoded).unwrap();
+            let locality = match &event {
+                RawKvEvent::BlockStored { locality, .. }
+                | RawKvEvent::BlockRemoved { locality, .. } => *locality,
+                other => panic!("expected block event, got {other:?}"),
+            };
+            assert_eq!(
+                locality,
+                Some(Locality::Unknown),
+                "`{wire_value}` must not match LOCAL/REMOTE"
+            );
+
+            let placement = convert_event(event, 1, 2, worker, &Arc::new(AtomicU32::new(0)), None)
+                .expect("known medium should produce a placement");
+            assert_eq!(placement.placement.owner, PlacementOwner::Shared);
+        }
+    }
+}
+
 #[test]
 fn test_deserialize_extra_keys_cache_namespace_fallback() {
     let mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210";
@@ -1032,15 +1132,20 @@ fn test_convert_event_rejects_unknown_medium_instead_of_defaulting_to_device() {
     let worker = WorkerWithDpRank::new(3, 0);
 
     for event_kind in [TestEventKind::BlockStored, TestEventKind::BlockRemoved] {
-        let placement = convert_event(
-            raw_placement_event(event_kind, Some("FUTURE_TIER"), None),
-            1,
-            2,
-            worker,
-            &Arc::new(AtomicU32::new(0)),
-            None,
-        );
-        assert!(placement.is_none());
+        for locality in [None, Some(Locality::Local)] {
+            let placement = convert_event(
+                raw_placement_event(event_kind, Some("FUTURE_TIER"), locality),
+                1,
+                2,
+                worker,
+                &Arc::new(AtomicU32::new(0)),
+                None,
+            );
+            assert!(
+                placement.is_none(),
+                "unknown medium must be dropped even with locality {locality:?}"
+            );
+        }
     }
 }
 
@@ -1098,4 +1203,51 @@ fn test_remote_events_do_not_pollute_local_cache_namespace_state() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("local-tenant"));
+}
+
+/// A LOCAL lower-tier placeholder (vLLM FS/OBJ events are hash-only:
+/// token_ids=[], block_size=0, no extra_keys) must not mutate normalizer
+/// state: it may not flip a Namespaced GPU hash to Ambiguous, and salted
+/// chain continuations must keep inheriting the parent namespace.
+#[test]
+fn test_local_lower_tier_placeholders_do_not_pollute_cache_namespace_state() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+
+    let salted_gpu = namespaced_block_stored(1, None, Some("tenant-a"), Locality::Local);
+    assert!(normalizer.preprocess(salted_gpu, worker).is_some());
+
+    let fs_placeholder = RawKvEvent::BlockStored {
+        block_hashes: vec![BlockHashValue::Unsigned(1)],
+        parent_block_hash: None,
+        token_ids: vec![],
+        block_size: 0,
+        medium: Some("FS".to_string()),
+        lora_name: None,
+        cache_namespace: None,
+        block_mm_infos: None,
+        is_eagle: None,
+        group_idx: Some(0),
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: Some(Locality::Local),
+    };
+    assert!(normalizer.preprocess(fs_placeholder, worker).is_some());
+    assert!(matches!(
+        &normalizer.cache_namespaces[&(worker, 1)],
+        CacheNamespaceState::Namespaced(ns) if ns.as_ref() == "tenant-a"
+    ));
+
+    // The salted chain continuation still inherits the parent namespace.
+    let gpu_child = namespaced_block_stored(2, Some(1), None, Locality::Local);
+    let child = normalizer
+        .preprocess(gpu_child, worker)
+        .expect("local FS placeholder must not make the parent ambiguous");
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = child
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
 }

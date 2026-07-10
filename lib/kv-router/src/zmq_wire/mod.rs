@@ -13,7 +13,9 @@ use std::sync::atomic::AtomicU32;
 use rmp_serde as rmps;
 use rustc_hash::FxHashMap;
 
-use crate::protocols::{DpRank, PlacementEvent, PlacementOwner, StorageTier, WorkerWithDpRank};
+use crate::protocols::{
+    DpRank, Placement, PlacementEvent, PlacementOwner, StorageTier, WorkerWithDpRank,
+};
 
 mod convert;
 mod deserialize;
@@ -138,9 +140,15 @@ impl ZmqEventNormalizer {
             return Err(ZmqEventFilterReason::IgnoredEvent);
         }
 
+        // Only device-tier local events feed per-group metadata and
+        // cache-namespace state; lower-tier local events are hash-only
+        // placeholders today and must not mutate normalizer state.
         if !matches!(
-            resolve_placement(&raw, worker).map(|placement| placement.owner),
-            Some(PlacementOwner::LocalWorker(_))
+            resolve_placement(&raw, worker),
+            Some(Placement {
+                owner: PlacementOwner::LocalWorker(_),
+                tier: StorageTier::Device,
+            })
         ) {
             return Ok(raw);
         }

@@ -356,12 +356,6 @@ impl StorageTier {
         }
     }
 
-    pub fn from_kv_medium_or_default(medium: Option<&str>) -> Self {
-        medium
-            .and_then(Self::from_kv_medium)
-            .unwrap_or(Self::Device)
-    }
-
     /// Canonical wire-format medium string. `None` for the default GPU tier so
     /// existing consumers that omit the field continue to round-trip.
     pub fn to_kv_medium(self) -> Option<&'static str> {

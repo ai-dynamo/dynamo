@@ -536,3 +536,188 @@ async fn connect_replay_socket(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::protocols::KvCacheEventData;
+    use crate::services::indexer::backend::create_indexer;
+    use crate::zmq_wire::{BlockHashValue, Locality, RawKvEvent};
+
+    const WORKER_ID: WorkerId = 7;
+    const BLOCK_SIZE: u32 = 2;
+    const LOCAL_BLOCK_HASH: u64 = 0xA1;
+    const SHARED_FS_BLOCK_HASH: u64 = 0xB2;
+    const SHARED_GPU_BLOCK_HASH: u64 = 0xC3;
+
+    /// Reserve an OS-assigned TCP port by binding+dropping a listener
+    /// (mirrors `tests/standalone_indexer_http.rs`).
+    fn reserve_zmq_endpoint() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe listener");
+        let port = listener
+            .local_addr()
+            .expect("local_addr on probe listener")
+            .port();
+        drop(listener);
+        format!("tcp://127.0.0.1:{port}")
+    }
+
+    fn raw_block_stored(
+        block_hash: u64,
+        token_ids: Vec<u32>,
+        medium: &str,
+        locality: Option<Locality>,
+    ) -> RawKvEvent {
+        RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(block_hash)],
+            parent_block_hash: None,
+            token_ids,
+            block_size: BLOCK_SIZE as usize,
+            medium: Some(medium.to_string()),
+            lora_name: None,
+            cache_namespace: None,
+            block_mm_infos: None,
+            is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality,
+        }
+    }
+
+    /// One-batch payload mixing shared and local placements. The shared
+    /// FS+REMOTE event comes first so the event loop must skip past it and
+    /// still index the local event behind it.
+    fn mixed_placement_payload() -> Vec<u8> {
+        let events = vec![
+            raw_block_stored(
+                SHARED_FS_BLOCK_HASH,
+                vec![20, 21],
+                "FS",
+                Some(Locality::Remote),
+            ),
+            raw_block_stored(LOCAL_BLOCK_HASH, vec![10, 11], "GPU", None),
+            raw_block_stored(
+                SHARED_GPU_BLOCK_HASH,
+                vec![30, 31],
+                "GPU",
+                Some(Locality::Remote),
+            ),
+        ];
+        rmp_serde::to_vec_named(&(0.0_f64, events, Some(0_i32))).expect("serialize KvEventBatch")
+    }
+
+    fn listener_loop(indexer: Indexer, replay_socket: Option<SharedSocket>) -> ListenerLoop {
+        ListenerLoop::new(
+            WORKER_ID,
+            0,
+            BLOCK_SIZE,
+            indexer,
+            CancellationToken::new(),
+            connect_sub_socket(&reserve_zmq_endpoint()).expect("connect live SUB socket"),
+            replay_socket,
+            Arc::new(AtomicU64::new(WATERMARK_UNSET)),
+        )
+    }
+
+    /// External block hashes of every stored block across all tiers.
+    /// `Indexer::dump_events` drains pending events first, so this doubles as
+    /// the FIFO barrier the other indexer tests rely on, and it covers the
+    /// device primary plus every allocated lower-tier indexer.
+    async fn stored_block_hashes(indexer: &Indexer) -> Vec<u64> {
+        let mut hashes: Vec<u64> = indexer
+            .dump_events()
+            .await
+            .expect("dump events")
+            .iter()
+            .filter_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(store) => Some(&store.blocks),
+                _ => None,
+            })
+            .flatten()
+            .map(|block| block.block_hash.0)
+            .collect();
+        hashes.sort_unstable();
+        hashes
+    }
+
+    /// Live path: a batch mixing shared (FS+REMOTE, GPU+REMOTE) and local
+    /// (GPU, no locality) events must index only the local block. Shared
+    /// placements yield `into_router_event() == None` and must be skipped,
+    /// not panic the listener (this used to be an `.expect(...)`).
+    #[tokio::test]
+    async fn live_batch_skips_shared_placements_and_indexes_local_block() {
+        let indexer = create_indexer(BLOCK_SIZE, 1);
+        let mut listener = listener_loop(indexer.clone(), None);
+
+        listener
+            .apply_live_batch(5, &mixed_placement_payload())
+            .await;
+
+        assert_eq!(
+            stored_block_hashes(&indexer).await,
+            vec![LOCAL_BLOCK_HASH],
+            "only the local GPU block may reach the index"
+        );
+        assert_eq!(
+            listener.messages_processed, 1,
+            "shared events must be skipped, not counted as processed"
+        );
+        assert_eq!(listener.watermark.load(Ordering::Acquire), 5);
+    }
+
+    /// Replay path: replayed batches flow through the same fail-closed gate.
+    /// A replayed batch containing shared events must still complete the
+    /// replay (batch counted, watermark advanced) while indexing only the
+    /// local block.
+    #[tokio::test]
+    async fn replayed_batch_skips_shared_placements_and_indexes_local_block() {
+        let replay_endpoint = reserve_zmq_endpoint();
+        let router = zmq::Context::new()
+            .socket(zmq::ROUTER)
+            .expect("create ROUTER socket");
+        router.set_linger(0).expect("set_linger");
+        router.set_rcvtimeo(10_000).expect("set_rcvtimeo");
+        router.bind(&replay_endpoint).expect("bind ROUTER socket");
+
+        let payload = mixed_placement_payload();
+        let server = std::thread::spawn(move || {
+            // Engine side of the replay protocol: answer the DEALER's
+            // `[empty, start_seq]` request with one batch at seq 0, then an
+            // empty-payload terminator.
+            let request = router.recv_multipart(0).expect("recv replay request");
+            let identity = request[0].as_slice();
+            let seq0 = 0_u64.to_be_bytes();
+            let batch: [&[u8]; 4] = [identity, b"", &seq0, payload.as_slice()];
+            router.send_multipart(batch, 0).expect("send replay batch");
+            let end_seq = 1_u64.to_be_bytes();
+            let terminator: [&[u8]; 4] = [identity, b"", &end_seq, b""];
+            router
+                .send_multipart(terminator, 0)
+                .expect("send replay terminator");
+        });
+
+        let indexer = create_indexer(BLOCK_SIZE, 1);
+        let replay_socket =
+            connect_dealer_socket(&replay_endpoint).expect("connect replay DEALER socket");
+        let mut listener = listener_loop(indexer.clone(), Some(replay_socket));
+
+        let replayed = tokio::time::timeout(Duration::from_secs(10), listener.replay_gap(0, 1))
+            .await
+            .expect("replay_gap timed out");
+
+        assert_eq!(
+            replayed, 1,
+            "shared events must not abort the replayed batch"
+        );
+        assert_eq!(
+            stored_block_hashes(&indexer).await,
+            vec![LOCAL_BLOCK_HASH],
+            "only the local GPU block may reach the index from replay"
+        );
+        assert_eq!(listener.watermark.load(Ordering::Acquire), 0);
+        server.join().expect("replay server thread");
+    }
+}
