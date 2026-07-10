@@ -43,6 +43,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
+    managed_runtime,
     poll_for_worker_instances,
     topology_env,
 )
@@ -567,18 +568,20 @@ def test_kv_router_bindings(
         "durable_kv_events": durable_kv_events,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=NUM_MOCKERS,
-        request_plane=request_plane,
-    ) as mockers:
+    with (
+        MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
+        ) as mockers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
         # Start mocker instances
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
         # Get runtime and create endpoint
-        runtime = get_runtime(request_plane=request_plane)
         endpoint = runtime.endpoint(
             f"{mockers.namespace}.{mockers.component_name}.generate"
         )

@@ -21,6 +21,7 @@ use dynamo_kv_router::{
     },
 };
 use dynamo_runtime::{
+    CancellationToken,
     component::{Client, Endpoint},
     discovery::DiscoveryQuery,
     error::{DynamoError, ErrorType},
@@ -219,7 +220,7 @@ where
     block_size: u32,
     kv_router_config: KvRouterConfig,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    cancellation_token: tokio_util::sync::CancellationToken,
+    cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
     _served_indexer_handle: Option<ServedIndexerHandle>,
@@ -254,7 +255,9 @@ where
         let kv_router_config = kv_router_config.unwrap_or_default();
         kv_router_config.validate()?;
         let component = endpoint.component();
-        let cancellation_token = component.drt().primary_token();
+        // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
+        let cancellation_token = component.drt().child_token();
+        let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
 
         let indexer = Indexer::new(
@@ -262,6 +265,7 @@ where
             &kv_router_config,
             block_size,
             model_name.as_deref(),
+            cancellation_token.child_token(),
         )
         .await?;
 
@@ -300,6 +304,7 @@ where
             Some(overloaded_worker_provider),
             model_name.as_deref(),
             worker_type,
+            cancellation_token.child_token(),
         )
         .await?;
 
@@ -307,8 +312,13 @@ where
         if kv_router_config.use_remote_indexer {
             tracing::info!("Skipping KV event subscription (using remote indexer)");
         } else if kv_router_config.should_subscribe_to_kv_events() {
-            indexer::start_subscriber(component.clone(), &kv_router_config, indexer.clone())
-                .await?;
+            indexer::start_subscriber(
+                component.clone(),
+                &kv_router_config,
+                indexer.clone(),
+                cancellation_token.child_token(),
+            )
+            .await?;
         } else {
             tracing::info!(
                 "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={})",
@@ -335,6 +345,7 @@ where
         };
 
         tracing::info!("KV Routing initialized");
+        let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
             indexer,
             scheduler,

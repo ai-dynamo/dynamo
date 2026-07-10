@@ -12,6 +12,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
 use rand::Rng;
 use tokio::sync::{Mutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use super::worker_query_directory::{DiscoveredQueryEndpoint, WorkerQueryEndpointDirectory};
 #[cfg(test)]
@@ -64,9 +65,10 @@ pub struct WorkerQueryClient {
     worker_states: DashMap<WorkerId, Arc<Mutex<WorkerState>>>,
     query_endpoints: WorkerQueryEndpointDirectory,
     recovery_semaphore: Arc<Semaphore>,
+    cancellation_token: CancellationToken,
     /// Per-rank cancellation for in-flight recovery tasks; cancelled on rank
     /// removal so retry backoff stops polling workers that no longer exist.
-    recovery_cancels: DashMap<RecoveryKey, tokio_util::sync::CancellationToken>,
+    recovery_cancels: DashMap<RecoveryKey, CancellationToken>,
 }
 
 impl WorkerQueryClient {
@@ -74,6 +76,7 @@ impl WorkerQueryClient {
         component: Component,
         indexer: Indexer,
         transport: Arc<dyn WorkerQueryTransport>,
+        cancellation_token: CancellationToken,
     ) -> Arc<Self> {
         Arc::new(Self {
             component,
@@ -82,6 +85,7 @@ impl WorkerQueryClient {
             worker_states: DashMap::new(),
             query_endpoints: WorkerQueryEndpointDirectory::default(),
             recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            cancellation_token,
             recovery_cancels: DashMap::new(),
         })
     }
@@ -91,12 +95,21 @@ impl WorkerQueryClient {
     /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
-    pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
+    pub async fn spawn(
+        component: Component,
+        indexer: Indexer,
+        cancellation_token: CancellationToken,
+    ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
-        let client = Self::new(component.clone(), indexer, transport);
+        let client = Self::new(
+            component.clone(),
+            indexer,
+            transport,
+            cancellation_token.clone(),
+        );
 
         let client_bg = client.clone();
-        let cancel_token = component.drt().primary_token();
+        let cancel_token = cancellation_token.child_token();
         tokio::spawn(async move {
             if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
                 tracing::error!("WorkerQueryClient discovery loop failed: {e}");
@@ -396,7 +409,13 @@ impl WorkerQueryClient {
                         // the recovery identity, or use a generation that survives
                         // removal.
                         (worker_state.epoch == epoch && worker_state.ranks.contains_key(&key.1))
-                            .then(|| client.recovery_cancels.entry(key).or_default().clone())
+                            .then(|| {
+                                client
+                                    .recovery_cancels
+                                    .entry(key)
+                                    .or_insert_with(|| client.cancellation_token.child_token())
+                                    .clone()
+                            })
                     }
                     None => None,
                 };
@@ -824,7 +843,12 @@ mod tests {
         let component = make_test_component(name).await;
         let (kv_indexer, indexer) = make_test_indexer();
         let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let client = WorkerQueryClient::new(
+            component,
+            indexer,
+            transport.clone(),
+            CancellationToken::new(),
+        );
         (client, transport, kv_indexer)
     }
 
