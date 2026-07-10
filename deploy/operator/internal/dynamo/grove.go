@@ -96,6 +96,7 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 			if err != nil {
 				return false, "", nil, fmt.Errorf("failed to check component %q (pcsg/%s): %w", componentName, resourceName, err)
 			}
+			componentStatus.RuntimeNamespace = dgd.GetDynamoNamespaceForComponent(component)
 			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("pcsg/%s: %s", resourceName, reason))
@@ -105,6 +106,7 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 			if err != nil {
 				return false, "", nil, fmt.Errorf("failed to check component %q (podclique/%s): %w", componentName, resourceName, err)
 			}
+			componentStatus.RuntimeNamespace = dgd.GetDynamoNamespaceForComponent(component)
 			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("podclique/%s: %s", resourceName, reason))
