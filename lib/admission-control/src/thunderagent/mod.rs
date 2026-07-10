@@ -8,7 +8,7 @@ mod strategy;
 
 pub use capacity::{WatchWorkerCapacity, WorkerCapacity, WorkerCapacityProvider};
 pub use config::{ConfigError, ThunderAgentConfig};
-pub use registration::{RegistrationError, register_builtin_strategies, strategy_recheck_interval};
+pub use registration::{RegistrationError, register_builtin_strategies};
 pub use strategy::ThunderAgent;
 
 pub const STRATEGY_NAME: &str = "session_aware";
