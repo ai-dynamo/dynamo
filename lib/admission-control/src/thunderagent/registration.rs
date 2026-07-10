@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use dynamo_kv_router::RouterQueuePolicy;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId};
@@ -27,8 +26,6 @@ pub enum RegistrationError {
     MultipleThunderAgentClasses { first: String, second: String },
     #[error(transparent)]
     ThunderAgentConfig(#[from] ConfigError),
-    #[error("admission strategy reconcile interval must be positive")]
-    ZeroReconcileInterval,
 }
 
 /// Register configured built-in strategies without replacing caller-provided ones.
@@ -76,24 +73,10 @@ where
     Ok(())
 }
 
-pub fn strategy_recheck_interval(
-    strategies: &PolicyClassAdmissionStrategies,
-) -> Result<Option<Duration>, RegistrationError> {
-    let mut minimum = None;
-    for interval in strategies
-        .values()
-        .filter_map(|strategy| strategy.reconcile_interval())
-    {
-        if interval.is_zero() {
-            return Err(RegistrationError::ZeroReconcileInterval);
-        }
-        minimum = Some(minimum.map_or(interval, |current: Duration| current.min(interval)));
-    }
-    Ok(minimum)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use dynamo_kv_router::scheduling::{
         AdmissionDecision, AdmissionRequest, PolicyClassAdmissionStrategy, RouterPolicyConfig,
@@ -125,18 +108,6 @@ mod tests {
     impl PolicyClassAdmissionStrategy for CustomStrategy {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
-        }
-    }
-
-    struct ZeroIntervalStrategy;
-
-    impl PolicyClassAdmissionStrategy for ZeroIntervalStrategy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
-            AdmissionDecision::Bypass
-        }
-
-        fn reconcile_interval(&self) -> Option<Duration> {
-            Some(Duration::ZERO)
         }
     }
 
@@ -196,16 +167,5 @@ policy_classes:
         register_builtin_strategies(&profile("custom"), workers(), 16, &mut strategies).unwrap();
 
         assert_eq!(strategies["agents"].reconcile_interval(), None);
-    }
-
-    #[test]
-    fn rejects_zero_reconcile_interval() {
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        strategies.insert("agents".to_owned(), Box::new(ZeroIntervalStrategy));
-
-        assert!(matches!(
-            strategy_recheck_interval(&strategies),
-            Err(RegistrationError::ZeroReconcileInterval)
-        ));
     }
 }

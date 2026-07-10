@@ -6,5 +6,4 @@ pub mod thunderagent;
 pub use thunderagent::{
     ConfigError, RegistrationError, STRATEGY_NAME, ThunderAgent, ThunderAgentConfig,
     WatchWorkerCapacity, WorkerCapacity, WorkerCapacityProvider, register_builtin_strategies,
-    strategy_recheck_interval,
 };
