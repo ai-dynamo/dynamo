@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 import torch
@@ -128,7 +129,9 @@ def test_nixl_connector_object_roundtrip(fake_nixl):
             "outputs": [{"token_ids": [1, 2], "text": "hi", "finish_reason": "stop"}],
             "multimodal_output": {"sr": 16000},
         }
-        ok, size, metadata = connector.put("1", "router", "req-obj", payload)
+        ok, size, metadata = connector.put(
+            "1", "router", f"req-obj-{uuid4().hex}", payload
+        )
 
         assert ok is True
         assert metadata is not None
