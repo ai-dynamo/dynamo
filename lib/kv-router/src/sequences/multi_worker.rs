@@ -23,8 +23,6 @@ use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use super::prefill_tracker::PrefillTimeLoad;
-#[cfg(any(test, feature = "bench"))]
-use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
 use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
@@ -314,23 +312,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.prompt_registry.is_block_index_empty(),
             "expected reverse block index to be empty after drain",
         );
-
-        let trie_lookup_live_hashes: Vec<_> = {
-            let table = self.workers.read();
-            table
-                .slots
-                .iter()
-                .filter_map(|slot| {
-                    let live_hashes = lookup_live_hashes(&slot.trie_lookup);
-                    (!live_hashes.is_empty()).then_some((slot.worker, live_hashes))
-                })
-                .collect()
-        };
-        assert!(
-            trie_lookup_live_hashes.is_empty(),
-            "expected all worker trie lookups to reference only dead nodes after drain, found {:?}",
-            trie_lookup_live_hashes,
-        );
     }
 
     fn publish_worker_load_snapshot(
@@ -407,13 +388,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     pub fn register_worker(&self, range: WorkerDpRange) -> Result<(), WorkerTopologyError> {
         let change = {
             let mut table = self.workers.write();
-            table.register_worker(self.block_size, range)?
+            let change = table.register_worker(self.block_size, range)?;
+            self.apply_worker_topology_change_locked(&change);
+            change
         };
 
         for worker in &change.added {
             tracing::debug!("Registering worker {:?}", worker);
         }
-        self.apply_worker_topology_change(change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -425,7 +408,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     pub fn upsert_worker(&self, range: WorkerDpRange) -> Result<(), WorkerTopologyError> {
         let change = {
             let mut table = self.workers.write();
-            table.upsert_worker(self.block_size, range)?
+            let change = table.upsert_worker(self.block_size, range)?;
+            self.apply_worker_topology_change_locked(&change);
+            change
         };
 
         for removed in &change.removed {
@@ -434,7 +419,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         for worker in &change.added {
             tracing::debug!("Registering external worker rank {:?}", worker);
         }
-        self.apply_worker_topology_change(change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -442,13 +427,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     pub fn unregister_worker(&self, worker_id: WorkerId) -> Result<(), WorkerTopologyError> {
         let change = {
             let mut table = self.workers.write();
-            table.unregister_worker(self.block_size, worker_id)?
+            let change = table.unregister_worker(self.block_size, worker_id)?;
+            self.apply_worker_topology_change_locked(&change);
+            change
         };
 
         for removed in &change.removed {
             tracing::warn!("Removing worker {:?}", removed.worker);
         }
-        self.apply_worker_topology_change(change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -461,7 +448,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Result<(), WorkerTopologyError> {
         let change = {
             let mut table = self.workers.write();
-            table.reconcile(self.block_size, ranges.into_iter().collect())?
+            let change = table.reconcile(self.block_size, ranges.into_iter().collect())?;
+            self.apply_worker_topology_change_locked(&change);
+            change
         };
 
         for removed in &change.removed {
@@ -471,7 +460,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             tracing::warn!("Adding worker {:?}", worker);
         }
 
-        self.apply_worker_topology_change(change);
+        self.finish_worker_topology_change(&change);
         Ok(())
     }
 
@@ -485,9 +474,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.workers.read().has_registered_workers()
     }
 
-    fn apply_worker_topology_change(&self, change: WorkerTopologyChange) {
+    /// Apply request-index and registry state while the caller holds
+    /// `workers.write()`. This excludes in-flight mutations and same-identity
+    /// re-registration until removed membership is fully drained.
+    fn apply_worker_topology_change_locked(&self, change: &WorkerTopologyChange) {
         for removed in &change.removed {
             self.request_index.remove_worker_requests(removed.worker);
+        }
+        self.prompt_registry
+            .apply_topology_change_without_cleanup(change);
+    }
+
+    fn finish_worker_topology_change(&self, change: &WorkerTopologyChange) {
+        for removed in &change.removed {
             self.publisher
                 .observe_worker_removed(&removed.worker, self.worker_type);
         }
@@ -495,7 +494,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             self.publisher
                 .observe_worker_registered(worker, self.worker_type);
         }
-        self.prompt_registry.apply_topology_change(change);
+        self.prompt_registry.maybe_cleanup();
     }
 
     pub fn add_request(
@@ -792,7 +791,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let load = seq.worker_load_snapshot();
                 self.prompt_registry.apply_membership_delta_and_load(
                     slot.worker,
-                    &slot.trie_lookup,
                     outcome.membership_delta,
                     load,
                 );
@@ -859,9 +857,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         tracing::debug!(?worker, "Lazily registering worker in slot tracker");
         let change = table.ensure_worker(self.block_size, worker);
+        self.apply_worker_topology_change_locked(&change);
         drop(table);
 
-        self.apply_worker_topology_change(change);
+        self.finish_worker_topology_change(&change);
     }
 
     fn add_request_local(
@@ -915,7 +914,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let load = seq.worker_load_snapshot();
             self.prompt_registry.apply_membership_delta_and_load(
                 worker,
-                &slot.trie_lookup,
                 outcome.membership_delta,
                 load,
             );
@@ -976,12 +974,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let mut seq = slot.sequences.write();
             let delta = mutate_fn(&mut seq, request_id, decay_now);
             let load = seq.worker_load_snapshot();
-            self.prompt_registry.apply_membership_delta_and_load(
-                worker,
-                &slot.trie_lookup,
-                delta,
-                load,
-            );
+            self.prompt_registry
+                .apply_membership_delta_and_load(worker, delta, load);
             load
         };
 

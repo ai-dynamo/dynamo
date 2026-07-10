@@ -9,14 +9,13 @@ use rustc_hash::FxHashSet;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use seqlock::SeqLock;
 use std::collections::HashMap;
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::time::Instant;
 
 use super::PrefillTokenDeltas;
 use super::prefill_tracker::{PrefillLoadSnapshot, PrefillTimeLoadError};
-use super::prompt_membership_trie::{PromptMembershipTrie, WorkerLookup};
+use super::prompt_membership_trie::PromptMembershipTrie;
 use super::single::PromptMembershipDelta;
 use super::topology::WorkerTopologyChange;
 use crate::protocols::WorkerWithDpRank;
@@ -213,27 +212,26 @@ impl PromptRegistry {
     pub(super) fn apply_membership_delta_and_load(
         &self,
         worker: WorkerWithDpRank,
-        lookup: &Arc<parking_lot::RwLock<WorkerLookup>>,
         delta: PromptMembershipDelta,
         load: WorkerLoadSnapshot,
     ) {
-        self.apply_membership_delta_and_load_without_cleanup(worker, lookup, delta, load);
+        self.apply_membership_delta_and_load_without_cleanup(worker, delta, load);
         self.maybe_cleanup();
     }
 
     pub(super) fn apply_membership_delta_and_load_without_cleanup(
         &self,
         worker: WorkerWithDpRank,
-        lookup: &Arc<parking_lot::RwLock<WorkerLookup>>,
         delta: PromptMembershipDelta,
         load: WorkerLoadSnapshot,
     ) {
         for remove in delta.removes {
-            self.membership.remove_chain(worker, lookup, &remove.hashes);
+            self.membership
+                .remove_path(worker, &remove.path, remove.remove_from);
         }
         for store in delta.stores {
             self.membership
-                .store_chain(worker, lookup, store.parent, &store.hashes);
+                .store_path(worker, &store.path, store.new_suffix_start);
         }
         self.upsert_worker_load(worker, load);
     }
@@ -256,17 +254,15 @@ impl PromptRegistry {
         self.cleanup_attempts.load(Ordering::Relaxed)
     }
 
-    pub(super) fn apply_topology_change(&self, change: WorkerTopologyChange) {
-        for removed in change.removed {
-            self.membership
-                .remove_worker(removed.worker, &removed.trie_lookup);
+    pub(super) fn apply_topology_change_without_cleanup(&self, change: &WorkerTopologyChange) {
+        for removed in &change.removed {
+            self.membership.remove_worker(removed.worker);
             self.loads.write().remove(removed.worker);
         }
 
-        for worker in change.added {
+        for &worker in &change.added {
             self.loads.write().ensure_worker(worker);
         }
-        self.membership.maybe_cleanup();
     }
 
     fn project_loads_from_membership<const INCLUDE_ACTIVE_REQUESTS: bool>(
@@ -425,15 +421,11 @@ mod tests {
         WorkerWithDpRank::new(worker_id, dp_rank)
     }
 
-    fn lookup() -> Arc<parking_lot::RwLock<WorkerLookup>> {
-        Arc::new(parking_lot::RwLock::new(WorkerLookup::default()))
-    }
-
-    fn store(parent: Option<SequenceHash>, hashes: &[SequenceHash]) -> PromptMembershipDelta {
+    fn store(path: &[SequenceHash], new_suffix_start: usize) -> PromptMembershipDelta {
         PromptMembershipDelta {
             stores: vec![PromptMembershipStore {
-                parent,
-                hashes: hashes.to_vec(),
+                path: path.to_vec(),
+                new_suffix_start,
             }],
             removes: Vec::new(),
         }
@@ -514,27 +506,23 @@ mod tests {
     fn removed_hash_can_be_restored_by_later_store() {
         let worker = worker(1, 0);
         let registry = PromptRegistry::new([worker]);
-        let lookup = lookup();
         let mut expected_loads = FxHashMap::default();
         let mut expected_blocks = FxHashMap::default();
 
-        registry.apply_membership_delta_and_load(
-            worker,
-            &lookup,
-            store(None, &[42]),
-            worker_load_snapshot(1),
-        );
+        registry.apply_membership_delta_and_load(worker, store(&[42], 0), worker_load_snapshot(1));
         let load = worker_load_snapshot(1);
         registry.apply_membership_delta_and_load(
             worker,
-            &lookup,
             PromptMembershipDelta {
-                removes: vec![PromptMembershipRemove { hashes: vec![42] }],
+                removes: vec![PromptMembershipRemove {
+                    path: vec![42],
+                    remove_from: 0,
+                }],
                 ..Default::default()
             },
             load,
         );
-        registry.apply_membership_delta_and_load(worker, &lookup, store(None, &[42]), load);
+        registry.apply_membership_delta_and_load(worker, store(&[42], 0), load);
         expected_loads.insert(worker, load);
         expected_blocks.insert(worker, hash_set(&[42]));
 
@@ -547,22 +535,15 @@ mod tests {
         let worker_b = worker(2, 0);
         let worker_c = worker(3, 0);
         let registry = PromptRegistry::new([worker_a, worker_b, worker_c]);
-        let lookup_a = lookup();
-        let lookup_b = lookup();
-        let lookup_c = lookup();
         let decay_now = Instant::now();
         let full_prompt: Vec<SequenceHash> = (1_u64..=96).collect();
         let mut expected_loads = FxHashMap::default();
         let mut expected_blocks = FxHashMap::default();
 
-        for (worker, lookup, prompt_len) in [
-            (worker_a, &lookup_a, 96usize),
-            (worker_b, &lookup_b, 64),
-            (worker_c, &lookup_c, 33),
-        ] {
+        for (worker, prompt_len) in [(worker_a, 96usize), (worker_b, 64), (worker_c, 33)] {
             let blocks = full_prompt[..prompt_len].to_vec();
             let load = worker_load_snapshot(prompt_len);
-            registry.apply_membership_delta_and_load(worker, lookup, store(None, &blocks), load);
+            registry.apply_membership_delta_and_load(worker, store(&blocks, 0), load);
             expected_loads.insert(worker, load);
             expected_blocks.insert(worker, blocks.into_iter().collect());
         }
@@ -590,7 +571,6 @@ mod tests {
     fn load_only_update_preserves_prompt_membership_and_active_token_projection() {
         let worker = worker(1, 0);
         let registry = PromptRegistry::new([worker]);
-        let lookup = lookup();
         let now = Instant::now();
         let anchored_since = now.checked_sub(Duration::from_secs(3)).unwrap_or(now);
         let mut expected_loads = FxHashMap::default();
@@ -598,8 +578,7 @@ mod tests {
 
         registry.apply_membership_delta_and_load(
             worker,
-            &lookup,
-            store(None, &[1, 2, 3]),
+            store(&[1, 2, 3], 0),
             worker_load_snapshot(3),
         );
         expected_blocks.insert(worker, hash_set(&[1, 2, 3]));
@@ -626,31 +605,21 @@ mod tests {
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
         let registry = PromptRegistry::new([worker_a, worker_b]);
-        let lookup_a = lookup();
-        let lookup_b = lookup();
         let mut expected_loads = FxHashMap::default();
         let mut expected_blocks = FxHashMap::default();
 
         let load_a = worker_load_snapshot(3);
         let load_b = worker_load_snapshot(2);
-        registry.apply_membership_delta_and_load(
-            worker_a,
-            &lookup_a,
-            store(None, &[1, 2, 3]),
-            load_a,
-        );
-        registry.apply_membership_delta_and_load(worker_b, &lookup_b, store(None, &[1, 2]), load_b);
+        registry.apply_membership_delta_and_load(worker_a, store(&[1, 2, 3], 0), load_a);
+        registry.apply_membership_delta_and_load(worker_b, store(&[1, 2], 0), load_b);
         expected_loads.insert(worker_a, load_a);
         expected_loads.insert(worker_b, load_b);
         expected_blocks.insert(worker_a, hash_set(&[1, 2, 3]));
         expected_blocks.insert(worker_b, hash_set(&[1, 2]));
 
-        registry.apply_topology_change(WorkerTopologyChange {
+        registry.apply_topology_change_without_cleanup(&WorkerTopologyChange {
             added: Vec::new(),
-            removed: vec![RemovedWorkerState {
-                worker: worker_a,
-                trie_lookup: Arc::clone(&lookup_a),
-            }],
+            removed: vec![RemovedWorkerState { worker: worker_a }],
         });
         expected_loads.remove(&worker_a);
         expected_blocks.remove(&worker_a);
@@ -671,21 +640,14 @@ mod tests {
         let worker_a = worker(1, 0);
         let worker_b = worker(1, 1);
         let registry = PromptRegistry::new([worker_a, worker_b]);
-        let lookup_a = lookup();
-        let lookup_b = lookup();
         let decay_now = Instant::now();
         let mut expected_loads = FxHashMap::default();
         let mut expected_blocks = FxHashMap::default();
 
         let load_a = worker_load_snapshot(3);
         let load_b = worker_load_snapshot(1);
-        registry.apply_membership_delta_and_load(
-            worker_a,
-            &lookup_a,
-            store(None, &[1, 2, 3]),
-            load_a,
-        );
-        registry.apply_membership_delta_and_load(worker_b, &lookup_b, store(None, &[1]), load_b);
+        registry.apply_membership_delta_and_load(worker_a, store(&[1, 2, 3], 0), load_a);
+        registry.apply_membership_delta_and_load(worker_b, store(&[1], 0), load_b);
         expected_loads.insert(worker_a, load_a);
         expected_loads.insert(worker_b, load_b);
         expected_blocks.insert(worker_a, hash_set(&[1, 2, 3]));
