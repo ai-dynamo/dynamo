@@ -1,0 +1,419 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Private RPC API for out-of-process vLLM frontends.
+//
+// This schema is owned by vLLM. Clients must vendor the schema from the vLLM
+// revision they target.
+
+syntax = "proto3";
+
+package vllm.engine.v1;
+
+import "google/protobuf/struct.proto";
+
+service Engine {
+  // Core inference path.
+  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+
+  // Runtime metadata.
+  rpc GetEngineInfo(GetEngineInfoRequest) returns (EngineInfo);
+  rpc GetModelInfo(GetModelInfoRequest) returns (ModelInfo);
+
+  // Health and lifecycle.
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Abort(AbortRequest) returns (AbortResponse);
+  rpc Drain(DrainRequest) returns (DrainResponse);
+
+  // LoRA lifecycle.
+  rpc LoadLora(LoadLoraRequest) returns (LoadLoraResponse);
+  rpc UnloadLora(UnloadLoraRequest) returns (UnloadLoraResponse);
+  rpc ListLoras(ListLorasRequest) returns (ListLorasResponse);
+
+  // Disaggregated serving / KV transfer.
+  rpc GetKvConnectorInfo(GetKvConnectorInfoRequest) returns (KvConnectorInfo);
+  rpc GetKvEventSources(GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Core identity and roles
+// ---------------------------------------------------------------------------
+
+enum EngineRole {
+  ENGINE_ROLE_UNSPECIFIED = 0;
+  ENGINE_ROLE_AGGREGATED = 1;
+  ENGINE_ROLE_PREFILL = 2;
+  ENGINE_ROLE_DECODE = 3;
+}
+
+message GetEngineInfoRequest {}
+
+message EngineInfo {
+  string engine_name = 1;          // sglang, vllm, tensorrt_llm, etc.
+  string engine_version = 2;
+  string api_version = 3;          // vllm.engine.v1
+  EngineRole role = 4;
+  string instance_id = 5;
+  repeated string supported_models = 6;
+  ParallelismInfo parallelism = 7;
+  KvConnectorInfo kv_connector = 8;
+}
+
+message ParallelismInfo {
+  uint32 tensor_parallel_size = 1;
+  uint32 pipeline_parallel_size = 2;
+  uint32 data_parallel_size = 3;
+  uint32 data_parallel_rank = 4;
+  uint32 data_parallel_start_rank = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Model and capacity metadata
+// ---------------------------------------------------------------------------
+
+message GetModelInfoRequest {}
+
+message ModelInfo {
+  string model_id = 1;
+  string served_model_name = 2;
+  repeated string served_model_aliases = 3;
+  uint32 max_context_length = 4;
+  uint32 max_output_tokens = 5;
+  uint32 kv_block_size = 6;
+  uint64 total_kv_blocks = 7;
+  uint64 max_running_requests = 8;
+  uint64 max_batched_tokens = 9;
+  repeated string tokenizer_modes = 10;
+  uint32 max_loras = 11;
+
+  bool supports_text_input = 20;
+  bool supports_token_ids_input = 21;
+  bool supports_lora = 22;
+  bool supports_multimodal = 23;
+
+  // Engine-advertised response parser names. The orchestrator's frontend applies
+  // these to a sidecar-served model's output stream (tool-call extraction,
+  // reasoning/thinking separation) — the engine streams tokens, the frontend
+  // parses. Empty = no parser configured for this model. Discovered from the
+  // engine so the sidecar stays endpoint-only (no parser flags on the worker).
+  string reasoning_parser = 24;
+  string tool_call_parser = 25;
+}
+
+// ---------------------------------------------------------------------------
+// LoRA lifecycle
+// ---------------------------------------------------------------------------
+
+message LoraAdapter {
+  int64 lora_id = 1;
+  string lora_name = 2;
+  string source_path = 3;
+}
+
+message LoadLoraRequest {
+  LoraAdapter adapter = 1;
+}
+
+message LoadLoraResponse {
+  LoraAdapter adapter = 1;
+  bool already_loaded = 2;
+}
+
+message UnloadLoraRequest {
+  string lora_name = 1;
+}
+
+message UnloadLoraResponse {
+  LoraAdapter adapter = 1;
+}
+
+message ListLorasRequest {}
+
+message ListLorasResponse {
+  repeated LoraAdapter adapters = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Generation API
+// ---------------------------------------------------------------------------
+
+message GenerateRequest {
+  string request_id = 1;
+  string model = 2;
+
+  oneof input {
+    string prompt = 3;
+    TokenIds token_ids = 4;
+  }
+
+  SamplingParams sampling = 5;
+  repeated StopCondition stop = 6;
+  bool stream = 7;
+
+  // Multimodal inputs. Requires token_ids input. Order is significant: the
+  // i-th item aligns with the i-th unexpanded placeholder marker in token_ids.
+  // The engine fetches/decodes and preprocesses each item, then expands the
+  // marker into the model's replacement run. Empty for text-only requests.
+  repeated MediaItem media = 8;
+
+  // Loaded LoRA adapter name to apply to this request. Empty = base model.
+  // ModelInfo.supports_lora advertises whether LoRA lifecycle and selection
+  // are available.
+  string lora_name = 9;
+
+  // Required for decode requests in disaggregated serving.
+  KvSessionRef kv_session = 20;
+
+  // Router-forced internal data-parallel rank. When set, the engine must place
+  // this request on exactly this DP rank instead of load-balancing across
+  // ranks. This is what keeps prefix->rank affinity for KV-aware routing: the
+  // KV router decides a rank from the prefix it indexed, and the engine honors
+  // it so a child block's parent stays in the same rank's radix subtree.
+  // Unset = let the engine pick (no affinity). Rank 0 is valid, hence optional.
+  optional uint32 data_parallel_rank = 21;
+
+  // Backend scheduling priority. Zero is the engine default.
+  optional int32 priority = 22;
+}
+
+// Multimodal modality discriminator. 0 is treated as image for forward
+// compatibility with senders that omit the field.
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  MODALITY_IMAGE = 1;
+  MODALITY_VIDEO = 2;
+  MODALITY_AUDIO = 3;
+}
+
+// A single multimodal input. Exactly one `source` should be set. The engine
+// owns fetch/decode/preprocess -- the orchestrator never derefs media (it has
+// no GPU/NIXL agent in the sidecar deployment), so a pre-decoded/RDMA media
+// descriptor is NOT representable here by design.
+message MediaItem {
+  Modality modality = 1;
+  oneof source {
+    string url       = 2;   // http(s):// -- engine fetches
+    string data_uri  = 3;   // data:<mime>;base64,<...> -- engine decodes
+    bytes  raw_bytes = 4;   // pre-fetched bytes -- engine still preprocesses
+  }
+  string mime_type = 5;     // optional, hints raw_bytes decode
+  string uuid      = 6;     // optional caller id / mm_hash
+}
+
+message TokenIds {
+  repeated uint32 ids = 1;
+}
+
+message SamplingParams {
+  optional double temperature = 1;
+  optional double top_p = 2;
+  optional int32 top_k = 3;
+  optional double frequency_penalty = 4;
+  optional double presence_penalty = 5;
+  optional uint32 max_tokens = 6;
+  optional int64 seed = 7;
+  // When true the engine ignores the EOS token and generates until another
+  // stop condition (e.g. max_tokens) fires. Without it the engine stops at
+  // natural EOS, which truncates fixed-length benchmark workloads.
+  bool ignore_eos = 8;
+  optional double min_p = 9;
+  optional double repetition_penalty = 10;
+  optional uint32 min_tokens = 11;
+}
+
+message StopCondition {
+  oneof condition {
+    string stop_text = 1;
+    uint32 stop_token_id = 2;
+  }
+}
+
+message GenerateResponse {
+  string request_id = 1;
+
+  oneof event {
+    TokenOutput token = 2;
+    PrefillReady prefill_ready = 3;
+    GenerationFinished finished = 4;
+    EngineError error = 5;
+  }
+
+  Usage usage = 10;
+}
+
+message TokenOutput {
+  repeated uint32 token_ids = 1;
+  string text = 2;
+}
+
+message PrefillReady {
+  KvSessionRef kv_session = 1;
+}
+
+message GenerationFinished {
+  FinishReason reason = 1;
+  string message = 2;
+}
+
+enum FinishReason {
+  FINISH_REASON_UNSPECIFIED = 0;
+  FINISH_REASON_STOP = 1;
+  FINISH_REASON_LENGTH = 2;
+  FINISH_REASON_CANCELLED = 3;
+  FINISH_REASON_ERROR = 4;
+}
+
+message Usage {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Disaggregated serving and KV API
+// ---------------------------------------------------------------------------
+
+message KvSessionRef {
+  string session_id = 1;
+  string transfer_backend = 2;
+  uint32 dp_rank = 3;
+  // Engine-specific KV-transfer parameters (e.g. NixlConnector
+  // remote_host / remote_port / tp_size / remote_block_ids / do_remote_*),
+  // carried as a Struct so numbers, booleans, and arrays survive the wire with
+  // their JSON type intact. Struct numbers are IEEE-754 doubles (exact only to
+  // 2^53); carry larger integer values as strings or use a dedicated field.
+  google.protobuf.Struct attributes_struct = 4;
+}
+
+message KvEndpoint {
+  string host = 1;
+  uint32 port = 2;
+  string protocol = 3; // grpc, nixl, ucx, tcp, shm, etc.
+}
+
+// ---------------------------------------------------------------------------
+// KV connector and KV events
+// ---------------------------------------------------------------------------
+
+message GetKvConnectorInfoRequest {}
+
+message KvConnectorInfo {
+  bool enabled = 1;
+  string transfer_backend = 2;
+  repeated KvEndpoint local_endpoints = 3;
+  repeated string supported_protocols = 4;
+  uint32 schema_version = 5;
+}
+
+message GetKvEventSourcesRequest {}
+
+message GetKvEventSourcesResponse {
+  repeated KvEventSource sources = 1;
+}
+
+message KvEventSource {
+  string transport = 1;          // grpc, zmq
+  // Connectable address. MUST use a routable host, never a bind wildcard.
+  KvEndpoint endpoint_addr = 2;
+  string topic = 3;
+  string replay_endpoint = 4;    // optional, for ZMQ replay
+  uint32 data_parallel_rank = 5;
+  string encoding = 6;           // protobuf, msgpack
+  uint32 schema_version = 7;
+  uint32 buffer_steps = 8;
+  uint32 hwm = 9;
+  uint32 max_queue_size = 10;
+}
+
+// ---------------------------------------------------------------------------
+// Health, abort, and drain
+// ---------------------------------------------------------------------------
+
+message HealthRequest {
+  // False means a lightweight readiness/liveness check. True asks the engine to
+  // run a role-appropriate minimal inference probe and report it as a check.
+  bool include_inference_probe = 1;
+
+  // Optional. Used when include_inference_probe is true. Empty means engine
+  // default served model.
+  string model = 2;
+
+}
+
+message HealthResponse {
+  HealthState state = 1;
+  repeated HealthCheck checks = 2;
+}
+
+enum HealthState {
+  HEALTH_STATE_UNSPECIFIED = 0;
+  HEALTH_STATE_STARTING = 1;
+  HEALTH_STATE_READY = 2;
+  HEALTH_STATE_DEGRADED = 3;
+  HEALTH_STATE_DRAINING = 4;
+  HEALTH_STATE_NOT_READY = 5;
+}
+
+message HealthCheck {
+  string name = 1; // grpc, scheduler, model, kv_connector, role, inference_probe
+  HealthState state = 2;
+  string message = 3;
+}
+
+message AbortRequest {
+  string request_id = 1;
+  bool abort_all = 2;
+}
+
+message AbortResponse {
+  AbortStatus status = 1;
+  string message = 2;
+}
+
+enum AbortStatus {
+  ABORT_STATUS_UNSPECIFIED = 0;
+  ABORT_STATUS_ABORTED = 1;
+  ABORT_STATUS_NOT_FOUND = 2;
+  ABORT_STATUS_ALREADY_FINISHED = 3;
+  ABORT_STATUS_UNSUPPORTED = 4;
+}
+
+message DrainRequest {}
+
+message DrainResponse {
+  DrainState state = 1;
+  uint32 in_flight_requests = 2;
+  string message = 3;
+}
+
+enum DrainState {
+  DRAIN_STATE_UNSPECIFIED = 0;
+  DRAIN_STATE_IN_PROGRESS = 1;
+  DRAIN_STATE_COMPLETE = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Standard errors
+// ---------------------------------------------------------------------------
+
+message EngineError {
+  ErrorCode code = 1;
+  string message = 2;
+  string retry_hint = 3;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_INVALID_ARGUMENT = 1;
+  ERROR_CODE_UNSUPPORTED_FEATURE = 2;
+  ERROR_CODE_ROLE_MISMATCH = 3;
+  ERROR_CODE_MODEL_NOT_FOUND = 4;
+  ERROR_CODE_OVERLOADED = 5;
+  ERROR_CODE_REQUEST_NOT_FOUND = 6;
+  ERROR_CODE_DUPLICATE_REQUEST = 7;
+  ERROR_CODE_KV_SESSION_NOT_FOUND = 8;
+  ERROR_CODE_KV_TRANSFER_FAILED = 9;
+  ERROR_CODE_CANCELLED = 10;
+  ERROR_CODE_DRAINING = 11;
+  ERROR_CODE_INTERNAL = 12;
+}

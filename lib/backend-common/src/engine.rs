@@ -26,7 +26,8 @@ pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
-    BootstrapInfo, PrefillResult, PreprocessedRequest,
+    BootstrapInfo, MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest,
+    RoutingHints,
 };
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
@@ -131,6 +132,10 @@ pub struct LlmRegistration {
     /// owns a sub-range (vLLM hybrid/external LB, multi-node SGLang
     /// DP-attention); the router enumerates `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
+    /// Whether the engine supports dynamic LoRA lifecycle and request selection.
+    pub supports_lora: bool,
+    /// Maximum number of concurrently active LoRA adapters.
+    pub max_loras: Option<u32>,
     /// Bootstrap host advertised to decode peers — only for Dynamo-handshake
     /// backends (SGLang); internal-KV-transport backends (TRT-LLM, vLLM
     /// `NixlConnector`) leave it `None`. When host+port are set, `Worker`
@@ -160,6 +165,14 @@ pub struct EngineConfig {
     pub llm: Option<LlmRegistration>,
 }
 
+/// Engine-readable LoRA descriptor used by the shared worker control plane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoraAdapter {
+    pub id: i64,
+    pub name: String,
+    pub path: String,
+}
+
 /// Inference engine trait.
 ///
 /// Lifecycle:
@@ -167,7 +180,8 @@ pub struct EngineConfig {
 ///   2. `start()` — start the engine, return `EngineConfig` metadata.
 ///   3. `generate()` — called for each request (concurrent calls expected).
 ///   4. `abort()` — called when a request is cancelled (optional, default no-op).
-///   5. `cleanup()` — called once on shutdown, release all resources.
+///   5. `watch()` — optionally request worker shutdown when external liveness fails.
+///   6. `cleanup()` — called once on shutdown, release all resources.
 #[async_trait]
 pub trait LLMEngine: Send + Sync + 'static {
     /// Start the engine and return registration metadata.
@@ -241,9 +255,31 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// scheduler to cancel compute early).
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Whether in-flight KV transfers are done, so `cleanup` may release GPU
-    /// memory. The `Worker` polls this on prefill workers between the grace
-    /// period and [`cleanup`](LLMEngine::cleanup):
+    /// Load and validate one LoRA adapter.
+    async fn load_lora(&self, _adapter: LoraAdapter) -> Result<LoraAdapter, DynamoError> {
+        Err(unsupported_lora())
+    }
+
+    /// Unload one logical LoRA adapter by name.
+    async fn unload_lora(&self, _name: &str) -> Result<LoraAdapter, DynamoError> {
+        Err(unsupported_lora())
+    }
+
+    /// List logical LoRA adapters available for request selection.
+    async fn list_loras(&self) -> Result<Vec<LoraAdapter>, DynamoError> {
+        Err(unsupported_lora())
+    }
+
+    /// Stop accepting new engine work and optionally report current
+    /// quiescence. `Some(true)` completes drain, `Some(false)` enables polling
+    /// for every role, and `None` uses the legacy prefill-only fallback.
+    async fn begin_drain(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
+    }
+
+    /// Whether in-flight work is done, so `cleanup` may release engine state.
+    /// The worker polls this when [`begin_drain`](Self::begin_drain) returned
+    /// `Some(false)`, or on prefill workers using the legacy `None` fallback:
     ///
     /// - `Ok(Some(true))`  — quiescent; exit the drain loop now.
     /// - `Ok(Some(false))` — busy; poll again next tick.
@@ -251,10 +287,23 @@ pub trait LLMEngine: Send + Sync + 'static {
     ///   budget expires, then cleanup. Never frees KV early.
     /// - `Err(_)`          — logged and treated as `Ok(None)`.
     ///
-    /// Aggregated/decode workers are never polled. Override only if the engine
-    /// can observe transfer completion (e.g. a connector or scheduler).
+    /// Override when the engine can observe request or transfer completion.
     async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         Ok(None)
+    }
+
+    /// Watch external engine liveness (optional, default never resolves).
+    ///
+    /// Implement this for sidecar-style backends whose serving process is
+    /// separate from the Dynamo worker. Returning from this future asks
+    /// [`Worker`](crate::Worker) to run the normal graceful shutdown path:
+    /// unregister from discovery, wait the grace period, drain, then cleanup.
+    ///
+    /// Use `Ok(())` for an intentional engine-side shutdown and `Err(_)` for a
+    /// failed liveness check. The worker still runs the graceful path in both
+    /// cases, then propagates an error result when one was returned here.
+    async fn watch(&self) -> Result<(), DynamoError> {
+        std::future::pending::<Result<(), DynamoError>>().await
     }
 
     /// Release all engine resources. Called exactly once.
@@ -445,6 +494,15 @@ pub trait RawEngine: Send + Sync + 'static {
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
         Ok(None)
     }
+}
+
+fn unsupported_lora() -> DynamoError {
+    DynamoError::builder()
+        .error_type(crate::error::ErrorType::Backend(
+            crate::error::BackendError::InvalidArgument,
+        ))
+        .message("engine does not support LoRA lifecycle")
+        .build()
 }
 
 /// Marker key stamped on canary payloads. Handlers may inspect it to branch

@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-vllm-sidecar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Dynamo sidecar for an out-of-process vLLM engine"
+
+[[bin]]
+name = "dynamo-vllm-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+dynamo-backend-common = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+# tonic / prost are pinned per-crate (not workspace deps): tonic 0.13.1
+# depends on prost 0.13.5, matching `lib/llm`. tonic-build 0.13.1 still
+# bundles prost codegen via `compile_protos` (the 0.14 split to
+# tonic-prost-build does not apply here).
+prost = { version = "0.13.5" }
+# prost-types provides google.protobuf.Struct (KvSessionRef.attributes_struct);
+# tonic-build maps the well-known types to ::prost_types by default.
+prost-types = { version = "0.13.5" }
+tonic = { version = "0.13.1" }
+
+[build-dependencies]
+tonic-build = { version = "0.13.1" }
+
+[dev-dependencies]
+dynamo-backend-common = { workspace = true, features = ["testing"] }
+dynamo-runtime = { workspace = true }
+# `net` brings in TcpListenerStream for the in-process fake engine server.
+tokio-stream = { workspace = true, features = ["net"] }
