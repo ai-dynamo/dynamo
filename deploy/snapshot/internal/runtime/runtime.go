@@ -213,19 +213,24 @@ func BuildRootfsMountExclusions(
 
 	effectiveSet := map[string]struct{}{}
 	for _, mount := range mounts {
-		if !mount.IsOCIManaged {
-			continue
-		}
 		mountPoint, err := normalizeAbsolutePath(mount.MountPoint, true)
 		if err != nil {
 			return result, fmt.Errorf(
-				"invalid OCI-managed mountpoint %q: %w",
+				"invalid mountinfo mountpoint %q: %w",
 				mount.MountPoint,
 				err,
 			)
 		}
 		if _, ok := normalizedBindSet[mountPoint]; ok {
 			effectiveSet[mountPoint] = struct{}{}
+		}
+	}
+	for _, path := range sortedPathSet(normalizedBindSet) {
+		if _, ok := effectiveSet[path]; !ok {
+			return result, fmt.Errorf(
+				"mountinfo is missing canonical OCI bind mountpoint %q",
+				path,
+			)
 		}
 	}
 

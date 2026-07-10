@@ -386,6 +386,153 @@ func TestBuildRootfsMountExclusionsAliases(t *testing.T) {
 	}
 }
 
+func TestBuildRootfsMountExclusionsRequiresCanonicalMountinfo(t *testing.T) {
+	rootFS := rootFSWithSymlink("var/run", "../run")(t)
+	spec := &specs.Spec{Mounts: []specs.Mount{{
+		Destination: "/var/run/secrets",
+		Type:        "bind",
+	}}}
+
+	for _, test := range []struct {
+		name   string
+		mounts []types.MountInfo
+	}{
+		{name: "missing"},
+		{
+			name: "disagrees",
+			mounts: []types.MountInfo{{
+				MountPoint:   "/var/run/secrets",
+				IsOCIManaged: true,
+			}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := BuildRootfsMountExclusions(spec, test.mounts, rootFS)
+			if err == nil {
+				t.Fatal("BuildRootfsMountExclusions succeeded")
+			}
+			if want := `canonical OCI bind mountpoint "/run/secrets"`; !strings.Contains(
+				err.Error(),
+				want,
+			) {
+				t.Fatalf("error = %q, want %q", err, want)
+			}
+		})
+	}
+
+	t.Run("matching classification disagreement", func(t *testing.T) {
+		got, err := BuildRootfsMountExclusions(
+			spec,
+			[]types.MountInfo{{
+				MountPoint:   "/run/secrets",
+				IsOCIManaged: false,
+			}},
+			rootFS,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{
+			"/run/secrets",
+			"/var/run/secrets",
+		}; !reflect.DeepEqual(got.All, want) {
+			t.Fatalf("All = %v, want %v", got.All, want)
+		}
+	})
+}
+
+func TestBuildRootfsMountExclusionsOnlyIncludesCanonicalBinds(t *testing.T) {
+	spec := &specs.Spec{
+		Mounts: []specs.Mount{{
+			Destination: "/data",
+			Type:        "bind",
+		}},
+		Linux: &specs.Linux{
+			MaskedPaths:   []string{"/proc/acpi"},
+			ReadonlyPaths: []string{"/proc/sys"},
+		},
+	}
+	got, err := BuildRootfsMountExclusions(
+		spec,
+		[]types.MountInfo{
+			{MountPoint: "/data"},
+			{MountPoint: "/run/nvidia", IsOCIManaged: true},
+			{MountPoint: "/proc/acpi", IsOCIManaged: true},
+			{MountPoint: "/proc/sys", IsOCIManaged: true},
+		},
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/data"}; !reflect.DeepEqual(got.All, want) {
+		t.Fatalf("All = %v, want %v", got.All, want)
+	}
+}
+
+func TestBuildRootfsMountExclusionsDeduplicatesCanonicalAliases(t *testing.T) {
+	rootFS := rootFSWithSymlink("var/run", "../run")(t)
+	spec := &specs.Spec{Mounts: []specs.Mount{
+		{Destination: "/var/run/secrets", Type: "bind"},
+		{Destination: "/run/secrets", Type: "bind"},
+		{Destination: "/var/run/secrets", Type: "bind"},
+	}}
+	got, err := BuildRootfsMountExclusions(
+		spec,
+		[]types.MountInfo{{MountPoint: "/run/secrets"}},
+		rootFS,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/run/secrets"}; !reflect.DeepEqual(
+		got.Effective,
+		want,
+	) {
+		t.Fatalf("Effective = %v, want %v", got.Effective, want)
+	}
+	if want := []string{
+		"/run/secrets",
+		"/var/run/secrets",
+	}; !reflect.DeepEqual(got.All, want) {
+		t.Fatalf("All = %v, want %v", got.All, want)
+	}
+}
+
+func TestBuildRootfsMountExclusionsFailsClosedOnSymlinkChange(t *testing.T) {
+	rootFS := rootFSWithSymlink("var/run", "../run")(t)
+	spec := &specs.Spec{Mounts: []specs.Mount{{
+		Destination: "/var/run/secrets",
+		Type:        "bind",
+	}}}
+	mounts, err := ClassifyMounts(
+		[]types.MountInfo{{MountPoint: "/run/secrets"}},
+		spec,
+		rootFS,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(rootFS, "var", "run")
+	if err := os.Remove(linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../other", linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = BuildRootfsMountExclusions(spec, mounts, rootFS)
+	if err == nil {
+		t.Fatal("BuildRootfsMountExclusions succeeded")
+	}
+	if want := `canonical OCI bind mountpoint "/other/secrets"`; !strings.Contains(
+		err.Error(),
+		want,
+	) {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
 func TestBuildRootfsMountExclusionsDeterministic(t *testing.T) {
 	rootFS := rootFSWithSymlink("var/run", "../run")(t)
 	spec := &specs.Spec{Mounts: []specs.Mount{
