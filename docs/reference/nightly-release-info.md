@@ -19,6 +19,41 @@ Every night (around 08:00 UTC) the [Nightly CI pipeline](https://github.com/ai-d
 
 Nightly deliberately does **not** publish the EFA image variants, `dynamo-frontend`, `kubernetes-operator`, `dynamo-planner`, `snapshot-agent`, Helm charts, or Rust crates. For those, use a [stable or pre-release build](release-artifacts.md).
 
+## Installing Nightly Containers
+
+Nightly images live in their own `-nightly` NGC repositories so they cannot be pulled accidentally in place of a stable image. Each nightly is published with:
+
+- a floating `:latest` tag — always the most recent nightly;
+- an immutable `:YYYYMMDD-<shortsha>` tag — a specific night's build;
+- a `-cuda13` alias — pins CUDA 13 explicitly.
+
+```bash
+# Always the latest nightly
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:latest
+
+# Pin a specific nightly
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260710-abc1234
+```
+
+## Installing Nightly Wheels
+
+Nightly wheels are published to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/), not the public PyPI. They are Linux (manylinux) builds for the Python versions in the [Support Matrix](support-matrix.md); install on a supported Linux host or inside a Linux container. Nightly versions follow PEP 440 dev versioning, `X.Y.Z.devYYYYMMDD`.
+
+```bash
+# Latest nightly (uv — recommended)
+uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
+
+# Latest nightly (pip)
+pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
+
+# Pin a specific nightly
+pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo==1.3.0.dev20260710
+```
+
+Backend extras such as `ai-dynamo[vllm]` use the same flags. For TensorRT-LLM, use the nightly container rather than a PyPI extra.
+
 ## Backend Versions
 
 Nightlies track `main`, so backend versions move as `main` advances. The table below is generated from the build's source of truth, [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/container/context.yaml):
@@ -83,45 +118,6 @@ To install a version from the table above:
 
 - **Wheels** — pin any date within the range: `ai-dynamo==X.Y.Z.devYYYYMMDD` (see [Installing Nightly Wheels](#installing-nightly-wheels)).
 - **Containers** — pull `…-runtime-nightly:YYYYMMDD-<sha>` for a date in the range. Find the `<sha>` for a given date from the [NGC catalog](https://catalog.ngc.nvidia.com/) tags — it is `main` HEAD at that night's build, so it cannot be derived from `container/context.yaml`.
-
-## Installing Nightly Containers
-
-Nightly images live in their own `-nightly` NGC repositories so they cannot be pulled accidentally in place of a stable image. Each nightly is published with:
-
-- a floating `:latest` tag — always the most recent nightly;
-- an immutable `:YYYYMMDD-<shortsha>` tag — a specific night's build;
-- a `-cuda13` alias — pins CUDA 13 explicitly.
-
-```bash
-# Always the latest nightly
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:latest
-
-# Pin a specific nightly
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260710-abc1234
-```
-
-## Installing Nightly Wheels
-
-Nightly wheels are published to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/), not the public PyPI. They are Linux (manylinux) builds for the Python versions in the [Support Matrix](support-matrix.md); install on a supported Linux host or inside a Linux container. Nightly versions follow PEP 440 dev versioning, `X.Y.Z.devYYYYMMDD`.
-
-```bash
-# Latest nightly (uv — recommended)
-uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
-
-# Latest nightly (pip)
-pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
-
-# Pin a specific nightly
-pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo==1.3.0.dev20260710
-```
-
-Backend extras such as `ai-dynamo[vllm]` use the same flags. For TensorRT-LLM, use the nightly container rather than a PyPI extra.
-
-## How Nightly Builds Work
-
-The [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/main/.github/workflows/nightly-ci.yml) runs on a daily cron against `main` at one resolved commit. The image tag (`YYYYMMDD-<shortsha>`) and wheel version (`X.Y.Z.devYYYYMMDD`) are both derived from the build date and that commit. Because every nightly is a fresh snapshot of `main`, its backend versions are whatever `container/context.yaml` pins at that moment — which is why the tables on this page are generated from that file rather than hand-maintained.
 
 ## See Also
 
