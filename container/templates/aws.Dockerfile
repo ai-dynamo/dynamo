@@ -12,7 +12,7 @@
 #
 # Use this stage when deploying on AWS infrastructure with EFA support
 
-FROM ${EFA_BASE_IMAGE} AS aws
+FROM ${EFA_BASE_IMAGE} AS aws_base
 
 ARG EFA_VERSION
 
@@ -87,6 +87,99 @@ RUN --mount=from=wheel_builder,source=/opt/nvidia/nvda_nixl,target=/tmp/nvda_nix
 
 ENV LD_PRELOAD=/opt/nvidia/nvda_nixl/lib64/libnixl.so
 ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
+{% endif %}
+
+{% if framework == "sglang" and device == "cuda" and target == "runtime" %}
+# Build only the NIXL 1.3.0 LIBFABRIC plugin carrying f29. This intermediate
+# stage uses the final EFA/libfabric and SGLang wheel, then is discarded so no
+# compiler or build dependency is added to the runtime image.
+FROM aws_base AS sglang_nixl_efa_builder
+
+USER root
+
+ARG TARGETARCH
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        binutils \
+        build-essential \
+        ca-certificates \
+        git \
+        libhwloc-dev \
+        libnuma-dev \
+        ninja-build \
+        patchelf \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    python3 -m pip install --break-system-packages \
+        "meson=={{ context.sglang.efa_nixl_patch.meson_version }}"
+
+COPY --chmod=0755 container/deps/sglang/nixl/build_f29_plugin.sh \
+    /tmp/nixl-f29/build_f29_plugin.sh
+COPY --chmod=0644 container/deps/sglang/nixl/f29b589b.patch \
+    /tmp/nixl-f29/f29b589b.patch
+
+RUN TARGETARCH="${TARGETARCH}" \
+    SGLANG_EFA_NIXL_VERSION="{{ context.sglang.efa_nixl_patch.nixl_version }}" \
+    SGLANG_EFA_NIXL_BASE_REF="{{ context.sglang.efa_nixl_patch.base_ref }}" \
+    SGLANG_EFA_NIXL_BASE_TREE="{{ context.sglang.efa_nixl_patch.base_tree }}" \
+    SGLANG_EFA_NIXL_BASE_SOURCE_SHA256="{{ context.sglang.efa_nixl_patch.base_source_sha256 }}" \
+    SGLANG_EFA_NIXL_PATCH_REF="{{ context.sglang.efa_nixl_patch.patch_ref }}" \
+    SGLANG_EFA_NIXL_PATCH_SHA256="{{ context.sglang.efa_nixl_patch.patch_sha256 }}" \
+    SGLANG_EFA_NIXL_PATCHED_TREE="{{ context.sglang.efa_nixl_patch.patched_tree }}" \
+    SGLANG_EFA_NIXL_PATCHED_SOURCE_SHA256="{{ context.sglang.efa_nixl_patch.patched_source_sha256 }}" \
+    SGLANG_EFA_NIXL_MESON_VERSION="{{ context.sglang.efa_nixl_patch.meson_version }}" \
+    /tmp/nixl-f29/build_f29_plugin.sh \
+        /tmp/nixl-f29/f29b589b.patch \
+        /opt/dynamo/nixl-f29
+{% endif %}
+
+# Keep aws as the public final-stage name used by the shared image workflow.
+FROM aws_base AS aws
+
+{% if framework == "sglang" and device == "cuda" and target == "runtime" %}
+USER root
+
+ARG TARGETARCH
+
+# The wheel contains the active mesonpy plugin and a compatibility copy. Patch
+# both, preserving each stock file's own RPATH/RUNPATH and hashed dependencies,
+# so NIXL_PLUGIN_DIR overrides cannot select the unfixed implementation.
+COPY --from=sglang_nixl_efa_builder \
+    /opt/dynamo/nixl-f29/plugins/mesonpy/libplugin_LIBFABRIC.so \
+    /usr/local/lib/python3.12/dist-packages/.nixl_cu13.mesonpy.libs/plugins/libplugin_LIBFABRIC.so
+COPY --from=sglang_nixl_efa_builder \
+    /opt/dynamo/nixl-f29/plugins/compat/libplugin_LIBFABRIC.so \
+    /usr/local/lib/python3.12/dist-packages/nixl_cu13.libs/nixl/libplugin_LIBFABRIC.so
+COPY --from=sglang_nixl_efa_builder \
+    /opt/dynamo/nixl-f29/provenance/ \
+    /opt/dynamo/patches/nixl-f29/
+
+# Fail closed if the inherited SGLang image changes its NIXL version/layout or
+# if anything other than the two plugin files changed across the stage copy.
+RUN EXPECTED_NIXL_VERSION="{{ context.sglang.efa_nixl_patch.nixl_version }}" \
+    python3 -c 'import importlib.metadata as m, os, sys; actual = m.version("nixl-cu13"); expected = os.environ["EXPECTED_NIXL_VERSION"]; actual == expected or sys.exit(f"expected nixl-cu13=={expected}, found {actual}")' && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/BASE_COMMIT)" = "{{ context.sglang.efa_nixl_patch.base_ref }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/BASE_TREE)" = "{{ context.sglang.efa_nixl_patch.base_tree }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/BASE_SOURCE_FILE_SHA256)" = "{{ context.sglang.efa_nixl_patch.base_source_sha256 }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/SOURCE_COMMIT)" = "{{ context.sglang.efa_nixl_patch.patch_ref }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/PATCHED_TREE)" = "{{ context.sglang.efa_nixl_patch.patched_tree }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/PATCH_SHA256)" = "{{ context.sglang.efa_nixl_patch.patch_sha256 }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/SOURCE_FILE_SHA256)" = "{{ context.sglang.efa_nixl_patch.patched_source_sha256 }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/NIXL_VERSION)" = "{{ context.sglang.efa_nixl_patch.nixl_version }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/MESON_VERSION)" = "{{ context.sglang.efa_nixl_patch.meson_version }}" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/SOURCE_URL)" = "https://github.com/ai-dynamo/nixl" && \
+    test "$(cat /opt/dynamo/patches/nixl-f29/TARGETARCH)" = "${TARGETARCH}" && \
+    test "$(sha256sum /opt/dynamo/patches/nixl-f29/f29b589b.patch | awk '{print $1}')" = "{{ context.sglang.efa_nixl_patch.patch_sha256 }}" && \
+    sha256sum -c /opt/dynamo/patches/nixl-f29/NIXL_CORE_SHA256SUMS && \
+    sha256sum -c /opt/dynamo/patches/nixl-f29/SHA256SUMS
+
+LABEL com.nvidia.dynamo.sglang.nixl-efa.base-revision="{{ context.sglang.efa_nixl_patch.base_ref }}" \
+      com.nvidia.dynamo.sglang.nixl-efa.patch-revision="{{ context.sglang.efa_nixl_patch.patch_ref }}"
 {% endif %}
 
 {% if target == "runtime" %}

@@ -121,6 +121,21 @@ sglang:
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
   nixl_ref: v1.0.1
+  # The upstream CUDA runtime carries nixl-cu13 1.3.0. Its EFA LIBFABRIC
+  # plugin can deadlock when FI_MORE batching races the progress thread.
+  # Runtime EFA images rebuild only that plugin from the exact wheel source
+  # plus the f29 backport; other images use their existing NIXL trees unchanged.
+  # Remove this overlay once the SGLang base image ships a fixed NIXL release.
+  efa_nixl_patch:
+    nixl_version: "1.3.0"
+    base_ref: f852e14226f0fd67378469d638bf45b12d1926e5
+    base_tree: 4e7e85eaad3947371e68c5bdace02340aea772ba
+    base_source_sha256: 46bb743838223de72a13f10ec0e2d297740ee77bb98b3f9595b1d26439c42fd1
+    patch_ref: f29b589b72ddabbe484e6109a397da50df29ad0f
+    patch_sha256: 831b1a88d074167d55fc55f70cb8065335cf943c31c3e1359367c7b65845e8e2
+    patched_tree: 1389c21f18a7ef1fe927e7682c56d591339df6bb
+    patched_source_sha256: b3d2b59240236c17485cfdd0283c9e190c42a64a7b832890befd2138be048b64
+    meson_version: "1.11.1"
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
