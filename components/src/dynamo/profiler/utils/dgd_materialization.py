@@ -115,14 +115,18 @@ def _materialize_dgd_document(
         and model_name_or_path
         and model_has_auto_map(model_name_or_path)
     ):
-        if not model_ref_allows_implicit_trust_remote_code(model_name_or_path):
+        if _all_workers_already_have_trust_flag(materialized):
+            # User already opted in via overrides — nothing to inject.
+            pass
+        elif not model_ref_allows_implicit_trust_remote_code(model_name_or_path):
             raise RuntimeError(
                 "Refusing to auto-inject --trust-remote-code for mutable remote "
                 f"model ref {model_name_or_path!r}. Set --trust-remote-code "
                 "explicitly via overrides if this ref is intended."
             )
-        _inject_trust_remote_code_flag(materialized)
-        applied_transforms.append("trust-remote-code")
+        else:
+            _inject_trust_remote_code_flag(materialized)
+            applied_transforms.append("trust-remote-code")
 
     logger.debug(
         "Materialized %s DGD with transforms: %s",
@@ -136,6 +140,48 @@ def _materialize_dgd_document(
 _TRUST_REMOTE_CODE_BACKENDS = frozenset({"vllm", "sglang"})
 _TRUST_REMOTE_CODE_FLAG = "--trust-remote-code"
 _NON_WORKER_SERVICES = frozenset({"Frontend", "Planner"})
+
+
+def _all_workers_already_have_trust_flag(config: dict) -> bool:
+    """Return True when every worker service already carries --trust-remote-code.
+
+    When the user has opted in explicitly via ``spec.overrides.dgd``, all
+    worker args will already contain the flag after the override merge step.
+    In that case we skip both auto-injection *and* the mutable-ref error so
+    the stated manual escape hatch works for remote HF model IDs.
+    """
+    services = config.get("spec", {}).get("services", {})
+    workers_seen = False
+    for svc_name, svc in services.items():
+        if not isinstance(svc, dict) or svc_name in _NON_WORKER_SERVICES:
+            continue
+        extra_pod_spec = svc.get("extraPodSpec")
+        if not isinstance(extra_pod_spec, dict):
+            continue
+        main_container = extra_pod_spec.get("mainContainer")
+        if not isinstance(main_container, dict):
+            continue
+        workers_seen = True
+        args = main_container.get("args") or []
+        cmd = main_container.get("command") or []
+        is_shell_c = (
+            isinstance(cmd, list)
+            and len(cmd) >= 2
+            and cmd[0] in ("/bin/sh", "sh")
+            and cmd[1] == "-c"
+        )
+        if (
+            is_shell_c
+            and isinstance(args, list)
+            and len(args) == 1
+            and isinstance(args[0], str)
+        ):
+            if _TRUST_REMOTE_CODE_FLAG not in args[0]:
+                return False
+        else:
+            if _TRUST_REMOTE_CODE_FLAG not in args:
+                return False
+    return workers_seen
 
 
 def _inject_trust_remote_code_flag(config: dict) -> None:

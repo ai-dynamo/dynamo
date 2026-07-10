@@ -960,6 +960,41 @@ def test_materialize_dgd_skips_trust_for_trtllm() -> None:
     assert "--trust-remote-code" not in args
 
 
+def test_materialize_dgd_remote_ref_with_explicit_override_skips_error() -> None:
+    """When the user already set --trust-remote-code via overrides, the
+    mutable-remote-ref error must not fire — the manual escape hatch works."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    # Simulate user override having already appended the flag.
+    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ].append("--trust-remote-code")
+
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=False,
+    ):
+        # Should NOT raise RuntimeError because the flag is already present.
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/remote-model",
+        )
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
 def test_materialize_dgd_trust_injection_is_idempotent() -> None:
     """Running materialize_dgd twice must not duplicate the flag."""
     from dynamo.profiler.utils.dgd_materialization import (
@@ -1172,6 +1207,9 @@ def test_materialize_dgd_shell_form_preserves_syntax() -> None:
     assert len(result_args) == 1
     # The original shell syntax (&&, export) must be preserved verbatim.
     assert result_args[0] == original_cmd + " --trust-remote-code"
+
+
+def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:
     """Unexpected errors (network, auth) must return True (conservative default)
     rather than silently returning False and risking a missed injection."""
     from dynamo.profiler.utils.model_info import model_has_auto_map
