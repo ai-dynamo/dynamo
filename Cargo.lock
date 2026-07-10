@@ -2402,6 +2402,7 @@ dependencies = [
  "futures-util",
  "hf-hub 0.4.3",
  "indicatif 0.18.4",
+ "libc",
  "minstant",
  "rand 0.9.4",
  "reqwest 0.12.28",
@@ -2488,9 +2489,11 @@ name = "dynamo-kv-router"
 version = "1.3.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "axum 0.8.4",
  "chrono",
+ "criterion",
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",
@@ -2623,6 +2626,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
@@ -2897,9 +2901,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.4.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eda65fd29fa8fc5395fc9430155d68d67a7eef216415a152cbf85e9916aa0bbf"
+checksum = "61fb9c031ea19d99d1faf8ff304fe666eb2dbd4666fcb416af3f08ae88f5be80"
 dependencies = [
  "aho-corasick",
  "anyhow",

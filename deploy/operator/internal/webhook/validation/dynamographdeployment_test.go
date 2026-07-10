@@ -776,7 +776,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
@@ -926,7 +926,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.ComponentType = consts.ComponentTypeEPP
 				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{}
 			}),
-			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Invalid value: null: exactly one of configMapRef or config is required"},
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: exactly one of configMapRef or config is required"},
 		},
 		{
 			name: "v1beta1 EPP config without a source is rejected by CEL",
