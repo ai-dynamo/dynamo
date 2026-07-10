@@ -40,6 +40,10 @@ RUN golangci-lint run --timeout=5m
 # Test stage
 FROM base AS tester
 
+# The operator CI uses deploy/operator as its build context, so provide the chart separately.
+COPY --from=operator-chart . /operator-chart
+ENV DYNAMO_OPERATOR_HELM_CHART=/operator-chart
+
 # Install make if not present
 RUN apt-get update && apt-get install -y --no-install-recommends make && apt-get clean && rm -rf /var/lib/apt/lists/*
 

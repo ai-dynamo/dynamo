@@ -30,11 +30,16 @@ runs:
       shell: bash
       working-directory: ./deploy/${{ inputs.component }}
       run: |
+        OPERATOR_CHART_CONTEXT=()
+        if [[ "${{ inputs.component }}" == "operator" ]]; then
+          OPERATOR_CHART_CONTEXT=(--build-context operator-chart=../helm/charts/platform/components/operator)
+        fi
         docker buildx build \
           --platform ${{ inputs.platform }} \
           --target tester \
           --progress=plain \
           --build-context snapshot=../snapshot \
+          "${OPERATOR_CHART_CONTEXT[@]}" \
           .
 
     - name: Set up Go

@@ -228,7 +228,12 @@ func renderHelmValidatingWebhook(operatorRoot string) (*admissionregistrationv1.
 			return nil, fmt.Errorf("find helm binary: %w", err)
 		}
 	}
-	chartPath := filepath.Join(operatorRoot, "..", "helm", "charts", "platform", "components", "operator")
+	chartPath := os.Getenv("DYNAMO_OPERATOR_HELM_CHART")
+	if chartPath == "" {
+		chartPath = filepath.Join(operatorRoot, "..", "helm", "charts", "platform", "components", "operator")
+	} else if !filepath.IsAbs(chartPath) {
+		chartPath = filepath.Join(operatorRoot, chartPath)
+	}
 	command := exec.Command(
 		helmBinary,
 		"template",
