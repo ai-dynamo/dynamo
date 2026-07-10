@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_tokens::{PositionalLineageHash, SequenceHash};
+use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 #[cfg(debug_assertions)]
 use rustc_hash::FxHashSet;
@@ -15,30 +15,14 @@ new_key_type! {
 
 /// One node in a persistent request block chain.
 ///
-/// Positional lineage hashes distinguish the same sequence hash at different
-/// positions or beneath different parent-hash fragments. Parent IDs are
-/// generational arena keys, while `incoming` counts direct request-tail and
-/// child-to-parent edges.
+/// Sequence hashes identify their lineage. Parent IDs are generational arena
+/// keys, while `incoming` counts direct request-tail and child-to-parent edges.
 #[derive(Debug)]
 struct BlockNode {
-    lineage_hash: PositionalLineageHash,
+    hash: SequenceHash,
+    depth: usize,
     parent: Option<BlockNodeId>,
     incoming: NonZeroU32,
-}
-
-impl BlockNode {
-    #[inline]
-    fn sequence_hash(&self) -> SequenceHash {
-        self.lineage_hash.current_sequence_hash()
-    }
-
-    #[inline]
-    fn depth(&self) -> usize {
-        usize::try_from(self.lineage_hash.position())
-            .expect("block position does not fit usize")
-            .checked_add(1)
-            .expect("block chain depth overflowed")
-    }
 }
 
 /// The single block-chain tail retained by a request.
@@ -62,25 +46,26 @@ impl RequestBlockChain {
 #[derive(Debug, Default)]
 pub(super) struct BlockTracker {
     nodes: SlotMap<BlockNodeId, BlockNode>,
-    unique_blocks: FxHashMap<PositionalLineageHash, BlockNodeId>,
-    fractional_blocks: FxHashMap<PositionalLineageHash, f64>,
+    unique_blocks: FxHashMap<SequenceHash, BlockNodeId>,
+    fractional_blocks: FxHashMap<SequenceHash, f64>,
 }
 
 impl BlockTracker {
     /// Acquire one request tail for a prompt and return the first newly present
     /// prompt index, if any.
     ///
-    /// The internal index augments each [`SequenceHash`] with its position and
-    /// parent-hash fragment. Public membership events continue to use the raw
-    /// sequence hashes.
+    /// # Lineage contract
+    ///
+    /// Each [`SequenceHash`] must identify exactly one prefix ancestry and
+    /// depth. As with the KV indexer, this tracker trusts callers to maintain
+    /// that invariant and does not validate the hash recurrence in production.
     pub(super) fn acquire_prompt(
         &mut self,
         sequence: &[SequenceHash],
     ) -> (RequestBlockChain, Option<usize>) {
-        let Some(tail_idx) = sequence.len().checked_sub(1) else {
+        let Some(&tail_hash) = sequence.last() else {
             return (RequestBlockChain::default(), None);
         };
-        let tail_hash = Self::prompt_lineage_hash(sequence, tail_idx);
 
         if let Some(tail) = self.live_node_id(tail_hash) {
             self.debug_assert_lineage(tail, sequence);
@@ -94,8 +79,7 @@ impl BlockTracker {
         // Prompt liveness is prefix-closed. Search backward for the deepest
         // live prefix, then construct only the missing suffix.
         for idx in (0..sequence.len().saturating_sub(1)).rev() {
-            let lineage_hash = Self::prompt_lineage_hash(sequence, idx);
-            if let Some(node_id) = self.live_node_id(lineage_hash) {
+            if let Some(node_id) = self.live_node_id(sequence[idx]) {
                 self.debug_assert_lineage(node_id, &sequence[..=idx]);
                 parent = Some(node_id);
                 first_new_idx = idx + 1;
@@ -106,7 +90,7 @@ impl BlockTracker {
         let missing = sequence.len() - first_new_idx;
         self.nodes.reserve(missing);
         self.unique_blocks.reserve(missing);
-        self.debug_assert_new_hashes(sequence, first_new_idx);
+        self.debug_assert_new_hashes(&sequence[first_new_idx..]);
 
         // Adding the first new child contributes one new incoming edge to the
         // reused prefix. Subsequent construction transfers the provisional
@@ -115,14 +99,14 @@ impl BlockTracker {
             self.increment_incoming(parent_id);
         }
 
-        for idx in first_new_idx..sequence.len() {
-            let lineage_hash = Self::prompt_lineage_hash(sequence, idx);
+        for (idx, &hash) in sequence[first_new_idx..].iter().enumerate() {
             let node_id = self.nodes.insert(BlockNode {
-                lineage_hash,
+                hash,
+                depth: first_new_idx + idx + 1,
                 parent,
                 incoming: NonZeroU32::MIN,
             });
-            let previous = self.unique_blocks.insert(lineage_hash, node_id);
+            let previous = self.unique_blocks.insert(hash, node_id);
             debug_assert!(
                 previous.is_none(),
                 "new block unexpectedly replaced a live index entry"
@@ -138,32 +122,27 @@ impl BlockTracker {
 
     /// Append a unique output block to an existing request chain.
     pub(super) fn append_output(&mut self, chain: &mut RequestBlockChain, hash: SequenceHash) {
-        let parent = chain.tail;
-        let (parent_hash, position) = parent.map_or((None, 0), |node_id| {
-            let node = self
-                .nodes
-                .get(node_id)
-                .expect("request tail references a missing block node");
-            let position = node
-                .lineage_hash
-                .position()
-                .checked_add(1)
-                .expect("block position overflowed");
-            (Some(node.sequence_hash()), position)
-        });
-        let lineage_hash = PositionalLineageHash::new(hash, parent_hash, position);
-
         debug_assert!(
-            !self.unique_blocks.contains_key(&lineage_hash),
+            !self.unique_blocks.contains_key(&hash),
             "random output hash unexpectedly collided with a live block"
         );
 
+        let parent = chain.tail;
+        let depth = parent.map_or(1, |node_id| {
+            self.nodes
+                .get(node_id)
+                .expect("request tail references a missing block node")
+                .depth
+                .checked_add(1)
+                .expect("block chain depth overflowed")
+        });
         let node_id = self.nodes.insert(BlockNode {
-            lineage_hash,
+            hash,
+            depth,
             parent,
             incoming: NonZeroU32::MIN,
         });
-        let previous = self.unique_blocks.insert(lineage_hash, node_id);
+        let previous = self.unique_blocks.insert(hash, node_id);
         debug_assert!(
             previous.is_none(),
             "new output unexpectedly replaced a live index entry"
@@ -198,12 +177,11 @@ impl BlockTracker {
                 .nodes
                 .get(node_id)
                 .expect("request chain references a missing block node");
-            let lineage_hash = node.lineage_hash;
-            let hash = node.sequence_hash();
-            let depth = node.depth();
+            let hash = node.hash;
+            let depth = node.depth;
             let parent = node.parent;
 
-            match self.unique_blocks.entry(lineage_hash) {
+            match self.unique_blocks.entry(hash) {
                 Entry::Occupied(entry) => {
                     assert_eq!(
                         *entry.get(),
@@ -214,7 +192,7 @@ impl BlockTracker {
                 }
                 Entry::Vacant(_) => panic!("live block node is missing from the hash index"),
             }
-            self.fractional_blocks.remove(&lineage_hash);
+            self.fractional_blocks.remove(&hash);
             self.nodes
                 .remove(node_id)
                 .expect("validated block node disappeared before removal");
@@ -244,7 +222,7 @@ impl BlockTracker {
             if node.incoming.get() != 1 {
                 break;
             }
-            self.fractional_blocks.insert(node.lineage_hash, fraction);
+            self.fractional_blocks.insert(node.hash, fraction);
             current = node.parent;
         }
     }
@@ -259,9 +237,8 @@ impl BlockTracker {
         count.round() as usize
     }
 
-    pub(super) fn contains_prompt_block(&self, sequence: &[SequenceHash], index: usize) -> bool {
-        self.live_node_id(Self::prompt_lineage_hash(sequence, index))
-            .is_some()
+    pub(super) fn contains_block(&self, hash: &SequenceHash) -> bool {
+        self.live_node_id(*hash).is_some()
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -282,9 +259,9 @@ impl BlockTracker {
                 "arena yielded a duplicate node ID"
             );
             assert_eq!(
-                self.unique_blocks.get(&node.lineage_hash),
+                self.unique_blocks.get(&node.hash),
                 Some(&node_id),
-                "live arena node is missing its exact lineage-index entry"
+                "live arena node is missing its exact hash-index entry"
             );
 
             if let Some(parent_id) = node.parent {
@@ -293,23 +270,23 @@ impl BlockTracker {
                     .get(parent_id)
                     .expect("block node references a missing parent");
                 assert_eq!(
-                    parent.depth() + 1,
-                    node.depth(),
+                    parent.depth + 1,
+                    node.depth,
                     "child block depth must immediately follow its parent"
                 );
             } else {
-                assert_eq!(node.depth(), 1, "root block depth must be one");
+                assert_eq!(node.depth, 1, "root block depth must be one");
             }
         }
 
-        for (&lineage_hash, &node_id) in &self.unique_blocks {
+        for (&hash, &node_id) in &self.unique_blocks {
             let node = self
                 .nodes
                 .get(node_id)
-                .expect("lineage index references a missing arena node");
+                .expect("hash index references a missing arena node");
             assert_eq!(
-                node.lineage_hash, lineage_hash,
-                "lineage index key does not match its arena node"
+                node.hash, hash,
+                "hash index key does not match its arena node"
             );
         }
 
@@ -331,7 +308,7 @@ impl BlockTracker {
                     .get(tail_id)
                     .expect("request tail references a missing arena node");
                 assert!(
-                    chain.prompt_depth <= tail.depth(),
+                    chain.prompt_depth <= tail.depth,
                     "request prompt depth cannot exceed its full block-chain depth"
                 );
                 let count = expected_incoming
@@ -366,9 +343,7 @@ impl BlockTracker {
 
     #[cfg(test)]
     pub(super) fn active_hashes(&self) -> impl Iterator<Item = SequenceHash> + '_ {
-        self.unique_blocks
-            .keys()
-            .map(PositionalLineageHash::current_sequence_hash)
+        self.unique_blocks.keys().copied()
     }
 
     #[cfg(test)]
@@ -378,29 +353,21 @@ impl BlockTracker {
     ) -> impl Iterator<Item = SequenceHash> + 'a {
         self.node_ids_from_tail(chain).filter_map(|node_id| {
             let node = &self.nodes[node_id];
-            (node.depth() <= chain.prompt_depth).then(|| node.sequence_hash())
+            (node.depth <= chain.prompt_depth).then_some(node.hash)
         })
     }
 
-    fn live_node_id(&self, lineage_hash: PositionalLineageHash) -> Option<BlockNodeId> {
-        let &node_id = self.unique_blocks.get(&lineage_hash)?;
+    fn live_node_id(&self, hash: SequenceHash) -> Option<BlockNodeId> {
+        let &node_id = self.unique_blocks.get(&hash)?;
         let node = self
             .nodes
             .get(node_id)
-            .expect("live lineage index references a stale arena ID");
+            .expect("live block index references a stale arena ID");
         assert_eq!(
-            node.lineage_hash, lineage_hash,
-            "live lineage index key does not match its arena node"
+            node.hash, hash,
+            "live block index key does not match its arena node"
         );
         Some(node_id)
-    }
-
-    #[inline]
-    fn prompt_lineage_hash(sequence: &[SequenceHash], index: usize) -> PositionalLineageHash {
-        let current = sequence[index];
-        let parent = index.checked_sub(1).map(|parent_idx| sequence[parent_idx]);
-        let position = u64::try_from(index).expect("block position does not fit u64");
-        PositionalLineageHash::new(current, parent, position)
     }
 
     fn increment_incoming(&mut self, node_id: BlockNodeId) {
@@ -417,16 +384,15 @@ impl BlockTracker {
     }
 
     #[cfg(debug_assertions)]
-    fn debug_assert_new_hashes(&self, sequence: &[SequenceHash], first_new_idx: usize) {
+    fn debug_assert_new_hashes(&self, hashes: &[SequenceHash]) {
         let mut seen = FxHashSet::default();
-        for idx in first_new_idx..sequence.len() {
-            let lineage_hash = Self::prompt_lineage_hash(sequence, idx);
+        for hash in hashes {
             assert!(
-                !self.unique_blocks.contains_key(&lineage_hash),
+                !self.unique_blocks.contains_key(hash),
                 "sequence lineage hash unexpectedly aliases a live block"
             );
             assert!(
-                seen.insert(lineage_hash),
+                seen.insert(*hash),
                 "sequence lineage repeats a hash in one missing suffix"
             );
         }
@@ -434,7 +400,7 @@ impl BlockTracker {
 
     #[cfg(not(debug_assertions))]
     #[inline]
-    fn debug_assert_new_hashes(&self, _sequence: &[SequenceHash], _first_new_idx: usize) {}
+    fn debug_assert_new_hashes(&self, _hashes: &[SequenceHash]) {}
 
     #[cfg(any(test, debug_assertions))]
     fn debug_assert_lineage(&self, tail: BlockNodeId, sequence: &[SequenceHash]) {
@@ -443,7 +409,7 @@ impl BlockTracker {
             .get(tail)
             .expect("live sequence tail references a missing arena node");
         assert_eq!(
-            tail_node.depth(),
+            tail_node.depth,
             sequence.len(),
             "sequence tail depth mismatch"
         );
@@ -454,17 +420,8 @@ impl BlockTracker {
                 .nodes
                 .get(node_id)
                 .expect("live sequence chain references a missing arena node");
-            assert_eq!(node.depth(), expected_depth + 1, "sequence depth mismatch");
-            assert_eq!(
-                node.lineage_hash,
-                Self::prompt_lineage_hash(sequence, expected_depth),
-                "positional sequence lineage hash mismatch"
-            );
-            assert_eq!(
-                node.sequence_hash(),
-                expected_hash,
-                "sequence lineage hash mismatch"
-            );
+            assert_eq!(node.depth, expected_depth + 1, "sequence depth mismatch");
+            assert_eq!(node.hash, expected_hash, "sequence lineage hash mismatch");
             current = node.parent;
         }
     }
@@ -492,27 +449,13 @@ impl BlockTracker {
 
     #[cfg(test)]
     fn incoming_for(&self, hash: SequenceHash) -> u32 {
-        let node_id = self.node_id_for(hash);
+        let node_id = self.live_node_id(hash).expect("expected live block hash");
         self.nodes[node_id].incoming.get()
     }
 
     #[cfg(test)]
     fn node_id_for(&self, hash: SequenceHash) -> BlockNodeId {
-        let mut matches = self.unique_blocks.iter().filter_map(|(lineage, &node_id)| {
-            (lineage.current_sequence_hash() == hash).then_some(node_id)
-        });
-        let node_id = matches.next().expect("expected live block hash");
-        assert!(
-            matches.next().is_none(),
-            "expected raw block hash to identify exactly one live lineage"
-        );
-        node_id
-    }
-
-    #[cfg(test)]
-    fn node_id_for_prompt(&self, sequence: &[SequenceHash], index: usize) -> BlockNodeId {
-        self.live_node_id(Self::prompt_lineage_hash(sequence, index))
-            .expect("expected live prompt lineage")
+        self.live_node_id(hash).expect("expected live block hash")
     }
 }
 
@@ -609,60 +552,8 @@ mod tests {
 
         assert_eq!(tracker.incoming_for(2), before);
         assert_eq!(tracker.incoming_for(42), 1);
-        let output = &tracker.nodes[tracker.node_id_for(42)];
-        assert_eq!(output.lineage_hash.position(), 2);
-        assert_eq!(output.lineage_hash.current_sequence_hash(), 42);
-        assert_eq!(output.lineage_hash.parent_hash_fragment(), 2);
         tracker.assert_consistent([&chain]);
         assert_eq!(tracker.release(chain), vec![1, 2]);
-    }
-
-    #[test]
-    fn same_tail_hash_under_different_parents_has_independent_lineages() {
-        let left_sequence = [1, 9];
-        let right_sequence = [2, 9];
-        let mut tracker = BlockTracker::default();
-        let (left, left_first_new) = tracker.acquire_prompt(&left_sequence);
-        let (right, right_first_new) = tracker.acquire_prompt(&right_sequence);
-
-        assert_eq!(left_first_new, Some(0));
-        assert_eq!(right_first_new, Some(0));
-        assert_ne!(
-            tracker.node_id_for_prompt(&left_sequence, 1),
-            tracker.node_id_for_prompt(&right_sequence, 1)
-        );
-        assert_eq!(tracker.active_blocks(), 4);
-
-        tracker.set_unique_suffix_fractional(&left, 0.5);
-        assert_eq!(tracker.active_blocks(), 3);
-        tracker.assert_consistent([&left, &right]);
-
-        assert_eq!(tracker.release(left), vec![1, 9]);
-        assert_eq!(tracker.active_blocks(), 2);
-        tracker.assert_consistent([&right]);
-        assert_eq!(tracker.release(right), vec![2, 9]);
-        tracker.assert_consistent(std::iter::empty());
-    }
-
-    #[test]
-    fn same_hash_at_different_depths_has_independent_lineages() {
-        let root_sequence = [9];
-        let nested_sequence = [1, 9];
-        let mut tracker = BlockTracker::default();
-        let (root, _) = tracker.acquire_prompt(&root_sequence);
-        let (nested, nested_first_new) = tracker.acquire_prompt(&nested_sequence);
-
-        assert_eq!(nested_first_new, Some(0));
-        assert_ne!(
-            tracker.node_id_for_prompt(&root_sequence, 0),
-            tracker.node_id_for_prompt(&nested_sequence, 1)
-        );
-        assert_eq!(tracker.active_blocks(), 3);
-        tracker.assert_consistent([&root, &nested]);
-
-        assert_eq!(tracker.release(root), vec![9]);
-        tracker.assert_consistent([&nested]);
-        assert_eq!(tracker.release(nested), vec![1, 9]);
     }
 
     #[test]
@@ -715,23 +606,9 @@ mod tests {
         let (shared_prefix, _) = tracker.acquire_prompt(&[1, 2]);
 
         tracker.set_unique_suffix_fractional(&longer, 0.5);
-        let sequence = [1, 2, 3];
-        assert_eq!(
-            tracker
-                .fractional_blocks
-                .get(&BlockTracker::prompt_lineage_hash(&sequence, 2)),
-            Some(&0.5)
-        );
-        assert!(
-            !tracker
-                .fractional_blocks
-                .contains_key(&BlockTracker::prompt_lineage_hash(&sequence, 0))
-        );
-        assert!(
-            !tracker
-                .fractional_blocks
-                .contains_key(&BlockTracker::prompt_lineage_hash(&sequence, 1))
-        );
+        assert_eq!(tracker.fractional_blocks.get(&3), Some(&0.5));
+        assert!(!tracker.fractional_blocks.contains_key(&1));
+        assert!(!tracker.fractional_blocks.contains_key(&2));
         tracker.assert_consistent([&longer, &shared_prefix]);
 
         assert_eq!(tracker.release(longer), vec![3]);
@@ -772,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "live lineage index references a stale arena ID")]
+    #[should_panic(expected = "live block index references a stale arena ID")]
     fn stale_generation_in_index_is_rejected() {
         let mut tracker = BlockTracker::default();
         let (first, _) = tracker.acquire_prompt(&[1]);
@@ -780,39 +657,21 @@ mod tests {
         assert_eq!(tracker.release(first), vec![1]);
         let (second, _) = tracker.acquire_prompt(&[2]);
 
-        let wrong_lineage = BlockTracker::prompt_lineage_hash(&[99], 0);
-        tracker.unique_blocks.insert(wrong_lineage, old_id);
-        let _ = tracker.live_node_id(wrong_lineage);
+        tracker.unique_blocks.insert(99, old_id);
+        let _ = tracker.contains_block(&99);
         drop(second);
     }
 
     #[test]
-    #[should_panic(expected = "live lineage index key does not match its arena node")]
+    #[should_panic(expected = "live block index key does not match its arena node")]
     fn live_id_with_the_wrong_hash_is_rejected() {
         let mut tracker = BlockTracker::default();
         let (chain, _) = tracker.acquire_prompt(&[1]);
         let node_id = tracker.node_id_for(1);
 
-        let wrong_lineage = BlockTracker::prompt_lineage_hash(&[2], 0);
-        tracker.unique_blocks.insert(wrong_lineage, node_id);
-        let _ = tracker.live_node_id(wrong_lineage);
+        tracker.unique_blocks.insert(2, node_id);
+        let _ = tracker.contains_block(&2);
         drop(chain);
-    }
-
-    #[test]
-    fn positional_lineage_modes_cover_prompt_size_boundaries() {
-        let sequence = (1..=65_537_u64).collect::<Vec<_>>();
-
-        assert_eq!(BlockTracker::prompt_lineage_hash(&sequence, 255).mode(), 0);
-        assert_eq!(BlockTracker::prompt_lineage_hash(&sequence, 256).mode(), 1);
-        assert_eq!(
-            BlockTracker::prompt_lineage_hash(&sequence, 65_535).mode(),
-            1
-        );
-        assert_eq!(
-            BlockTracker::prompt_lineage_hash(&sequence, 65_536).mode(),
-            2
-        );
     }
 
     #[test]
