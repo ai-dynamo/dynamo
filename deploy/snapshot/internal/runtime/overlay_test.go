@@ -555,6 +555,28 @@ func TestCaptureRootfsExclusionsAndBindDestinations(t *testing.T) {
 	}
 }
 
+func TestCaptureRootfsToleratesSourceRootXattrs(t *testing.T) {
+	source := t.TempDir()
+	writeTestFile(t, filepath.Join(source, "file"), []byte("data"))
+	if err := unix.Setxattr(source, "user.test", []byte("x"), 0); err != nil {
+		if errors.Is(err, unix.ENOTSUP) {
+			t.Skipf("filesystem xattrs unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if _, err := CaptureRootfsDiff(
+		context.Background(),
+		source,
+		t.TempDir(),
+		types.OverlaySettings{},
+		nil,
+		1,
+		testr.New(t),
+	); err != nil {
+		t.Fatalf("CaptureRootfsDiff: %v", err)
+	}
+}
+
 func TestCaptureRootfsRejectsUnsupportedEntries(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -626,7 +648,7 @@ func TestCaptureRootfsRejectsUnsupportedEntries(t *testing.T) {
 		})
 	}
 
-	t.Run("xattr", func(t *testing.T) {
+	t.Run("child xattr", func(t *testing.T) {
 		source := t.TempDir()
 		file := filepath.Join(source, "file")
 		writeTestFile(t, file, nil)

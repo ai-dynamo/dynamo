@@ -337,9 +337,6 @@ func scanRootfs(
 	if uint32(rootStat.Mode)&unix.S_IFMT != unix.S_IFDIR {
 		return nil, rootfsStats{}, nil, fmt.Errorf("root is not a directory")
 	}
-	if err := rejectXattrs(root); err != nil {
-		return nil, rootfsStats{}, nil, fmt.Errorf("inspect root xattrs: %w", err)
-	}
 
 	entries := make([]rootfsEntry, 0, 1024)
 	stats := rootfsStats{}
