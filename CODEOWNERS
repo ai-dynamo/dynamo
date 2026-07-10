@@ -293,7 +293,7 @@
 /tests/frontend/agent_smoke_inputs.py                                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/llm/src/kv_router/shared_cache.rs                                                        @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/runtime/examples/service_metrics/                                                        @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
-/components/src/dynamo/vllm/handlers.py                                                       @ai-dynamo/dynamo-backend-vllm-codeowners RL
+/components/src/dynamo/vllm/handlers.py                                                       @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-rl-codeowners
 /components/src/dynamo/vllm/snapshot.py                                                       @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/preprocessor/media/rdma.rs                                                       @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/protocols/openai/images.rs                                                       @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners

@@ -872,7 +872,7 @@ shared:
 - glob: components/src/dynamo/vllm/handlers.py
   owners:
   - backend-vllm
-  - RL
+  - rl
 - glob: components/src/dynamo/vllm/main.py
   owners:
   - backend-vllm
@@ -1108,9 +1108,9 @@ classify:
   - match: metrics
     coowner: observability
   - match: /rl/
-    area: RL
+    area: rl
   - match: weight_update
-    area: RL
+    area: rl
   - match: logits
     coowner: frontend
   - match: tokeniz
