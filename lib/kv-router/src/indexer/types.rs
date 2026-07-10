@@ -11,6 +11,9 @@ use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
 
+#[cfg(feature = "bench")]
+use super::{EventCompletionBuffer, EventCompletionWriter, ObservationSeal};
+
 /// Trait for types that may represent an error response.
 /// Used for RPC-style responses that can indicate success or failure.
 pub trait MaybeError {
@@ -465,6 +468,20 @@ pub enum WorkerTask {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
     },
+    #[cfg(feature = "bench")]
+    InstallObservation {
+        writer: EventCompletionWriter,
+        resp: oneshot::Sender<bool>,
+    },
+    #[cfg(feature = "bench")]
+    ObservedEvent {
+        event: RouterEvent,
+        correlation_id: u32,
+    },
+    #[cfg(feature = "bench")]
+    SealObservation(oneshot::Sender<Option<ObservationSeal>>),
+    #[cfg(feature = "bench")]
+    HarvestObservation(oneshot::Sender<EventCompletionBuffer>),
     Anchor {
         worker: WorkerWithDpRank,
         anchor: AnchorTask,

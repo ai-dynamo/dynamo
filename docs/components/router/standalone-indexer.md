@@ -24,13 +24,13 @@ The HTTP API follows the [Mooncake KV Indexer RFC](https://github.com/kvcache-ai
 standalone indexer waits for that many workers to register before opening its startup-ready
 gate, matching the frontend/router startup behavior.
 
-## Multi-Model and Multi-Tenant Support
+## Model and Routing Group Support
 
-The indexer maintains one radix tree per `(model_name, tenant_id)` pair. Workers registered with different model names or tenant IDs are isolated into separate indexers — queries against one model/tenant never return scores from another.
+The indexer maintains one radix tree per `(model_name, routing_group)` pair. Workers registered with different model names or routing groups are isolated into separate indexers. Queries against one pair never return scores from another.
 
 - **`model_name`** (required on `/register` and `/query`): Identifies the model. Workers serving different models get separate radix trees.
-- **`tenant_id`** (optional, defaults to `"default"`): Enables multi-tenant isolation within the same model. Omit for single-tenant deployments.
-- **`block_size`** is per-indexer: the first `/register` call for a given `(model_name, tenant_id)` sets the block size. Subsequent registrations for the same pair must use the same block size or the request will fail.
+- **`routing_group`** (optional, defaults to `"default"`): Identifies a statically assigned worker pool within the model. Omit it when the model does not need independently selectable pools.
+- **`block_size`** is per-indexer: the first `/register` call for a given `(model_name, routing_group)` sets the block size. Subsequent registrations for the same pair must use the same block size or the request will fail.
 
 ## Compatibility
 
@@ -115,7 +115,7 @@ This keeps the default `kv-indexer` build lean while still allowing Prometheus m
 ## CLI
 
 ```bash
-python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-model --tenant-id default --workers "1=tcp://host:5557,2:1=tcp://host:5558"] [--peers "http://peer1:8090,http://peer2:8091"]
+python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name my-model --routing-group default --workers "1=tcp://host:5557,2:1=tcp://host:5558"] [--peers "http://peer1:8090,http://peer2:8091"]
 ```
 
 | Flag | Default | Description |
@@ -125,7 +125,7 @@ python -m dynamo.indexer --port 8090 [--threads 4] [--block-size 16 --model-name
 | `--threads` | `4` | Number of indexer threads (1 = single-threaded, >1 = thread pool) |
 | `--workers` | (none) | Initial workers as `instance_id[:dp_rank]=zmq_address,...` pairs (dp_rank defaults to 0) |
 | `--model-name` | `default` | Model name for initial `--workers` |
-| `--tenant-id` | `default` | Tenant ID for initial `--workers` |
+| `--routing-group` | `default` | Routing group for initial `--workers` |
 | `--peers` | (none) | Comma-separated peer indexer URLs for P2P recovery on startup |
 
 ### Shared Startup Gate
@@ -157,13 +157,13 @@ curl http://localhost:8090/metrics
 | `dynamo_kvindexer_request_duration_seconds` | Histogram | `endpoint` | HTTP request latency |
 | `dynamo_kvindexer_requests_total` | Counter | `endpoint`, `method` | Total HTTP requests |
 | `dynamo_kvindexer_errors_total` | Counter | `endpoint`, `status_class` | HTTP error responses (4xx/5xx) |
-| `dynamo_kvindexer_models` | Gauge | — | Number of active model+tenant indexers |
+| `dynamo_kvindexer_models` | Gauge | — | Number of active model+routing-group indexers |
 | `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
 | `dynamo_kvindexer_listeners` | Gauge | `status` | Number of ZMQ listeners by status (`pending`, `active`, `paused`, `failed`) |
 | `dynamo_kvrouter_kv_cache_events_applied` | Counter | `event_type`, `status` | Primary device-tier KV events applied, partitioned by event type and result |
 | `dynamo_kvrouter_kv_cache_event_warnings` | Counter | `warning_kind` | Suspicious-but-valid primary device-tier events, including duplicate STORE content |
 
-The core event counters aggregate process-wide across model and tenant indexers and
+The core event counters aggregate process-wide across model and routing-group indexers and
 across all indexer threads. A `duplicate_store` warning is not necessarily an error:
 peer recovery replay can reapply content already restored from a snapshot. Lower-tier
 events and listener transport or replay failures are not represented by these core
@@ -171,11 +171,11 @@ event counters; use the standalone service metrics and logs for those paths.
 
 ### `POST /register` — Register an endpoint
 
-Register a ZMQ endpoint for an instance. Each call creates or reuses the indexer for the given `(model_name, tenant_id)` pair.
+Register a ZMQ endpoint for an instance. Each call creates or reuses the indexer for the given `(model_name, routing_group)` pair.
 Registration is non-blocking: if the worker is not up yet, the listener is accepted in `pending` state and transitions to `active` once the initial ZMQ connection succeeds.
 
 ```bash
-# Single model, default tenant
+# Single model, default routing group
 curl -X POST http://localhost:8090/register \
   -H 'Content-Type: application/json' \
   -d '{
@@ -185,14 +185,14 @@ curl -X POST http://localhost:8090/register \
     "block_size": 16
   }'
 
-# With tenant isolation
+# With an explicit routing group
 curl -X POST http://localhost:8090/register \
   -H 'Content-Type: application/json' \
   -d '{
     "instance_id": 2,
     "endpoint": "tcp://127.0.0.1:5558",
     "model_name": "llama-3-8b",
-    "tenant_id": "customer-a",
+    "routing_group": "customer-a",
     "block_size": 16,
     "dp_rank": 0
   }'
@@ -204,47 +204,52 @@ curl -X POST http://localhost:8090/register \
 | `endpoint` | yes | — | ZMQ PUB address to subscribe to |
 | `model_name` | yes | — | Model name (used to select the indexer) |
 | `block_size` | yes | — | KV cache block size (must match the engine) |
-| `tenant_id` | no | `"default"` | Tenant identifier for isolation |
+| `routing_group` | no | `"default"` | Worker routing group |
 | `dp_rank` | no | `0` | Data parallel rank |
 | `replay_endpoint` | no | — | ZMQ ROUTER address for gap replay (e.g. `tcp://host:5560`) |
 | `additional_salt` | no | — | Per-tenant salt (Mooncake RFC #1403 `additionalsalt`, alias accepted). Currently parsed for forward compatibility — engines apply their own salting today. |
 
+For transition compatibility, indexer HTTP inputs also accept a string `tenant_id`, and the
+CLI accepts the hidden `--tenant-id` flag. These values are ignored. `routing_group` always
+controls worker eligibility; when it is omitted, the endpoint's normal default or all-groups
+behavior applies. Responses never include `tenant_id`.
+
 ### `POST /unregister` — Deregister an instance
 
-Remove an instance. Omitting `tenant_id` removes the instance from **all** tenants for the given model; providing it targets only that tenant's indexer.
+Remove an instance. Omitting `routing_group` removes the instance from every routing group for the given model; providing it targets one routing group.
 
 ```bash
-# Remove from all tenants
+# Remove from all routing groups
 curl -X POST http://localhost:8090/unregister \
   -H 'Content-Type: application/json' \
   -d '{"instance_id": 1, "model_name": "llama-3-8b"}'
 
-# Remove from a specific tenant
+# Remove from a specific routing group
 curl -X POST http://localhost:8090/unregister \
   -H 'Content-Type: application/json' \
-  -d '{"instance_id": 1, "model_name": "llama-3-8b", "tenant_id": "customer-a"}'
+  -d '{"instance_id": 1, "model_name": "llama-3-8b", "routing_group": "customer-a"}'
 
 # Remove a specific dp_rank
 curl -X POST http://localhost:8090/unregister \
   -H 'Content-Type: application/json' \
-  -d '{"instance_id": 1, "model_name": "llama-3-8b", "tenant_id": "default", "dp_rank": 0}'
+  -d '{"instance_id": 1, "model_name": "llama-3-8b", "routing_group": "default", "dp_rank": 0}'
 ```
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `instance_id` | yes | — | Worker instance to remove |
 | `model_name` | yes | — | Model name (identifies the indexer) |
-| `tenant_id` | no | — | Tenant identifier (omit to remove from all tenants) |
+| `routing_group` | no | — | Routing group (omit to remove from every group) |
 | `dp_rank` | no | — | Specific dp_rank to remove (omit to remove all) |
 
 ### `GET /workers` — List registered instances
 
-Returns all registered workers, optionally filtered by model and/or tenant.
+Returns all registered workers, optionally filtered by model and routing group.
 
 | Query parameter | Description |
 |-----------------|-------------|
 | `model_name` | Return only workers registered for this model. Omit to return all models. |
-| `tenant_id` | Return only workers registered for this tenant. Omit to return all tenants. |
+| `routing_group` | Return only workers registered for this routing group. Omit to return all groups. |
 
 ```bash
 # All workers
@@ -253,8 +258,8 @@ curl http://localhost:8090/workers
 # Workers for a specific model
 curl "http://localhost:8090/workers?model_name=llama-3-8b"
 
-# Workers for a specific model and tenant
-curl "http://localhost:8090/workers?model_name=llama-3-8b&tenant_id=customer-a"
+# Workers for a specific model and routing group
+curl "http://localhost:8090/workers?model_name=llama-3-8b&routing_group=customer-a"
 ```
 
 Returns:
@@ -265,7 +270,7 @@ Returns:
     "source": "zmq",
     "status": "active",
     "model_name": "llama-3-8b",
-    "tenant_id": "default",
+    "routing_group": "default",
     "block_size": 16,
     "endpoints": {
       "0": "tcp://127.0.0.1:5557",
@@ -291,12 +296,12 @@ Returns:
 | `source` | Always `"zmq"` for ZMQ-managed workers |
 | `status` | Aggregated listener status: `failed > pending > active > paused` |
 | `model_name` | Model this worker is registered under |
-| `tenant_id` | Tenant this worker is registered under |
-| `block_size` | KV cache block size for this worker's `(model_name, tenant_id)` indexer |
+| `routing_group` | Routing group this worker is registered under |
+| `block_size` | KV cache block size for this worker's `(model_name, routing_group)` indexer |
 | `endpoints` | Map of `dp_rank → zmq_address` |
 | `listeners` | Per-dp_rank listener detail; each entry may include a `last_error` field when the most recent startup or recv-loop attempt failed |
 
-Filters are independent — providing both `model_name` and `tenant_id` returns only workers matching both. An empty array is returned (not a 404) when no workers match the filter.
+Filters are independent — providing both `model_name` and `routing_group` returns only workers matching both. An empty array is returned (not a 404) when no workers match the filter.
 
 ### `POST /query` — Query overlap for token IDs
 
@@ -341,7 +346,7 @@ All counts are in **matched tokens** (block overlap count × block size).
 |-------|----------|---------|-------------|
 | `token_ids` | yes | — | Token sequence to query |
 | `model_name` | yes | — | Model name (selects the indexer) |
-| `tenant_id` | no | `"default"` | Tenant identifier |
+| `routing_group` | no | `"default"` | Worker routing group |
 | `lora_name` | no | — | LoRA adapter (overrides indexer-level lora_name for this query) |
 | `cache_salt` | no | — | Per-request cache salt (Mooncake RFC #1403). The indexer mixes it into hashes computed from `token_ids`; equal tokens with different salts do not match. |
 
@@ -359,7 +364,7 @@ Same response format as `/query`, including the per-instance `instances` map. Sc
 |-------|----------|---------|-------------|
 | `block_hashes` | yes | — | Pre-computed block hash array |
 | `model_name` | yes | — | Model name (selects the indexer) |
-| `tenant_id` | no | `"default"` | Tenant identifier |
+| `routing_group` | no | `"default"` | Worker routing group |
 | `cache_salt` | no | — | Must be omitted or `null`. Any string value, including an empty string, returns `400 Bad Request`. |
 
 `block_hashes` are opaque outputs of token hashing, so the indexer cannot apply or verify a salt
@@ -385,7 +390,7 @@ Legacy callers that only consume `scores` keep working: those values are equal t
 
 ### `GET /dump` — Dump all radix tree events
 
-Returns the full radix tree state as a JSON object keyed by `model_name:tenant_id`:
+Returns the full radix tree state as a JSON object keyed by `model_name:routing_group`:
 
 ```bash
 curl http://localhost:8090/dump
@@ -471,7 +476,7 @@ graph TD
     subgraph "Standalone Indexer (HTTP)"
         REG[Worker Registry]
         ZMQ[ZMQ SUB Listeners]
-        IDX["Indexer Map<br/>(model, tenant) → Radix Tree"]
+        IDX["Indexer Map<br/>(model, routing group) → Radix Tree"]
         HTTP[HTTP API<br/>/query /dump /register /health]
     end
 
