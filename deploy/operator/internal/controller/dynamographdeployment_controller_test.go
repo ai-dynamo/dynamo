@@ -2698,7 +2698,6 @@ func Test_reconcileGroveResources(t *testing.T) {
 			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			// setWantGroveReconcileResultRuntimeNamespaces(dgd, &tt.wantReconcileResult)
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
 		})
 	}

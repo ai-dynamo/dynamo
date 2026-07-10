@@ -56,7 +56,6 @@ logger = logging.getLogger(__name__)
 
 CURRENT_WORKER_HASH_ANNOTATION = "nvidia.com/current-worker-hash"
 CURRENT_WORKER_HASH_V2_ANNOTATION = "nvidia.com/current-worker-hash-v2"
-LEGACY_WORKER_HASH = "legacy"
 WORKER_COMPONENT_TYPES = {"worker", "prefill", "decode"}
 WORKER_SUFFIX_COMPONENT_KINDS = {"Deployment", "LeaderWorkerSet"}
 
