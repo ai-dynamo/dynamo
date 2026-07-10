@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -18,6 +19,7 @@ from dynamo.vllm.worker_factory import (
     _engine_generate_prefill_endpoint_path,
     _wait_and_load_benchmark,
 )
+from dynamo.vllm.worker_endpoints import WorkerEndpointSet
 
 pytestmark = [
     pytest.mark.unit,
@@ -63,6 +65,64 @@ def test_engine_generate_prefill_uses_independent_versioned_endpoint() -> None:
         _engine_generate_prefill_endpoint_path(config)
         == "rollout.prefill.engine_generate_prefill_v1"
     )
+
+
+def test_decode_endpoint_set_owns_publication_and_shutdown_membership() -> None:
+    runtime = Mock()
+    runtime.endpoint.side_effect = lambda path: path
+    config = SimpleNamespace(
+        namespace="dyn",
+        component="decode",
+        endpoint="generate",
+        use_vllm_tokenizer=False,
+        enable_rl=True,
+        engine_args=SimpleNamespace(enable_lora=True),
+    )
+
+    endpoints = WorkerEndpointSet.decode(
+        runtime,
+        config,
+        versioned_path="dyn.decode.engine_generate_v1",
+    )
+
+    assert endpoints.routing_endpoints == (
+        "dyn.decode.generate",
+        "dyn.decode.engine_generate_v1",
+    )
+    assert endpoints.handler_args == {
+        "generate_endpoint": "dyn.decode.generate",
+        "additional_generate_endpoints": ("dyn.decode.engine_generate_v1",),
+    }
+    shutdown: list = []
+    endpoints.bind_shutdown(shutdown)
+    assert shutdown == list(endpoints.shutdown_members)
+    assert "dyn.decode.rl" in shutdown
+    assert "dyn.decode.load_lora" in shutdown
+
+
+def test_prefill_endpoint_set_declares_prefill_alias_without_lora_controls() -> None:
+    runtime = Mock()
+    runtime.endpoint.side_effect = lambda path: path
+    config = SimpleNamespace(
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=True),
+    )
+
+    endpoints = WorkerEndpointSet.prefill(
+        runtime,
+        config,
+        versioned_path="dyn.prefill.engine_generate_prefill_v1",
+    )
+
+    assert endpoints.routing_endpoints == (
+        "dyn.prefill.generate",
+        "dyn.prefill.engine_generate_prefill_v1",
+    )
+    assert endpoints.rl is None
+    assert endpoints.lora == ()
 
 
 @pytest.mark.asyncio

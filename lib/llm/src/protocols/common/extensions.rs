@@ -386,6 +386,72 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     Some(ext)
 }
 
+/// Parse Dynamo's canonical routing headers for request types that do not
+/// carry an `nvext` body. Unlike the backwards-compatible nvext overlay, this
+/// boundary is strict: a present-but-malformed target must not silently turn
+/// into an unpinned request.
+pub fn routing_hints_from_headers(
+    headers: &HeaderMap,
+) -> anyhow::Result<Option<super::preprocessor::RoutingHints>> {
+    fn validate<T: std::str::FromStr>(
+        headers: &HeaderMap,
+        names: &[&str],
+        label: &str,
+    ) -> anyhow::Result<()> {
+        if let Some((name, value)) = names
+            .iter()
+            .find_map(|name| headers.get(*name).map(|value| (*name, value)))
+        {
+            let value = value
+                .to_str()
+                .map_err(|_| anyhow::anyhow!("{name} must be valid ASCII"))?;
+            value
+                .trim()
+                .parse::<T>()
+                .map(|_| ())
+                .map_err(|_| anyhow::anyhow!("{name} must be a valid {label}"))?;
+        }
+        Ok(())
+    }
+
+    validate::<u64>(
+        headers,
+        &[HEADER_WORKER_INSTANCE_ID, HEADER_WORKER_INSTANCE_ID_ALIAS],
+        "worker ID",
+    )?;
+    validate::<u64>(
+        headers,
+        &[HEADER_PREFILL_INSTANCE_ID, HEADER_PREFILL_INSTANCE_ID_ALIAS],
+        "prefill worker ID",
+    )?;
+    validate::<u32>(
+        headers,
+        &[
+            HEADER_DP_RANK,
+            HEADER_DP_RANK_ALIAS,
+            HEADER_DATA_PARALLEL_RANK_ALIAS,
+        ],
+        "data-parallel rank",
+    )?;
+    validate::<u32>(
+        headers,
+        &[HEADER_PREFILL_DP_RANK, HEADER_PREFILL_DP_RANK_ALIAS],
+        "prefill data-parallel rank",
+    )?;
+
+    let Some(nvext) = apply_header_routing_overrides(None, headers) else {
+        return Ok(None);
+    };
+    Ok(Some(super::preprocessor::RoutingHints {
+        backend_instance_id: nvext.backend_instance_id,
+        prefill_worker_id: nvext.prefill_worker_id,
+        decode_worker_id: nvext.decode_worker_id,
+        dp_rank: nvext.dp_rank,
+        prefill_dp_rank: nvext.prefill_dp_rank,
+        ..Default::default()
+    }))
+}
+
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
     fn raw_prompt(&self) -> Option<String>;

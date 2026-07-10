@@ -99,6 +99,7 @@ from .multimodal_utils.request_processor import (
     VllmMultimodalRequestProcessor,
 )
 from .multimodal_utils.vision_encoder_backend import VisionEncoderBackend
+from .pause_controller import VllmEnginePauseController
 from .response_adapters import (
     GenerationResponseContext,
     LegacyResponseAdapter,
@@ -314,63 +315,6 @@ async def _deferred_abort_guard(
             finally:
                 if registry is not None:
                     registry.pop(request_id, None)
-
-
-class VllmEnginePauseController:
-    def __init__(self, engine_client: Any):
-        self._engine_client = engine_client
-        self._is_paused = False
-        self._generation_paused = False
-
-    @property
-    def is_paused(self) -> bool:
-        return self._is_paused
-
-    @property
-    def needs_resume_recovery(self) -> bool:
-        return self._generation_paused
-
-    async def pause(self, *args: object) -> bool:
-        if self._is_paused or self._generation_paused:
-            return False
-
-        level = args[0] if args else None
-        await self._engine_client.pause_generation()
-        self._generation_paused = True
-        try:
-            if level is None:
-                await self._engine_client.sleep()
-            else:
-                await self._engine_client.sleep(level)
-        except Exception:
-            try:
-                await self._engine_client.resume_generation()
-                self._generation_paused = False
-            except Exception:
-                logger.exception(
-                    "Failed to resume generation after native vLLM sleep failure"
-                )
-            raise
-        self._is_paused = True
-        return True
-
-    async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_paused and not self._generation_paused:
-            return False
-
-        if self._is_paused:
-            if tags is None:
-                await self._engine_client.wake_up()
-            else:
-                await self._engine_client.wake_up(tags)
-        if self._generation_paused:
-            await self._engine_client.resume_generation()
-            self._generation_paused = False
-        return True
-
-    def mark_resumed(self) -> None:
-        self._is_paused = False
-        self._generation_paused = False
 
 
 def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
@@ -970,6 +914,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Guard lock-map access in case handlers are invoked from multiple threads.
         self._lora_load_locks_guard = threading.Lock()
         self._paused: bool = False
+        self._pause_drained: bool = False
         self._weight_version: str = "initial"
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
@@ -1487,7 +1432,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        mode = body.get("mode", "keep")
+        mode = body.get("mode", "wait")
         clear_cache = bool(body.get("clear_cache", False))
         if mode not in ("keep", "wait", "abort"):
             return {
@@ -1496,15 +1441,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         async with self._pause_lock:
             try:
+                legacy_pause = False
                 try:
                     await self.engine_client.pause_generation(
                         mode=mode, clear_cache=clear_cache
                     )
                 except TypeError:
+                    legacy_pause = True
                     await self.engine_client.pause_generation()
                     if clear_cache:
-                        await self.engine_client.reset_prefix_cache()
+                        reset_successful = await self.engine_client.reset_prefix_cache(
+                            reset_connector=True
+                        )
+                        if reset_successful is not True:
+                            raise RuntimeError(
+                                "prefix/KV/connector cache reset did not complete"
+                            )
                 self._paused = True
+                self._pause_drained = not legacy_pause and mode in ("wait", "abort")
                 logger.info(
                     f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})"
                 )
@@ -1536,6 +1490,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             try:
                 await self.engine_client.resume_generation()
                 self._paused = False
+                self._pause_drained = False
                 logger.info("[RL] Engine resumed")
                 return {"status": "ok", "message": "Engine resumed"}
             except EngineDeadError as e:
@@ -1557,7 +1512,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # weight-update / pause / resume mutating engine cache state.
         async with self._pause_lock:
             try:
-                await self.engine_client.reset_prefix_cache()
+                reset_successful = await self.engine_client.reset_prefix_cache(
+                    reset_connector=True
+                )
+                if reset_successful is not True:
+                    raise RuntimeError(
+                        "prefix/KV/connector cache reset did not complete"
+                    )
                 logger.debug("[RL] Prefix cache flushed")
                 return {"status": "ok", "message": "Cache flushed"}
             except EngineDeadError as e:
@@ -1641,6 +1602,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "update, then resume_generation()."
                     ),
                 }
+            if not getattr(self, "_pause_drained", False):
+                return {
+                    "status": "error",
+                    "message": (
+                        "Weight updates that invalidate cache require a drained "
+                        "pause (mode='wait' or mode='abort')."
+                    ),
+                }
             path = body.get("model_path")
             if not path:
                 return {"status": "error", "message": "Missing 'model_path' in body"}
@@ -1656,7 +1625,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # Weights changed: any prefix/KV cache computed under the old
                 # weights is now stale and must not be reused. Invalidate it
                 # while still holding _pause_lock (generation is paused).
-                await self.engine_client.reset_prefix_cache()
+                reset_successful = await self.engine_client.reset_prefix_cache(
+                    reset_connector=True
+                )
+                if reset_successful is not True:
+                    raise RuntimeError(
+                        "prefix/KV/connector cache reset failed after weight update"
+                    )
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
@@ -1707,6 +1682,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         "update, then resume_generation()."
                     ),
                 }
+            if reset_prefix_cache and not getattr(self, "_pause_drained", False):
+                return {
+                    "status": "error",
+                    "message": (
+                        "Weight updates that invalidate cache require a drained "
+                        "pause (mode='wait' or mode='abort')."
+                    ),
+                }
             version = body.get("weight_version", "unknown")
             rpc = body.get("engine_rpc", "update_weights_from_path")
             rpc_kwargs = {
@@ -1719,7 +1702,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if reset_prefix_cache:
                     # Weights changed: stale prefix/KV cache must be invalidated
                     # before resume so it is not reused under the new weights.
-                    await self.engine_client.reset_prefix_cache()
+                    reset_successful = await self.engine_client.reset_prefix_cache(
+                        reset_connector=True
+                    )
+                    if reset_successful is not True:
+                        raise RuntimeError(
+                            "prefix/KV/connector cache reset failed after weight update"
+                        )
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
@@ -1919,11 +1908,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if temp_dir is not None:
             self.temp_dirs.append(temp_dir)
 
-    def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
+    def _to_local_dp_rank(
+        self, dp_rank: int | None, *, strict: bool = False
+    ) -> int | None:
         """Convert global DP rank to local DP rank based on engine config."""
         if dp_rank is None:
             return None
         if dp_rank < self.dp_range[0] or dp_rank >= self.dp_range[0] + self.dp_range[1]:
+            if strict:
+                raise ValueError(
+                    f"Target DP rank {dp_rank} is outside this worker's range "
+                    f"[{self.dp_range[0]}, {self.dp_range[0] + self.dp_range[1]})"
+                )
             logger.warning(
                 f"Received DP rank {dp_rank} is out of range [{self.dp_range[0]} - {self.dp_range[0] + self.dp_range[1]}), fallback to vLLM internal DP selection"
             )
@@ -2661,6 +2657,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
         response_adapter: ResponseAdapter = LegacyResponseAdapter(),
+        prefill_generate_metadata: dict[str, Any] | None = None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -2692,6 +2689,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
             kv_transfer_params: Any = None
+            prefill_prompt_logprobs = (
+                prefill_generate_metadata.get("prompt_logprobs")
+                if isinstance(prefill_generate_metadata, dict)
+                else None
+            )
+            prefill_routed_experts_by_choice = (
+                prefill_generate_metadata.get("routed_experts_by_choice", {})
+                if isinstance(prefill_generate_metadata, dict)
+                else {}
+            )
+            if not isinstance(prefill_routed_experts_by_choice, dict):
+                raise ValueError(
+                    "prefill generate_metadata.routed_experts_by_choice must be an object"
+                )
             async for res in gen:
                 # res is vllm's RequestOutput
                 if (
@@ -2783,6 +2794,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             prompt_logprobs=prompt_logprobs_payload,
                             routed_experts=raw_routed_experts_by_output.get(output_idx),
                             kv_transfer_params=kv_transfer_params,
+                            prefill_prompt_logprobs=prefill_prompt_logprobs,
+                            prefill_routed_experts=(
+                                prefill_routed_experts_by_choice.get(str(output_idx))
+                                or prefill_routed_experts_by_choice.get(output_idx)
+                            ),
                         ),
                     )
 
@@ -3101,6 +3117,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         prefill_prompt_tokens_details = (
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
+        prefill_generate_metadata = (
+            prefill_result.get("generate_metadata") if prefill_result else None
+        )
 
         # Extract LoRA request if present
         model_name = request.get("model")
@@ -3114,7 +3133,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
         routing = request.get("routing") or {}
-        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        dp_rank = self._to_local_dp_rank(
+            routing.get("dp_rank"), strict=engine_request is not None
+        )
         priority = (
             engine_request.priority(routing)
             if engine_request is not None
@@ -3177,6 +3198,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             if engine_request is not None
                             else LegacyResponseAdapter()
                         ),
+                        prefill_generate_metadata=prefill_generate_metadata,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3475,7 +3497,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         routing = request.get("routing") or {}
-        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        dp_rank = self._to_local_dp_rank(
+            routing.get("prefill_dp_rank", routing.get("dp_rank")),
+            strict=engine_request is not None,
+        )
         priority = (
             engine_request.priority(routing)
             if engine_request is not None

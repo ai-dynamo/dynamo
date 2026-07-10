@@ -103,6 +103,38 @@ def serialize_vllm_routed_experts(routed_experts: Any) -> Optional[str]:
         return None
 
 
+def merge_vllm_routed_experts(
+    prefill_routed_experts: str | None,
+    decode_routed_experts: Any,
+) -> Optional[str]:
+    """Join prompt and decode expert rows without crossing choice boundaries."""
+    if prefill_routed_experts is None:
+        return serialize_vllm_routed_experts(decode_routed_experts)
+    if decode_routed_experts is None:
+        return prefill_routed_experts
+    try:
+        prefill = np.load(
+            io.BytesIO(base64.b64decode(prefill_routed_experts)),
+            allow_pickle=False,
+        )
+        decode = np.asarray(decode_routed_experts)
+        if prefill.ndim != decode.ndim or prefill.shape[1:] != decode.shape[1:]:
+            raise ValueError(
+                "prefill/decode routed-expert tensors have incompatible shapes: "
+                f"{prefill.shape} vs {decode.shape}"
+            )
+        if prefill.dtype != decode.dtype:
+            raise ValueError(
+                "prefill/decode routed-expert tensors have incompatible dtypes: "
+                f"{prefill.dtype} vs {decode.dtype}"
+            )
+        return serialize_vllm_routed_experts(np.concatenate((prefill, decode), axis=0))
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("invalid prefill routed-expert payload") from exc
+
+
 def build_completion_usage(
     request_output: RequestOutput,
     embedding_sequence_length: int | None = None,
@@ -147,6 +179,8 @@ class GenerationResponseContext:
     prompt_logprobs: list | None
     routed_experts: Any
     kv_transfer_params: Any
+    prefill_prompt_logprobs: list | None = None
+    prefill_routed_experts: str | None = None
 
 
 class ResponseAdapter(Protocol):
@@ -209,9 +243,22 @@ class EngineGenerateResponseAdapter:
             return
 
         metadata: Dict[str, Any] = {}
-        if context.prompt_logprobs is not None:
-            metadata["prompt_logprobs"] = context.prompt_logprobs
-        serialized = serialize_vllm_routed_experts(context.routed_experts)
+        prompt_logprobs = context.prompt_logprobs
+        if context.prefill_prompt_logprobs is not None:
+            if (
+                prompt_logprobs is not None
+                and prompt_logprobs != context.prefill_prompt_logprobs
+            ):
+                raise ValueError(
+                    "prefill and decode returned inconsistent prompt logprobs"
+                )
+            prompt_logprobs = context.prefill_prompt_logprobs
+        if prompt_logprobs is not None:
+            metadata["prompt_logprobs"] = prompt_logprobs
+        serialized = merge_vllm_routed_experts(
+            context.prefill_routed_experts,
+            context.routed_experts,
+        )
         if serialized is not None:
             metadata["routed_experts"] = serialized
         if context.kv_transfer_params is not None:

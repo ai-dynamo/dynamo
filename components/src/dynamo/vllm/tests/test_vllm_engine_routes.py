@@ -29,6 +29,7 @@ def _make_engine(include_scale: bool = False) -> VllmLLMEngine:
         pause_generation=AsyncMock(),
         sleep=AsyncMock(),
         wake_up=AsyncMock(),
+        is_sleeping=AsyncMock(return_value=False),
         resume_generation=AsyncMock(),
         start_profile=AsyncMock(),
         stop_profile=AsyncMock(),

@@ -641,12 +641,13 @@ impl Model {
         result
     }
 
-    pub(crate) fn reactivate_prefill_routers_for_namespace(
+    pub(crate) fn refresh_prefill_routers_for_namespace(
         &self,
         namespace: &str,
         engine_generate: bool,
+        endpoint: dynamo_runtime::component::Endpoint,
     ) -> bool {
-        let mut reactivated = false;
+        let mut refreshed = false;
         for entry in self.worker_sets.iter() {
             let worker_set = entry.value();
             if worker_set.namespace() != namespace {
@@ -657,14 +658,11 @@ impl Model {
             } else {
                 worker_set.prefill_router.as_ref()
             };
-            if let Some(router) = router
-                && router.is_deactivated()
-            {
-                router.reactivate();
-                reactivated = true;
+            if let Some(router) = router {
+                refreshed |= router.refresh_activation_endpoint(endpoint.clone());
             }
         }
-        reactivated
+        refreshed
     }
 
     pub(crate) fn deactivate_prefill_routers_for_namespace(&self, namespace: &str) {

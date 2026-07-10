@@ -30,13 +30,14 @@ use super::openai::{
 use super::{RouteDoc, service_v2};
 use crate::discovery::ModelManagerError;
 use crate::protocols::common::FinishReason;
-use crate::protocols::common::extensions::HEADER_DATA_PARALLEL_RANK_ALIAS;
+use crate::protocols::common::extensions::routing_hints_from_headers;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, TopLogprob};
 use crate::protocols::inference::generate::{
-    GENERATE_DP_RANK_CONTEXT_KEY, GENERATE_PATH, GenerateChoiceLogprobs, GenerateLogprob,
+    GENERATE_PATH, GENERATE_ROUTING_HINTS_CONTEXT_KEY, GenerateChoiceLogprobs, GenerateLogprob,
     GenerateProtocolError, GenerateRequest, GenerateResponse, GenerateResponseChoice,
     GenerateStreamResponse, GenerateStreamResponseChoice, GenerateTokenLogprob, GenerateTopLogprob,
 };
+use routed_experts::merge_routed_expert_payloads;
 
 pub(super) fn router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
     let doc = RouteDoc::new(axum::http::Method::POST, GENERATE_PATH);
@@ -94,8 +95,13 @@ async fn handle_generate(
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
     let mut request = context_from_headers(request, request_id.clone(), &headers)?;
-    if let Some(dp_rank) = data_parallel_rank_from_headers(&headers) {
-        request.insert(GENERATE_DP_RANK_CONTEXT_KEY, dp_rank);
+    if let Some(routing) = routing_hints_from_headers(&headers).map_err(|error| {
+        ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: format!("Validation: {error}"),
+        })
+    })? {
+        request.insert(GENERATE_ROUTING_HINTS_CONTEXT_KEY, routing);
     }
     let context = request.context();
     let (mut connection_handle, stream_handle) =
@@ -556,13 +562,6 @@ fn resolve_request_id(headers: &HeaderMap, body_request_id: Option<&str>) -> Str
         .unwrap_or_else(|| get_or_create_request_id(headers))
 }
 
-fn data_parallel_rank_from_headers(headers: &HeaderMap) -> Option<u32> {
-    headers
-        .get(HEADER_DATA_PARALLEL_RANK_ALIAS)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
-}
-
 struct GenerateStreamAccumulator {
     request_id: String,
     expected_choices: usize,
@@ -607,7 +606,14 @@ impl GenerateStreamAccumulator {
 
         let routed_experts = output
             .generate_metadata
-            .and_then(|metadata| metadata.routed_experts);
+            .map(|metadata| {
+                merge_routed_expert_payloads(
+                    metadata.prefill_routed_experts,
+                    metadata.routed_experts,
+                )
+            })
+            .transpose()?
+            .flatten();
         let token_ids = output.token_ids;
         let logprobs = if let Some(requested_logprobs) = self.requested_logprobs
             && !token_ids.is_empty()
@@ -840,7 +846,10 @@ impl GenerateAccumulator {
             if let Some(kv_transfer_params) = metadata.kv_transfer_params {
                 self.kv_transfer_params = Some(kv_transfer_params);
             }
-            if let Some(routed_experts) = metadata.routed_experts {
+            if let Some(routed_experts) = merge_routed_expert_payloads(
+                metadata.prefill_routed_experts,
+                metadata.routed_experts,
+            )? {
                 choice.routed_experts = Some(routed_experts);
             }
         }
@@ -997,6 +1006,8 @@ fn protocol_error(error: GenerateProtocolError) -> ErrorResponse {
 fn invalid_response(message: impl Into<String>) -> GenerateProtocolError {
     GenerateProtocolError::InvalidResponse(message.into())
 }
+
+mod routed_experts;
 
 #[cfg(test)]
 mod tests;

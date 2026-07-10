@@ -304,6 +304,15 @@ def test_priority_is_native_for_engine_generate_and_legacy_for_chat():
     assert priority({}, {"priority": -4}) == 4
 
 
+def test_generate_dp_rank_pin_fails_instead_of_falling_back_locally():
+    handler = SimpleNamespace(dp_range=(4, 2))
+
+    assert BaseWorkerHandler._to_local_dp_rank(handler, 5, strict=True) == 1
+    with pytest.raises(ValueError, match="outside this worker's range"):
+        BaseWorkerHandler._to_local_dp_rank(handler, 3, strict=True)
+    assert BaseWorkerHandler._to_local_dp_rank(handler, 3) is None
+
+
 def test_request_adapter_owns_engine_prompt_sampling_and_priority():
     request = _request(
         {"temperature": 0.25, "max_tokens": 17}, cache_salt="checkpoint-7"
@@ -499,3 +508,91 @@ def test_engine_generate_worker_preserves_missing_logprob_rows():
     assert chunks[0]["token_ids"] == [41]
     assert chunks[0]["log_probs"] == [-9999.0]
     assert chunks[0]["top_logprobs"] == [[]]
+
+
+def test_pd_generate_metadata_matches_aggregated_for_multiple_choices():
+    raw_prompt_logprobs = [
+        None,
+        {11: SimpleNamespace(logprob=-0.25, rank=1, decoded_token=None)},
+    ]
+    prompt_logprobs = [None, {"11": {"logprob": -0.25, "rank": 1}}]
+    prefill_experts = {
+        0: np.array([[[10]], [[11]]], dtype=np.int16),
+        1: np.array([[[20]], [[21]]], dtype=np.int16),
+    }
+    decode_experts = {
+        0: np.array([[[12]]], dtype=np.int16),
+        1: np.array([[[22]]], dtype=np.int16),
+    }
+
+    def response(experts_by_choice, prompt):
+        return SimpleNamespace(
+            outputs=[
+                SimpleNamespace(
+                    index=index,
+                    token_ids=[40 + index],
+                    finish_reason="length",
+                    stop_reason=None,
+                    logprobs=None,
+                    routed_experts=experts,
+                )
+                for index, experts in experts_by_choice.items()
+            ],
+            prompt_token_ids=[11, 22],
+            prompt_logprobs=prompt,
+            num_cached_tokens=0,
+            kv_transfer_params=None,
+        )
+
+    async def collect(responses, *, prefill_metadata=None):
+        handler = SimpleNamespace(
+            engine_client=_FakeEngineClient(responses),
+            _extract_logprobs=BaseWorkerHandler._extract_logprobs,
+            _log_with_lora_context=lambda *args, **kwargs: None,
+        )
+        chunks = []
+        async for chunk in BaseWorkerHandler.generate_tokens(
+            handler,
+            prompt={"prompt_token_ids": [11, 22]},
+            sampling_params=SamplingParams(n=2, max_tokens=1),
+            request_id="request-pd",
+            response_adapter=EngineGenerateRequest.from_request(
+                _request({"n": 2})
+            ).response_adapter(),
+            prefill_generate_metadata=prefill_metadata,
+        ):
+            chunks.append(chunk)
+        return chunks
+
+    aggregated = asyncio.run(
+        collect(
+            [
+                response(
+                    {
+                        index: np.concatenate(
+                            [prefill_experts[index], decode_experts[index]], axis=0
+                        )
+                        for index in (0, 1)
+                    },
+                    raw_prompt_logprobs,
+                )
+            ]
+        )
+    )
+    pd = asyncio.run(
+        collect(
+            [response(decode_experts, None)],
+            prefill_metadata={
+                "prompt_logprobs": prompt_logprobs,
+                "routed_experts_by_choice": {
+                    str(index): serialize_routed_experts(experts)
+                    for index, experts in prefill_experts.items()
+                },
+            },
+        )
+    )
+
+    assert [chunk["index"] for chunk in pd] == [0, 1]
+    assert [chunk["generate_metadata"] for chunk in pd] == [
+        chunk["generate_metadata"] for chunk in aggregated
+    ]

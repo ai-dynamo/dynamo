@@ -1733,6 +1733,41 @@ class TestRLAdminRouteHardening:
         handler.engine_client.reset_prefix_cache.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_default_pause_establishes_a_real_drained_admission_fence(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler._pause_drained = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.pause_generation = AsyncMock()
+
+        resp = await handler.pause_generation({})
+
+        assert resp["status"] == "ok"
+        assert handler._paused is True
+        assert handler._pause_drained is True
+        handler.engine_client.pause_generation.assert_awaited_once_with(
+            mode="wait", clear_cache=False
+        )
+
+    @pytest.mark.asyncio
+    async def test_legacy_pause_fallback_is_not_claimed_as_drained(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler._pause_drained = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.pause_generation = AsyncMock(
+            side_effect=[TypeError("old signature"), None]
+        )
+
+        resp = await handler.pause_generation({})
+
+        assert resp["status"] == "ok"
+        assert handler._paused is True
+        assert handler._pause_drained is False
+
+    @pytest.mark.asyncio
     async def test_distributed_update_rejects_unpaused_cache_reset(self):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
@@ -1764,6 +1799,8 @@ class TestRLAdminRouteHardening:
         handler.engine_client.collective_rpc.assert_not_awaited()
 
         handler._paused = True
+        handler._pause_drained = True
+        handler.engine_client.reset_prefix_cache.return_value = True
         resp = await handler.update_weights_from_distributed(
             {"engine_rpc": "finish_weight_update"}
         )
@@ -1771,7 +1808,47 @@ class TestRLAdminRouteHardening:
         handler.engine_client.collective_rpc.assert_awaited_once_with(
             "finish_weight_update", kwargs={}
         )
-        handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+            reset_connector=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_weight_update_rejects_non_drained_pause(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler._pause_drained = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock(return_value=True)
+
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+
+        assert resp["status"] == "error"
+        assert "drained" in resp["message"]
+        handler.engine_client.collective_rpc.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_weight_update_fails_when_cache_or_connector_reset_fails(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler._pause_drained = True
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock(return_value=False)
+
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+
+        assert resp["status"] == "error"
+        assert "cache" in resp["message"].lower()
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+            reset_connector=True
+        )
 
     @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):

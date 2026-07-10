@@ -1736,8 +1736,8 @@ impl ModelWatcher {
             };
 
             // Store KV router, worker monitor, and prefill router on the WorkerSet.
-            // The prefill router is stored so the watcher can deactivate/reactivate it
-            // when prefill workers die or rejoin.
+            // The prefill router is stored so teardown can deactivate it; its
+            // endpoint watch handles compatible worker rejoin and identity refresh.
             worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
             worker_set.prefill_router = prefill_chooser.clone();

@@ -59,7 +59,8 @@ pub struct WorkerSet {
     pub(crate) engine_generate_worker_monitor: Option<KvWorkerMonitor>,
 
     /// Prefill router for disaggregated serving. Stored here so the watcher can
-    /// deactivate it when all prefill workers die, and reactivate when they rejoin.
+    /// deactivate it when all prefill workers die; its endpoint watch reopens
+    /// it only after a compatible worker rejoins.
     pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
 
     /// Optional multimodal encoder hop. Stored for discovery-driven

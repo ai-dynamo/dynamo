@@ -7,7 +7,7 @@
 //! backend adapter. Dynamo-private routing and cancellation data belongs in a
 //! separate envelope and must not be added to these wire types.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use dynamo_protocols::types::CompletionUsage;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -16,9 +16,8 @@ use thiserror::Error;
 
 pub const GENERATE_PATH: &str = "/inference/v1/generate";
 
-/// Private pipeline-context key for vLLM-compatible data-parallel affinity.
-/// This deliberately stays out of the public JSON request contract.
-pub(crate) const GENERATE_DP_RANK_CONTEXT_KEY: &str = "dynamo.llm.generate.dp_rank";
+/// Private pipeline-context key for the canonical Dynamo routing headers.
+pub(crate) const GENERATE_ROUTING_HINTS_CONTEXT_KEY: &str = "dynamo.llm.generate.routing_hints";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GenerateRequest {
@@ -661,8 +660,24 @@ pub struct GenerateBackendMetadata {
     pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub routed_experts: Option<String>,
+    /// Prompt-side expert rows captured by an asynchronous bootstrap prefill.
+    /// This is an internal worker/frontend field; the HTTP accumulator joins
+    /// it with `routed_experts` into the single public NumPy payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_routed_experts: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer_params: Option<Value>,
+}
+
+/// Prompt-owned metadata captured on the prefill leg of a disaggregated
+/// Generate request. Routed-expert tensors are keyed by choice so `n > 1`
+/// cannot leak one choice's prompt rows into another choice.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GeneratePrefillMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub routed_experts_by_choice: BTreeMap<u32, String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

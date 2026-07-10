@@ -125,6 +125,11 @@ pub struct PrefillResult {
     /// Prompt token details produced during prefill
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<dynamo_protocols::types::PromptTokensDetails>,
+    /// Prompt-owned engine-Generate metadata captured by the prefill worker.
+    /// Decode workers merge it with choice-local decode metadata before
+    /// returning their final chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate_metadata: Option<crate::protocols::inference::generate::GeneratePrefillMetadata>,
 }
 
 /// Optional multimodal routing-only data.

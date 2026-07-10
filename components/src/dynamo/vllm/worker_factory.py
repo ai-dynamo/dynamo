@@ -4,12 +4,9 @@
 """Worker initialization factory for vLLM workers."""
 
 import asyncio
-import json
 import logging
 import os
-import time as _time
 from collections.abc import Awaitable, Callable
-from pathlib import Path
 from typing import Any, Optional
 
 from vllm.config import VllmConfig
@@ -45,9 +42,11 @@ from .health_check import (
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
 )
-from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
+from .instrumented_scheduler import ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .publisher import StatLoggerFactory
+from .worker_benchmark import wait_and_load_benchmark
+from .worker_endpoints import WorkerEndpointSet
 
 logger = logging.getLogger(__name__)
 
@@ -67,85 +66,11 @@ def _engine_generate_prefill_endpoint_path(config: Config) -> str:
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
-    """Wait for benchmark result files and aggregate across DP ranks."""
-    base_path = Path(
-        os.environ.get(ENV_FPM_BENCHMARK_OUTPUT_PATH, bench_cfg["output_path"])
+    return await wait_and_load_benchmark(
+        bench_cfg,
+        vllm_config,
+        dp_range_resolver=get_dp_range_for_worker,
     )
-    timeout = int(bench_cfg.get("timeout", 300))
-
-    try:
-        dp_start, dp_size = get_dp_range_for_worker(vllm_config)
-    except Exception:
-        logger.warning(
-            "Could not determine DP range, assuming single rank",
-            exc_info=True,
-        )
-        dp_start, dp_size = 0, 1
-
-    rank_paths = []
-    for dp_rank in range(dp_start, dp_start + dp_size):
-        if dp_rank == 0:
-            rank_paths.append(base_path)
-        else:
-            stem, ext = os.path.splitext(str(base_path))
-            rank_paths.append(Path(f"{stem}_dp{dp_rank}{ext}"))
-
-    logger.info(
-        "Waiting for benchmark to complete (files: %s, timeout: %ds)...",
-        rank_paths,
-        timeout,
-    )
-
-    deadline = _time.monotonic() + timeout
-    for p in rank_paths:
-        while not p.exists():
-            if _time.monotonic() > deadline:
-                raise TimeoutError(
-                    f"Benchmark did not complete within {timeout}s. Missing: {p}"
-                )
-            await asyncio.sleep(0.1)
-
-    merged: dict = {}
-    for i, p in enumerate(rank_paths):
-        with open(p) as f:
-            data = json.load(f)
-        if data.get("valid") is False:
-            raise RuntimeError(
-                f"Self-benchmark produced incomplete results at {p}: "
-                f"coverage={data.get('coverage')} "
-                f"skipped_points={data.get('skipped_points')} "
-                f"missing_phases={data.get('missing_phases')}"
-            )
-        if i == 0:
-            merged = data
-            for r in merged.get("results", []):
-                r["point"]["dp_rank"] = dp_start
-        else:
-            dp_rank = dp_start + i
-            for r in data.get("results", []):
-                r["point"]["dp_rank"] = dp_rank
-            merged.setdefault("results", []).extend(data.get("results", []))
-            merged_coverage = merged.get("coverage")
-            rank_coverage = data.get("coverage")
-            if isinstance(merged_coverage, dict) and isinstance(rank_coverage, dict):
-                for key in (
-                    "expected_points",
-                    "completed_points",
-                    "skipped_points",
-                ):
-                    merged_coverage[key] = merged_coverage.get(
-                        key, 0
-                    ) + rank_coverage.get(key, 0)
-            merged.setdefault("skipped_points", []).extend(
-                data.get("skipped_points", [])
-            )
-
-    logger.info(
-        "Benchmark complete, %d points across %d rank(s)",
-        len(merged.get("results", [])),
-        len(rank_paths),
-    )
-    return merged
 
 
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
@@ -416,51 +341,14 @@ class WorkerFactory:
         Instantiate and serve
         """
 
-        generate_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.{config.endpoint}"
+        endpoints = WorkerEndpointSet.decode(
+            runtime,
+            config,
+            versioned_path=_engine_generate_endpoint_path(config),
         )
-        engine_generate_endpoint = (
-            runtime.endpoint(_engine_generate_endpoint_path(config))
-            if not config.use_vllm_tokenizer
-            else None
-        )
-        clear_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.clear_kv_blocks"
-        )
-        rl_endpoint = (
-            runtime.endpoint(f"{config.namespace}.{config.component}.rl")
-            if config.enable_rl
-            else None
-        )
-
-        shutdown_endpoints[:] = [
-            generate_endpoint,
-            clear_endpoint,
-        ]
-        if engine_generate_endpoint is not None:
-            shutdown_endpoints.append(engine_generate_endpoint)
-        if rl_endpoint is not None:
-            shutdown_endpoints.append(rl_endpoint)
-
+        endpoints.bind_shutdown(shutdown_endpoints)
+        generate_endpoint = endpoints.primary
         lora_enabled = config.engine_args.enable_lora
-        if lora_enabled:
-            load_lora_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.load_lora"
-            )
-            unload_lora_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.unload_lora"
-            )
-            list_loras_endpoint = runtime.endpoint(
-                f"{config.namespace}.{config.component}.list_loras"
-            )
-
-            shutdown_endpoints.extend(
-                [
-                    load_lora_endpoint,
-                    unload_lora_endpoint,
-                    list_loras_endpoint,
-                ]
-            )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -518,12 +406,7 @@ class WorkerFactory:
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
             model_config=getattr(vllm_config, "model_config", None),
             enable_multimodal=config.enable_multimodal,
-            generate_endpoint=generate_endpoint,
-            additional_generate_endpoints=(
-                (engine_generate_endpoint,)
-                if engine_generate_endpoint is not None
-                else ()
-            ),
+            **endpoints.handler_args,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
@@ -631,11 +514,6 @@ class WorkerFactory:
             engine_client, use_text_input=config.use_vllm_tokenizer
         ).to_dict()
 
-        perf_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.get_perf_metrics"
-        )
-        shutdown_endpoints.append(perf_endpoint)
-
         try:
             logger.debug("Starting serve_endpoint for decode worker")
 
@@ -650,65 +528,13 @@ class WorkerFactory:
                 ),
             ]
 
-            serve_tasks = [
-                # for decode, we want to transfer the in-flight requests to other decode engines,
-                # because waiting them to finish can take a long time for long OSLs
-                generate_endpoint.serve_endpoint(
-                    handler.generate,  # type: ignore
-                    graceful_shutdown=True,
+            await asyncio.gather(
+                *endpoints.serve_tasks(
+                    handler,
                     metrics_labels=model_metrics_labels,
                     health_check_payload=health_check_payload,
-                ),
-                clear_endpoint.serve_endpoint(
-                    handler.clear_kv_blocks,
-                    metrics_labels=model_metrics_labels,
-                ),
-                perf_endpoint.serve_endpoint(
-                    handler.get_perf_metrics,
-                    metrics_labels=model_metrics_labels,
-                ),
-            ]
-            if engine_generate_endpoint is not None:
-                # Engine-native Generate has a versioned request-plane endpoint.
-                # Old and text-mode workers never register this alias, so a
-                # rolling frontend cannot route the nested v1 wire contract to
-                # an incompatible legacy handler.
-                serve_tasks.append(
-                    engine_generate_endpoint.serve_endpoint(
-                        handler.generate,  # type: ignore
-                        graceful_shutdown=True,
-                        metrics_labels=model_metrics_labels,
-                        health_check_payload=health_check_payload,
-                    )
                 )
-
-            if rl_endpoint is not None:
-                serve_tasks.append(
-                    rl_endpoint.serve_endpoint(
-                        handler.rl_dispatch,
-                        metrics_labels=model_metrics_labels,
-                    )
-                )
-
-            if lora_enabled:
-                serve_tasks.extend(
-                    [
-                        load_lora_endpoint.serve_endpoint(
-                            handler.load_lora,
-                            metrics_labels=model_metrics_labels,
-                        ),
-                        unload_lora_endpoint.serve_endpoint(
-                            handler.unload_lora,
-                            metrics_labels=model_metrics_labels,
-                        ),
-                        list_loras_endpoint.serve_endpoint(
-                            handler.list_loras,
-                            metrics_labels=model_metrics_labels,
-                        ),
-                    ]
-                )
-
-            await asyncio.gather(*serve_tasks)
+            )
             logger.debug("serve_endpoint completed for decode worker")
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
@@ -729,20 +555,13 @@ class WorkerFactory:
         """
         Instantiate and serve
         """
-        generate_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.{config.endpoint}"
+        endpoints = WorkerEndpointSet.prefill(
+            runtime,
+            config,
+            versioned_path=_engine_generate_prefill_endpoint_path(config),
         )
-        engine_generate_prefill_endpoint = runtime.endpoint(
-            _engine_generate_prefill_endpoint_path(config)
-        )
-        clear_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.clear_kv_blocks"
-        )
-        rl_endpoint = (
-            runtime.endpoint(f"{config.namespace}.{config.component}.rl")
-            if config.enable_rl
-            else None
-        )
+        endpoints.bind_shutdown(shutdown_endpoints)
+        generate_endpoint = endpoints.primary
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -781,8 +600,7 @@ class WorkerFactory:
             getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
             model_config=getattr(vllm_config, "model_config", None),
             enable_multimodal=config.enable_multimodal,
-            generate_endpoint=generate_endpoint,
-            additional_generate_endpoints=(engine_generate_prefill_endpoint,),
+            **endpoints.handler_args,
             use_vllm_tokenizer=config.use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
@@ -846,18 +664,6 @@ class WorkerFactory:
                 bench_cfg, vllm_config
             )
 
-        perf_endpoint = runtime.endpoint(
-            f"{config.namespace}.{config.component}.get_perf_metrics"
-        )
-        shutdown_endpoints[:] = [
-            generate_endpoint,
-            engine_generate_prefill_endpoint,
-            clear_endpoint,
-            perf_endpoint,
-        ]
-        if rl_endpoint is not None:
-            shutdown_endpoints.append(rl_endpoint)
-
         # Prefill workers expose no OpenAI surface — the role is carried by
         # `worker_type=Prefill`. We register the legacy `ModelType.Prefill`
         # marker bit (not a surface) so an OLD frontend, which detects prefill
@@ -901,36 +707,13 @@ class WorkerFactory:
 
         try:
             logger.debug("Starting serve_endpoint for prefill worker")
-            serve_tasks = [
-                generate_endpoint.serve_endpoint(
-                    handler.generate,  # type: ignore
-                    graceful_shutdown=True,
+            await asyncio.gather(
+                *endpoints.serve_tasks(
+                    handler,
                     metrics_labels=prefill_metrics_labels,
                     health_check_payload=health_check_payload,
-                ),
-                clear_endpoint.serve_endpoint(
-                    handler.clear_kv_blocks,  # type: ignore
-                    metrics_labels=prefill_metrics_labels,
-                ),
-                perf_endpoint.serve_endpoint(
-                    handler.get_perf_metrics,
-                    metrics_labels=prefill_metrics_labels,
-                ),
-                engine_generate_prefill_endpoint.serve_endpoint(
-                    handler.generate,  # type: ignore
-                    graceful_shutdown=True,
-                    metrics_labels=prefill_metrics_labels,
-                    health_check_payload=health_check_payload,
-                ),
-            ]
-            if rl_endpoint is not None:
-                serve_tasks.append(
-                    rl_endpoint.serve_endpoint(
-                        handler.rl_dispatch,
-                        metrics_labels=prefill_metrics_labels,
-                    )
                 )
-            await asyncio.gather(*serve_tasks)
+            )
             logger.debug("serve_endpoint completed for prefill worker")
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")

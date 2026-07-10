@@ -25,7 +25,7 @@ use crate::{
         llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
         preprocessor::{MultimodalData, RoutingHints},
     },
-    protocols::inference::generate::{GENERATE_DP_RANK_CONTEXT_KEY, GenerateRequest},
+    protocols::inference::generate::{GENERATE_ROUTING_HINTS_CONTEXT_KEY, GenerateRequest},
     request_template::RequestTemplate,
     session_affinity::SessionAffinityPushRouter,
     types::{
@@ -108,12 +108,12 @@ impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>,
         request: SingleIn<GenerateRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let lora_name = self.lora_name.clone();
-        let dp_rank = request
-            .get::<u32>(GENERATE_DP_RANK_CONTEXT_KEY)
+        let routing = request
+            .get::<RoutingHints>(GENERATE_ROUTING_HINTS_CONTEXT_KEY)
             .ok()
-            .map(|rank| *rank);
+            .map(|routing| routing.as_ref().clone());
         let request = request
-            .try_map(move |generate| preprocessed_generate_request(generate, lora_name, dp_rank))?;
+            .try_map(move |generate| preprocessed_generate_request(generate, lora_name, routing))?;
         self.inner.generate(request).await
     }
 }
@@ -121,7 +121,7 @@ impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>,
 fn preprocessed_generate_request(
     generate: GenerateRequest,
     lora_name: Option<String>,
-    dp_rank: Option<u32>,
+    routing: Option<RoutingHints>,
 ) -> anyhow::Result<PreprocessedRequest> {
     generate.validate()?;
     let model = generate
@@ -133,6 +133,13 @@ fn preprocessed_generate_request(
     let cache_namespace = generate.cache_salt.clone();
     let (token_ids, generate_request) = generate.into_worker_parts()?;
 
+    let mut routing = routing.unwrap_or_default();
+    routing.expected_output_tokens = expected_output_tokens;
+    routing.lora_name = lora_name;
+    routing.cache_namespace = cache_namespace;
+    routing.priority_jump = Some(routing_priority.max(0) as f64);
+    routing.priority = Some(routing_priority);
+
     PreprocessedRequest::builder()
         .model(model)
         .token_ids(token_ids)
@@ -140,15 +147,7 @@ fn preprocessed_generate_request(
         .stop_conditions(Default::default())
         .sampling_options(Default::default())
         .output_options(Default::default())
-        .routing(Some(RoutingHints {
-            expected_output_tokens,
-            lora_name,
-            cache_namespace,
-            priority_jump: Some(routing_priority.max(0) as f64),
-            priority: Some(routing_priority),
-            dp_rank,
-            ..Default::default()
-        }))
+        .routing(Some(routing))
         .build()
         .map_err(anyhow::Error::from)
 }
@@ -708,9 +707,15 @@ mod tests {
         }))
         .unwrap();
 
-        let preprocessed =
-            preprocessed_generate_request(request.clone(), Some("adapter-a".into()), Some(6))
-                .unwrap();
+        let preprocessed = preprocessed_generate_request(
+            request.clone(),
+            Some("adapter-a".into()),
+            Some(RoutingHints {
+                dp_rank: Some(6),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
         assert_eq!(preprocessed.model, "test-model");
         assert_eq!(preprocessed.token_ids, vec![11, 22, 33]);
         let serialized = serde_json::to_value(&preprocessed).unwrap();

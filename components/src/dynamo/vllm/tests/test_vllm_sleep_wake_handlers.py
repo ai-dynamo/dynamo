@@ -35,6 +35,7 @@ def _make_handler() -> _TestWorkerHandler:
         pause_generation=AsyncMock(),
         sleep=AsyncMock(),
         wake_up=AsyncMock(),
+        is_sleeping=AsyncMock(return_value=False),
         resume_generation=AsyncMock(),
     )
     handler.generate_endpoint = SimpleNamespace(
@@ -198,6 +199,62 @@ async def test_wake_up_passes_explicit_tags_from_request():
 
     assert result["status"] == "ok"
     handler.engine_client.wake_up.assert_awaited_once_with(["weights"])
+    handler.engine_client.resume_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_partial_wake_remains_unpublished_and_generation_paused():
+    handler = _make_handler()
+    await handler._pause_controller.pause(1)
+    handler.engine_client.is_sleeping.return_value = True
+
+    result = await handler.wake_up({"tags": ["weights"]})
+
+    assert result["status"] == "error"
+    assert "still sleeping" in result["message"]
+    handler.engine_client.wake_up.assert_awaited_once_with(["weights"])
+    handler.engine_client.resume_generation.assert_not_awaited()
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
+    assert handler._pause_controller.is_paused is True
+    assert handler._pause_controller.needs_resume_recovery is True
+
+
+@pytest.mark.asyncio
+async def test_native_wake_is_not_repeated_when_resume_retry_is_needed():
+    handler = _make_handler()
+    await handler._pause_controller.pause(1)
+    handler.engine_client.resume_generation.side_effect = [
+        RuntimeError("resume failed"),
+        None,
+    ]
+
+    first = await handler.wake_up({})
+    second = await handler.wake_up({})
+
+    assert first["status"] == "error"
+    assert second["status"] == "ok"
+    handler.engine_client.wake_up.assert_awaited_once_with()
+    assert handler.engine_client.resume_generation.await_count == 2
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_native_wake_is_reconciled_before_retry_after_residency_query_failure():
+    handler = _make_handler()
+    await handler._pause_controller.pause(1)
+    handler.engine_client.is_sleeping.side_effect = [
+        RuntimeError("residency query failed"),
+        False,
+    ]
+
+    first = await handler.wake_up({})
+    second = await handler.wake_up({})
+
+    assert first["status"] == "error"
+    assert second["status"] == "ok"
+    handler.engine_client.wake_up.assert_awaited_once_with()
+    assert handler.engine_client.is_sleeping.await_count == 2
     handler.engine_client.resume_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 

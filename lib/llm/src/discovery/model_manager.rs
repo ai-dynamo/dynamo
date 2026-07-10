@@ -1182,13 +1182,16 @@ impl ModelManager {
     ) -> anyhow::Result<()> {
         let key = Self::prefill_route_key(model_name, namespace, route);
 
-        // Reactivate any existing deactivated decode-side `PrefillRouter`. Used
-        // by the PrefillReady-refresh and Vacant arms — the rebuilding case
-        // for prefill workers that previously died and now rejoin.
-        let reactivate_if_needed = || {
+        // Notify any existing decode-side `PrefillRouter` of the latest
+        // primary identity. Its live alias watch decides availability and
+        // rebuilds the client when the endpoint identity changes.
+        let refresh_existing = |endpoint: &Endpoint| {
             self.get_model(model_name).is_some_and(|model| {
-                model
-                    .reactivate_prefill_routers_for_namespace(namespace, route.is_engine_generate())
+                model.refresh_prefill_routers_for_namespace(
+                    namespace,
+                    route.is_engine_generate(),
+                    endpoint.clone(),
+                )
             })
         };
 
@@ -1205,7 +1208,7 @@ impl ModelManager {
                 let old = o.insert(new_value);
                 // Drop the OccupiedEntry to release the shard lock before any
                 // potentially-non-trivial work (e.g. nested DashMap accesses
-                // via reactivate_if_needed). The state transition above is
+                // via refresh_existing). The state transition above is
                 // already committed.
                 drop(o);
 
@@ -1234,13 +1237,13 @@ impl ModelManager {
                         //       the same prefill instance re-publishes its
                         //       endpoint) — just refresh, no router action.
                         //   (b) Prefill rejoin after a transient absence —
-                        //       reactivate any deactivated decode-side router.
-                        if reactivate_if_needed() {
+                        //       refresh any existing decode-side router.
+                        if refresh_existing(&endpoint) {
                             tracing::info!(
                                 model_name = %model_name,
                                 namespace = %namespace,
                                 route = route.label(),
-                                "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
+                                "Refreshed existing prefill router for decode WorkerSet"
                             );
                         } else {
                             tracing::debug!(
@@ -1258,16 +1261,17 @@ impl ModelManager {
                 // No prior handshake state. Insert a fresh PrefillReady so a
                 // future decode rebuild's register_prefill_router finds the
                 // cache and activates immediately.
-                v.insert(PrefillActivationState::PrefillReady(Box::new(endpoint)));
+                v.insert(PrefillActivationState::PrefillReady(Box::new(
+                    endpoint.clone(),
+                )));
 
-                // Then handle the prefill-rejoin case: an existing decode-side
-                // PrefillRouter that was deactivated when prefill went away.
-                if reactivate_if_needed() {
+                // Then refresh an existing decode-side PrefillRouter, if any.
+                if refresh_existing(&endpoint) {
                     tracing::info!(
                         model_name = %model_name,
                         namespace = %namespace,
                         route = route.label(),
-                        "Reactivated existing prefill router for decode WorkerSet (prefill rejoin)"
+                        "Refreshed existing prefill router for decode WorkerSet"
                     );
                 } else {
                     tracing::info!(

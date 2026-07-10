@@ -5,12 +5,21 @@ use super::*;
 use crate::discovery::{UNKNOWN_METRIC_MODEL, WorkerSet};
 use crate::http::service::metrics::{RequestType, Status};
 use crate::model_card::ModelDeploymentCard;
-use crate::protocols::inference::generate::GenerateBackendMetadata;
+use crate::protocols::common::extensions::{
+    HEADER_DATA_PARALLEL_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
+    HEADER_WORKER_INSTANCE_ID, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+};
+use crate::protocols::common::preprocessor::RoutingHints;
+use crate::protocols::inference::generate::{
+    GENERATE_ROUTING_HINTS_CONTEXT_KEY, GenerateBackendMetadata,
+};
 use crate::types::Annotated;
+use base64::Engine as _;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContext, ResponseStream};
 use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use futures::stream;
+use ndarray_npy::{ReadNpyExt, WriteNpyExt};
 use std::pin::Pin;
 use std::sync::{
     Arc, Mutex,
@@ -22,7 +31,8 @@ use tokio::sync::Notify;
 #[derive(Debug)]
 struct CapturedGenerate {
     request: GenerateRequest,
-    dp_rank: Option<u32>,
+    routing: Option<RoutingHints>,
+    session_affinity: Option<String>,
 }
 
 struct CaptureGenerateEngine {
@@ -89,13 +99,18 @@ impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>,
         &self,
         request: SingleIn<GenerateRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let dp_rank = request
-            .get::<u32>(GENERATE_DP_RANK_CONTEXT_KEY)
+        let routing = request
+            .get::<RoutingHints>(GENERATE_ROUTING_HINTS_CONTEXT_KEY)
             .ok()
-            .map(|rank| *rank);
+            .map(|routing| routing.as_ref().clone());
+        let session_affinity = request
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .ok()
+            .map(|session| session.as_str().to_string());
         self.captured.lock().unwrap().replace(CapturedGenerate {
             request: request.content().clone(),
-            dp_rank,
+            routing,
+            session_affinity,
         });
         let context = request.context();
         let response = Annotated::from_data(LLMEngineOutput {
@@ -280,6 +295,13 @@ fn output(index: u32, token_id: u32, finished: bool) -> LLMEngineOutput {
     }
 }
 
+fn routed_expert_payload(values: Vec<i16>, rows: usize) -> String {
+    let array = ndarray::Array::from_shape_vec(ndarray::IxDyn(&[rows, 1, 1]), values).unwrap();
+    let mut bytes = Vec::new();
+    array.write_npy(&mut bytes).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 fn request_for(model: &str) -> GenerateRequest {
     serde_json::from_value(serde_json::json!({
         "model": model,
@@ -389,6 +411,23 @@ fn unary_accumulator_preserves_choice_order_and_alignment() {
             .len(),
         2
     );
+}
+
+#[test]
+fn routed_expert_numpy_rows_merge_across_bootstrap_prefill_and_decode() {
+    let merged = merge_routed_expert_payloads(
+        Some(routed_expert_payload(vec![10, 11], 2)),
+        Some(routed_expert_payload(vec![12], 1)),
+    )
+    .unwrap()
+    .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(merged)
+        .unwrap();
+    let array = ndarray::ArrayD::<i16>::read_npy(std::io::Cursor::new(bytes)).unwrap();
+
+    assert_eq!(array.shape(), &[3, 1, 1]);
+    assert_eq!(array.iter().copied().collect::<Vec<_>>(), vec![10, 11, 12]);
 }
 
 #[test]
@@ -882,6 +921,7 @@ async fn cancelled_finish_reason_returns_499_and_cancelled_metrics() {
 fn stream_accumulator_emits_delta_finish_only_and_usage_chunks() {
     let mut accumulator = GenerateStreamAccumulator::new("request-1".into(), 1, Some(1));
     let mut delta = output(0, 11, false);
+    let routed_experts = routed_expert_payload(vec![7], 1);
     delta.completion_usage = Some(CompletionUsage {
         prompt_tokens: 3,
         completion_tokens: 1,
@@ -890,14 +930,15 @@ fn stream_accumulator_emits_delta_finish_only_and_usage_chunks() {
         completion_tokens_details: None,
     });
     delta.generate_metadata = Some(GenerateBackendMetadata {
-        routed_experts: Some("routed-delta".to_string()),
+        routed_experts: Some(routed_experts.clone()),
+        prefill_routed_experts: None,
         ..Default::default()
     });
     let delta = accumulator.push(delta, true).unwrap().unwrap();
     assert_eq!(delta.choices[0].token_ids, vec![11]);
     assert_eq!(
         delta.choices[0].routed_experts.as_deref(),
-        Some("routed-delta")
+        Some(routed_experts.as_str())
     );
     assert_eq!(delta.usage.as_ref().unwrap().total_tokens, 4);
 
@@ -992,17 +1033,23 @@ fn request_context_matches_vllm_header_precedence() {
     headers.insert(HEADER_DATA_PARALLEL_RANK_ALIAS, "7".parse().unwrap());
 
     assert_eq!(resolve_request_id(&headers, Some("body-id")), "header-id");
-    assert_eq!(data_parallel_rank_from_headers(&headers), Some(7));
+    assert_eq!(
+        routing_hints_from_headers(&headers)
+            .unwrap()
+            .unwrap()
+            .dp_rank,
+        Some(7)
+    );
 }
 
 #[test]
-fn malformed_data_parallel_rank_is_ignored_like_vllm() {
+fn malformed_data_parallel_rank_is_rejected_instead_of_unpinned() {
     let mut headers = HeaderMap::new();
     headers.insert(
         HEADER_DATA_PARALLEL_RANK_ALIAS,
         "not-a-rank".parse().unwrap(),
     );
-    assert_eq!(data_parallel_rank_from_headers(&headers), None);
+    assert!(routing_hints_from_headers(&headers).is_err());
 }
 
 #[tokio::test]
@@ -1026,7 +1073,11 @@ async fn unary_http_boundary_preserves_token_native_request_and_private_context(
 
     let mut headers = HeaderMap::new();
     headers.insert("x-request-id", "header-request".parse().unwrap());
+    headers.insert(HEADER_WORKER_INSTANCE_ID, "17".parse().unwrap());
+    headers.insert(HEADER_PREFILL_INSTANCE_ID, "19".parse().unwrap());
     headers.insert(HEADER_DATA_PARALLEL_RANK_ALIAS, "3".parse().unwrap());
+    headers.insert(HEADER_PREFILL_DP_RANK, "5".parse().unwrap());
+    headers.insert("x-dynamo-session-id", "rollout-1".parse().unwrap());
     let request: GenerateRequest = serde_json::from_value(serde_json::json!({
         "request_id": "body-request",
         "token_ids": [11, 22, 33],
@@ -1069,7 +1120,13 @@ async fn unary_http_boundary_preserves_token_native_request_and_private_context(
     );
     assert_eq!(captured.request.token_ids, vec![11, 22, 33]);
     assert_eq!(captured.request.priority, -2);
-    assert_eq!(captured.dp_rank, Some(3));
+    let routing = captured.routing.as_ref().unwrap();
+    assert_eq!(routing.backend_instance_id, Some(17));
+    assert_eq!(routing.decode_worker_id, Some(17));
+    assert_eq!(routing.prefill_worker_id, Some(19));
+    assert_eq!(routing.dp_rank, Some(3));
+    assert_eq!(routing.prefill_dp_rank, Some(5));
+    assert_eq!(captured.session_affinity.as_deref(), Some("rollout-1"));
 }
 
 #[tokio::test]

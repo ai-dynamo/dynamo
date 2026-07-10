@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::AtomicU8;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU8, AtomicU64};
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -84,6 +84,7 @@ enum PrefillOutcome {
     Bootstrap {
         bootstrap_info: BootstrapInfo,
         worker_id: u64,
+        completion: Option<tokio::task::JoinHandle<Result<PrefillCompletion, PrefillError>>>,
     },
     Completed {
         result: PrefillResult,
@@ -123,9 +124,15 @@ struct PrefillCompletion {
 /// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
 /// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
-    prefill_router: OnceLock<InnerPrefillRouter>,
+    prefill_router: RwLock<Option<InnerPrefillRouter>>,
     model_manager: Arc<ModelManager>,
-    endpoint_id: OnceLock<EndpointId>,
+    endpoint_id: RwLock<Option<EndpointId>>,
+    activation_updates: tokio::sync::mpsc::UnboundedSender<dynamo_runtime::component::Endpoint>,
+    activation_generation: AtomicU64,
+    #[cfg(test)]
+    activation_attempts: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    activation_failures_remaining: std::sync::atomic::AtomicUsize,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
@@ -217,6 +224,7 @@ impl
         }
 
         let tracker = prefill_req.tracker.clone();
+        let capture_generate_metadata = prefill_req.generate_request.is_some();
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
         if let Some(session_affinity) = session_affinity {
@@ -227,7 +235,9 @@ impl
         }
         let router = self
             .prefill_router
-            .get()
+            .read()
+            .expect("prefill router lock poisoned")
+            .clone()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
@@ -237,10 +247,12 @@ impl
                 .await?;
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
-                self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
+                let completion =
+                    self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
                     worker_id: prepared.worker_id,
+                    completion: capture_generate_metadata.then_some(completion),
                 }
             } else {
                 drop(prefill_phase_barrier);
@@ -293,13 +305,16 @@ impl
         }
 
         let mut decode_req = req;
+        let mut bootstrap_completion = None;
         match outcome {
             PrefillOutcome::Bootstrap {
                 bootstrap_info,
                 worker_id,
+                completion,
             } => {
                 decode_req.bootstrap_info = Some(bootstrap_info);
                 decode_req.routing_mut().prefill_worker_id = Some(worker_id);
+                bootstrap_completion = completion;
             }
             PrefillOutcome::Completed {
                 result,
@@ -322,7 +337,11 @@ impl
         let existing_override = decode_req.router_config_override.take();
         decode_req.router_config_override = Some(build_decode_router_override(existing_override));
 
-        next.generate(context.map(|_| decode_req)).await
+        let decode_stream = next.generate(context.map(|_| decode_req)).await?;
+        Ok(match bootstrap_completion {
+            Some(completion) => Self::attach_bootstrap_generate_metadata(decode_stream, completion),
+            None => decode_stream,
+        })
     }
 }
 
@@ -333,11 +352,16 @@ impl PrefillRouter {
         target: AffinityTarget,
     ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
-        let endpoint_id = self.endpoint_id.get();
+        let endpoint_id = self
+            .endpoint_id
+            .read()
+            .expect("prefill endpoint lock poisoned")
+            .clone();
         let topology_constraints =
-            self.preflight_kv_transfer_constraints(endpoint_id, worker_id)?;
+            self.preflight_kv_transfer_constraints(endpoint_id.as_ref(), worker_id)?;
 
         let bootstrap_info = endpoint_id
+            .as_ref()
             .and_then(|endpoint_id| {
                 self.model_manager
                     .get_disaggregated_endpoint(endpoint_id, worker_id)
@@ -434,6 +458,7 @@ fn merge_decode_topology_constraints(
 mod tests {
     use super::*;
     use dynamo_kv_router::config::RouterConfigOverride;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use std::collections::{HashMap, HashSet};
 
     use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
@@ -581,7 +606,104 @@ mod tests {
 
         assert!(!router.passthrough_when_unavailable);
         assert!(!router.is_available());
+        let router_weak = Arc::downgrade(&router);
+        drop(router);
+        tokio::task::yield_now().await;
+        assert!(
+            router_weak.upgrade().is_none(),
+            "the activation watcher must not keep the router alive"
+        );
         drop(activation_tx);
+    }
+
+    #[tokio::test]
+    async fn versioned_prefill_follows_live_alias_membership_and_refreshes_identity() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let namespace = distributed
+            .namespace("versioned_prefill_lifecycle".to_string())
+            .unwrap();
+        let first_component = namespace.component("prefill-a".to_string()).unwrap();
+        let first_primary = first_component.endpoint("generate");
+        let first_alias = first_component.endpoint("engine_generate_prefill_v1");
+        let (activation_tx, activation_rx) = tokio::sync::oneshot::channel();
+        let router = PrefillRouter::new_for_endpoint_name(
+            activation_rx,
+            Arc::new(crate::discovery::ModelManager::new()),
+            RouterMode::RoundRobin,
+            16,
+            Some(dynamo_kv_router::config::KvRouterConfig::default()),
+            None,
+            Some(30),
+            "model".to_string(),
+            "versioned_prefill_lifecycle".to_string(),
+            false,
+            None,
+            "engine_generate_prefill_v1".to_string(),
+        );
+        router.fail_next_activation_for_test();
+        activation_tx.send(first_primary).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !router.is_activated() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            router
+                .activation_attempts
+                .load(std::sync::atomic::Ordering::Acquire)
+                >= 2,
+            "a transient activation failure must be retried"
+        );
+        assert!(
+            !router.is_available(),
+            "primary alone must not open the route"
+        );
+
+        first_alias.register_endpoint_instance().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !router.is_available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        first_alias.unregister_endpoint_instance().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while router.is_available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let second_component = namespace.component("prefill-b".to_string()).unwrap();
+        let second_primary = second_component.endpoint("generate");
+        let second_alias = second_component.endpoint("engine_generate_prefill_v1");
+        second_alias.register_endpoint_instance().await.unwrap();
+        assert!(router.refresh_activation_endpoint(second_primary));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !router.is_available()
+                || router
+                    .endpoint_id
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .is_none_or(|id| id.component != "prefill-b")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        runtime.shutdown();
     }
 
     #[test]
@@ -613,27 +735,14 @@ mod tests {
     }
 
     #[test]
-    fn pending_router_latches_worker_availability_transitions() {
+    fn availability_watch_can_reopen_a_deactivated_router() {
         let router = make_test_router();
         router.deactivate();
         assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
 
-        router.reactivate();
-        router.reactivate();
+        router.set_alias_availability(true);
 
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
-    }
-
-    #[test]
-    fn activation_does_not_overwrite_latched_deactivation() {
-        let router = make_test_router();
-        router.deactivate();
-
-        assert_eq!(
-            router.complete_activation(),
-            PrefillLifecycleState::Unavailable
-        );
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
     }
 
     #[test]
