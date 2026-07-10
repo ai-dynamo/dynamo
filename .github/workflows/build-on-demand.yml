@@ -14,6 +14,14 @@ on:
         description: 'Build and push the experimental vLLM snapshot placeholder'
         type: boolean
         default: false
+      build_vllm_placeholder_from_base:
+        description: 'Build the vLLM snapshot placeholder from an immutable base'
+        type: boolean
+        default: false
+      vllm_placeholder_base_image:
+        description: 'Digest-pinned runtime image required for direct placeholder builds'
+        type: string
+        default: ''
       vllm_git_url:
         description: 'Exact vLLM overlay repository'
         type: string
@@ -178,6 +186,50 @@ jobs:
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
           extra_build_args: |
             BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
+            CRIU_REPO=${{ inputs.snapshot_criu_repo }}
+            CRIU_REF=${{ inputs.snapshot_criu_ref }}
+
+  snapshot-placeholder-vllm-from-base:
+    name: vLLM Snapshot Placeholder from Base
+    needs: [init]
+    if: inputs.build_vllm_placeholder_from_base
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout exact Dynamo revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+      - name: Validate immutable vLLM placeholder base image
+        id: validate-base-image
+        shell: bash
+        env:
+          BASE_IMAGE_INPUT: ${{ inputs.vllm_placeholder_base_image }}
+        run: |
+          image_name='([a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?/)?[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*'
+          digest='sha256:[0-9a-fA-F]{64}'
+          if [[ ! "${BASE_IMAGE_INPUT}" =~ ^${image_name}@${digest}$ ]]; then
+            echo "::error::vllm_placeholder_base_image must be a digest-pinned image (...@sha256:<64 hex>)"
+            exit 1
+          fi
+          echo "base_image=${BASE_IMAGE_INPUT}" >> "${GITHUB_OUTPUT}"
+      - name: Build and push vLLM snapshot placeholder from base
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder-from-base
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder-from-base
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder-from-base
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder-from-base
+          extra_build_args: |
+            BASE_IMAGE=${{ steps.validate-base-image.outputs.base_image }}
             CRIU_REPO=${{ inputs.snapshot_criu_repo }}
             CRIU_REF=${{ inputs.snapshot_criu_ref }}
 
