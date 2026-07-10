@@ -2222,7 +2222,7 @@ policy_classes:
         let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
             state: Arc::clone(&state),
         }));
-        let (mut request, response) = make_request("cancelled-after-handoff", 64);
+        let (mut request, response) = make_admission_request("cancelled-after-handoff", 64);
         request.policy_class = Some("agents".to_owned());
         let cancellation = queue
             .cancellation_guard(Some("cancelled-after-handoff"))
@@ -2257,12 +2257,12 @@ policy_classes:
         let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
             state: Arc::clone(&state),
         }));
-        let (mut first, first_response) = make_request("duplicate", 64);
+        let (mut first, first_response) = make_admission_request("duplicate", 64);
         first.policy_class = Some("agents".to_owned());
         queue.enqueue(first).await;
         first_response.await.unwrap().unwrap();
 
-        let (mut duplicate, duplicate_response) = make_request("duplicate", 64);
+        let (mut duplicate, duplicate_response) = make_admission_request("duplicate", 64);
         duplicate.policy_class = Some("agents".to_owned());
         queue.enqueue(duplicate).await;
         assert!(matches!(
