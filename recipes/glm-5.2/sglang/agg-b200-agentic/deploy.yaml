@@ -1,22 +1,6 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# GLM-5.2 NVFP4 aggregated serving on one B200x4 node via SGLang + Dynamo.
-#
-# For synthetic MTP acceptance-length benchmarking, uncomment the
-# SGLANG_SIMULATE_ACC_* environment variables below.
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -35,7 +19,6 @@ data:
     moe-runner-backend: flashinfer_trtllm
     moe-a2a-backend: none
     fp4-gemm-backend: flashinfer_trtllm
-    enable-symm-mem: true
     speculative-attention-mode: decode
     quantization: modelopt_fp4
     kv-cache-dtype: fp8_e4m3
@@ -46,7 +29,8 @@ data:
     speculative-num-draft-tokens: 4
     max-running-requests: 128
     cuda-graph-max-bs: 128
-    mem-fraction-static: 0.93
+    watchdog-timeout: 3600
+    mem-fraction-static: 0.925
     enable-dp-lm-head: true
     enable-metrics: true
     speculative-moe-runner-backend: flashinfer_cutlass
@@ -54,6 +38,10 @@ data:
     enable-flashinfer-allreduce-fusion: true
     hicache-size: 200
     enable-hierarchical-cache: true
+    kv-events-config:
+      publisher: zmq
+      topic: kv-events
+      endpoint: tcp://*:5557
     model-loader-extra-config:
       enable_multithread_load: true
       num_threads: 32
@@ -84,7 +72,7 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4
               imagePullPolicy: Always
               resources: {}
       replicas: 1
@@ -133,7 +121,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4
               imagePullPolicy: Always
               resources:
                 requests:
@@ -175,4 +163,4 @@ spec:
               operator: Equal
               value: "true"
               effect: NoSchedule
-      replicas: 1
+      replicas: 4

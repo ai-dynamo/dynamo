@@ -58,7 +58,7 @@ spec:
       # tolerations: # Uncomment and populate for tainted frontend nodes.
       containers:
       - name: perf
-        image: nvcr.io/nvstaging/ai-dynamo/aiperf:0.11.0rc1
+        image: nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0
         imagePullPolicy: IfNotPresent
         workingDir: /app
         command:
@@ -152,6 +152,8 @@ spec:
             --tokenizer-trust-remote-code \
             --input-file "$TRACE_FILE" \
             --custom-dataset-type mooncake_trace \
+            --synthesis-max-isl 500000 \
+            --synthesis-max-osl 12000 \
             --num-requests $(/busybox/wc -l < "${TRACE_FILE}") \
             --dataset-sampling-strategy sequential \
             --url "http://$ENDPOINT" \

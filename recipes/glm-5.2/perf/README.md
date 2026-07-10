@@ -34,10 +34,12 @@ The benchmark replays a
 `--custom-dataset-type mooncake_trace`. Each JSONL line describes one request
 with `input_length`, `output_length`, and `hash_ids`.
 
-The recipe includes the 15% agentic trace under [`traces`](traces):
+The recipe reuses the 15% agentic trace from the Kimi-K2.6 recipe via a
+symlink under [`traces`](traces):
 
 ```text
 traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+  -> ../../../kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
 ```
 
 The default 15% trace contains 3,541 requests. Its SHA-256 is
@@ -59,7 +61,7 @@ Materialize the Git LFS trace files, then copy them through a helper pod that
 mounts `model-cache`:
 
 ```bash
-git lfs pull --include='recipes/glm-5.2/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+git lfs pull --include='recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
 
 kubectl run pvc-helper -n ${NAMESPACE} \
   --image=busybox:1.36 --restart=Never \
