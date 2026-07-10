@@ -690,6 +690,9 @@ pub fn make_engine<'p>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         if let Some(model_path) = args.model_path.clone() {
             let local_path = if model_path.exists() {
+                // Preserve the on-disk path as source_path so a custom
+                // --model-name does not become the HF repo id fallback.
+                builder.source_path(model_path.clone());
                 model_path
             } else {
                 // Mocker only needs tokenizer, not weights

@@ -696,6 +696,20 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     Ok((repo.to_string(), filename.to_string()))
 }
 
+fn local_model_path_overlay_uri(
+    filename: &str,
+    local_model_path: Option<&Path>,
+) -> anyhow::Result<Option<String>> {
+    let Some(prefix) = local_model_path else {
+        return Ok(None);
+    };
+    let local = prefix.join(filename);
+    if local.exists() {
+        return file_uri_for(&local).map(Some);
+    }
+    Ok(None)
+}
+
 fn checked_file_uri(
     cf: &CheckedFile,
     source: &str,
@@ -721,7 +735,14 @@ fn checked_file_uri(
     };
 
     match url.scheme() {
-        "http" | "https" | "hf" => Ok(url.to_string()),
+        "http" | "https" => Ok(url.to_string()),
+        "hf" => {
+            let (_, filename) = parse_hf_uri(url.as_str())?;
+            if let Some(uri) = local_model_path_overlay_uri(&filename, local_model_path)? {
+                return Ok(uri);
+            }
+            Ok(url.to_string())
+        }
         "file" => {
             // worker location → --model-path → hf://. Basename + checksum preserved.
             // is_custom slots aren't published on HF, so rung 4 errors instead.
@@ -735,11 +756,8 @@ fn checked_file_uri(
             if path.exists() {
                 return Ok(url.to_string());
             }
-            if let Some(prefix) = local_model_path {
-                let local = prefix.join(filename);
-                if local.exists() {
-                    return file_uri_for(&local);
-                }
+            if let Some(uri) = local_model_path_overlay_uri(filename, local_model_path)? {
+                return Ok(uri);
             }
             if is_custom {
                 anyhow::bail!(
@@ -2564,15 +2582,30 @@ mod tests {
     #[test]
     fn checked_file_uri_passes_through_remote_urls() {
         let tmp = tempfile::tempdir().unwrap();
-        for url in [
-            "http://worker:8080/v1/metadata/slug/base/config.json",
-            "hf://Qwen/Qwen3-0.6B/config.json",
-        ] {
-            let got =
-                super::checked_file_uri(&cf_for(url), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
-                    .unwrap();
-            assert_eq!(got, url);
-        }
+        let http = "http://worker:8080/v1/metadata/slug/base/config.json";
+        let got =
+            super::checked_file_uri(&cf_for(http), "Qwen/Qwen3-0.6B", Some(tmp.path()), false)
+                .unwrap();
+        assert_eq!(got, http);
+
+        // hf:// without a matching --model-path overlay still passes through.
+        let hf = "hf://Qwen/Qwen3-0.6B/config.json";
+        let got = super::checked_file_uri(&cf_for(hf), "Qwen/Qwen3-0.6B", None, false).unwrap();
+        assert_eq!(got, hf);
+    }
+
+    #[test]
+    fn checked_file_uri_hf_uri_uses_local_model_path_overlay() {
+        let cf = cf_for("hf://Qwen/Qwen3-0.6B/tokenizer.json");
+        let local = tempfile::tempdir().unwrap();
+        let local_tok = local.path().join("tokenizer.json");
+        std::fs::write(&local_tok, b"{}").unwrap();
+        let got =
+            super::checked_file_uri(&cf, "Qwen/Qwen3-0.6B", Some(local.path()), false).unwrap();
+        assert_eq!(
+            got,
+            url::Url::from_file_path(&local_tok).unwrap().to_string()
+        );
     }
 
     #[test]

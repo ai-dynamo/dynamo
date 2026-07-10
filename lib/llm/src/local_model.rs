@@ -377,6 +377,10 @@ impl LocalModelBuilder {
         // path of the downloaded model.
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
+        } else {
+            // Local snapshot with a custom display name must still record the
+            // directory as the metadata/weight source, not display_name().
+            card.set_source_path(model_path.clone());
         }
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
@@ -604,22 +608,13 @@ impl LocalModel {
                 .context("move_to_self_host")?;
         }
 
-        let source_path = PathBuf::from(self.card.source_path());
-        if !source_path.exists() {
-            // The consumers of MDC (frontend) might not have the same local path as us, so
-            // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
-            //
-            // We can't do this if the model came from disk, as it might not be the same version
-            // as on Hugging Face (if it exists there at all).
-            //
-            // The URL is not used by anything. Frontend will download the repo and edit these
-            // paths to be local, so only the filename part matters currently.
-            // Possibly we should just use the filenames here. The URL feels nicer to me, it makes
-            // each field fully identified and fetchable independently.
-            self.card
-                .move_to_url(&format!("hf://{}/", self.card.source_path()))
-                .context("move_to_url")?;
-        }
+        // Publish honest file:// URIs for whatever this worker actually has
+        // on disk. The consuming side (ModelDeploymentCard::download_config /
+        // checked_file_uri) already implements the local -> --model-path
+        // overlay -> hf:// fallback chain, so the worker does not need to
+        // guess here — guessing from source_path/display_name was the root
+        // cause of a custom --model-name being published as a bogus hf://
+        // repo id.
 
         // Register the Model Deployment Card via discovery interface
         // The model_suffix (for LoRA) will be appended AFTER the instance_id
@@ -849,6 +844,62 @@ fn harvest_extra_files(
         out.push(CheckedFile::from_disk(&path)?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod metadata_publish_tests {
+    use super::*;
+
+    fn sample_model_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
+    }
+
+    /// Regression test: a local model dir plus a custom `--model-name` must
+    /// keep the directory as `source_path`. Before the fix, `source_path()`
+    /// fell back to the custom display name, and `attach()` published
+    /// `hf://<custom-name>/...` URIs pointing at a nonexistent HF repo.
+    #[tokio::test]
+    async fn build_local_model_custom_name_keeps_directory_source_path() {
+        let model_dir = sample_model_dir();
+        let canonical = fs::canonicalize(&model_dir).unwrap();
+
+        let mut builder = LocalModelBuilder::default();
+        builder.model_path(model_dir);
+        builder.model_name(Some("my-custom-name".to_string()));
+        let model = builder.build().await.unwrap();
+
+        assert_eq!(model.display_name(), "my-custom-name");
+        assert_eq!(model.card().source_path(), canonical.display().to_string());
+        assert_eq!(model.path(), canonical);
+    }
+
+    #[tokio::test]
+    async fn build_local_model_defaults_name_to_model_path() {
+        let model_dir = sample_model_dir();
+        let canonical = fs::canonicalize(&model_dir).unwrap();
+
+        let mut builder = LocalModelBuilder::default();
+        builder.model_path(model_dir);
+        let model = builder.build().await.unwrap();
+
+        let want = canonical.display().to_string();
+        assert_eq!(model.display_name(), want);
+        assert_eq!(model.card().source_path(), want);
+    }
+
+    /// An explicit builder source_path (the HF repo id recorded after a
+    /// download) must win over the local-directory fallback.
+    #[tokio::test]
+    async fn build_local_model_explicit_source_path_wins() {
+        let mut builder = LocalModelBuilder::default();
+        builder.model_path(sample_model_dir());
+        builder.source_path(PathBuf::from("Qwen/Qwen3-0.6B"));
+        builder.model_name(Some("served-name".to_string()));
+        let model = builder.build().await.unwrap();
+
+        assert_eq!(model.display_name(), "served-name");
+        assert_eq!(model.card().source_path(), "Qwen/Qwen3-0.6B");
+    }
 }
 
 #[cfg(test)]
