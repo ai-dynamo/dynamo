@@ -151,7 +151,8 @@ pub struct SamplingParams {
     // reads only the controls it needs; `raw` remains authoritative.
     temperature: Option<f32>,
     top_p: Option<f32>,
-    top_k: Option<u32>,
+    // vLLM uses -1 as the public sentinel for disabling top-k sampling.
+    top_k: Option<i32>,
     seed: Option<i64>,
     max_tokens: Option<u32>,
     min_tokens: Option<u32>,
@@ -677,7 +678,7 @@ mod tests {
     fn generate_request_preserves_unknown_sampling_fields() {
         let raw_sampling = json!({
             "temperature": 0.5,
-            "top_k": 12,
+            "top_k": -1,
             "max_tokens": 8,
             "min_tokens": null,
             "bad_words": ["blocked"],
@@ -691,7 +692,7 @@ mod tests {
 
         assert_eq!(req.sampling_params.max_tokens(), Some(8));
         assert_eq!(req.sampling_params.temperature, Some(0.5));
-        assert_eq!(req.sampling_params.top_k, Some(12));
+        assert_eq!(req.sampling_params.top_k, Some(-1));
         assert_eq!(
             req.sampling_params.bad_words.as_deref(),
             Some(["blocked".to_string()].as_slice())
@@ -714,10 +715,6 @@ mod tests {
             json!({
                 "token_ids": [1],
                 "sampling_params": {"max_tokens": -1}
-            }),
-            json!({
-                "token_ids": [1],
-                "sampling_params": {"top_k": -1}
             }),
             json!({
                 "token_ids": [1],
