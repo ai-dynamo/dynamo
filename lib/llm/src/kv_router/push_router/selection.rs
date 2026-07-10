@@ -7,6 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
+    router_hint::RouterHint,
     scheduling::RoutingEligibility,
     selector::WorkerSelector,
 };
@@ -32,6 +33,7 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
+    pub(super) router_hint: Option<RouterHint>,
 }
 
 #[derive(Clone, Copy)]
@@ -117,6 +119,7 @@ where
                 cached_tokens,
                 potential_decode_blocks: _,
                 routing_hashes,
+                router_hint,
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -124,6 +127,7 @@ where
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
+                router_hint,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

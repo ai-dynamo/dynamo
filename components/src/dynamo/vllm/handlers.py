@@ -46,7 +46,6 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
-from dynamo.common.constants import ROUTER_HINT_RUNTIME_CAPABILITY_KEY
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -86,6 +85,7 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
 )
+from dynamo.vllm.router_hints import enable_router_hint_support
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -2072,7 +2072,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
 
         runtime_config = ModelRuntimeConfig()
-        runtime_config.set_engine_specific(ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true")
+        enable_router_hint_support(runtime_config, self.config.engine_args)
         runtime_config.context_length = self.model_max_len
         publish_vllm_token_budget(runtime_config, self.model_max_len)
         runtime_config.kv_event_publishing_enabled = getattr(

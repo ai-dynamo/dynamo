@@ -15,6 +15,7 @@ use dynamo_kv_router::{
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
+    router_hint::{RouterHint, RouterHintSourceSelectionInput, select_router_hint_source},
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
@@ -141,6 +142,7 @@ pub enum FindBestMatchOutcome {
         cached_tokens: usize,
         potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
+        router_hint: Option<RouterHint>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -580,6 +582,78 @@ where
         cache_hit_for_worker(cache_hit_estimates, worker)
     }
 
+    fn router_hint_for_selection(
+        &self,
+        request_id: Option<&str>,
+        target: WorkerWithDpRank,
+        local_block_hashes: Option<&[LocalBlockHash]>,
+        tiered_matches: &indexer::TieredMatchDetails,
+    ) -> Option<RouterHint> {
+        if !self.kv_router_config.router_hints {
+            return None;
+        }
+        let local_block_hashes = local_block_hashes?;
+
+        let (selected, source_control_endpoint) = {
+            let configs = self.workers_with_configs.borrow();
+            let target_config = configs.get(&target.worker_id)?;
+            if !target_config.supports_router_hints() {
+                return None;
+            }
+
+            let selected = select_router_hint_source(RouterHintSourceSelectionInput {
+                target,
+                local_block_hashes,
+                tiered_matches,
+            })?;
+            let source_control_endpoint = configs
+                .get(&selected.source.worker_id)?
+                .router_hint_source_control_endpoint()?
+                .to_string();
+            (selected, source_control_endpoint)
+        };
+
+        let source_start = selected.source_start_block_index as usize;
+        let hint_start = selected.start_block_index as usize;
+        let hint_blocks = selected.planned_prefix_blocks as usize;
+        let hint_end = hint_start.checked_add(hint_blocks)?;
+        if source_start > hint_start || hint_end > local_block_hashes.len() {
+            return None;
+        }
+
+        let parent_hash = if source_start == 0 {
+            None
+        } else {
+            Some(
+                *tiered_matches
+                    .device
+                    .last_matched_hashes
+                    .get(&selected.source)?,
+            )
+        };
+        let chain = self.indexer.chain_block_hashes_for_host_pinned(
+            selected.source,
+            parent_hash,
+            &local_block_hashes[source_start..hint_end],
+        );
+        let offset = hint_start - source_start;
+        if chain.len() <= offset {
+            return None;
+        }
+        let available_blocks = chain.len() - offset;
+        let planned_blocks = hint_blocks.min(available_blocks);
+        if planned_blocks == 0 {
+            return None;
+        }
+
+        Some(RouterHint {
+            request_id: request_id.unwrap_or_default().to_string(),
+            source_control_endpoint,
+            kv_block_hashes: chain[offset..offset + planned_blocks].to_vec(),
+            start_block_index: selected.start_block_index,
+        })
+    }
+
     pub async fn record_routing_decision(
         &self,
         mut tokens_with_hashes: TokensWithHashes,
@@ -846,6 +920,10 @@ where
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
             .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
+        let router_hint_block_hashes = self
+            .kv_router_config
+            .router_hints
+            .then(|| block_hashes.clone());
         log_routing_input_hashes(context_id, self.block_size, tokens, &block_hashes);
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
@@ -863,7 +941,8 @@ where
         let seq_hash_elapsed = start.elapsed();
 
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
-        let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
+        let retain_block_hashes =
+            supports_overlap_refresh || return_routing_hashes || self.kv_router_config.router_hints;
 
         let TieredLookupResult {
             tiered_matches,
@@ -895,7 +974,6 @@ where
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, self.block_size, &tiered_matches)
                 .signals();
-        drop(tiered_matches);
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
@@ -961,6 +1039,13 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
+        let router_hint = self.router_hint_for_selection(
+            context_id,
+            response.best_worker,
+            router_hint_block_hashes.as_deref(),
+            &tiered_matches,
+        );
+
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
@@ -1010,6 +1095,7 @@ where
                     cached_tokens: response.cached_tokens,
                     potential_decode_blocks: response.potential_decode_blocks as u64,
                     routing_hashes,
+                    router_hint,
                 }),
             ),
             FindBestMatchAdmission::WithoutAdmission => Ok(
