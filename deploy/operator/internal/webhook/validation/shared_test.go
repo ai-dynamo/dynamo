@@ -45,22 +45,31 @@ func admissionUnstructured(t *testing.T, deployment runtime.Object) map[string]a
 	}
 
 	// Several compact fixtures omit TypeMeta, but a real API request requires it.
-	if _, found := request["apiVersion"]; !found {
+	_, hasAPIVersion := request["apiVersion"]
+	_, hasKind := request["kind"]
+	if !hasAPIVersion || !hasKind {
+		var apiVersion, kind string
 		switch deployment.(type) {
 		case *nvidiacomv1alpha1.DynamoGraphDeployment:
-			request["apiVersion"] = nvidiacomv1alpha1.GroupVersion.String()
-			request["kind"] = admissionDGDKind
+			apiVersion = nvidiacomv1alpha1.GroupVersion.String()
+			kind = admissionDGDKind
 		case *nvidiacomv1beta1.DynamoGraphDeployment:
-			request["apiVersion"] = nvidiacomv1beta1.GroupVersion.String()
-			request["kind"] = admissionDGDKind
+			apiVersion = nvidiacomv1beta1.GroupVersion.String()
+			kind = admissionDGDKind
 		case *nvidiacomv1alpha1.DynamoComponentDeployment:
-			request["apiVersion"] = nvidiacomv1alpha1.GroupVersion.String()
-			request["kind"] = admissionDCDKind
+			apiVersion = nvidiacomv1alpha1.GroupVersion.String()
+			kind = admissionDCDKind
 		case *nvidiacomv1beta1.DynamoComponentDeployment:
-			request["apiVersion"] = nvidiacomv1beta1.GroupVersion.String()
-			request["kind"] = admissionDCDKind
+			apiVersion = nvidiacomv1beta1.GroupVersion.String()
+			kind = admissionDCDKind
 		default:
 			t.Fatalf("unsupported admission object type %T", deployment)
+		}
+		if !hasAPIVersion {
+			request["apiVersion"] = apiVersion
+		}
+		if !hasKind {
+			request["kind"] = kind
 		}
 	}
 	delete(request, "status")

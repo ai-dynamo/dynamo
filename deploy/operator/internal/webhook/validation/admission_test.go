@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,6 +82,7 @@ type admissionTestEnvironment struct {
 	warnings    *admissionWarningCollector
 	dcdBeta     *validatorSlot
 	dgdBeta     *validatorSlot
+	userID      atomic.Uint64
 }
 
 func startAdmissionTestEnvironment() (*admissionTestEnvironment, error) {
@@ -579,15 +581,47 @@ func (e *admissionTestEnvironment) clientForUser(userInfo *authenticationv1.User
 	if userInfo.UID != "" || len(userInfo.Extra) != 0 {
 		return nil, fmt.Errorf("envtest admission users support username and groups only")
 	}
-	groups := append([]string{}, userInfo.Groups...)
-	groups = append(groups, "system:masters")
-	user, err := e.environment.AddUser(envtest.User{Name: userInfo.Username, Groups: groups}, nil)
+	user, err := e.environment.AddUser(envtest.User{Name: userInfo.Username, Groups: userInfo.Groups}, nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := e.authorizeTestUser(userInfo.Username); err != nil {
 		return nil, err
 	}
 	config := rest.CopyConfig(user.Config())
 	config.WarningHandler = e.warnings
 	return dynamic.NewForConfig(config)
+}
+
+func (e *admissionTestEnvironment) authorizeTestUser(username string) error {
+	// Bind by username so authorization does not add privileged groups to the admission identity.
+	bindingName := fmt.Sprintf("admission-test-cluster-admin-%d", e.userID.Add(1))
+	bindings := e.client.Resource(schema.GroupVersionResource{
+		Group:    "rbac.authorization.k8s.io",
+		Version:  "v1",
+		Resource: "clusterrolebindings",
+	})
+	_, err := bindings.Create(context.Background(), &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "rbac.authorization.k8s.io/v1",
+		"kind":       "ClusterRoleBinding",
+		"metadata": map[string]any{
+			"name": bindingName,
+		},
+		"roleRef": map[string]any{
+			"apiGroup": "rbac.authorization.k8s.io",
+			"kind":     "ClusterRole",
+			"name":     "cluster-admin",
+		},
+		"subjects": []any{map[string]any{
+			"apiGroup": "rbac.authorization.k8s.io",
+			"kind":     "User",
+			"name":     username,
+		}},
+	}}, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("authorize admission test user %q: %w", username, err)
+	}
+	return nil
 }
 
 type admissionWarningCollector struct {
