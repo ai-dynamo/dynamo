@@ -61,6 +61,12 @@ async def request_plane_client(runtime):
     client = await endpoint.client()
     await client.wait_for_instances()
 
+    # This fixture runs on the TCP request plane, so every instance must
+    # expose a TCP transport address keyed by its instance id.
+    tcp_addresses = client.instance_tcp_addresses()
+    assert set(tcp_addresses) == set(client.instance_ids())
+    assert all(":" in address for address in tcp_addresses.values())
+
     yield client
 
     server_task.cancel()
