@@ -75,6 +75,7 @@ from .handlers import (
     _apply_nvext_cache_salt,
     _engine_generate_reasoning_kwargs,
     _request_reasoning_metadata,
+    build_prompt_tokens_details,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -593,10 +594,11 @@ class VllmLLMEngine(LLMEngine):
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
                     completion_tokens = sum(total_output_tokens_by_index.values())
-                    num_cached_tokens = getattr(res, "num_cached_tokens", None)
                     prompt_tokens_details = prefill_prompt_tokens_details
-                    if prompt_tokens_details is None and num_cached_tokens is not None:
-                        prompt_tokens_details = {"cached_tokens": num_cached_tokens}
+                    if prompt_tokens_details is None:
+                        prompt_tokens_details = build_prompt_tokens_details(
+                            getattr(res, "num_cached_tokens", None)
+                        )
                     out["completion_usage"] = {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
@@ -1309,8 +1311,8 @@ class VllmLLMEngine(LLMEngine):
             logger.error("Failed to stop profiling: %s", e)
             return {"status": "error", "message": str(e)}
 
-    async def clear_kv_blocks(self, body: dict) -> dict:
-        del body  # The control accepts an empty object and has no options.
+    async def clear_kv_blocks(self, _body: dict) -> dict:
+        """Clear KV blocks; the control request body is intentionally ignored."""
         if self.engine_client is None:
             return {"status": "error", "message": "Engine is not running"}
         try:

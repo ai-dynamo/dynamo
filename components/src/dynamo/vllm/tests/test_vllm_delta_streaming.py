@@ -131,7 +131,7 @@ async def test_generate_tokens_passes_delta_chunks_without_cumulative_slicing():
         "prompt_tokens": 2,
         "completion_tokens": 4,
         "total_tokens": 6,
-        "prompt_tokens_details": None,
+        "prompt_tokens_details": {"cached_tokens": 0},
     }
 
 
@@ -242,9 +242,17 @@ async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("num_cached_tokens", [0, 1])
+@pytest.mark.parametrize(
+    ("num_cached_tokens", "expected_prompt_tokens_details"),
+    [
+        (None, None),
+        (0, {"cached_tokens": 0}),
+        (1, {"cached_tokens": 1}),
+    ],
+)
 async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage(
     num_cached_tokens,
+    expected_prompt_tokens_details,
 ):
     pytest.importorskip("vllm.usage.usage_lib")
     from dynamo.vllm.llm_engine import VllmLLMEngine
@@ -293,7 +301,7 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage(
         "prompt_tokens": 2,
         "completion_tokens": 3,
         "total_tokens": 5,
-        "prompt_tokens_details": {"cached_tokens": num_cached_tokens},
+        "prompt_tokens_details": expected_prompt_tokens_details,
     }
 
 

@@ -107,6 +107,15 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
 )
 
 
+def build_prompt_tokens_details(
+    num_cached_tokens: int | None,
+) -> dict[str, int] | None:
+    """Preserve the distinction between unavailable and zero cached tokens."""
+    if num_cached_tokens is None:
+        return None
+    return {"cached_tokens": num_cached_tokens}
+
+
 class _DeferredAbort:
     """Defers engine_client.abort(request_id) until the first engine output.
 
@@ -2493,10 +2502,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "total_tokens": (
                 prompt_tokens + completion_tokens if prompt_tokens is not None else None
             ),
-            "prompt_tokens_details": (
-                {"cached_tokens": num_cached}
-                if (num_cached := getattr(request_output, "num_cached_tokens", None))
-                else None
+            "prompt_tokens_details": build_prompt_tokens_details(
+                getattr(request_output, "num_cached_tokens", None)
             ),
         }
 
