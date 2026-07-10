@@ -4,6 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::scheduling::RequestOutcome;
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -123,11 +124,16 @@ impl KvPushRouter {
         match selection_result {
             Some(result) => result,
             None => {
-                if !is_query_only && let Err(error) = self.chooser.free(&context_id).await {
+                if !is_query_only
+                    && let Err(error) = self
+                        .chooser
+                        .finish(&context_id, RequestOutcome::Aborted)
+                        .await
+                {
                     tracing::warn!(
                         request_id = %context_id,
                         %error,
-                        "Failed to free scheduler state after cancellation during worker selection"
+                        "Failed to finish scheduler state after cancellation during worker selection"
                     );
                 }
                 Err(cancelled_error(&context_id))
