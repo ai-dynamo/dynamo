@@ -285,17 +285,22 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
 
-	state = reconcileResult.State
-	reason = reconcileResult.Reason
-	message = reconcileResult.Message
-	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
-	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
-
 	if err != nil {
 		logger.Error(err, "failed to reconcile the resources")
 		reason = "failed_to_reconcile_the_resources"
 		return ctrl.Result{}, err
 	}
+
+	// Assign status only after confirming the reconcile succeeded. On error,
+	// reconcileResources returns an empty ReconcileResult; assigning it here
+	// would wipe Components/Restart, which the deferred status update would then
+	// persist. Deferring the assignment past the error check preserves the
+	// last-known-good status on a transient failure.
+	state = reconcileResult.State
+	reason = reconcileResult.Reason
+	message = reconcileResult.Message
+	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
+	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
 
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
@@ -510,10 +515,15 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		// single-node GMS components stall in the in-progress list because the
 		// corresponding PodClique never exists.
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		// A transient read error surfaces here as isReady=false, so the component
+		// conservatively remains in-progress (we never mark a restart complete on
+		// a component we could not read). The reconcile that owns readiness
+		// classification propagates the error and retries, so it is safe to
+		// discard it in this progress-tracking helper.
 		if usesPCSG {
-			isReady, reason, _, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, _, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
-			isReady, reason, _, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, _, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
 		if !isReady {
 			logger.V(1).Info("component not ready", "componentName", componentName, "resourceName", resourceName, "reason", reason)
@@ -669,8 +679,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 	syncedGrovePodCliqueSetAsResource, err := commoncontroller.NewResourceWithComponentStatuses(
 		syncedGrovePodCliqueSet,
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
-			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
-			allComponentsReady, reason, componentStatuses := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
+			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas.
+			// A transient (non-NotFound) read error is handled authoritatively by
+			// reconcileGroveResources, which re-evaluates and returns the error so
+			// the reconcile retries; here we defensively treat it as not-ready so a
+			// read blip can never surface as "ready".
+			allComponentsReady, reason, componentStatuses, readErr := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
+			if readErr != nil {
+				return false, nvidiacomv1beta1.DGDReadyReasonSomeResourcesNotReady, nil
+			}
 			if !allComponentsReady {
 				return false, reason, componentStatuses
 			}
@@ -1226,36 +1243,48 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		}
 	}
 
-	// Check resource readiness
+	// Check resource readiness and overlay the Grove-specific Ready reason.
+	// Extracted to keep this function's cyclomatic complexity within the
+	// gocyclo limit.
+	return r.checkGroveResourcesReadiness(ctx, dynamoDeployment, resources)
+}
+
+// checkGroveResourcesReadiness computes the readiness result for the synced
+// Grove resources and overlays the Grove-specific Ready reason
+// classification on a not-ready result. A transient Grove read error is
+// returned (not folded into the result) so the reconcile retries and does not
+// advance ObservedGeneration on a blip.
+func (r *DynamoGraphDeploymentReconciler) checkGroveResourcesReadiness(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, resources []Resource) (ReconcileResult, error) {
 	result := r.checkResourcesReadiness(resources)
-
-	// Grove-specific Ready reason classification
-	r.applyGroveReadyClassification(ctx, dynamoDeployment, &result)
-
+	if err := r.applyGroveReadyClassification(ctx, dynamoDeployment, &result); err != nil {
+		return ReconcileResult{}, err
+	}
 	return result, nil
 }
 
 // applyGroveReadyClassification replaces the generic not-ready reason on result
-// with a Grove-specific classification (InsufficientCapacity / PodsNotReady /
-// Updating / MixedNotReadyReasons / SomeResourcesNotReady) computed from Grove
-// PodClique / PodCliqueScalingGroup status (REQ 1). It only overrides when the
-// result is not successful; the ready path keeps checkResourcesReadiness's
+// with a Grove-specific classification (insufficient_capacity / pods_not_ready /
+// updating / mixed_not_ready_reasons / some_resources_are_not_ready) computed
+// from Grove PodClique / PodCliqueScalingGroup status (REQ 1). It only overrides
+// when the result is not successful; the ready path keeps checkResourcesReadiness's
 // success result.
 //
-// This is a separate read from checkResourcesReadiness (which produces the
-// detailed human-readable Message via the Resource closure) because
-// Condition.Reason must be a bare CamelCase token and cannot be threaded
-// through the generic Resource.IsReady() -> "<name>: <reason>" wrapping. Both
-// reads are served from the controller-runtime informer cache, not the API
-// server, so the cost is negligible and they observe the same PodClique/PCSG
-// generation within a single reconcile.
-func (r *DynamoGraphDeploymentReconciler) applyGroveReadyClassification(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, result *ReconcileResult) {
+// A non-nil error is a transient (non-NotFound) Grove read failure: the caller
+// should return it so the reconcile retries rather than publishing a possibly
+// wrong not-ready diagnosis and advancing ObservedGeneration. NotFound is not an
+// error and is classified as a legitimate not-ready state.
+func (r *DynamoGraphDeploymentReconciler) applyGroveReadyClassification(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, result *ReconcileResult) error {
 	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
-		return
+		return nil
 	}
-	if classification := dynamo.ClassifyGroveReadiness(ctx, r.Client, dynamoDeployment); classification != "" {
+	classification, err := dynamo.ClassifyGroveReadiness(ctx, r.Client, dynamoDeployment)
+	if err != nil {
+		return err
+	}
+	if classification != "" {
 		result.Reason = Reason(classification)
 	}
+	return nil
 }
 
 // isNewRestartRequest checks if the current spec.restart.id represents a new restart request

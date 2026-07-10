@@ -2275,6 +2275,30 @@ func Test_reconcileGroveResources(t *testing.T) {
 		interceptorFuncs       interceptor.Funcs
 	}{
 		{
+			// Covers the error-propagation fix: a non-NotFound Grove read error
+			// must surface as a reconcile error (so it retries and does not
+			// advance ObservedGeneration), not be folded into a not-ready result.
+			name: "transient PodClique API error is propagated",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
+					},
+				},
+			},
+			interceptorFuncs: interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*grovev1alpha1.PodClique); ok {
+						return fmt.Errorf("transient API error")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			},
+			wantErrSubstring: "transient API error",
+		},
+		{
 			name: "singular frontend service with 2 replicas - creates a PodClique with 2 replicas - ready",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
@@ -2571,6 +2595,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				WithScheme(s).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
+				WithInterceptorFuncs(tt.interceptorFuncs).
 				Build()
 
 			recorder := record.NewFakeRecorder(100)

@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -22,6 +23,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -667,9 +669,9 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				Build()
 
 			logger := log.FromContext(ctx)
-			ready, reason, serviceStatus, classification := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
+			ready, reason, serviceStatus, classification, checkErr := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
 
-			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
 			if tt.wantReasonContains != "" {
 				g.Expect(reason).To(gomega.ContainSubstring(tt.wantReasonContains))
@@ -952,9 +954,9 @@ func TestCheckPCSGReady(t *testing.T) {
 				Build()
 
 			logger := log.FromContext(ctx)
-			ready, reason, serviceStatus, classification := CheckPCSGReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
+			ready, reason, serviceStatus, classification, checkErr := CheckPCSGReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
 
-			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
 			if tt.wantReasonContains != "" {
 				g.Expect(reason).To(gomega.ContainSubstring(tt.wantReasonContains))
@@ -1305,8 +1307,9 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			ready, reason, serviceStatuses := GetComponentReadinessAndServiceReplicaStatuses(ctx, fakeKubeClient, betaDGD)
+			ready, reason, serviceStatuses, err := GetComponentReadinessAndServiceReplicaStatuses(ctx, fakeKubeClient, betaDGD)
 
+			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
 			g.Expect(reason).To(gomega.Equal(tt.wantReason))
 			g.Expect(serviceStatuses).To(gomega.Equal(tt.wantServiceStatuses))
@@ -1315,7 +1318,7 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// REQ 1 Ready-reason classification tests (merged from classification_test.go).
+// Ready-reason classification tests (merged from classification_test.go).
 // These exercise the DGD-level Ready reason returned as the 4th value of
 // CheckPodCliqueReady / CheckPCSGReady, focusing on the capacity-before-
 // readiness branches (schedule-gated, scheduling condition, partial scheduled
@@ -1326,7 +1329,7 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 // reading path (client.Get + field/condition inspection) and assert the
 // DGD Ready reason string returned as the 4th value. They complement the
 // existing TestCheckPodCliqueReady / TestCheckPCSGReady tables (which assert
-// ready/reason/serviceStatus) by focusing on REQ 1's capacity-before-readiness
+// ready/reason/serviceStatus) by focusing on capacity-before-readiness
 // classification ordering.
 
 func TestCheckPodCliqueReadyClassification(t *testing.T) {
@@ -1460,7 +1463,8 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 				objs = append(objs, tt.podClique)
 			}
 			c := newFakeGroveClient(g, objs...)
-			ready, reason, _, classification := CheckPodCliqueReady(ctx, c, testPodCliqueName, "default", log.FromContext(ctx))
+			ready, reason, _, classification, checkErr := CheckPodCliqueReady(ctx, c, testPodCliqueName, "default", log.FromContext(ctx))
+			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
 			g.Expect(classification).To(gomega.Equal(tt.wantClassification))
@@ -1566,7 +1570,8 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 				objs = append(objs, tt.pcsg)
 			}
 			c := newFakeGroveClient(g, objs...)
-			ready, reason, _, classification := CheckPCSGReady(ctx, c, testPCSGName, "default", log.FromContext(ctx))
+			ready, reason, _, classification, checkErr := CheckPCSGReady(ctx, c, testPCSGName, "default", log.FromContext(ctx))
+			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
 			g.Expect(classification).To(gomega.Equal(tt.wantClassification))
@@ -1615,4 +1620,98 @@ func newFakeGroveClient(g *gomega.WithT, objects ...client.Object) client.Client
 		WithObjects(objects...).
 		WithStatusSubresource(objects...).
 		Build()
+}
+
+// TestGroveReadinessTransientErrorsPropagate verifies that a non-NotFound Get
+// error from a Grove child is returned as an error (so the reconcile retries and
+// does not advance ObservedGeneration), rather than folded into a normal
+// not-ready result. NotFound remains a legitimate not-ready state (covered by
+// the "not found" cases in TestCheckPodCliqueReady / TestCheckPCSGReady).
+func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
+	ctx := context.Background()
+	logger := log.FromContext(ctx)
+	transientErr := fmt.Errorf("transient API error")
+
+	newClient := func(g *gomega.WithT) client.Client {
+		s := scheme.Scheme
+		g.Expect(v1alpha1.AddToScheme(s)).To(gomega.Succeed())
+		g.Expect(v1beta1.AddToScheme(s)).To(gomega.Succeed())
+		g.Expect(grovev1alpha1.AddToScheme(s)).To(gomega.Succeed())
+		return fake.NewClientBuilder().
+			WithScheme(s).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					switch obj.(type) {
+					case *grovev1alpha1.PodClique, *grovev1alpha1.PodCliqueScalingGroup:
+						return transientErr
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			}).
+			Build()
+	}
+
+	t.Run("CheckPodCliqueReady returns error on non-NotFound get failure", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		c := newClient(g)
+		ready, _, _, classification, err := CheckPodCliqueReady(ctx, c, "test-pc", "default", logger)
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
+		g.Expect(ready).To(gomega.BeFalse())
+		// On a transient error we do not emit a classification; the reconcile retries.
+		g.Expect(classification).To(gomega.BeEmpty())
+	})
+
+	t.Run("CheckPCSGReady returns error on non-NotFound get failure", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		c := newClient(g)
+		ready, _, _, classification, err := CheckPCSGReady(ctx, c, "test-pcsg", "default", logger)
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
+		g.Expect(ready).To(gomega.BeFalse())
+		g.Expect(classification).To(gomega.BeEmpty())
+	})
+
+	t.Run("GetComponentReadinessAndServiceReplicaStatuses propagates the error", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
+					},
+				},
+			},
+		})
+		c := newClient(g)
+		ready, _, _, err := GetComponentReadinessAndServiceReplicaStatuses(ctx, c, dgd)
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
+		// A transient error is not a normal not-ready result: ready is false and
+		// the error is what callers must act on.
+		g.Expect(ready).To(gomega.BeFalse())
+	})
+
+	t.Run("ClassifyGroveReadiness propagates the error", func(t *testing.T) {
+		g := gomega.NewGomegaWithT(t)
+		dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+			Spec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
+					},
+				},
+			},
+		})
+		c := newClient(g)
+		_, err := ClassifyGroveReadiness(ctx, c, dgd)
+		g.Expect(err).To(gomega.HaveOccurred())
+		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
+	})
 }
