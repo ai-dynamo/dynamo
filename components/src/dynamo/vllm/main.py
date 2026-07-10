@@ -69,6 +69,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+VLLM_GENERATE_RUNTIME_KEY = "vllm_inference_v1_generate"
 MX_LOAD_FORMATS = {"modelexpress", "mx"}
 
 
@@ -84,6 +85,11 @@ def should_prefetch_model(config: Config) -> bool:
 
 def should_register_model_ignore_weights(config: Config) -> bool:
     return uses_modelexpress_load_format(config)
+
+
+def advertise_vllm_generate(runtime_config: ModelRuntimeConfig) -> None:
+    """Mark model cards as compatible with the native token-in/token-out API."""
+    runtime_config.set_engine_specific(VLLM_GENERATE_RUNTIME_KEY, json.dumps(True))
 
 
 def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
@@ -667,6 +673,7 @@ async def register_vllm_model(
     """
     runtime_config = ModelRuntimeConfig()
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    advertise_vllm_generate(runtime_config)
 
     # Get runtime configuration from vLLM engine
     logging.info(

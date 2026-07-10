@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.main import VLLM_GENERATE_RUNTIME_KEY, advertise_vllm_generate
 
 pytestmark = [
     pytest.mark.unit,
@@ -13,6 +15,16 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+def test_vllm_worker_advertises_native_generate_capability():
+    runtime_config = MagicMock()
+
+    advertise_vllm_generate(runtime_config)
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        VLLM_GENERATE_RUNTIME_KEY, "true"
+    )
 
 
 def test_spec_decode_runtime_data_uses_vllm_speculative_config():
