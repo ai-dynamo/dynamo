@@ -18,6 +18,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThunderAgentConfig {
+    pub capacity_control: bool,
     pub pause_threshold: f64,
     pub pause_target: f64,
     pub resume_hysteresis: f64,
@@ -31,6 +32,7 @@ pub struct ThunderAgentConfig {
 impl Default for ThunderAgentConfig {
     fn default() -> Self {
         Self {
+            capacity_control: true,
             pause_threshold: 0.95,
             pause_target: 0.80,
             resume_hysteresis: 0.10,
@@ -112,12 +114,13 @@ mod tests {
     #[test]
     fn options_use_defaults_and_reject_unknown_fields() {
         let options = serde_yaml::from_str::<Mapping>(
-            "pause_threshold: 0.7\npause_target: 0.6\nresume_hysteresis: 0.05",
+            "capacity_control: false\npause_threshold: 0.7\npause_target: 0.6\nresume_hysteresis: 0.05",
         )
         .unwrap();
         let config = ThunderAgentConfig::from_options(&options).unwrap();
         assert_eq!(config.pause_threshold, 0.7);
         assert_eq!(config.pause_target, 0.6);
+        assert!(!config.capacity_control);
         assert_eq!(config.session_retention_seconds, 1_800.0);
 
         let unknown = serde_yaml::from_str::<Mapping>("unknown: 1").unwrap();

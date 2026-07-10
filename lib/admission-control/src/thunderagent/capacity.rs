@@ -29,15 +29,21 @@ where
 pub struct WatchWorkerCapacity<C> {
     workers: watch::Receiver<HashMap<WorkerId, C>>,
     block_size: u32,
+    enabled: bool,
     cached: Option<Arc<[WorkerCapacity]>>,
     warned_missing_capacity: bool,
 }
 
 impl<C> WatchWorkerCapacity<C> {
-    pub fn new(workers: watch::Receiver<HashMap<WorkerId, C>>, block_size: u32) -> Self {
+    pub fn new(
+        workers: watch::Receiver<HashMap<WorkerId, C>>,
+        block_size: u32,
+        enabled: bool,
+    ) -> Self {
         Self {
             workers,
             block_size,
+            enabled,
             cached: None,
             warned_missing_capacity: false,
         }
@@ -49,6 +55,9 @@ where
     C: WorkerConfigLike + Send + Sync,
 {
     fn snapshot(&mut self) -> Arc<[WorkerCapacity]> {
+        if !self.enabled {
+            return Arc::default();
+        }
         if let Some(cached) = &self.cached
             && !self.workers.has_changed().unwrap_or(false)
         {
@@ -162,7 +171,7 @@ mod tests {
     #[test]
     fn watch_provider_expands_dp_ranks_and_offload_capacity() {
         let (_tx, rx) = watch::channel(HashMap::from([(11, Config)]));
-        let mut provider = WatchWorkerCapacity::new(rx, 16);
+        let mut provider = WatchWorkerCapacity::new(rx, 16, true);
         assert_eq!(
             provider.snapshot().as_ref(),
             &[
@@ -181,8 +190,15 @@ mod tests {
     #[test]
     fn watch_provider_treats_zero_kv_blocks_as_missing_capacity() {
         let (_tx, rx) = watch::channel(HashMap::from([(11, ZeroConfig)]));
-        let mut provider = WatchWorkerCapacity::new(rx, 16);
+        let mut provider = WatchWorkerCapacity::new(rx, 16, true);
         assert!(provider.snapshot().is_empty());
         assert!(provider.warned_missing_capacity);
+    }
+
+    #[test]
+    fn disabled_provider_hides_capacity() {
+        let (_tx, rx) = watch::channel(HashMap::from([(11, Config)]));
+        let mut provider = WatchWorkerCapacity::new(rx, 16, false);
+        assert!(provider.snapshot().is_empty());
     }
 }
