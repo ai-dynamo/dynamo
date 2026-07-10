@@ -101,6 +101,24 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>SGLang</span><span>20x GB200</span><span>Long output / static ISL-OSL</span></div>
   <a className="dynamo-card-link" href="./glm-5-nvfp4.mdx" aria-label="Open the GLM-5 NVFP4 recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing expert-parallel mtp" data-workload="agentic">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek-V4-Pro</h3><p>NVIDIA checkpoint / DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">vLLM agentic recipe — MoE 1.6T / 49B active, B200 (NVFP4, 1M ctx) and H200 (FP8), aggregated or disaggregated with MTP-2 and KV-aware routing.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>8–32x B200/H200</span><span>Agentic</span></div>
+  <a className="dynamo-card-link" href="./deepseek-v4-pro.mdx" aria-label="Open the DeepSeek-V4-Pro recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing expert-parallel mtp" data-workload="agentic">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
+      <div><h3>DeepSeek-V4-Flash</h3><p>NVIDIA checkpoint / DeepSeek</p></div>
+    </div>
+    <p className="dynamo-model-summary">vLLM agentic recipe — MoE 284B / 13B active, B200 (NVFP4) and H200 (FP8), aggregated or disaggregated (4P2D / 4P3D) with KV-aware routing.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>4–28x B200/H200</span><span>Agentic</span></div>
+  <a className="dynamo-card-link" href="./deepseek-v4-flash.mdx" aria-label="Open the DeepSeek-V4-Flash recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="trtllm" data-hardware="b200 gb200" data-technique="disaggregated kv-routing expert-parallel" data-workload="long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
