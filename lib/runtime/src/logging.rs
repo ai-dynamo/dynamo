@@ -1308,7 +1308,8 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             // Export enabled: create OTLP exporters with batch processors.
             // Building these requires an active Tokio reactor (see
             // `otel_runtime_handle` docs) — enter one for the rest of this branch.
-            let _otel_reactor_guard = otel_runtime_handle().enter();
+            let otel_handle = otel_runtime_handle();
+            let _otel_reactor_guard = otel_handle.enter();
 
             let protocol = otlp_protocol_from_env();
             let traces_protocol = resolve_signal_otlp_protocol(
