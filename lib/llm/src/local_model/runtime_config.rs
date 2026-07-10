@@ -47,6 +47,14 @@ pub enum StructuralTagScope {
 
 pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 
+/// Worker-advertised support for Dynamo's vLLM-compatible
+/// `POST /inference/v1/generate` adapter.
+///
+/// This is deliberately a runtime capability rather than an inference from
+/// `ModelType::Chat` / `ModelType::Completions`: other backends expose those
+/// surfaces without implementing vLLM's Generate contract.
+pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -288,6 +296,13 @@ impl dynamo_kv_router::WorkerConfigLike for ModelRuntimeConfig {
 
     fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
+    }
+
+    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
+        self.runtime_data
+            .get("native_offloading_capacity")?
+            .get("total_tokens")?
+            .as_u64()
     }
 
     fn taints(&self) -> &HashSet<String> {
@@ -636,6 +651,21 @@ mod tests {
         assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
         let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+    }
+
+    #[test]
+    fn native_offloading_capacity_is_backend_neutral() {
+        use dynamo_kv_router::WorkerConfigLike;
+
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(
+                "native_offloading_capacity",
+                serde_json::json!({"total_tokens": 300}),
+            )
+            .unwrap();
+
+        assert_eq!(config.native_offloading_capacity_tokens(), Some(300));
     }
 
     #[test]

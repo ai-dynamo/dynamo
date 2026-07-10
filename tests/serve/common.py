@@ -3,6 +3,7 @@
 
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
 
+import collections
 import concurrent.futures
 import dataclasses
 import logging
@@ -36,6 +37,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 DEFAULT_TIMEOUT = 10
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
+logger = logging.getLogger(__name__)
 
 
 def _tail_logs(content: str, *, lines: int = 80) -> str:
@@ -166,6 +168,7 @@ class _PreparedDeployment:
     frontend_port: int
     system_ports: list
     disagg_bootstrap_port: Optional[int]
+    extra_allocated_ports: list[int]
 
 
 def _prepare_deployment(
@@ -216,6 +219,19 @@ def _prepare_deployment(
                 str(gib_to_bytes),
             )
 
+    # Stagger engine startup under xdist to avoid vLLM profiling race
+    # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker_id.startswith("gw"):
+        worker_num = int(worker_id.removeprefix("gw"))
+        if worker_num > 0:
+            stagger_s = worker_num * 15
+            logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
+            time.sleep(stagger_s)
+
+    # Track additional ports allocated for multi-GPU tests (for cleanup in finally)
+    extra_allocated_ports: list[int] = []
+
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
         dynamic_system_ports = [int(p) for p in ports.system_ports]
@@ -250,8 +266,16 @@ def _prepare_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
+            # For multi-worker scripts (xpu_2 router tests), allocate separate
+            # KV event ports for each worker to avoid ZMQ bind collisions.
+            if len(dynamic_system_ports) >= 2:
+                kv_port1 = ports.kv_event_port
+                kv_port2 = allocate_port(ports.kv_event_port + 1)
+                extra_allocated_ports.append(kv_port2)
+                merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
+                merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
 
-        # Per-worker NIXL side-channel ports, indexed to match DYN_SYSTEM_PORT{idx}.
+        # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
@@ -287,6 +311,7 @@ def _prepare_deployment(
         frontend_port=dynamic_frontend_port,
         system_ports=dynamic_system_ports,
         disagg_bootstrap_port=disagg_bootstrap_port,
+        extra_allocated_ports=extra_allocated_ports,
     )
 
 
@@ -403,28 +428,36 @@ def run_prefill_drain_deployment(
 
             # Functional floor: some burst requests served. Requests routed
             # after the prefill unregister legitimately fail, so this is a
-            # floor, not "all succeed".
-            ok = 0
+            # floor, not "all succeed". Tally outcomes by status code (or
+            # exception type) so a 0-OK failure shows how the burst died.
+            outcomes: collections.Counter = collections.Counter()
             try:
                 for fut in concurrent.futures.as_completed(futures, timeout=200):
                     try:
-                        if fut.result().status_code == 200:
-                            ok += 1
-                    except Exception:
-                        pass
+                        outcomes[fut.result().status_code] += 1
+                    except Exception as e:
+                        outcomes[type(e).__name__] += 1
             except concurrent.futures.TimeoutError:
                 logger.warning("burst tally timed out waiting for stragglers")
+            ok = outcomes[200]
             logger.info(
-                "burst: %d/%d returned 200 across prefill drain (drain loop engaged=%s)",
+                "burst: %d/%d returned 200 across prefill drain "
+                "(drain loop engaged=%s, outcomes=%s)",
                 ok,
                 burst_size,
                 drain_engaged,
+                dict(outcomes),
             )
-            assert ok >= 1, "no burst request completed across the prefill drain"
+            assert ok >= 1, (
+                "no burst request completed across the prefill drain "
+                f"(outcomes: {dict(outcomes)})"
+            )
             pool.shutdown(wait=False)
     finally:
         if prep.disagg_bootstrap_port is not None:
             deallocate_port(prep.disagg_bootstrap_port)
+        for p in prep.extra_allocated_ports:
+            deallocate_port(p)
 
 
 def run_serve_deployment(
@@ -457,6 +490,7 @@ def run_serve_deployment(
     dynamic_frontend_port = prep.frontend_port
     dynamic_system_ports = prep.system_ports
     disagg_bootstrap_port = prep.disagg_bootstrap_port
+    extra_allocated_ports = prep.extra_allocated_ports
 
     try:
         with EngineProcess.from_script(
@@ -573,6 +607,8 @@ def run_serve_deployment(
     finally:
         if disagg_bootstrap_port is not None:
             deallocate_port(disagg_bootstrap_port)
+        for p in extra_allocated_ports:
+            deallocate_port(p)
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

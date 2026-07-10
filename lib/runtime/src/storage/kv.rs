@@ -109,6 +109,7 @@ impl KeyValue {
 pub enum WatchEvent {
     Put(KeyValue),
     Delete(Key),
+    Resync(HashMap<Key, bytes::Bytes>),
 }
 
 #[async_trait]
@@ -273,10 +274,6 @@ impl Manager {
         Manager(Arc::new(s))
     }
 
-    pub fn is_memory(&self) -> bool {
-        matches!(self.0.as_ref(), KeyValueStoreEnum::Memory(_))
-    }
-
     pub async fn get_or_create_bucket(
         &self,
         bucket_name: &str,
@@ -362,8 +359,26 @@ impl Manager {
                         None => break,
                     }
                 };
-                if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
-                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
+                match event {
+                    WatchEvent::Resync(_) => {
+                        // Resync is an authoritative snapshot; do not drop it on a
+                        // timeout like incremental events. If the receiver closes,
+                        // the watch has no consumer and can stop.
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            result = tx.send(event) => {
+                                if let Err(err) = result {
+                                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding resync to channel");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    event => {
+                        if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
+                            tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
+                        }
+                    }
                 }
             }
 

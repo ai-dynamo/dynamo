@@ -80,6 +80,7 @@ ignore:
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
+  - 'scripts/validate_skills.py'
 
 ci: &ci
   - '.github/workflows/**'
@@ -134,12 +135,17 @@ operator:
   - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
+  # The operator check owns the real Go/Python DGD override contract test.
+  - 'components/src/dynamo/profiler/utils/dgd_override.py'
+  - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
-  - *ci
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
+  - 'components/src/dynamo/common/snapshot/**'
+  - 'deploy/operator/internal/checkpoint/**'
+  - 'tests/deploy/test_dynamocheckpoint.py'
 
 power_agent:
   - *ci

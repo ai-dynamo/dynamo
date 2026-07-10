@@ -39,6 +39,13 @@ global:
     # inject schedulerName and queue labels into pod templates.
     enabled: false
 
+  volcano-scheduler:
+    # -- EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets.
+    # Set to true when Volcano is available in the cluster and Grove is configured
+    # with Volcano scheduler support. The operator uses this to inject schedulerName
+    # and map nvidia.com/volcano-queue to Grove's Volcano queue annotation.
+    enabled: false
+
   grove:
     # -- Whether this chart should install the bundled Grove subchart.
     # When true, deploys the Grove operator cluster-wide. Integration is automatically enabled.
@@ -64,10 +71,10 @@ dynamo-operator:
   # Environment variables to pass to operator Deployment.
   env: []
 
-  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port"
+  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: `nats://hostname:4222`
   natsAddr: ""
 
-  # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port"
+  # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379`
   etcdAddr: ""
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).

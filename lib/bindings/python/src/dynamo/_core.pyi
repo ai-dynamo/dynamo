@@ -346,6 +346,7 @@ def compute_block_hash_for_seq(
     block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     lora_name: Optional[str] = None,
     is_eagle: Optional[bool] = None,
+    cache_namespace: Optional[str] = None,
 ) -> List[int]:
     """
     Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
@@ -685,9 +686,9 @@ class SelectionService:
         ...
 
     def list_workers(
-        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:
-        """List catalog records, optionally filtered by model and tenant."""
+        """List catalog records, optionally filtered by model and routing group."""
         ...
 
     def ready(self) -> JsonLike:
@@ -725,7 +726,7 @@ class SelectionService:
         ...
 
     def loads(
-        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:
         """Current per-model active load (pending counts + per-worker potential loads)."""
         ...
@@ -1097,6 +1098,7 @@ class KvEventPublisher:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         is_eagle: Optional[bool] = None,
+        cache_salt: Optional[str] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -1572,7 +1574,7 @@ class RouterConfig:
             active_decode_blocks_threshold: Threshold percentage (0.0-1.0) for decode blocks busy detection
             active_prefill_tokens_threshold: Literal token count threshold for prefill busy detection
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
-            enforce_disagg: Strictly enforce disaggregated mode, failing requests if no prefill workers are available
+            enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
         """
         ...
 
@@ -2845,6 +2847,7 @@ class KvRouter:
         routing_constraints: Optional[RoutingConstraints] = None,
         strict_priority: int = 0,
         policy_class: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2862,6 +2865,7 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
+            cache_namespace: Optional cache namespace used in block hash computation.
             policy_class: Requested policy family, or an exact explicit class.
                           Missing, unknown, and ordinary physical-class names use the
                           configured default family before cache-bucket resolution.
@@ -2879,6 +2883,7 @@ class KvRouter:
         token_ids: List[int],
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
+        cache_namespace: Optional[str] = None,
     ) -> List[Dict[str, int]]:
         """
         Get potential prefill and decode loads for all workers.
@@ -2911,6 +2916,7 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         include_shared: bool = True,
+        cache_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Get per-worker KV overlap by storage tier.
@@ -3276,6 +3282,8 @@ class backend:
             structural_tag_scope: str = ...,
             structural_tag_schema: str = ...,
             route_to_encoder: bool = ...,
+            media_decoder: Optional[MediaDecoder] = None,
+            media_fetcher: Optional[MediaFetcher] = None,
         ) -> None: ...
 
     class Worker:

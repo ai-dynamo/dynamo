@@ -107,6 +107,11 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        # The image bakes CARGO_HOME=/usr/local/cargo owned by uid 1000, so cargo
+        # cannot write registry/{index,cache} as the uid-1001 runner and dies with
+        # "Permission denied (os error 13)" while downloading crates. Redirect
+        # CARGO_HOME to the runner-writable workspace so cargo owns its cache.
+        CARGO_HOME: /__w/dynamo/dynamo/.cargo
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_rust_dynamo
     timeout-minutes: 30
     steps:

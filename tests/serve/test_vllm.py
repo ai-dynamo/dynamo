@@ -35,6 +35,7 @@ from tests.utils.payload_builder import (
     elastic_ep_scale_payload,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
     router_cached_tokens_chat_payload,
@@ -176,6 +177,7 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            guided_decoding_chat_payload_default(),
         ],
     ),
     "elastic_ep_unified": VLLMConfig(
@@ -833,6 +835,13 @@ def test_serve_deployment(
 # gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
 # the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
 # vLLM has no is_quiescent() override, so the drain waits the full budget.
+#
+# Timing: the launch script's wait_any_exit tears down the frontend and decode
+# worker as soon as the drained prefill worker exits, so the burst's `ok >= 1`
+# floor must be met inside SIGTERM + drain budget + cleanup. The 30s budget
+# (matching the sglang/trtllm variants) and the small per-request decode at the
+# call site keep that window winnable on L4-class CI GPUs; a 3s budget with
+# 256-token decodes lost the race after the vLLM 0.24.0 bump (#11076).
 # ---------------------------------------------------------------------------
 _PREFILL_DRAIN_CONFIG = VLLMConfig(
     name="prefill_drain_unified",
@@ -845,8 +854,10 @@ _PREFILL_DRAIN_CONFIG = VLLMConfig(
     health_check_workers=True,
     env={
         "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
-        "DYN_PREFILL_DRAIN_TIMEOUT_S": "3",
-        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "30",
+        "DYN_PREFILL_DRAIN_TIMEOUT_S": "30",
+        # Must exceed the drain budget by CLEANUP_RESERVE_S (5s) or the Rust
+        # Worker caps the effective drain at timeout - reserve.
+        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "60",
         # The unified decode worker disables its health canary by design
         # (NixlConnector has no local-only bypass), so its system /health is
         # gated on starting status, which defaults to NotReady. Mark it
@@ -883,7 +894,12 @@ def test_prefill_drain_unified(
     config = dataclasses.replace(
         _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    run_prefill_drain_deployment(config, request, ports=dynamo_dynamic_ports)
+    # Short decodes so first completions land well inside the drain window on
+    # slow CI GPUs; the full-size burst still keeps 96 requests in flight when
+    # the SIGTERM lands.
+    run_prefill_drain_deployment(
+        config, request, ports=dynamo_dynamic_ports, burst_max_tokens=32
+    )
 
 
 # LoRA Test Directory

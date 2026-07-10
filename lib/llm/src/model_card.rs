@@ -42,6 +42,41 @@ fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
         .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
 }
 
+fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
+    let cached_tokens = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+        .with_label_values(&[model]);
+    let uncached_tokens =
+        dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+            .with_label_values(&[model]);
+
+    Arc::new(move |usage| {
+        cached_tokens.inc_by(usage.cached_tokens as u64);
+        uncached_tokens.inc_by(usage.uncached_tokens as u64);
+    })
+}
+
+fn instrumented_tokenizer_cache(
+    raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
+    special_tokens: Vec<String>,
+    cache_bytes: usize,
+    cache_extend: bool,
+    model: &str,
+) -> Arc<dyn crate::tokenizers::traits::Tokenizer> {
+    Arc::new(
+        crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
+            .with_extend(cache_extend)
+            .with_observer(
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL.inc();
+                }),
+                Arc::new(|| {
+                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL.inc();
+                }),
+            )
+            .with_token_observer(tokenizer_cache_token_observer(model)),
+    )
+}
+
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
@@ -60,6 +95,47 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// serde `deserialize_with` that maps an explicitly-present value -- *including
+/// an explicit JSON `null`* -- to `Some`. Paired with `#[serde(default)]` (which
+/// supplies `None` only when the key is absent), this distinguishes "field
+/// missing" from "field present but null/invalid". A plain `Option<Value>` would
+/// collapse an explicit `null` into `None`, letting a malformed present
+/// `max_position_embeddings` silently fall through to the next source instead of
+/// surfacing the documented deserialization error.
+fn deserialize_present_json_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// Minimal projection of `config.json`, holding only the fields consulted when
+/// deriving the architectural context length. Every other entry is skipped by
+/// serde. This matters because some HF configs (e.g. Nemotron-H) serialize
+/// fields such as `time_step_limit` with non-finite literals (`Infinity`,
+/// `NaN`) that are valid JSON5 but not strict JSON; deserializing the whole
+/// document into `serde_json::Value` would reject them, whereas projecting into
+/// this struct via the JSON5 parser never materializes those unread fields.
+///
+/// The two consulted fields are captured as raw `serde_json::Value` (rather than
+/// `u32`) so the original per-field error messages are preserved when a value is
+/// present but not a valid integer. `deserialize_present_json_value` keeps an
+/// explicit `null` distinguishable from an absent key (see its docs).
+#[derive(Deserialize)]
+struct ArchMaxContextConfig {
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    max_position_embeddings: Option<serde_json::Value>,
+    text_config: Option<ArchMaxContextTextConfig>,
+}
+
+#[derive(Deserialize)]
+struct ArchMaxContextTextConfig {
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    max_position_embeddings: Option<serde_json::Value>,
 }
 
 /// Resolve the static architectural context limit from local HF metadata.
@@ -93,20 +169,24 @@ fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Resu
     let Some(config_json) = config_json else {
         return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
     };
-    let config: serde_json::Value = serde_json::from_str(&config_json)
+    // Parse with the JSON5 parser (a lenient superset of JSON) into a minimal
+    // projection, mirroring `HFConfig::from_json_file`. This tolerates non-finite
+    // literals (`Infinity`, `NaN`) that HF configs may emit in fields we don't
+    // read, which strict `serde_json` would reject.
+    let config: ArchMaxContextConfig = json_five::from_str(&config_json)
         .with_context(|| format!("Failed to parse JSON from file: {}", config_path.display()))?;
 
-    let context_length = match config.get("max_position_embeddings") {
+    let context_length = match config.max_position_embeddings {
         Some(value) => Some(
-            serde_json::from_value(value.clone())
+            serde_json::from_value(value)
                 .context("Failed to deserialize max_position_embeddings")?,
         ),
         None => match config
-            .get("text_config")
-            .and_then(|text_config| text_config.get("max_position_embeddings"))
+            .text_config
+            .and_then(|text_config| text_config.max_position_embeddings)
         {
             Some(value) => Some(
-                serde_json::from_value(value.clone())
+                serde_json::from_value(value)
                     .context("Failed to deserialize text_config.max_position_embeddings")?,
             ),
             None => tokenizer_context_length(),
@@ -1130,19 +1210,12 @@ impl ModelDeploymentCard {
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, specials, cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            ),
+                    instrumented_tokenizer_cache(
+                        raw,
+                        specials,
+                        cache_bytes,
+                        cache_extend,
+                        self.name(),
                     )
                 } else {
                     raw
@@ -1160,27 +1233,21 @@ impl ModelDeploymentCard {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
 
+                let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
-                    // Empty specials -> L1 always misses; wrapper is a thin passthrough.
-                    // Special-token extraction for tiktoken is out of scope for v1.
                     tracing::info!(
                         cache_bytes,
-                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 will not hit until tiktoken special-token extraction is added)",
+                        cache_extend,
+                        boundaries = specials.len(),
+                        "wrapping tiktoken tokenizer in L1 prefix cache",
                     );
-                    Arc::new(
-                        crate::tokenizers::CachedTokenizer::new(raw, Vec::new(), cache_bytes)
-                            .with_extend(cache_extend)
-                            .with_observer(
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_HITS_TOTAL
-                                        .inc();
-                                }),
-                                Arc::new(|| {
-                                    dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL
-                                        .inc();
-                                }),
-                            ),
+                    instrumented_tokenizer_cache(
+                        raw,
+                        specials,
+                        cache_bytes,
+                        cache_extend,
+                        self.name(),
                     )
                 } else {
                     raw
@@ -2084,6 +2151,50 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn tokenizer_cache_token_observer_records_per_model_totals() {
+        let model_a = "token-observer-test-model-a";
+        let model_b = "token-observer-test-model-b";
+        let cached_a = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+            .with_label_values(&[model_a]);
+        let uncached_a =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                .with_label_values(&[model_a]);
+        let cached_b = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
+            .with_label_values(&[model_b]);
+        let uncached_b =
+            dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL
+                .with_label_values(&[model_b]);
+
+        let before_a = (cached_a.get(), uncached_a.get());
+        let before_b = (cached_b.get(), uncached_b.get());
+
+        super::tokenizer_cache_token_observer(model_a)(crate::tokenizers::CacheTokenUsage {
+            cached_tokens: 7,
+            uncached_tokens: 5,
+        });
+
+        assert_eq!(
+            (cached_a.get(), uncached_a.get()),
+            (before_a.0 + 7, before_a.1 + 5)
+        );
+        assert_eq!((cached_b.get(), uncached_b.get()), before_b);
+
+        super::tokenizer_cache_token_observer(model_b)(crate::tokenizers::CacheTokenUsage {
+            cached_tokens: 3,
+            uncached_tokens: 11,
+        });
+
+        assert_eq!(
+            (cached_a.get(), uncached_a.get()),
+            (before_a.0 + 7, before_a.1 + 5)
+        );
+        assert_eq!(
+            (cached_b.get(), uncached_b.get()),
+            (before_b.0 + 3, before_b.1 + 11)
+        );
+    }
+
+    #[test]
     fn tokenizer_cache_is_enabled_by_default_and_disabled_only_by_zero() {
         assert!(super::tokenizer_cache_enabled(None));
         assert!(super::tokenizer_cache_enabled(Some("1")));
@@ -2707,6 +2818,50 @@ mod ownership_tests {
             err.to_string()
                 .contains("Failed to deserialize text_config.max_position_embeddings"),
             "{err:?}"
+        );
+
+        // An explicit null is a present-but-malformed value: it must error, not
+        // silently fall through to text_config/tokenizer (regression guard for
+        // the Option<Value> projection collapsing null into None).
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": null}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize max_position_embeddings"),
+            "{err:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": null}}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
+            "{err:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn architectural_context_tolerates_non_finite_literals() -> anyhow::Result<()> {
+        // Some HF configs (e.g. Nemotron-H) serialize fields such as
+        // `time_step_limit` with the bare literal `Infinity`, which is valid
+        // JSON5 but not strict JSON. Deriving max_position_embeddings must not
+        // choke on such literals in fields we never read.
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": 262144, "time_step_limit": [0.0, Infinity]}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(262144)
         );
 
         Ok(())
