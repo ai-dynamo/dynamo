@@ -13,6 +13,7 @@ use dynamo_runtime::{
     component::Component, discovery::EventTransportKind, prelude::*,
     transports::event_plane::EventSubscriber,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Start a simplified background task for event consumption using the event plane.
 ///
@@ -31,9 +32,8 @@ async fn start_kv_router_background_event_plane(
     workers_with_configs: RuntimeConfigWatch,
     model: String,
     worker_type: &'static str,
+    cancellation_token: CancellationToken,
 ) -> Result<()> {
-    let cancellation_token = component.drt().primary_token();
-
     // Subscribe to KV events BEFORE spawning the discovery/recovery loop.
     // This ensures no events are lost between the initial dump fetch and the
     // subscription becoming active — the tree state at fetch time is guaranteed
@@ -55,6 +55,7 @@ async fn start_kv_router_background_event_plane(
         workers_with_configs,
         model,
         worker_type,
+        cancellation_token.child_token(),
     )
     .await?;
     let kv_event_subject = format!(
@@ -130,6 +131,7 @@ pub async fn start_subscriber(
     workers_with_configs: RuntimeConfigWatch,
     model: String,
     worker_type: &'static str,
+    cancellation_token: CancellationToken,
 ) -> Result<()> {
     let transport_kind = component.drt().default_event_transport_kind();
 
@@ -154,6 +156,7 @@ pub async fn start_subscriber(
             consumer_id,
             indexer,
             kv_router_config,
+            cancellation_token,
         )
         .await
     } else {
@@ -177,6 +180,7 @@ pub async fn start_subscriber(
             workers_with_configs,
             model,
             worker_type,
+            cancellation_token,
         )
         .await
     }

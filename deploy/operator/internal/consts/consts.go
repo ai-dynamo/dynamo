@@ -42,6 +42,11 @@ const (
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
 
+	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
+	// PodCliqueSet update strategy while the long-term DGD API is settled.
+	// Supported values match Grove exactly: "RollingRecreate" and "OnDelete".
+	KubeAnnotationGroveUpdateStrategy = "nvidia.com/grove-update-strategy"
+
 	// KubeAnnotationIstioSidecarInject is the standard Istio annotation that
 	// controls whether the mutating webhook injects an istio-proxy sidecar into
 	// a pod. Setting it to "false" opts the pod out of sidecar injection even
@@ -191,6 +196,11 @@ const (
 	KubeLabelKaiSchedulerQueue      = "kai.scheduler/queue"            // Label injected into pods for kai-scheduler
 	KaiSchedulerName                = "kai-scheduler"                  // Scheduler name for kai-scheduler
 	DefaultKaiSchedulerQueue        = "dynamo"                         // Default queue name when none specified
+
+	// Volcano scheduler related constants
+	KubeAnnotationVolcanoQueue  = "nvidia.com/volcano-queue" // User-provided annotation to specify Volcano queue name
+	GroveAnnotationVolcanoQueue = "scheduling.grove.io/volcano-queue"
+	VolcanoSchedulerName        = "volcano"
 
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"

@@ -7,15 +7,13 @@ import inspect
 import logging
 import math
 import os
-
-# MM kwargs NIXL transfer (frontend → backend pre-rendered path)
-import pickle
 import struct
 import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -27,6 +25,7 @@ from typing import (
     NoReturn,
     Optional,
     TypeVar,
+    cast,
 )
 
 import torch
@@ -34,7 +33,6 @@ from vllm import PoolingParams
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import (
@@ -50,21 +48,11 @@ from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
-from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.embedding_transfer import (
     LocalEmbeddingReceiver,
     NixlReadEmbeddingReceiver,
     NixlWriteEmbeddingReceiver,
 )
-from dynamo.common.multimodal.image_loader import ImageLoader
-from dynamo.common.multimodal.mm_kwargs_transfer import (
-    MmKwargsNixlReceiver,
-    MmKwargsReceiver,
-    MmKwargsShmReceiver,
-    MmKwargsShmTransferMetadata,
-    MmKwargsTransferMetadata,
-)
-from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.rl import (
     RLAdminValidationError,
     RLRouteRegistry,
@@ -98,24 +86,11 @@ from dynamo.vllm.kv_connector_protocols import (
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
-from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
-from .multimodal_utils.model import (
-    ModelFamily,
-    construct_qwen_decode_mm_data,
-    resolve_model_family,
-)
-from .multimodal_utils.models.qwen import (
-    build_qwen_embedding_params,
-    load_qwen_grid_params,
-)
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
-
-# Multimodal data dictionary keys
-IMAGE_URL_KEY: Final = "image_url"
-VIDEO_URL_KEY: Final = "video_url"
-AUDIO_URL_KEY: Final = "audio_url"
-URL_VARIANT_KEY: Final = "Url"
-DECODED_VARIANT_KEY: Final = "Decoded"
+from .multimodal_utils.request_processor import (
+    MissingMultimodalHandoffError,
+    VllmMultimodalRequestProcessor,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -373,123 +348,6 @@ class VllmEnginePauseController:
         self._generation_paused = False
 
 
-def _pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
-    """Pad the frontend's canonical 16-char hex hashes to vLLM's 64-char
-    BlockStored form. The router's parse_mm_hash_from_extra_key keys on the
-    64-char length to distinguish MM hashes from other extra_keys, so vLLM
-    must publish 64 chars. Already-64-char values pass through unchanged.
-    """
-    return [
-        h.ljust(64, "0") if isinstance(h, str) and len(h) < 64 else h for h in mm_hashes
-    ]
-
-
-def _compute_mm_uuids(
-    multi_modal_data: Dict[str, Any] | None,
-) -> Dict[str, list[str]] | None:
-    """
-    Compute multi_modal_uuids from multi_modal_data.
-
-    Each image gets a blake3 hex digest as its UUID (computed by
-    compute_mm_uuids_from_images over a fixed-length header + pixel
-    preimage), ensuring consistent hashing across the MM Router, vLLM
-    handler, and Rust KV publisher.
-    """
-    if not multi_modal_data or "image" not in multi_modal_data:
-        return None
-    images = multi_modal_data["image"]
-    # [gluo FIXME] Dict being returned when the mm data has been processed,
-    # in this case, we skip computing mm_uuids for now until we better understand
-    # what info should be hash on.
-    if isinstance(images, dict):
-        return None
-    if not isinstance(images, list):
-        images = [images]
-    if not images:
-        return None
-    uuids = compute_mm_uuids_from_images(images)
-    return {"image": uuids}
-
-
-def _normalize_forwarded_mm_modality(
-    modality: str,
-    use_unified_vision_chunk: bool,
-) -> str:
-    if use_unified_vision_chunk and modality == "image":
-        return "vision_chunk"
-    return modality
-
-
-def _build_forwarded_mm_uuids(
-    extra_args: Dict[str, Any],
-    use_unified_vision_chunk: bool,
-) -> dict[str, Any] | None:
-    grouped_hashes = extra_args.get("mm_hashes_by_modality")
-    if isinstance(grouped_hashes, dict):
-        mm_uuids: dict[str, Any] = {}
-        for modality, hashes in grouped_hashes.items():
-            if not hashes:
-                continue
-            modality_key = _normalize_forwarded_mm_modality(
-                str(modality),
-                use_unified_vision_chunk,
-            )
-            mm_uuids.setdefault(modality_key, []).extend(
-                _pad_mm_hashes_to_64(list(hashes))
-            )
-        if mm_uuids:
-            return mm_uuids
-
-    forwarded_hashes = extra_args.get("mm_hashes")
-    if forwarded_hashes:
-        modality_key = _normalize_forwarded_mm_modality(
-            "image",
-            use_unified_vision_chunk,
-        )
-        return {modality_key: _pad_mm_hashes_to_64(list(forwarded_hashes))}
-
-    return None
-
-
-def _get_modality_extra_values(
-    extra_args: Dict[str, Any],
-    grouped_key: str,
-    flat_key: str,
-    metadata_modality: str,
-    backend_modality: str,
-) -> Any | None:
-    grouped_values = extra_args.get(grouped_key)
-    if isinstance(grouped_values, dict):
-        for key in (metadata_modality, backend_modality):
-            values = grouped_values.get(key)
-            if values:
-                return values
-    if metadata_modality != "image":
-        return None
-    return extra_args.get(flat_key)
-
-
-def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
-    if isinstance(value, dict):
-        offset = int(value["offset"])
-        length = int(value["length"])
-        is_embed_raw = value.get("is_embed")
-        is_embed = (
-            None
-            if is_embed_raw is None
-            else torch.as_tensor(is_embed_raw, dtype=torch.bool)
-        )
-        if is_embed is not None and is_embed.numel() != length:
-            raise ValueError(
-                "forwarded mm placeholder is_embed length "
-                f"{is_embed.numel()} does not match placeholder length {length}"
-            )
-        return PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
-
-    offset, length = value
-    return PlaceholderRange(offset=offset, length=length)
-
-
 # Helpers for nvext response fields requested through `nvext.extra_fields`.
 
 
@@ -606,13 +464,25 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
+# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
+_DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
+
+
 def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
+    """Pass an internally tagged cache salt to vLLM.
+
+    vLLM publishes cache salts as otherwise-untyped strings in ``extra_keys``
+    alongside LoRA and multimodal metadata. The tag lets Dynamo recover the
+    namespace without guessing from the user-controlled value. It is removed
+    again by the Rust KV-event decoder, so Dynamo's public namespace is
+    unchanged.
+    """
     if not isinstance(prompt, dict):
         return
     for source in _iter_nvext_sources(request):
         cache_salt = source.get("cache_salt")
-        if cache_salt is not None:
-            prompt["cache_salt"] = cache_salt
+        if cache_salt:
+            prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
             return
 
 
@@ -626,6 +496,71 @@ def _prompt_token_ids_for_engine_data(
         else request.get("token_ids")
     )
     return list(prompt_token_ids or [])
+
+
+def _prompt_token_count_for_validation(
+    request: Dict[str, Any],
+    embedding_sequence_length: int | None = None,
+    prompt_token_count: int | None = None,
+) -> int | None:
+    """Return the prompt length used for max-model-length validation."""
+    if prompt_token_count is not None:
+        return prompt_token_count
+    if embedding_sequence_length is not None:
+        return embedding_sequence_length
+
+    extra_args = request.get("extra_args") or {}
+    if isinstance(extra_args, dict):
+        expanded_token_ids = extra_args.get("expanded_token_ids")
+        if expanded_token_ids:
+            return len(expanded_token_ids)
+    if "token_ids" in request:
+        return len(request.get("token_ids") or [])
+    return None
+
+
+def _explicit_max_tokens_budget_error(
+    request: Dict[str, Any],
+    model_max_len: int | None,
+    embedding_sequence_length: int | None = None,
+    prompt_token_count: int | None = None,
+) -> str | None:
+    if model_max_len is None or model_max_len <= 0:
+        return None
+
+    stop_conditions = request.get("stop_conditions") or {}
+    max_tokens = stop_conditions.get("max_tokens")
+    if max_tokens is None:
+        max_tokens = request.get("max_tokens")
+    if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
+        return None
+
+    prompt_tokens = _prompt_token_count_for_validation(
+        request,
+        embedding_sequence_length=embedding_sequence_length,
+        prompt_token_count=prompt_token_count,
+    )
+    if prompt_tokens is None:
+        return None
+
+    requested_tokens = prompt_tokens + max_tokens
+    if requested_tokens <= model_max_len:
+        return None
+
+    return (
+        f"This model's maximum context length is {model_max_len} tokens. "
+        f"However, you requested {requested_tokens} tokens "
+        f"({prompt_tokens} in the messages, {max_tokens} in the completion). "
+        "Please reduce the length of the messages or completion."
+    )
+
+
+def _prompt_token_count_for_text_mode(
+    input_param_manager: InputParamManager, input_data: Any
+) -> int:
+    if isinstance(input_data, list):
+        return len(input_data)
+    return len(input_param_manager.tokenizer.encode(input_data))
 
 
 def _flatten_logprobs(
@@ -893,8 +828,7 @@ def build_sampling_params(
 
     # If max_tokens wasn't provided (None or missing), compute a dynamic default
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
-    token_ids = request.get("token_ids", [])
-    input_length = len(token_ids)
+    input_length = _prompt_token_count_for_validation(request) or 0
     if model_max_len is not None and provided_max_tokens is None:
         # Ensure at least 1 token generation by default when possible
         dynamic_default = max(1, model_max_len - input_length)
@@ -1032,7 +966,7 @@ def _engine_generate_reasoning_support(
 
 
 def _request_reasoning_metadata(
-    request: dict[str, Any],
+    request: Mapping[str, Any],
 ) -> tuple[bool | None, dict[str, Any] | None]:
     reasoning_ended = request.get("reasoning_ended")
     reasoning_parser_kwargs = request.get("reasoning_parser_kwargs")
@@ -1083,10 +1017,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
 
     _benchmark_results: Optional[dict] = None
-    # Class-level default so test doubles that bypass __init__ via
-    # __new__ still have a sane value; __init__ overrides this from
-    # hf_config.use_unified_vision_chunk on real instances.
-    _use_unified_vision_chunk: bool = False
     _scale_ep_in_progress: bool = False
 
     def __init__(
@@ -1115,7 +1045,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.model_config = model_config
-        self.enable_multimodal = enable_multimodal
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
@@ -1125,16 +1054,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._paused: bool = False
         self._weight_version: str = "initial"
 
-        self.image_loader = ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
-        )
-        self.audio_loader = AudioLoader(
-            enable_frontend_decoding=enable_frontend_decoding
-        )
-        self.video_loader = VideoLoader(
-            enable_frontend_decoding=enable_frontend_decoding
-        )
-        self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
+        embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -1146,21 +1066,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # of calling engine_client.abort() during the unsafe pre-first-token
         # NIXL-KV-transfer window.
         self._deferred_aborts: dict[str, _DeferredAbort] = {}
-        self._mm_kwargs_receiver: MmKwargsNixlReceiver | None = None
 
-        # Some models (Kimi-K2.5) declare their image modality as
-        # "vision_chunk" rather than "image". vLLM's openai entrypoint
-        # renames the dict key + wraps images via the chat_utils tracker,
-        # but dynamo bypasses chat_utils and builds `multi_modal_data`
-        # directly — so we mirror the rename + wrap here. The flag lives
-        # on the model's HF config; defaults to False for all other
-        # families.
-        self._use_unified_vision_chunk = bool(
-            getattr(
-                self.engine_client.vllm_config.model_config.hf_config,
-                "use_unified_vision_chunk",
-                False,
-            )
+        self._multimodal_request_processor = VllmMultimodalRequestProcessor(
+            model=config.model,
+            engine_client=engine,
+            enable_multimodal=enable_multimodal,
+            enable_frontend_decoding=enable_frontend_decoding,
+            embedding_loader=embedding_loader,
+            trust_remote_code=config.engine_args.trust_remote_code,
         )
 
         # Serialise concurrent scale_elastic_ep calls.  vLLM's elastic-EP
@@ -2520,345 +2433,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
         return prompt, sequence_length, embeddings_tensor
 
-    async def _try_receive_mm_kwargs(
-        self, request: Dict[str, Any]
-    ) -> Dict[str, Any] | None:
-        """Try to receive pre-processed mm_kwargs from the frontend (SHM or NIXL).
-
-        If ``extra_args`` contains ``mm_kwargs_shm`` or ``mm_kwargs_nixl``, fetch
-        the tensors via the corresponding transport and construct a pre-rendered
-        MultiModalInput dict the vLLM engine can consume directly, skipping the
-        HF processor. Returns None if no transfer metadata is present or the
-        receive fails (caller falls back to normal processing).
-        """
-        extra_args = request.get("extra_args") or {}
-        logger.debug(
-            "[mm-routing] _try_receive_mm_kwargs: extra_args keys=%s",
-            list(extra_args.keys()),
-        )
-
-        # SHM path first (same-node, ~1.5ms). Only works when frontend and
-        # backend share /dev/shm; if the read fails (cross-node), fall through
-        # to normal processing.
-        shm_meta_raw = extra_args.get("mm_kwargs_shm")
-        if shm_meta_raw:
-            shm_meta = MmKwargsShmTransferMetadata.model_validate(shm_meta_raw)
-            return await self._receive_mm_kwargs(
-                extra_args, "shm", MmKwargsShmReceiver(), shm_meta
-            )
-
-        nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
-        if nixl_meta_raw:
-            nixl_meta = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
-            if self._mm_kwargs_receiver is None:
-                self._mm_kwargs_receiver = MmKwargsNixlReceiver()
-            return await self._receive_mm_kwargs(
-                extra_args, "nixl", self._mm_kwargs_receiver, nixl_meta
-            )
-
-        logger.debug("[mm-routing] No mm_kwargs transfer metadata in extra_args")
-        return None
-
-    async def _receive_mm_kwargs(
-        self,
-        extra_args: Dict[str, Any],
-        transport: str,
-        receiver: MmKwargsReceiver,
-        metadata: Any,
-    ) -> Dict[str, Any] | None:
-        """Shared NIXL/SHM receive path.
-
-        Calls ``receiver.receive(metadata)`` to fetch pickled
-        ``MultiModalKwargsItem`` bytes, deserializes them, builds an
-        ``EngineInput`` dict, and injects into the engine's MM processor
-        cache. Returns None on any validation or transport failure
-        (caller falls back).
-        """
-        color = "magenta" if transport == "nixl" else "cyan"
-        rng = _nvtx.start_range(f"mm_backend:{transport}_receive", color=color)
-        try:
-            backend_modality = _normalize_forwarded_mm_modality(
-                metadata.modality,
-                self._use_unified_vision_chunk,
-            )
-            mm_hashes = (
-                _get_modality_extra_values(
-                    extra_args,
-                    "mm_hashes_by_modality",
-                    "mm_hashes",
-                    metadata.modality,
-                    backend_modality,
-                )
-                or metadata.mm_hashes
-            )
-            mm_placeholders = _get_modality_extra_values(
-                extra_args,
-                "mm_placeholders_by_modality",
-                "mm_placeholders",
-                metadata.modality,
-                backend_modality,
-            )
-            if not mm_hashes or not mm_placeholders:
-                logger.warning(
-                    "[mm-routing] %s present but mm_hashes/mm_placeholders missing",
-                    transport,
-                )
-                return None
-            mm_hashes = _pad_mm_hashes_to_64(mm_hashes)
-
-            # Receive pickled kwargs items (NVTX wrap is owned by the receiver).
-            results = await receiver.receive(metadata)
-
-            pickled_items = results.get("__pickled_kwargs_item__")
-            if not pickled_items:
-                logger.warning(
-                    "[mm-routing] %s: no pickled kwargs items received", transport
-                )
-                return None
-
-            # Unpickle and validate each item.
-            kwargs_items: list[MultiModalKwargsItem] = []
-            with _nvtx.annotate(f"mm_backend:{transport}_pickle_loads", color=color):
-                for pi in pickled_items:
-                    item = pickle.loads(pi)
-                    if not isinstance(item, MultiModalKwargsItem):
-                        logger.warning(
-                            "[mm-routing] %s: deserialized object is %s, expected "
-                            "MultiModalKwargsItem; falling back to normal path",
-                            transport,
-                            type(item).__name__,
-                        )
-                        return None
-                    kwargs_items.append(item)
-
-            # Use the expanded token IDs (with image placeholders) from the
-            # frontend, not the unexpanded request["token_ids"]. The
-            # mm_placeholders and transferred kwargs are aligned to the
-            # expanded sequence — using unexpanded tokens would misplace
-            # every placeholder.
-            expanded_token_ids = extra_args.get("expanded_token_ids")
-            if not expanded_token_ids:
-                logger.warning(
-                    "[mm-routing] %s: no expanded_token_ids in extra_args, "
-                    "cannot use pre-rendered mm_kwargs; falling back",
-                    transport,
-                )
-                return None
-
-            mm_hashes_dict = {backend_modality: mm_hashes}
-            mm_kwargs_dict = {backend_modality: kwargs_items}
-            with _nvtx.annotate(
-                f"mm_backend:{transport}_build_engine_input", color=color
-            ):
-                engine_input = {
-                    "type": "multimodal",
-                    "prompt_token_ids": expanded_token_ids,
-                    "mm_kwargs": mm_kwargs_dict,
-                    "mm_hashes": mm_hashes_dict,
-                    "mm_placeholders": {
-                        backend_modality: [
-                            _placeholder_range_from_extra_arg(placeholder)
-                            for placeholder in mm_placeholders
-                        ],
-                    },
-                }
-
-            # Inject into the engine's MM processor cache so subsequent
-            # requests with the same images get cache hits.
-            try:
-                self.engine_client.input_processor.inject_into_mm_cache(
-                    mm_hashes_dict, mm_kwargs_dict
-                )
-            except Exception:
-                logger.debug(
-                    "[mm-routing] Failed to inject into mm_cache", exc_info=True
-                )
-
-            logger.debug(
-                "[mm-routing] %s: constructed pre-rendered MultiModalInput from "
-                "%d kwargs_items, %d hashes, %d placeholders",
-                transport,
-                len(kwargs_items),
-                len(mm_hashes),
-                len(mm_placeholders),
-            )
-            return engine_input
-        except Exception:
-            logger.exception("[mm-routing] %s receive failed, falling back", transport)
-            return None
-        finally:
-            _nvtx.end_range(rng)
-
-    @staticmethod
-    def _get_mm_processor_kwargs(
-        request: Dict[str, Any],
-    ) -> Dict[str, Any] | None:
-        """Extract mm_processor_kwargs from a request dict.
-
-        Checks the top-level key (client router / Rust preprocessor path)
-        and falls back to ``extra_args`` (KV router path).
-        """
-        mm_processor_kwargs = request.get("mm_processor_kwargs")
-        if mm_processor_kwargs is None:
-            req_extra_args = request.get("extra_args")
-            if isinstance(req_extra_args, dict):
-                mm_processor_kwargs = req_extra_args.get("mm_processor_kwargs")
-        return mm_processor_kwargs
-
-    async def _extract_multimodal_data(
-        self,
-        request: Dict[str, Any],
-        request_id: str,
-        context,
-        mm_processor_kwargs: Dict[str, Any] | None = None,
-    ) -> Dict[str, Any] | None:
-        """
-        Extract and decode multimodal data from PreprocessedRequest.
-        """
-        rng = _nvtx.start_range("mm_backend:extract_multimodal_data", color="orange")
-        if "multi_modal_data" not in request or request["multi_modal_data"] is None:
-            _nvtx.end_range(rng)
-            return None
-
-        # Security check: reject multimodal data if not explicitly enabled
-        if not self.enable_multimodal:
-            raise ValueError(
-                "Received multimodal data but multimodal processing is not enabled. "
-                "Use --enable-multimodal flag to enable multimodal processing."
-            )
-
-        mm_map = request["multi_modal_data"]
-
-        vllm_mm_data = {}
-
-        # [gluo NOTE] If embedding loader is configured, fetch image embeddings first.
-        # Still continue below so mixed image+video requests can attach `video`.
-        if self.embedding_loader is not None:
-            # [gluo FIXME] couldn't simply pass 'mm_map.get(IMAGE_URL_KEY, [])' like below
-            # as currently the encode worker is using 'ImageLoader.load_image()' which doesn't
-            # support 'Decoded' variant. Need to update the encode worker to unify handling
-            image_urls = []
-            supported = True
-            for item in mm_map.get(IMAGE_URL_KEY, []):
-                if isinstance(item, dict) and "Url" in item:
-                    image_urls.append(item["Url"])
-                elif isinstance(item, dict) and "Decoded" in item:
-                    supported = False
-            if supported:
-                vllm_mm_data = await self.embedding_loader.load_multimodal_embeddings(
-                    image_urls, request_id, model=self.config.model, context=context
-                )
-                logger.debug(
-                    f"Fetched multimodal embeddings for {len(vllm_mm_data)} items"
-                )
-
-        image_mm_items = mm_map.get(IMAGE_URL_KEY, [])
-        # Kimi-K2.5 (and any model with `use_unified_vision_chunk=True`)
-        # consumes images under the `vision_chunk` modality, not `image`,
-        # and expects each item to be a `VisionChunkImage` TypedDict.
-        # See chat_utils.use_unified_vision_chunk_modality for the
-        # upstream rename + wrap path.
-        image_modality_key = (
-            "vision_chunk" if self._use_unified_vision_chunk else "image"
-        )
-        if image_modality_key not in vllm_mm_data and image_mm_items:
-            with _nvtx.annotate("mm_backend:image_download", color="green"):
-                images = await self.image_loader.load_image_batch(
-                    image_mm_items,
-                )
-
-            if images:
-                if self._use_unified_vision_chunk:
-                    # `VisionChunkImage` is a TypedDict — a plain dict
-                    # with `type`/`image`/`uuid` keys is structurally
-                    # equivalent. uuid=None matches vLLM's chat_utils
-                    # path when the request doesn't pre-supply one.
-                    chunks = [
-                        {"type": "image", "image": img, "uuid": None} for img in images
-                    ]
-                    vllm_mm_data["vision_chunk"] = (
-                        chunks[0] if len(chunks) == 1 else chunks
-                    )
-                else:
-                    # vLLM expects single image or list
-                    vllm_mm_data["image"] = images[0] if len(images) == 1 else images
-                logger.debug(
-                    f"Extracted {len(images)} image(s) for multimodal "
-                    f"processing under modality={image_modality_key!r}"
-                )
-
-        video_mm_items = mm_map.get(VIDEO_URL_KEY, [])
-        if video_mm_items:
-            videos = await self.video_loader.load_video_batch(video_mm_items)
-
-            if videos:
-                # vLLM expects single video or list
-                vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
-                logger.debug(
-                    f"Extracted {len(videos)} video(s) for multimodal processing"
-                )
-
-        # Handle audio_url entries
-        audio_mm_items = mm_map.get(AUDIO_URL_KEY, [])
-        if audio_mm_items:
-            audios = await self.audio_loader.load_audio_batch(audio_mm_items)
-            if audios:
-                vllm_mm_data["audio"] = audios[0] if len(audios) == 1 else audios
-                logger.debug(
-                    f"Extracted {len(audios)} audio item(s) for multimodal processing"
-                )
-
-        # Extract audio from video URLs when use_audio_in_video is set.
-        # Models expect 1:1 audio/video pairing in the same order.
-        # We load per-video sequentially to preserve ordering; a video
-        # without an audio track raises immediately to avoid corrupting
-        # the alignment.
-        if (
-            video_mm_items
-            and mm_processor_kwargs
-            and mm_processor_kwargs.get("use_audio_in_video", False)
-        ):
-            video_audios: list = []
-            for item in video_mm_items:
-                url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
-                if not url:
-                    raise ValueError(
-                        "use_audio_in_video requires all video items to be "
-                        "URL-based. Got a non-URL video item (e.g. frontend-"
-                        "decoded). Audio extraction from decoded video data "
-                        "is not yet supported."
-                    )
-                try:
-                    audio = await self.audio_loader.load_audio(url)
-                    video_audios.append(audio)
-                except Exception:
-                    logger.error(
-                        "Failed to extract audio from video %s. "
-                        "use_audio_in_video requires every video to "
-                        "contain an audio stream.",
-                        url[:80],
-                    )
-                    raise
-            if video_audios:
-                existing = vllm_mm_data.get("audio")
-                if existing is not None:
-                    all_audios = (
-                        existing if isinstance(existing, list) else [existing]
-                    ) + video_audios
-                else:
-                    all_audios = video_audios
-                vllm_mm_data["audio"] = (
-                    all_audios[0] if len(all_audios) == 1 else all_audios
-                )
-                logger.debug(
-                    "Extracted %d audio track(s) from video URL(s) "
-                    "(use_audio_in_video=True)",
-                    len(video_audios),
-                )
-
-        _nvtx.end_range(rng)
-        return vllm_mm_data if vllm_mm_data else None
-
     def _build_prompt_from_request(
         self,
         request: Dict[str, Any],
@@ -2928,38 +2502,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     },
                 )
         # Normal path: use token IDs.
-        # Frontend-forwarded hashes are the routing/transfer identity. Preserve
-        # their canonical hash strings for vLLM/Dynamo cache metadata parsing;
-        # modality grouping belongs in the multi_modal_uuids dict keys, not in
-        # the hash value. If no hashes were forwarded, compute image UUIDs only
-        # in aggregated mode, where the worker owns raw image payloads. In EPD,
-        # image identity lives upstream at the router / encoder cache.
-        extra_args = request.get("extra_args") or {}
-        mm_uuids: dict[str, Any] | None = None
-        forwarded_mm_uuids = _build_forwarded_mm_uuids(
-            extra_args,
-            self._use_unified_vision_chunk,
+        # Prefer frontend-forwarded mm_hashes for hash consistency with the
+        # routing layer. Fall back to computing from loaded image data when
+        # not in EPD mode — in EPD mode multi_modal_data carries pre-computed
+        # embeddings from the encode worker, not raw images, and raw-image
+        # identity lives upstream at the Router / URL-keyed encoder cache.
+        prompt = self._multimodal_request_processor.build_tokens_prompt(
+            request,
+            multi_modal_data,
+            mm_processor_kwargs,
         )
-        if forwarded_mm_uuids:
-            mm_uuids = forwarded_mm_uuids
-        elif self.embedding_loader is None:
-            mm_uuids = _compute_mm_uuids(multi_modal_data)
-            if mm_uuids and multi_modal_data:
-                logger.warning(
-                    "[mm-routing] No forwarded mm_hashes from frontend; "
-                    "recomputed from image data. KV-cache-aware MM routing "
-                    "may not match the frontend's routing decisions."
-                )
-        prompt_kwargs = dict[str, Any](
-            prompt_token_ids=request["token_ids"],
-            multi_modal_data=multi_modal_data,
-        )
-        if mm_uuids is not None:
-            prompt_kwargs["multi_modal_uuids"] = mm_uuids
-        if mm_processor_kwargs is not None:
-            prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
-
-        prompt = TokensPrompt(**prompt_kwargs)
         return prompt, embedding_sequence_length, None
 
     @staticmethod
@@ -3258,6 +2810,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        self._multimodal_request_processor.validate_multimodal_request(request)
         first_token = True
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
@@ -3286,86 +2839,31 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # the key is absent, not when it is present-but-None.
             disaggregated_params = prefill_result.get("disaggregated_params") or {}
             kv_params = disaggregated_params.get("kv_transfer_params")
-            embedding_params = disaggregated_params.get("embedding_params")
-            # Normalize embedding_params to None if it is an empty dict
-            if not embedding_params:
-                embedding_params = None
         else:
             kv_params = None
-            embedding_params = None
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        has_mm_data = (
-            "multi_modal_data" in request and request["multi_modal_data"] is not None
-        )
+        try:
+            mode = cast(DisaggregationMode, self.config.disaggregation_mode)
+            prepared_input = await self._multimodal_request_processor.prepare_input(
+                request,
+                request_id,
+                context,
+                mode,
+            )
+        except MissingMultimodalHandoffError as exc:
+            logger.error("Request %s: %s", request_id, exc)
+            yield {
+                "finish_reason": f"error: {exc}",
+                "index": 0,
+                "token_ids": [],
+            }
+            return
 
-        mm_processor_kwargs = self._get_mm_processor_kwargs(request)
-
-        multi_modal_data: Dict[str, Any] | None = None
-        pre_rendered: Dict[str, Any] | None = None
-        if is_decode_only:
-            # Decode mode: branch on model, not data.
-            if resolve_model_family(self.config.model) is ModelFamily.QWEN_VL:
-                # Qwen VL needs embedding_params for mRoPE initialization.
-                if embedding_params is not None:
-                    multi_modal_data = construct_qwen_decode_mm_data(
-                        embedding_params["image_grid_thw"],
-                        embedding_params["embeddings_shape"],
-                        request_id,
-                    )
-                elif has_mm_data and request["multi_modal_data"].get(IMAGE_URL_KEY):
-                    # Guard is on IMAGE_URL_KEY (not just has_mm_data) so
-                    # text-only requests pass through and video/audio fall
-                    # through to re-download below (TODO: proper support).
-                    msg = (
-                        "Decode worker received multimodal request without "
-                        "prefill result"
-                        if prefill_result is None
-                        else "Prefill did not produce required multimodal "
-                        "embedding metadata (image_grid_thw) for Qwen VL "
-                        "decode. Use --route-to-encoder or the P/D launcher "
-                        "with grid_thw computation support"
-                    )
-                    logger.error("Request %s: %s", request_id, msg)
-                    yield {"status": "error", "message": msg}
-                    return
-            else:
-                # Non-qwen model, assume the multi_modal_data has been consumed
-                # in prefill, so we can use the expanded prompt token ids
-                # without multimodal data
-                if embedding_params and "expanded_prompt_token_ids" in embedding_params:
-                    request["token_ids"] = embedding_params["expanded_prompt_token_ids"]
-                    has_mm_data = False
-            # TODO(DIS-1661): video/audio re-downloaded on decode.
-            # TODO(DIS-1664): mixed image+video in disagg decode is not
-            # supported — synthetic image data would be overwritten.
-            if multi_modal_data is None and has_mm_data:
-                mm = request["multi_modal_data"]
-                if mm.get(VIDEO_URL_KEY) or mm.get(AUDIO_URL_KEY):
-                    multi_modal_data = await self._extract_multimodal_data(
-                        request,
-                        request_id,
-                        context,
-                        mm_processor_kwargs=mm_processor_kwargs,
-                    )
-        else:
-            # Fast path: check for pre-processed mm_kwargs via NIXL/SHM from frontend.
-            # If available, we skip image downloading AND the HF processor.
-            with _nvtx.annotate("mm_backend:receive_mm_kwargs", color="magenta"):
-                pre_rendered = await self._try_receive_mm_kwargs(request)
-            if pre_rendered is not None:
-                logger.debug(
-                    "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL/SHM",
-                    request_id,
-                )
-            else:
-                # Aggregated mode: load images normally
-                multi_modal_data = await self._extract_multimodal_data(
-                    request,
-                    request_id,
-                    context,
-                    mm_processor_kwargs=mm_processor_kwargs,
-                )
+        request = prepared_input.request
+        multi_modal_data = prepared_input.multi_modal_data
+        mm_processor_kwargs = prepared_input.mm_processor_kwargs
+        pre_rendered = prepared_input.pre_rendered_prompt
 
         # Build prompt from request. `prompt` is either a pre-rendered
         # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
@@ -3400,6 +2898,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
 
         _apply_nvext_cache_salt(request, prompt)
+
+        budget_error = _explicit_max_tokens_budget_error(
+            request,
+            self.model_max_len,
+            embedding_sequence_length=embedding_sequence_length,
+        )
+        if budget_error is not None:
+            logger.error("Request %s: %s", request_id, budget_error)
+            yield {
+                "finish_reason": f"error: {budget_error}",
+                "index": 0,
+                "token_ids": [],
+            }
+            return
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
@@ -3522,6 +3034,35 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prompt = TextPrompt(prompt=input_data)
 
         _apply_nvext_cache_salt(request, prompt)
+
+        request_max_tokens = request.get("max_tokens")
+        prompt_token_count = (
+            _prompt_token_count_for_text_mode(self.input_param_manager, input_data)
+            if isinstance(request_max_tokens, int)
+            and not isinstance(request_max_tokens, bool)
+            else None
+        )
+        budget_error = _explicit_max_tokens_budget_error(
+            request,
+            self.model_max_len,
+            prompt_token_count=prompt_token_count,
+        )
+        if budget_error is not None:
+            logger.error("Request %s: %s", request_id, budget_error)
+            yield {
+                "id": request.get("id") or request.get("request_id", request_id),
+                "created": int(time.time()),
+                "object": "chat.completion.chunk",
+                "model": request.get("model", "unknown"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": f"error: {budget_error}",
+                    }
+                ],
+            }
+            return
 
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(
@@ -3650,24 +3191,22 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             encode_worker_client=encode_worker_client,
         )
 
-        # Cache Qwen VL grid parameters for computing image_grid_thw from
-        # PIL images in the P/D path (no separate encode worker).
-        if resolve_model_family(config.model) is ModelFamily.QWEN_VL:
-            self._qwen_grid_params = load_qwen_grid_params(config.model)
-            if self._qwen_grid_params is None and self.embedding_loader is None:
-                logger.error(
-                    "Qwen VL grid params failed to load and no encode worker "
-                    "is configured. P/D multimodal requests will fail because "
-                    "prefill cannot produce embedding_params for decode. "
-                    "Use --route-to-encoder or ensure the model is cached."
-                )
-        else:
-            self._qwen_grid_params = None
+        self._multimodal_request_processor.initialize_prefill_handoff()
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
-        logger.debug(f"Prefill Request ID: {request_id}")
+        logger.debug("Prefill Request ID: %s", request_id)
+        try:
+            self._multimodal_request_processor.validate_multimodal_request(request)
+        except ValueError as exc:
+            logger.error("Request %s: %s", request_id, exc)
+            yield {
+                "status": "error",
+                "message": str(exc),
+                "disaggregated_params": None,
+            }
+            return
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
@@ -3676,18 +3215,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
-        # TODO: Wire up NIXL mm_kwargs passthrough for disaggregated prefill
-        # (similar to DecodeWorkerHandler). For now, prefill
-        # always downloads and processes images via the standard path.
-        mm_processor_kwargs = self._get_mm_processor_kwargs(request)
-
-        # Extract and decode multimodal data if present
-        multi_modal_data = await self._extract_multimodal_data(
+        prepared_input = await self._multimodal_request_processor.prepare_input(
             request,
             request_id,
             context,
-            mm_processor_kwargs=mm_processor_kwargs,
+            DisaggregationMode.PREFILL,
         )
+        request = prepared_input.request
+        multi_modal_data = prepared_input.multi_modal_data
+        mm_processor_kwargs = prepared_input.mm_processor_kwargs
 
         # Build prompt from request (handles both prompt_embeds and token_ids)
         prompt, embedding_sequence_length, error = self._build_prompt_from_request(
@@ -3776,8 +3312,12 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 # For prefill worker, only one res will be generated,
                 # so we can always build embedding params here without conditionals
-                embedding_params = self._build_embedding_params(
-                    multi_modal_data or {}, res.prompt_token_ids
+                embedding_params = (
+                    self._multimodal_request_processor.build_prefill_handoff(
+                        multi_modal_data=multi_modal_data,
+                        prompt_token_ids=list(res.prompt_token_ids or []),
+                        mm_processor_kwargs=mm_processor_kwargs,
+                    )
                 )
 
                 output: Dict[str, Any] = {
@@ -3819,25 +3359,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
-
-    def _build_embedding_params(
-        self, multi_modal_data: dict[str, Any], prompt_token_ids: list[int]
-    ) -> Dict[str, Any] | None:
-        # [gluo NOTE] there could be different model architectures that
-        # need different embedding params, will add more logic if needed
-        if resolve_model_family(self.config.model) is not ModelFamily.QWEN_VL:
-            # For non-qwen models, vLLM doesn't trigger mm preprocess so
-            # decode worker only needs expanded prompt to properly fetch KV blocks
-            # from prefill.
-            if multi_modal_data:
-                return {"expanded_prompt_token_ids": prompt_token_ids}
-        else:
-            # For qwen models, vLLM triggers mm preprocess so decode worker will
-            # perform token expansion unconditionally, so we need to pass
-            # original prompt and sufficient metadata to reconstruct mm embedding
-            # as request input.
-            return build_qwen_embedding_params(multi_modal_data, self._qwen_grid_params)
-        return None
 
 
 class EmbeddingWorkerHandler:
@@ -3976,7 +3497,8 @@ class EmbeddingWorkerHandler:
         ``"base64"``); when ``"base64"`` is requested, each per-input vector is
         serialized as a base64-encoded string of little-endian ``f32`` bytes
         per the OpenAI spec, so the byte count matches the (possibly reduced)
-        dimensionality.
+        dimensionality. Optional ``truncate_prompt_tokens`` is forwarded to
+        vLLM's tokenizer path for raw-text inputs.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
         input_field = request.get("input")
@@ -4009,6 +3531,25 @@ class EmbeddingWorkerHandler:
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
                 "expected 'float' or 'base64'"
             )
+
+        truncate_prompt_tokens = request.get("truncate_prompt_tokens")
+        tokenization_kwargs: dict[str, Any] | None = None
+        if truncate_prompt_tokens is not None:
+            if not isinstance(truncate_prompt_tokens, int) or isinstance(
+                truncate_prompt_tokens, bool
+            ):
+                raise TypeError(
+                    "Invalid 'truncate_prompt_tokens' type "
+                    f"{type(truncate_prompt_tokens).__name__}; expected int"
+                )
+            if truncate_prompt_tokens < -1:
+                raise ValueError(
+                    "truncate_prompt_tokens must be >= -1, "
+                    f"got {truncate_prompt_tokens}"
+                )
+            tokenization_kwargs = {
+                "truncate_prompt_tokens": truncate_prompt_tokens,
+            }
 
         # Request the pooled sentence embedding. With no task, vLLM's
         # encode() resolves to per-token output (the full ``n_tokens x
@@ -4050,11 +3591,15 @@ class EmbeddingWorkerHandler:
             )
             final_output = None
             async with self._abort_monitor(context, request_id):
-                async for out in self.engine_client.encode(
-                    prompt=encode_arg,
-                    pooling_params=pooling_params,
-                    request_id=request_id,
-                ):
+                encode_kwargs: dict[str, Any] = {
+                    "prompt": encode_arg,
+                    "pooling_params": pooling_params,
+                    "request_id": request_id,
+                }
+                if tokenization_kwargs is not None and isinstance(encode_arg, str):
+                    encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
+
+                async for out in self.engine_client.encode(**encode_kwargs):
                     final_output = out
             if final_output is None:
                 raise RuntimeError(

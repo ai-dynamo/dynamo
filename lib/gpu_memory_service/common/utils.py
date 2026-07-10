@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 ENV_SCRATCH_KV_ENABLED = "DYN_GMS_SCRATCH_KV_ENABLED"
 ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
 
+# Production GMS tags: the per-GPU server child and every engine integration
+# serve exactly these logical memory pools, one UDS socket per (device, tag).
+GMS_TAGS = ("weights", "kv_cache")
+
 _TRUTHY = ("true", "1", "yes")
 
 
