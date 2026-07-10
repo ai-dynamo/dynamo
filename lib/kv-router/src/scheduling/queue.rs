@@ -688,6 +688,15 @@ impl<
             (class_index, Some(snapshot))
         };
 
+        if let Some(request_id) = request.mode.tracked_request_id()
+            && self.tracked_admissions.contains_key(request_id)
+        {
+            request.respond(Err(KvSchedulerError::BookingFailed(format!(
+                "request {request_id} already has an active admission"
+            ))));
+            return false;
+        }
+
         let mut admission = if request.mode.is_tracked() && self.admission.has_strategy(class_index)
         {
             let allowed_worker_ids = request.allowed_worker_ids.clone();
@@ -877,7 +886,17 @@ impl<
     }
 
     fn handle_cancelled(&mut self, request_id: &str) -> bool {
-        self.handle_finished(request_id, RequestOutcome::Aborted)
+        let rollback_booking = self
+            .tracked_admissions
+            .get(request_id)
+            .is_some_and(|tracked| tracked.worker.is_some() && !tracked.dispatched);
+        if rollback_booking
+            && let Err(error) = self.slots.free(&request_id.to_owned(), Instant::now())
+        {
+            tracing::error!(%request_id, %error, "Failed to roll back cancelled scheduler booking");
+        }
+        let made_ready = self.handle_finished(request_id, RequestOutcome::Aborted);
+        rollback_booking || made_ready
     }
 
     fn handle_finished(&mut self, request_id: &str, outcome: RequestOutcome) -> bool {
@@ -2169,6 +2188,75 @@ policy_classes:
             }
             Vec::new()
         }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_response_send_rolls_back_booking() {
+        let state = Arc::new(StdMutex::new(GateState::default()));
+        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
+            state: Arc::clone(&state),
+        }));
+        let (mut request, response) = make_request("cancelled-after-handoff", 64);
+        request.policy_class = Some("agents".to_owned());
+        let cancellation = queue
+            .cancellation_guard(Some("cancelled-after-handoff"))
+            .unwrap();
+
+        queue.enqueue(request).await;
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(1)
+        );
+
+        drop(cancellation);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.lock().unwrap().aborted.len() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation did not abort admission");
+
+        slots.assert_completely_drained(decay_now());
+        assert_eq!(state.lock().unwrap().aborted, vec![AdmissionId::new(0)]);
+        drop(response);
+    }
+
+    #[tokio::test]
+    async fn duplicate_request_id_does_not_replace_active_admission() {
+        let state = Arc::new(StdMutex::new(GateState::default()));
+        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
+            state: Arc::clone(&state),
+        }));
+        let (mut first, first_response) = make_request("duplicate", 64);
+        first.policy_class = Some("agents".to_owned());
+        queue.enqueue(first).await;
+        first_response.await.unwrap().unwrap();
+
+        let (mut duplicate, duplicate_response) = make_request("duplicate", 64);
+        duplicate.policy_class = Some("agents".to_owned());
+        queue.enqueue(duplicate).await;
+        assert!(matches!(
+            duplicate_response.await.unwrap(),
+            Err(KvSchedulerError::BookingFailed(message))
+                if message == "request duplicate already has an active admission"
+        ));
+        assert_eq!(
+            slots
+                .active_request_counts()
+                .get(&WorkerWithDpRank::new(0, 0))
+                .copied(),
+            Some(1)
+        );
+        assert!(state.lock().unwrap().aborted.is_empty());
+
+        queue.finish("duplicate", RequestOutcome::Aborted).await;
+        queue.update().await;
+        assert_eq!(state.lock().unwrap().aborted, vec![AdmissionId::new(0)]);
+        slots.free(&"duplicate".to_owned(), decay_now()).unwrap();
     }
 
     struct BypassGate {
