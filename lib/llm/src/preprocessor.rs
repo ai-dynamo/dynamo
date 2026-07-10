@@ -315,6 +315,38 @@ impl OpenAIPreprocessor {
         Some(context_length.saturating_sub(prompt_len as u32))
     }
 
+    fn validate_explicit_max_tokens_budget(
+        prompt_len: usize,
+        max_tokens: Option<u32>,
+        context_length: u32,
+    ) -> Result<()> {
+        let Some(max_tokens) = max_tokens else {
+            return Ok(());
+        };
+        if context_length == 0 {
+            return Ok(());
+        }
+
+        let max_len = context_length as usize;
+        let completion_len = max_tokens as usize;
+        let requested_tokens = prompt_len.saturating_add(completion_len);
+        if requested_tokens > max_len {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!(
+                    "This model's maximum context length is {} tokens. \
+                     However, you requested {} tokens \
+                     ({} in the messages, {} in the completion). \
+                     Please reduce the length of the messages or completion.",
+                    max_len, requested_tokens, prompt_len, completion_len,
+                ))
+                .build()
+                .into());
+        }
+
+        Ok(())
+    }
+
     /// Prompt length for sizing the omitted-`max_tokens` cap. Prefers the
     /// MM-expanded length; a 0 (serde-default / absent) counts as missing. With
     /// images but no expanded length, defers to the backend (`None`); text-only
@@ -862,6 +894,13 @@ impl OpenAIPreprocessor {
             has_images,
             preprocessed.token_ids.len(),
         );
+        if let Some(prompt_len) = effective_prompt_len {
+            Self::validate_explicit_max_tokens_budget(
+                prompt_len,
+                preprocessed.stop_conditions.max_tokens,
+                self.context_length,
+            )?;
+        }
         if preprocessed.stop_conditions.max_tokens.is_none()
             && let Some(prompt_len) = effective_prompt_len
             && let Some(max_tokens) =
@@ -3442,6 +3481,13 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        if common_request.prompt_embeds.is_none() {
+            Self::validate_explicit_max_tokens_budget(
+                common_request.token_ids.len(),
+                common_request.stop_conditions.max_tokens,
+                self.context_length,
+            )?;
+        }
         attach_agent_context_from_context(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -4270,6 +4316,27 @@ mod tests {
                 PreprocessRequestOptions::default()
             ),
             None
+        );
+    }
+
+    #[test]
+    fn test_validate_explicit_max_tokens_budget() {
+        OpenAIPreprocessor::validate_explicit_max_tokens_budget(10, Some(90), 100).unwrap();
+        OpenAIPreprocessor::validate_explicit_max_tokens_budget(10, None, 100).unwrap();
+        OpenAIPreprocessor::validate_explicit_max_tokens_budget(10, Some(256), 0).unwrap();
+
+        let err =
+            OpenAIPreprocessor::validate_explicit_max_tokens_budget(10, Some(91), 100).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("This model's maximum context length is 100 tokens."),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "However, you requested 101 tokens (10 in the messages, 91 in the completion)."
+            ),
+            "{message}"
         );
     }
 
