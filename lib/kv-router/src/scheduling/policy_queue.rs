@@ -633,55 +633,65 @@ impl<T> PolicyQueue<T> {
         mut predicate: impl FnMut(&T) -> bool,
     ) -> Vec<PolicyQueueEntry<T>> {
         let mut removed = Vec::new();
-        for class in &mut self.classes {
-            let remove_sequences: FxHashSet<u64> = class
-                .entries()
-                .filter(|entry| predicate(entry.payload()))
-                .map(|entry| entry.enqueue_seq)
-                .collect();
-            if remove_sequences.is_empty() {
-                continue;
-            }
-            let removed_start = removed.len();
+        for class_index in 0..self.classes.len() {
+            removed.extend(self.take_if_in_class(class_index, &mut predicate));
+        }
+        removed
+    }
 
-            let mut retained = BinaryHeap::with_capacity(class.pending.len());
-            for entry in class.pending.drain() {
+    pub(crate) fn take_if_in_class(
+        &mut self,
+        class_index: usize,
+        mut predicate: impl FnMut(&T) -> bool,
+    ) -> Vec<PolicyQueueEntry<T>> {
+        let class = &mut self.classes[class_index];
+        let remove_sequences: FxHashSet<u64> = class
+            .entries()
+            .filter(|entry| predicate(entry.payload()))
+            .map(|entry| entry.enqueue_seq)
+            .collect();
+        if remove_sequences.is_empty() {
+            return Vec::new();
+        }
+
+        let mut removed = Vec::new();
+        let mut retained = BinaryHeap::with_capacity(class.pending.len());
+        for entry in class.pending.drain() {
+            if remove_sequences.contains(&entry.enqueue_seq) {
+                removed.push(entry);
+            } else {
+                retained.push(entry);
+            }
+        }
+        class.pending = retained;
+
+        removed.extend(
+            class
+                .deferred
+                .extract_if(|_, entry| remove_sequences.contains(&entry.enqueue_seq))
+                .map(|(_, entry)| entry),
+        );
+
+        class.ready_by_worker.retain(|_, ready| {
+            let mut retained = BinaryHeap::with_capacity(ready.len());
+            for entry in ready.drain() {
                 if remove_sequences.contains(&entry.enqueue_seq) {
                     removed.push(entry);
                 } else {
                     retained.push(entry);
                 }
             }
-            class.pending = retained;
+            *ready = retained;
+            !ready.is_empty()
+        });
+        class.rebuild_worker_heads();
 
-            let deferred: Vec<PolicyQueueEntry<T>> = class
-                .deferred
-                .extract_if(|_, entry| remove_sequences.contains(&entry.enqueue_seq))
-                .map(|(_, entry)| entry)
-                .collect();
-            removed.extend(deferred);
-
-            class.ready_by_worker.retain(|_, ready| {
-                let mut retained = BinaryHeap::with_capacity(ready.len());
-                for entry in ready.drain() {
-                    if remove_sequences.contains(&entry.enqueue_seq) {
-                        removed.push(entry);
-                    } else {
-                        retained.push(entry);
-                    }
-                }
-                *ready = retained;
-                !ready.is_empty()
-            });
-            class.rebuild_worker_heads();
-
-            for entry in &removed[removed_start..] {
-                subtract_stats(&mut class.stats, entry.snapshot);
-                self.pending_count -= 1;
-            }
-            if class.ready_is_empty() {
-                class.deficit = 0;
-            }
+        for entry in &removed {
+            subtract_stats(&mut class.stats, entry.snapshot);
+            self.pending_count -= 1;
+        }
+        if class.ready_is_empty() {
+            class.deficit = 0;
         }
         removed
     }
