@@ -3420,6 +3420,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    use crate::protocols::common::StopConditionsProvider;
     use crate::protocols::common::extensions::NvExt;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
@@ -3591,6 +3592,19 @@ mod tests {
             },
             nvext: None,
         }
+    }
+
+    #[test]
+    fn test_responses_max_output_tokens_reaches_chat_budget_field() {
+        let mut response_request = make_base_request();
+        response_request.inner.max_output_tokens = Some(256);
+
+        let unified_request: UnifiedRequest = response_request.try_into().unwrap();
+        let chat_request = unified_request.into_inner();
+        let stop_conditions = chat_request.extract_stop_conditions().unwrap();
+
+        assert_eq!(chat_request.inner.max_completion_tokens, Some(256));
+        assert_eq!(stop_conditions.max_tokens, Some(256));
     }
 
     #[test]
