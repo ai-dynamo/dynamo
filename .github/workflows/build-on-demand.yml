@@ -131,8 +131,8 @@ jobs:
       platform: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 90 || 60 }}
-      build_only: true
-      image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
+      build_only: ${{ inputs.build_vllm_placeholder }}
+      image_tag_suffix: ${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}
       extra_build_args: |
         BASELINE_SBOM_FILE=${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 'vllm-openai@5bda7078' || 'cuda@2ab6381d' }}
         FLASHINFER_GIT_URL=${{ inputs.flashinfer_git_url }}
@@ -182,7 +182,7 @@ jobs:
       cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
-      image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
+      image_tag_suffix: ${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}
     secrets: inherit
 
   sglang-copy-to-acr:
@@ -214,7 +214,7 @@ jobs:
   snapshot-agent:
     name: Snapshot Agent
     needs: [init]
-    if: inputs.build_snapshot_agent
+    if: inputs.build_snapshot_agent || inputs.build_vllm_placeholder
     runs-on: prod-default-v2
     steps:
       - name: Checkout code

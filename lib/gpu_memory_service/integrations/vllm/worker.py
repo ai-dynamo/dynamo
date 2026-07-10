@@ -431,7 +431,7 @@ class GMSWorker(Worker):
                 self._register_kv_caches_with_nixl()
                 self._snapshot_nixl_registration_pending = False
 
-            if backend.state() == "RUNNING":
+            if tags is None and backend.state() == "RUNNING":
                 mx_ctx = get_mx_load_context()
                 if mx_ctx is not None:
                     resume_serving(mx_ctx, self.model_runner.model)

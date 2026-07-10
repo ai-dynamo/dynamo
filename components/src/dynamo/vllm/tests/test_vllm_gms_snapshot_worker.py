@@ -286,7 +286,7 @@ def test_partial_kv_reallocation_is_fatal_and_never_published(monkeypatch):
         backend.resume(["kv_cache"])
 
 
-def test_modelexpress_remains_paused_until_full_wake(monkeypatch):
+def test_modelexpress_resumes_only_after_untagged_full_wake(monkeypatch):
     monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", "/run/dynamo/snapshot")
     worker = _snapshot_worker()
     worker._sleep_mode_backend.state.return_value = "RESUMING"
@@ -308,8 +308,15 @@ def test_modelexpress_remains_paused_until_full_wake(monkeypatch):
         ) as resume_serving,
     ):
         worker.wake_up(["weights"])
+        resume_serving.assert_not_called()
 
-    resume_serving.assert_not_called()
+        worker._sleep_mode_backend.state.return_value = "RUNNING"
+        worker.wake_up(["kv_cache"])
+        resume_serving.assert_not_called()
+
+        worker.wake_up()
+
+    resume_serving.assert_called_once_with(mx_context, worker.model_runner.model)
 
 
 def test_weight_timeout_cleans_connection_and_exits(monkeypatch):
