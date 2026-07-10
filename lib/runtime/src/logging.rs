@@ -27,7 +27,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 use figment::{
     Figment,
@@ -253,6 +253,38 @@ fn trace_sample_ratio_from_env() -> Option<f64> {
             .ok()
             .as_deref(),
     )
+}
+
+/// Returns a Tokio runtime handle suitable for constructing the OTLP exporters and
+/// batch processors.
+///
+/// The `opentelemetry_sdk` batch exporters (built with the `rt-tokio` feature) call
+/// `tokio::spawn` internally while being built, to launch their background flush task.
+/// That requires an active reactor at construction time, but `logging::init()` can be
+/// called from synchronous entrypoints (e.g. a plain `fn main()`) before any Tokio
+/// runtime exists — see https://github.com/ai-dynamo/dynamo/issues/11077.
+///
+/// If we're already inside a runtime, its handle is reused so the spawned flush task
+/// lives alongside the caller's own work. Otherwise a dedicated background runtime is
+/// lazily created and kept alive for the rest of the process (it is never dropped), so
+/// the flush task keeps running after this function returns.
+fn otel_runtime_handle() -> tokio::runtime::Handle {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return handle;
+    }
+
+    static OTEL_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    OTEL_RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("dynamo-otel-export")
+                .enable_all()
+                .build()
+                .expect("failed to build background Tokio runtime for OTLP export")
+        })
+        .handle()
+        .clone()
 }
 
 fn build_span_exporter(
@@ -1273,7 +1305,11 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 
         // Build tracer and logger providers - with or without OTLP export
         let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_enabled {
-            // Export enabled: create OTLP exporters with batch processors
+            // Export enabled: create OTLP exporters with batch processors.
+            // Building these requires an active Tokio reactor (see
+            // `otel_runtime_handle` docs) — enter one for the rest of this branch.
+            let _otel_reactor_guard = otel_runtime_handle().enter();
+
             let protocol = otlp_protocol_from_env();
             let traces_protocol = resolve_signal_otlp_protocol(
                 protocol,
@@ -2501,6 +2537,66 @@ pub mod tests {
 
         init();
         tracing::info!("readable log with OTLP export");
+    }
+
+    /// Regression test for https://github.com/ai-dynamo/dynamo/issues/11077:
+    /// `logging::init()` must not panic with "there is no reactor running" when
+    /// called synchronously, before any Tokio runtime exists — e.g. from a plain
+    /// `fn main()` like `lib/runtime/examples/hello_world/src/bin/client.rs`.
+    /// Runs both JSONL settings, since JSONL=1+OTEL=1 already panicked pre-fix.
+    #[test]
+    fn test_otlp_export_from_sync_entrypoint_without_runtime() {
+        use std::process::Command;
+
+        for jsonl in ["0", "1"] {
+            let output = Command::new("cargo")
+                .args([
+                    "test",
+                    "-p",
+                    "dynamo-runtime",
+                    "logging::tests::test_otlp_export_from_sync_entrypoint_without_runtime_subprocess",
+                    "--",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("OTEL_EXPORT_ENABLED", "1")
+                .env("DYN_LOGGING_JSONL", jsonl)
+                .output()
+                .expect("Failed to execute subprocess test");
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !output.status.success() {
+                eprintln!(
+                    "=== STDOUT ===\n{}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
+                eprintln!("=== STDERR ===\n{}", stderr);
+            }
+
+            assert!(
+                output.status.success(),
+                "Subprocess test with DYN_LOGGING_JSONL={jsonl} failed with exit code: {:?} \
+                 (this is the 'no reactor running' panic from issue #11077 if it fails)",
+                output.status.code()
+            );
+            assert!(
+                !stderr.contains("no reactor running"),
+                "logging::init() must not require an ambient Tokio runtime: {stderr}"
+            );
+        }
+    }
+
+    /// Subprocess target for `test_otlp_export_from_sync_entrypoint_without_runtime`.
+    /// Deliberately a plain (non-`#[tokio::test]`) `#[test]` so no Tokio runtime is
+    /// running when `init()` is called, reproducing the synchronous entrypoint case.
+    #[test]
+    fn test_otlp_export_from_sync_entrypoint_without_runtime_subprocess() {
+        if std::env::var("OTEL_EXPORT_ENABLED").is_err() {
+            return;
+        }
+
+        init();
+        tracing::info!("log from synchronous entrypoint with OTLP export enabled");
     }
 
     // Test functions at different log levels for filtering tests
