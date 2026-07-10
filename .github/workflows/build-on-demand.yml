@@ -36,15 +36,15 @@ on:
       flashinfer_git_url:
         description: 'Exact FlashInfer repository'
         type: string
-        default: 'https://github.com/flashinfer-ai/flashinfer.git'
+        default: 'https://github.com/galletas1712/flashinfer.git'
       flashinfer_git_ref:
         description: 'Exact FlashInfer ref'
         type: string
-        default: 'f2f9646ec388d9f178b2fbda6ae0ec4246d8e7dc'
+        default: 'schwinns/flashinfer-v0615-mnnvl-inference-fix-20260710'
       flashinfer_git_sha:
         description: 'Exact FlashInfer commit'
         type: string
-        default: 'f2f9646ec388d9f178b2fbda6ae0ec4246d8e7dc'
+        default: 'c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b'
       vllm_install_mode:
         description: 'vLLM installation mode'
         type: choice
