@@ -18,7 +18,6 @@
 package validation
 
 import (
-	"fmt"
 	"slices"
 	"testing"
 
@@ -26,10 +25,10 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -40,8 +39,6 @@ const (
 )
 
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
-	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamocomponentdeployments.yaml")
-
 	var (
 		oneReplica       = int32(1)
 		validReplicas    = int32(3)
@@ -129,7 +126,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{}
 			}),
-			wantCELErr: "spec.sharedMemory: Invalid value: size is required when disabled is false",
+			wantCELErr: "spec.sharedMemory: Invalid value: \"object\": size is required when disabled is false",
 		},
 
 		// CEL rules generated into the standalone DCD CRD.
@@ -139,7 +136,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.MinAvailable = &validMinAvail
 			}),
-			wantCELErr: "spec: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
+			wantCELErr: "spec: Invalid value: \"object\": minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
 			name: "v1beta1 replicas below minAvailable are rejected by CEL",
@@ -147,7 +144,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &oneReplica
 				dcd.Spec.MinAvailable = &validMinAvail
 			}),
-			wantCELErr: "spec: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
+			wantCELErr: "spec: Invalid value: \"object\": minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
 			name: "v1alpha1 minAvailable change is rejected by CEL",
@@ -159,7 +156,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.MinAvailable = &validMinAvail
 			}),
-			wantCELErr: "spec: Invalid value: minAvailable is immutable after creation",
+			wantCELErr: "spec: Invalid value: \"object\": minAvailable is immutable after creation",
 		},
 		{
 			name: "v1beta1 minAvailable change is rejected by CEL",
@@ -171,7 +168,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.MinAvailable = &validMinAvail
 			}),
-			wantCELErr: "spec: Invalid value: minAvailable is immutable after creation",
+			wantCELErr: "spec: Invalid value: \"object\": minAvailable is immutable after creation",
 		},
 		{
 			name: "v1alpha1 inter-pod GMS client containers are rejected by CEL",
@@ -182,7 +179,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					ExtraClientContainers: []string{"metrics"},
 				}
 			}),
-			wantCELErr: "spec.gpuMemoryService: Invalid value: extraClientContainers is only supported with mode=intraPod",
+			wantCELErr: "spec.gpuMemoryService: Invalid value: \"object\": extraClientContainers is only supported with mode=intraPod",
 		},
 		{
 			name: "v1beta1 inter-pod GMS client containers are rejected by CEL",
@@ -194,7 +191,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantCELErr: "spec.experimental.gpuMemoryService: Invalid value: extraClientContainers is only supported with mode=IntraPod",
+			wantCELErr: "spec.experimental.gpuMemoryService: Invalid value: \"object\": extraClientContainers is only supported with mode=IntraPod",
 		},
 		{
 			name: "v1alpha1 non-empty GMS extra client pods are rejected by CEL",
@@ -205,7 +202,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					ExtraClientPods: []nvidiacomv1alpha1.GMSClientPodSpec{{Name: "client"}},
 				}
 			}),
-			wantCELErr: "spec.gpuMemoryService: Invalid value: extraClientPods is reserved for inter-pod GMS and is not implemented yet",
+			wantCELErr: "spec.gpuMemoryService: Invalid value: \"object\": extraClientPods is reserved for inter-pod GMS and is not implemented yet",
 		},
 		{
 			name: "v1beta1 non-empty GMS extra client pods are rejected by CEL",
@@ -217,7 +214,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantCELErr: "spec.experimental.gpuMemoryService: Invalid value: extraClientPods is reserved for inter-pod GMS and is not implemented yet",
+			wantCELErr: "spec.experimental.gpuMemoryService: Invalid value: \"object\": extraClientPods is reserved for inter-pod GMS and is not implemented yet",
 		},
 		{
 			name: "v1beta1 EPP config on a worker is rejected by CEL",
@@ -226,7 +223,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
 				}
 			}),
-			wantCELErr: "spec: Invalid value: eppConfig may only be set when type is epp",
+			wantCELErr: "spec: Invalid value: \"object\": eppConfig may only be set when type is epp",
 		},
 		{
 			name: "v1beta1 checkpoint job with checkpointRef is rejected by CEL",
@@ -239,7 +236,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantCELErr: "spec.experimental.checkpoint: Invalid value: checkpoint.job cannot be set when checkpointRef is specified",
+			wantCELErr: "spec.experimental.checkpoint: Invalid value: \"object\": checkpoint.job cannot be set when checkpointRef is specified",
 		},
 
 		// Shared v1alpha1 validation reached through standalone DCD admission.
@@ -372,7 +369,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Job:           &nvidiacomv1alpha1.ServiceCheckpointJobConfig{},
 				},
 			}),
-			wantCELErr: "spec.checkpoint: Invalid value: checkpoint.job cannot be set when checkpointRef is specified",
+			wantCELErr: "spec.checkpoint: Invalid value: \"object\": checkpoint.job cannot be set when checkpointRef is specified",
 		},
 		{
 			name: "deprecated checkpoint mode with checkpointRef is accepted",
@@ -674,7 +671,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			name: "deprecated dynamo namespace warning shows calculated namespace",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Namespace = "hannahz"
-				dcd.OwnerReferences = []metav1.OwnerReference{{Kind: "DynamoGraphDeployment", Name: "trtllm-disagg"}}
+				dcd.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+					Kind:       "DynamoGraphDeployment",
+					Name:       "trtllm-disagg",
+					UID:        types.UID("test-owner"),
+				}}
 				dcd.Spec.DynamoNamespace = k8sptr.To("my-custom-namespace")
 			}),
 			wantWarnings: []string{`spec.dynamoNamespace is deprecated and ignored. Value "my-custom-namespace" will be replaced with "hannahz-trtllm-disagg". Remove this field from your configuration`},
@@ -731,7 +733,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{}
 			}),
-			wantCELErr: "spec.eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
+			wantCELErr: "spec.eppConfig: Invalid value: \"object\": exactly one of configMapRef or config must be specified",
 		},
 		{
 			name: "v1alpha1 conflicting EPP config reaches and is rejected by the webhook",
@@ -759,7 +761,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					},
 				}
 			}),
-			wantCELErr: "spec.eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
+			wantCELErr: "spec.eppConfig: Invalid value: \"object\": exactly one of configMapRef or config must be specified",
 		},
 		{
 			name: "v1alpha1 EPP config map without a name reaches and is rejected by the webhook",
@@ -800,7 +802,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Containers: []corev1.Container{{Name: consts.MainContainerName}, {Name: "metrics"}},
 				}}
 			}),
-			wantCELErr: "spec.podTemplate.spec.containers[1]: Invalid value: sidecar containers must specify a non-empty image",
+			wantCELErr: "spec.podTemplate.spec.containers[1]: Invalid value: \"object\": sidecar containers must specify a non-empty image",
 		},
 		{
 			name: "v1alpha1 sidecar without image reaches the webhook",
@@ -818,7 +820,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					InitContainers: []corev1.Container{{Name: "prepare"}},
 				}}
 			}),
-			wantCELErr: "spec.podTemplate.spec.initContainers[0]: Invalid value: init containers must specify a non-empty image",
+			wantCELErr: "spec.podTemplate.spec.initContainers[0]: Invalid value: \"object\": init containers must specify a non-empty image",
 		},
 		{
 			name: "v1alpha1 init container without image reaches the webhook",
@@ -838,7 +840,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
 				}
 			}),
-			wantCELErr: "spec.podTemplate.metadata.annotations: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
+			wantCELErr: "spec.podTemplate.metadata.annotations: Invalid value: \"object\": podTemplate backend annotation must be mp or ray, case-insensitively",
 		},
 		{
 			name: "v1beta1 valid pod template backend annotation reaches the webhook",
@@ -968,95 +970,21 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			request := admissionUnstructured(t, tt.deployment)
-			var oldRequest map[string]any
-			if tt.oldDeployment != nil {
-				oldRequest = admissionUnstructured(t, tt.oldDeployment)
-			}
-
-			version := admissionSourceVersion(t, tt.deployment)
-			if tt.oldDeployment != nil && admissionSourceVersion(t, tt.oldDeployment) != version {
-				t.Fatalf("old and current source versions differ")
-			}
-			requestValidator, ok := requestValidators[version]
-			if !ok {
-				t.Fatalf("no request validator for source version %q", version)
-			}
-
-			schemaErrs := requestValidator.validateSchema(request, oldRequest)
-			if tt.wantSchemaErr != "" {
-				if tt.wantCELErr != "" || len(tt.wantWebhookErrs) != 0 || len(tt.wantWarnings) != 0 {
-					t.Fatal("schema rejection cannot have downstream expectations")
-				}
-				assertRequestValidationError(t, schemaErrs, tt.wantSchemaErr)
-				return
-			}
-			if len(schemaErrs) != 0 {
-				t.Fatalf("schema errors = %v, want none", schemaErrs)
-			}
-
-			celErrs := requestValidator.celValidator(request, oldRequest)
-			if tt.wantCELErr != "" {
-				if len(tt.wantWebhookErrs) != 0 || len(tt.wantWarnings) != 0 {
-					t.Fatal("CEL rejection cannot have webhook expectations")
-				}
-				assertRequestValidationError(t, celErrs, tt.wantCELErr)
-				return
-			}
-			if len(celErrs) != 0 {
-				t.Fatalf("CEL errors = %v, want none", celErrs)
-			}
-
 			handler := NewDynamoComponentDeploymentHandler()
-			ctx := dgdAdmissionContext(dgdAdmissionOperation(tt.oldDeployment), nvidiacomv1beta1.DynamoComponentDeploymentGVK)
-			var warnings []string
-			var err error
-			if tt.oldDeployment == nil {
-				warnings, err = handler.ValidateCreate(ctx, dcdAdmissionBeta(t, tt.deployment))
-			} else {
-				warnings, err = handler.ValidateUpdate(
-					ctx,
-					dcdAdmissionBeta(t, tt.oldDeployment),
-					dcdAdmissionBeta(t, tt.deployment),
-				)
-			}
-			assertDCDWebhookErrors(t, err, tt.wantWebhookErrs)
+			warnings, err := apiAdmissionTestEnvironment.Admit(
+				t,
+				tt.oldDeployment,
+				tt.deployment,
+				nil,
+				nil,
+				apiAdmissionTestEnvironment.allowDynamoComponentDeployments,
+				func() { apiAdmissionTestEnvironment.useDynamoComponentDeploymentHandler(handler) },
+			)
+			assertAdmissionErrors(t, err, tt.wantSchemaErr, tt.wantCELErr, tt.wantWebhookErrs)
 			if !slices.Equal(warnings, tt.wantWarnings) {
-				t.Fatalf("webhook warnings = %v, want %v", warnings, tt.wantWarnings)
+				t.Fatalf("admission warnings = %v, want %v", warnings, tt.wantWarnings)
 			}
 		})
-	}
-}
-
-func assertDCDWebhookErrors(t *testing.T, err error, want []string) {
-	t.Helper()
-	if len(want) == 0 {
-		if err != nil {
-			t.Fatalf("webhook error = %v, want none", err)
-		}
-		return
-	}
-	if err == nil {
-		t.Fatalf("webhook errors = nil, want %v", want)
-	}
-	statusErr, ok := err.(*k8serrors.StatusError)
-	if !ok || !k8serrors.IsInvalid(err) {
-		t.Fatalf("error = %T %v, want typed Kubernetes invalid error", err, err)
-	}
-	if statusErr.ErrStatus.Details == nil {
-		t.Fatalf("error = %v, want typed field causes", err)
-	}
-
-	causes := statusErr.ErrStatus.Details.Causes
-	got := make([]string, len(causes))
-	for i, cause := range causes {
-		if cause.Field == "" {
-			t.Fatalf("error cause = %#v, want an exact field path", cause)
-		}
-		got[i] = fmt.Sprintf("%s: %s", cause.Field, cause.Message)
-	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("webhook errors = %v, want %v", got, want)
 	}
 }
 
@@ -1112,21 +1040,4 @@ func betaDCDForAdmission(
 		mutate(dcd)
 	}
 	return dcd
-}
-
-func dcdAdmissionBeta(t *testing.T, deployment runtime.Object) *nvidiacomv1beta1.DynamoComponentDeployment {
-	t.Helper()
-	switch deployment := deployment.(type) {
-	case *nvidiacomv1alpha1.DynamoComponentDeployment:
-		beta := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		if err := deployment.ConvertTo(beta); err != nil {
-			t.Fatalf("convert v1alpha1 DCD to v1beta1: %v", err)
-		}
-		return beta
-	case *nvidiacomv1beta1.DynamoComponentDeployment:
-		return deployment.DeepCopy()
-	default:
-		t.Fatalf("unsupported DCD type %T", deployment)
-		return nil
-	}
 }
