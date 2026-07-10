@@ -20,16 +20,7 @@ spec:
           - -lc
           args:
           - |
-            python3 -m dynamo.frontend \
-              --discovery-backend etcd \
-              --request-plane tcp \
-              --event-plane zmq \
-              --router-mode kv \
-              --router-kv-events \
-              --kv-cache-block-size 256 \
-              --router-reset-states \
-              --http-host 0.0.0.0 \
-              --http-port 8000
+            DYN_ROUTER_MODE=kv python3 -m dynamo.frontend --trust-remote-code
           name: main
           volumeMounts:
           - name: model-cache
@@ -77,9 +68,6 @@ spec:
           args:
           - |
             python3 -m dynamo.vllm \
-              --discovery-backend etcd \
-              --request-plane tcp \
-              --event-plane zmq \
               --model nvidia/DeepSeek-V4-Pro-NVFP4 \
               --served-model-name nvidia/DeepSeek-V4-Pro-NVFP4 \
               --trust-remote-code \
