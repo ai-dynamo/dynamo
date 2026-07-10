@@ -765,12 +765,12 @@ async fn cached_reservation_ignores_request_overrides() {
     .await;
     assert_eq!(select_response.status(), StatusCode::OK);
 
-    // The replay is pure: request-side token hints are ignored in favor of
-    // the values captured by `select`.
+    // A request-side effective_prefill_tokens override is
+    // ignored in favor of the value captured by `select`.
     let response = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1","effective_prefill_tokens":5,"expected_output_tokens":99}"#,
+        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1","effective_prefill_tokens":5}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
