@@ -92,8 +92,9 @@ The baseline (resolved by `resolve_diff_base.py`) depends on where the build run
   `1.3.0` beats `1.2.5` for a `1.3.1` build regardless of publish date). Among
   tags sharing an `X.Y.Z` base (e.g. `v1.2.3-nemo-3` vs `v1.2.3-minimax`), the
   one published later wins.
-- **Nightly** → the previous successful run of the nightly workflow (found via
-  the Actions API); its commit names the baseline artifact.
+- **Nightly** → the previous successful scheduled run of the nightly workflow
+  (found via the Actions API); manual runs are excluded and the selected run's
+  commit names the baseline artifact.
 
 The baseline CSV is fetched by downloading the baseline commit's
 `compliance-<baseSHA>-<container>` artifact (needs `actions: read`). Baselines

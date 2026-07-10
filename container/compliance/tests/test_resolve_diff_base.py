@@ -10,6 +10,7 @@ Run from the repo root with the compliance package on the path:
 from __future__ import annotations
 
 import pytest
+from compliance import resolve_diff_base
 from compliance.resolve_diff_base import (
     is_release_branch,
     parse_release_tuple,
@@ -22,6 +23,20 @@ from compliance.resolve_diff_base import (
 # CPU-only unit tests; markers are required by .ai/pytest-guidelines.md
 # (lifecycle / test-type / hardware categories).
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+
+def _run(
+    run_id: int,
+    head_sha: str,
+    conclusion: str | None = "success",
+    event: str = "schedule",
+) -> dict:
+    return {
+        "id": run_id,
+        "head_sha": head_sha,
+        "event": event,
+        "conclusion": conclusion,
+    }
 
 
 class TestParseReleaseTuple:
@@ -78,28 +93,58 @@ class TestPickPriorReleaseTag:
 class TestPickPreviousRunSha:
     def test_most_recent_prior_success(self):
         runs = [
-            {"id": 100, "head_sha": "cur", "conclusion": None},  # current, in progress
-            {"id": 90, "head_sha": "sha90", "conclusion": "success"},
-            {"id": 80, "head_sha": "sha80", "conclusion": "success"},
+            _run(100, "cur", conclusion=None),  # current, in progress
+            _run(90, "sha90"),
+            _run(80, "sha80"),
         ]
         assert pick_previous_run_sha(100, runs) == "sha90"
 
     def test_skips_failed_runs(self):
-        runs = [
-            {"id": 90, "head_sha": "sha90", "conclusion": "failure"},
-            {"id": 80, "head_sha": "sha80", "conclusion": "success"},
-        ]
+        runs = [_run(90, "sha90", conclusion="failure"), _run(80, "sha80")]
         assert pick_previous_run_sha(100, runs) == "sha80"
 
-    def test_ignores_runs_at_or_after_current(self):
+    def test_skips_successful_manual_runs(self):
         runs = [
-            {"id": 100, "head_sha": "cur", "conclusion": "success"},
-            {"id": 110, "head_sha": "future", "conclusion": "success"},
+            _run(95, "manual", event="workflow_dispatch"),
+            _run(90, "scheduled"),
         ]
+        assert pick_previous_run_sha(100, runs) == "scheduled"
+
+    def test_ignores_runs_at_or_after_current(self):
+        runs = [_run(100, "cur"), _run(110, "future")]
         assert pick_previous_run_sha(100, runs) is None
 
     def test_empty(self):
         assert pick_previous_run_sha(100, []) is None
+
+
+class TestFetchWorkflowRuns:
+    def test_requests_only_successful_scheduled_runs(self, monkeypatch):
+        responses = iter(
+            [
+                "1234",
+                '[{"id": 90, "head_sha": "scheduled", '
+                '"event": "schedule", "conclusion": "success"}]',
+            ]
+        )
+        calls = []
+
+        def fake_gh(*args):
+            calls.append(args)
+            return next(responses)
+
+        monkeypatch.setattr(resolve_diff_base, "_gh", fake_gh)
+
+        assert resolve_diff_base._fetch_workflow_runs("ai-dynamo/dynamo", 100) == [
+            {
+                "id": 90,
+                "head_sha": "scheduled",
+                "event": "schedule",
+                "conclusion": "success",
+            }
+        ]
+        assert calls[1][0].endswith("?event=schedule&status=success&per_page=50")
+        assert calls[1][2] == ("[.workflow_runs[] | {id, head_sha, event, conclusion}]")
 
 
 class TestPickCommitWithArtifact:

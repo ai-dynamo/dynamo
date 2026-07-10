@@ -17,8 +17,10 @@ The baseline depends on where the build runs:
                                        several tags share the same ``X.Y.Z`` base
                                        (e.g. ``v1.2.3-nemo-3`` vs ``v1.2.3-minimax``)
                                        the one published later wins.
-4. Nightly build                    -> the previous successful run of the same
-                                       workflow, found via the Actions API; its
+4. Nightly build                    -> the previous successful scheduled run of
+                                       the same workflow, found via the Actions
+                                       API; manual ``workflow_dispatch`` runs are
+                                       excluded and the selected run's
                                        ``head_sha`` names the baseline artifact.
 
 Prints two ``key=value`` lines to stdout (suitable for ``>> "$GITHUB_OUTPUT"``)::
@@ -155,17 +157,20 @@ def _gh(*args: str) -> str | None:
 
 
 def pick_previous_run_sha(current_run_id: int, runs: list[dict]) -> str | None:
-    """Return the head SHA of the most recent successful run before the current one.
+    """Return the head SHA of the most recent successful scheduled prior run.
 
-    ``runs`` is a list of ``{"id", "head_sha", "conclusion"}`` dicts. Run ids
-    increase over time, so "before this run" is ``id < current_run_id`` and
-    "most recent" is the max such id.
+    ``runs`` is a list of ``{"id", "head_sha", "event", "conclusion"}``
+    dicts. Run ids increase over time, so "before this run" is
+    ``id < current_run_id`` and "most recent" is the max such id. Requiring
+    ``event == "schedule"`` keeps successful manual nightlies from becoming the
+    baseline for the next cron-triggered run.
     """
     prev = [
         r
         for r in runs
         if isinstance(r.get("id"), int)
         and r["id"] < current_run_id
+        and r.get("event") == "schedule"
         and r.get("conclusion") == "success"
     ]
     if not prev:
@@ -184,9 +189,10 @@ def _fetch_workflow_runs(repo: str, current_run_id: int) -> list[dict]:
     # per_page goes in the query string (not `-f`) so `gh api` stays a GET; a
     # `-f` field would flip it to POST and the runs list would never resolve.
     raw = _gh(
-        f"/repos/{repo}/actions/workflows/{workflow_id}/runs?per_page=50",
+        f"/repos/{repo}/actions/workflows/{workflow_id}/runs"
+        "?event=schedule&status=success&per_page=50",
         "--jq",
-        "[.workflow_runs[] | {id, head_sha, conclusion}]",
+        "[.workflow_runs[] | {id, head_sha, event, conclusion}]",
     )
     if not raw:
         return []
@@ -289,7 +295,8 @@ def resolve(
     artifact_prefix: str = "",
 ) -> tuple[str, str]:
     """Return (base_sha, base_label). base_sha empty when there is no baseline."""
-    # Rule 4: nightly build -> previous successful run of the same workflow.
+    # Rule 4: nightly build -> previous successful scheduled run of the same
+    # workflow. Manual workflow_dispatch runs are deliberately excluded.
     if event_context == "nightly":
         try:
             rid = int(current_run_id)
@@ -297,8 +304,8 @@ def resolve(
             return "", "nightly baseline (no current run id)"
         sha = pick_previous_run_sha(rid, _fetch_workflow_runs(repo, rid))
         if sha:
-            return sha, f"previous nightly {_short(sha)}"
-        return "", "no previous successful nightly run found"
+            return sha, f"previous scheduled nightly {_short(sha)}"
+        return "", "no previous successful scheduled nightly run found"
 
     # Rule 1: PR targeting main -> most recent main commit that has this
     # container's artifact (walk back main; the tip often isn't built yet).
