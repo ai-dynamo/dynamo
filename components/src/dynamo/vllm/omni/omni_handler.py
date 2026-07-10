@@ -415,6 +415,8 @@ class OmniHandler(BaseOmniHandler):
                     "lora_name": lora_name,
                     "lora_id": lora_id,
                 }
+                    "lora_id": lora_id,
+                }
             except Exception as e:
                 logger.exception("Failed to unload LoRA adapter: %s", e)
                 yield {"status": "error", "message": str(e)}
