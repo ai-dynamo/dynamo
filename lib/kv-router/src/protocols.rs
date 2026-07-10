@@ -350,8 +350,8 @@ impl StorageTier {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
             "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
-            "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
-            "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
+            "CPU_TIER2" | "DISK" | "NVME" | "FS" => Some(Self::Disk),
+            "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" | "OBJ" => Some(Self::External),
             _ => None,
         }
     }
@@ -400,6 +400,13 @@ impl Placement {
 
     pub fn local_gpu(worker_id: WorkerId, dp_rank: DpRank) -> Self {
         Self::local_worker(worker_id, dp_rank, StorageTier::Device)
+    }
+
+    pub fn shared(tier: StorageTier) -> Self {
+        Self {
+            owner: PlacementOwner::Shared,
+            tier,
+        }
     }
 
     pub fn is_local_gpu(&self) -> bool {

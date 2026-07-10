@@ -49,6 +49,7 @@ fn bs_event_with_cache_namespace(
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        locality: None,
     }
 }
 

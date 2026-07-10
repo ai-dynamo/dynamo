@@ -73,7 +73,13 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                     }
                     last_raw_input_id = Some(raw_event_id);
 
-                    let storage_tier = placement_event.placement.tier;
+                    let Placement {
+                        owner,
+                        tier: storage_tier,
+                    } = placement_event.placement;
+                    if !matches!(owner, PlacementOwner::LocalWorker(_)) {
+                        continue;
+                    }
                     let event = placement_event.event;
                     tracing::trace!(
                         "Event processor for worker_id {} processing event: {:?}",

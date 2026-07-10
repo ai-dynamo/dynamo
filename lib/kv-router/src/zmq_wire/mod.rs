@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicU32;
 use rmp_serde as rmps;
 use rustc_hash::FxHashMap;
 
-use crate::protocols::{DpRank, PlacementEvent, WorkerWithDpRank};
+use crate::protocols::{DpRank, PlacementEvent, PlacementOwner, StorageTier, WorkerWithDpRank};
 
 mod convert;
 mod deserialize;
@@ -30,9 +30,20 @@ pub use extra_keys::{
     extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
-pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, RawKvEvent};
+pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, Locality, RawKvEvent};
 
+use convert::resolve_placement;
 use filter::KvCacheEventMetadata;
+
+/// Resolve the storage tier when a wire event can safely be attributed to the
+/// subscribing worker.
+///
+/// Legacy device and host-pinned events remain local. Lower-tier events must
+/// explicitly declare `LOCAL` locality.
+pub fn worker_local_event_tier(raw: &RawKvEvent) -> Option<StorageTier> {
+    let placement = resolve_placement(raw, WorkerWithDpRank::new(0, 0))?;
+    matches!(placement.owner, PlacementOwner::LocalWorker(_)).then_some(placement.tier)
+}
 
 pub fn decode_event_batch(payload: &[u8]) -> Result<KvEventBatch, rmps::decode::Error> {
     rmps::from_slice(payload)
@@ -125,6 +136,13 @@ impl ZmqEventNormalizer {
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
         if raw.is_ignored() {
             return Err(ZmqEventFilterReason::IgnoredEvent);
+        }
+
+        if !matches!(
+            resolve_placement(&raw, worker).map(|placement| placement.owner),
+            Some(PlacementOwner::LocalWorker(_))
+        ) {
+            return Ok(raw);
         }
 
         let metadata = raw.metadata();

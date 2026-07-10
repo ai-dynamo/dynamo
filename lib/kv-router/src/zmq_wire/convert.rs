@@ -11,7 +11,42 @@ use crate::protocols::{
     StorageTier, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
-use super::types::{BlockHashValue, RawKvEvent};
+use super::types::{BlockHashValue, Locality, RawKvEvent};
+
+pub(crate) fn resolve_placement(raw: &RawKvEvent, worker: WorkerWithDpRank) -> Option<Placement> {
+    let (medium, locality) = match raw {
+        RawKvEvent::BlockStored {
+            medium, locality, ..
+        }
+        | RawKvEvent::BlockRemoved {
+            medium, locality, ..
+        } => (medium.as_deref(), *locality),
+        RawKvEvent::AllBlocksCleared => {
+            return Some(Placement::local_gpu(worker.worker_id, worker.dp_rank));
+        }
+        RawKvEvent::Ignored => return None,
+    };
+
+    let storage_tier = match medium {
+        None => StorageTier::Device,
+        Some(medium) => StorageTier::from_kv_medium(medium)?,
+    };
+    let is_local = match locality {
+        Some(Locality::Local) => true,
+        Some(Locality::Remote | Locality::Unknown) => false,
+        None if matches!(storage_tier, StorageTier::Device | StorageTier::HostPinned) => {
+            // Preserve legacy GPU and native CPU-offload events. Configurable
+            // FS/OBJ tiers remain fail-closed until they declare locality.
+            true
+        }
+        None => false,
+    };
+    Some(if is_local {
+        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier)
+    } else {
+        Placement::shared(storage_tier)
+    })
+}
 
 /// Convert a raw event coming from the ZMQ channel into a placement-aware worker event.
 pub fn convert_event(
@@ -22,13 +57,7 @@ pub fn convert_event(
     warning_count: &Arc<AtomicU32>,
     image_token_id: Option<u32>,
 ) -> Option<PlacementEvent> {
-    let storage_tier = match &raw {
-        RawKvEvent::BlockStored { medium, .. } | RawKvEvent::BlockRemoved { medium, .. } => {
-            StorageTier::from_kv_medium_or_default(medium.as_deref())
-        }
-        RawKvEvent::AllBlocksCleared => StorageTier::Device,
-        RawKvEvent::Ignored => return None,
-    };
+    let placement = resolve_placement(&raw, worker)?;
     let dp_rank = worker.dp_rank;
     let event = match raw {
         RawKvEvent::BlockStored {
@@ -44,6 +73,7 @@ pub fn convert_event(
             group_idx: _,
             kv_cache_spec_kind: _,
             kv_cache_spec_sliding_window: _,
+            locality: _,
         } => {
             // Reject self-referencing blocks: all block hashes (including parent) must be unique.
             {
@@ -61,7 +91,7 @@ pub fn convert_event(
                     // the worker's entire index state. An empty Removed is a no-op
                     // in the radix tree (zero iterations, returns Ok(())).
                     return Some(PlacementEvent::new(
-                        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
+                        placement,
                         KvCacheEvent {
                             event_id,
                             data: KvCacheEventData::Removed(KvCacheRemoveData {
@@ -123,10 +153,7 @@ pub fn convert_event(
         RawKvEvent::Ignored => unreachable!("ignored events return before conversion"),
     };
 
-    Some(PlacementEvent::new(
-        Placement::local_worker(worker.worker_id, worker.dp_rank, storage_tier),
-        event,
-    ))
+    Some(PlacementEvent::new(placement, event))
 }
 
 /// Rewrite each `image_token_id` run in `token_ids` to `pad_value(mm_hash)`,

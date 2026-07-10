@@ -272,9 +272,9 @@ impl ListenerLoop {
                 ) else {
                     continue;
                 };
-                let router_event = placement_event
-                    .into_router_event()
-                    .expect("local worker placement must convert to router event");
+                let Some(router_event) = placement_event.into_router_event() else {
+                    continue;
+                };
                 indexer.apply_event_routed(router_event).await;
             }
             watermark.store(seq, Ordering::Release);
@@ -341,9 +341,9 @@ impl ListenerLoop {
             ) else {
                 continue;
             };
-            let router_event = placement_event
-                .into_router_event()
-                .expect("local worker placement must convert to router event");
+            let Some(router_event) = placement_event.into_router_event() else {
+                continue;
+            };
             self.indexer.apply_event_routed(router_event).await;
             self.messages_processed += 1;
         }

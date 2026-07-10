@@ -11,7 +11,7 @@ use crate::protocols::BlockExtraInfo;
 
 use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
 use super::filter::{BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField};
-use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, RawKvEvent};
+use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, Locality, RawKvEvent};
 
 /// Our producers use msgspec with `tag=True` and `array_like=True`, which
 /// encodes each event as either a tagged map or a tagged tuple. To be tolerant of
@@ -52,6 +52,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut cache_namespace: Option<Option<String>> = None;
         let mut extra_keys: Option<Option<Vec<Option<Vec<ExtraKeyItem>>>>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
+        let mut locality: Option<Option<Locality>> = None;
         let mut metadata = KvCacheEventMetadata::default();
 
         while let Some(key) = map.next_key::<String>()? {
@@ -95,6 +96,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "kv_cache_spec_sliding_window" => {
                     metadata.kv_cache_spec_sliding_window = map.next_value()?;
                 }
+                "locality" => {
+                    locality = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -131,6 +135,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
+                    locality: locality.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -143,6 +148,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
+                    locality: locality.unwrap_or(None),
                 })
             }
             Some("AllBlocksCleared") => Ok(RawKvEvent::AllBlocksCleared),
@@ -223,6 +229,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
+                    locality: None,
                 })
             }
             "BlockRemoved" => {
@@ -248,6 +255,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     group_idx: metadata.group_idx,
                     kv_cache_spec_kind: metadata.kv_cache_spec_kind,
                     kv_cache_spec_sliding_window: metadata.kv_cache_spec_sliding_window,
+                    locality: None,
                 })
             }
             "AllBlocksCleared" => {

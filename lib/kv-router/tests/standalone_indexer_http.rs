@@ -573,6 +573,7 @@ fn raw_block_stored(
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        locality: None,
     }
 }
 

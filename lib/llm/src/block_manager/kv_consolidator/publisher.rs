@@ -14,8 +14,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::task::JoinHandle;
 
+use dynamo_kv_router::zmq_wire::Locality;
+
 use super::SharedCacheStatusTracker;
-use super::tracker::ConsolidatedEvent;
+use super::tracker::{ConsolidatedEvent, StorageTier};
 use crate::utils::zmq::{bind_pub_socket, send_multipart};
 
 /// Event batch structure matching vLLM's format (array_like=True)
@@ -44,12 +46,16 @@ enum Event {
         lora_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
     },
     #[serde(rename = "BlockRemoved")]
     BlockRemoved {
         block_hashes: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locality: Option<Locality>,
     },
     #[serde(rename = "AllBlocksCleared")]
     AllBlocksCleared {},
@@ -108,6 +114,7 @@ impl Event {
                     block_size: block_size_i32,
                     lora_name,
                     medium: tier.map(|t| t.to_vllm_medium().to_string()),
+                    locality: matches!(tier, Some(StorageTier::Disk)).then_some(Locality::Local),
                 })
             }
             ConsolidatedEvent::Remove {
@@ -123,6 +130,7 @@ impl Event {
                 Ok(Event::BlockRemoved {
                     block_hashes: vec![parsed_hash],
                     medium: tier.map(|t| t.to_vllm_medium().to_string()),
+                    locality: matches!(tier, Some(StorageTier::Disk)).then_some(Locality::Local),
                 })
             }
             ConsolidatedEvent::ClearAll => Ok(Event::AllBlocksCleared {}),
@@ -293,6 +301,7 @@ mod tests {
                 block_size: 4,
                 lora_name: None,
                 medium: Some("CPU_TIER1".to_string()),
+                locality: None,
             }],
             Some(0),
         );
@@ -325,5 +334,49 @@ mod tests {
         assert_eq!(*block_size, 4);
         assert_eq!(medium.as_deref(), Some("CPU_TIER1"));
         assert_eq!(lora_name.as_deref(), None);
+    }
+
+    #[test]
+    fn test_lower_tier_events_are_marked_worker_local() {
+        let events = vec![
+            Event::from_consolidated(ConsolidatedEvent::Store {
+                block_hash: "42".to_string(),
+                parent_hash: Some("7".to_string()),
+                token_ids: vec![1, 2, 3, 4],
+                block_size: 4,
+                lora_name: None,
+                source: "vllm".to_string(),
+                tier: Some(StorageTier::Disk),
+            })
+            .unwrap(),
+            Event::from_consolidated(ConsolidatedEvent::Remove {
+                block_hash: "42".to_string(),
+                source: "vllm".to_string(),
+                tier: Some(StorageTier::Disk),
+            })
+            .unwrap(),
+        ];
+        let batch = EventBatch(0.0, events, Some(0));
+
+        let mut payload = Vec::new();
+        batch
+            .serialize(&mut Serializer::new(&mut payload).with_struct_map())
+            .unwrap();
+
+        let decoded: KvEventBatch = rmps::from_slice(&payload).unwrap();
+        assert_eq!(decoded.events.len(), 2);
+        for event in decoded.events {
+            let (medium, locality) = match event {
+                RawKvEvent::BlockStored {
+                    medium, locality, ..
+                }
+                | RawKvEvent::BlockRemoved {
+                    medium, locality, ..
+                } => (medium, locality),
+                other => panic!("expected block event, got {other:?}"),
+            };
+            assert_eq!(medium.as_deref(), Some("CPU_TIER2"));
+            assert_eq!(locality, Some(Locality::Local));
+        }
     }
 }

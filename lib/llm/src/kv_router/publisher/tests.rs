@@ -199,6 +199,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let out = convert_event(
@@ -231,6 +232,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -245,6 +247,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let wc = Arc::new(AtomicU32::new(0));
@@ -300,6 +303,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let evt2 = RawKvEvent::BlockStored {
             block_hashes: vec![BlockHashValue::Unsigned(10)],
@@ -314,6 +318,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
 
         let out1 = convert_event(
@@ -414,6 +419,7 @@ mod test_event_processing {
             group_idx: None,
             kv_cache_spec_kind: None,
             kv_cache_spec_sliding_window: None,
+            locality: None,
         };
         let out = convert_event(
             raw_evt,
@@ -1298,6 +1304,7 @@ mod tests_startup_helpers {
                 group_idx: None,
                 kv_cache_spec_kind: None,
                 kv_cache_spec_sliding_window: None,
+                locality: None,
             }],
             data_parallel_rank: Some(0),
         };
@@ -2082,6 +2089,46 @@ mod event_processor_tests {
             panic!("expected stored event");
         };
         assert_eq!(data.blocks.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_shared_placement_is_not_published_as_local() {
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
+        let publisher = MockPublisher::new();
+        let handle = tokio::spawn(run_event_processor_loop(
+            publisher.clone(),
+            1,
+            CancellationToken::new(),
+            rx,
+            None,
+            None,
+            DEFAULT_MAX_BATCH_BLOCKS,
+        ));
+
+        tx.send(vec![
+            PlacementEvent::local_gpu(1, stored_event(0, None, 10, 0)),
+            PlacementEvent::new(
+                Placement::shared(StorageTier::External),
+                stored_event(1, Some(10), 11, 0),
+            ),
+            PlacementEvent::local_gpu(1, stored_event(2, Some(10), 12, 0)),
+        ])
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(events.len(), 1);
+        let KvCacheEventData::Stored(data) = &events[0].event.data else {
+            panic!("expected stored event");
+        };
+        assert_eq!(
+            data.blocks
+                .iter()
+                .map(|block| block.block_hash.0)
+                .collect::<Vec<_>>(),
+            vec![10, 12]
+        );
     }
 
     #[tokio::test]
