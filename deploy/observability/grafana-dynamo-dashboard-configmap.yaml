@@ -1104,7 +1104,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(dynamo_frontend_active_requests)",
+              "expr": "sum(dynamo_frontend_active_requests{model=\"$model\"})",
               "legendFormat": "active",
               "range": true,
               "refId": "A"
@@ -1115,7 +1115,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(dynamo_frontend_stage_requests{stage=~\"preprocess|route|dispatch\"})",
+              "expr": "sum(dynamo_frontend_queued_requests{model=\"$model\"})",
               "legendFormat": "queued",
               "range": true,
               "refId": "B"
