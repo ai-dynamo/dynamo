@@ -20,6 +20,7 @@ use crate::{
     kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
+        FinishReason,
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData},
     },
@@ -211,6 +212,7 @@ impl KvPushRouter {
             context_id.clone(),
             request,
             selection.scheduler_tracked,
+            selection.request_progress.take(),
         );
 
         let record_result: Result<(), Error> = async {
@@ -340,7 +342,7 @@ impl KvPushRouter {
             }
         };
 
-        guard.mark_dispatched();
+        guard.mark_dispatched().await;
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
         let wrapped_stream = Box::pin(async_stream::stream! {
@@ -350,26 +352,32 @@ impl KvPushRouter {
             let stopped = context_for_monitoring.stopped();
             tokio::pin!(stopped);
 
-            loop {
+            let mut failed = false;
+            let completed = loop {
                 tokio::select! {
                     biased;
 
                     _ = &mut stopped => {
                         tracing::debug!("Request {context_id} cancelled, ending stream");
-                        break;
+                        break false;
                     }
 
                     item = response_stream.next() => {
                         let Some(item) = item else {
-                            break;
+                            break true;
                         };
+                        failed |= response_item_failed(&item);
                         guard.on_item(&item).await;
                         yield item;
                     }
                 }
-            }
+            };
 
-            guard.finish().await;
+            if completed && !failed {
+                guard.finish().await;
+            } else {
+                guard.abort().await;
+            }
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
@@ -608,6 +616,18 @@ impl DirectRoutingRouter {
     }
 }
 
+fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
+    item.error.is_some()
+        || item.event.as_deref() == Some("error")
+        || item
+            .data
+            .as_ref()
+            .and_then(|data| data.finish_reason.as_ref())
+            .is_some_and(|reason| {
+                matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled)
+            })
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for DirectRoutingRouter
@@ -652,6 +672,21 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn response_item_failed_includes_typed_terminal_failures() {
+        let mut output = LLMEngineOutput::default();
+        assert!(!response_item_failed(&Annotated::from_data(output.clone())));
+
+        output.finish_reason = Some(FinishReason::Error("decode failed".to_string()));
+        assert!(response_item_failed(&Annotated::from_data(output.clone())));
+
+        output.finish_reason = Some(FinishReason::Cancelled);
+        assert!(response_item_failed(&Annotated::from_data(output.clone())));
+
+        output.finish_reason = Some(FinishReason::Length);
+        assert!(!response_item_failed(&Annotated::from_data(output)));
     }
 
     async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {

@@ -18,6 +18,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
+use crate::scheduling::queue_admission::RequestProgressUpdater;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -75,6 +76,13 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
+    pub request_progress: Option<RequestProgressUpdater>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    Completed { context_tokens: usize },
+    Aborted,
 }
 
 #[derive(Debug, Clone)]

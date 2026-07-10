@@ -6,8 +6,9 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PolicyClassAdmissionStrategies,
+    PotentialLoad, RequestOutcome, ScheduleRequest, SchedulingRequest, SchedulingResponse,
+    TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -61,6 +62,36 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
     ) -> Result<Self, KvSchedulerError> {
+        Self::start_with_admission_strategies(
+            component,
+            block_size,
+            workers_with_configs,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            model_name,
+            worker_type,
+            PolicyClassAdmissionStrategies::new(),
+        )
+        .await
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub async fn start_with_admission_strategies(
+        component: Component,
+        block_size: u32,
+        workers_with_configs: RuntimeConfigWatch,
+        selector: Sel,
+        kv_router_config: &KvRouterConfig,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        model_name: Option<&str>,
+        worker_type: &'static str,
+        admission_strategies: PolicyClassAdmissionStrategies,
+    ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
 
@@ -83,6 +114,16 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
+        let strategy_recheck_interval = admission_strategies
+            .values()
+            .filter_map(|strategy| strategy.reconcile_interval())
+            .min();
+        let queue_recheck_interval = strategy_recheck_interval.map_or_else(
+            || kv_router_config.router_queue_recheck_interval(),
+            |strategy_interval| {
+                strategy_interval.min(kv_router_config.router_queue_recheck_interval())
+            },
+        );
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
             .classes()
@@ -96,21 +137,24 @@ where
             .map(|(index, class)| (class.name.clone(), index))
             .collect();
 
-        let inner = Arc::new(LocalScheduler::new_with_policy_profile(
-            slots,
-            workers_with_configs.clone(),
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-            kv_router_config.router_queue_recheck_interval(),
-            kv_router_config.router_track_prefill_tokens,
-            component.drt().child_token(),
-            worker_type,
-            watch_worker_configs,
-        ));
+        let inner = Arc::new(
+            LocalScheduler::new_with_policy_profile_and_admission_strategies(
+                slots,
+                workers_with_configs.clone(),
+                profile,
+                block_size,
+                selector,
+                prefill_load_estimator,
+                overlap_scores_refresh,
+                overloaded_worker_provider,
+                queue_recheck_interval,
+                kv_router_config.router_track_prefill_tokens,
+                component.drt().child_token(),
+                worker_type,
+                watch_worker_configs,
+                admission_strategies,
+            ),
+        );
 
         let metrics_scheduler = Arc::clone(&inner);
         let background_metrics = queue_metrics.clone();
@@ -334,6 +378,20 @@ where
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.inner.free(request_id).await?;
+        self.update_queue_metrics();
+        Ok(())
+    }
+
+    pub async fn mark_dispatched(&self, request_id: &str) {
+        self.inner.mark_dispatched(request_id).await;
+    }
+
+    pub async fn finish(
+        &self,
+        request_id: &str,
+        outcome: RequestOutcome,
+    ) -> Result<(), SequenceError> {
+        self.inner.finish(request_id, outcome).await?;
         self.update_queue_metrics();
         Ok(())
     }
