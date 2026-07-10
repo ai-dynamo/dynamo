@@ -173,10 +173,10 @@ impl SelectionCache {
             if now.duration_since(oldest.0) <= self.ttl {
                 break;
             }
-            if let Some(key) = state.order.remove(&oldest) {
-                if let Some(evicted) = state.entries.remove(&key) {
-                    state.total_bytes = state.total_bytes.saturating_sub(evicted.bytes);
-                }
+            if let Some(key) = state.order.remove(&oldest)
+                && let Some(evicted) = state.entries.remove(&key)
+            {
+                state.total_bytes = state.total_bytes.saturating_sub(evicted.bytes);
             }
         }
         let bytes = entry_bytes(&cache_key, &selection);
