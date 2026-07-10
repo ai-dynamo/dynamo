@@ -293,6 +293,18 @@ struct SelectServiceCli {
     /// Comma-separated ZMQ PUB endpoints for peer selectors
     #[arg(long, value_delimiter = ',', requires = "replica_sync_port")]
     replica_sync_peers: Vec<String>,
+
+    /// Seconds an unclaimed pending selection lives before eviction
+    #[arg(long)]
+    selection_cache_ttl_secs: Option<f64>,
+
+    /// Maximum number of resident pending selections
+    #[arg(long)]
+    selection_cache_max_entries: Option<usize>,
+
+    /// Approximate byte budget across resident pending selections
+    #[arg(long)]
+    selection_cache_max_bytes: Option<usize>,
 }
 
 #[cfg(all(test, feature = "select-service"))]
@@ -331,6 +343,44 @@ mod select_service_cli_tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
     }
+
+    #[test]
+    fn parses_selection_cache_overrides() {
+        let cli = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--selection-cache-ttl-secs",
+            "30",
+            "--selection-cache-max-entries",
+            "100",
+            "--selection-cache-max-bytes",
+            "1048576",
+        ])
+        .unwrap();
+
+        let config = selection_cache_config_from_overrides(
+            cli.selection_cache_ttl_secs,
+            cli.selection_cache_max_entries,
+            cli.selection_cache_max_bytes,
+        );
+        assert_eq!(config.ttl, std::time::Duration::from_secs(30));
+        assert_eq!(config.max_entries, 100);
+        assert_eq!(config.max_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn selection_cache_falls_back_to_defaults() {
+        let cli = SelectServiceCli::try_parse_from(["dynamo.select_service"]).unwrap();
+
+        let config = selection_cache_config_from_overrides(
+            cli.selection_cache_ttl_secs,
+            cli.selection_cache_max_entries,
+            cli.selection_cache_max_bytes,
+        );
+        let default = RsSelectionCacheConfig::default();
+        assert_eq!(config.ttl, default.ttl);
+        assert_eq!(config.max_entries, default.max_entries);
+        assert_eq!(config.max_bytes, default.max_bytes);
+    }
 }
 
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -355,7 +405,11 @@ where
             replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
             kv_router_config: kv_router_config_from_dynamo_env(),
-            selection_cache: RsSelectionCacheConfig::default(),
+            selection_cache: selection_cache_config_from_overrides(
+                cli.selection_cache_ttl_secs,
+                cli.selection_cache_max_entries,
+                cli.selection_cache_max_bytes,
+            ),
         }))
     }
 
@@ -388,6 +442,28 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
     })
 }
 
+/// Build a [`RsSelectionCacheConfig`] from optional overrides, falling back to
+/// the service default for each field left unset. Shared by the Python
+/// `SelectionCacheConfig` and the `dynamo.select_service` CLI.
+#[cfg(feature = "select-service")]
+fn selection_cache_config_from_overrides(
+    ttl_secs: Option<f64>,
+    max_entries: Option<usize>,
+    max_bytes: Option<usize>,
+) -> RsSelectionCacheConfig {
+    let mut config = RsSelectionCacheConfig::default();
+    if let Some(ttl_secs) = ttl_secs {
+        config.ttl = std::time::Duration::from_secs_f64(ttl_secs);
+    }
+    if let Some(max_entries) = max_entries {
+        config.max_entries = max_entries;
+    }
+    if let Some(max_bytes) = max_bytes {
+        config.max_bytes = max_bytes;
+    }
+    config
+}
+
 /// Bounds for the in-flight selection cache. Each field defaults to the
 /// service default when omitted.
 #[cfg(feature = "select-service")]
@@ -403,17 +479,9 @@ impl SelectionCacheConfig {
     #[new]
     #[pyo3(signature = (*, ttl_secs = None, max_entries = None, max_bytes = None))]
     fn new(ttl_secs: Option<f64>, max_entries: Option<usize>, max_bytes: Option<usize>) -> Self {
-        let mut inner = RsSelectionCacheConfig::default();
-        if let Some(ttl_secs) = ttl_secs {
-            inner.ttl = std::time::Duration::from_secs_f64(ttl_secs);
+        Self {
+            inner: selection_cache_config_from_overrides(ttl_secs, max_entries, max_bytes),
         }
-        if let Some(max_entries) = max_entries {
-            inner.max_entries = max_entries;
-        }
-        if let Some(max_bytes) = max_bytes {
-            inner.max_bytes = max_bytes;
-        }
-        Self { inner }
     }
 }
 
@@ -743,7 +811,7 @@ mod selection_service_lifecycle_tests {
     #[test]
     fn idempotent_shutdown() {
         let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None)).unwrap();
+            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None)).unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
             service.shutdown(py);

@@ -66,6 +66,9 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. |
 | `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
 | `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
+| `--selection-cache-ttl-secs` | `120` | Seconds an unclaimed pending selection lives before eviction. |
+| `--selection-cache-max-entries` | `4096` | Maximum resident pending selections, evicting oldest first. |
+| `--selection-cache-max-bytes` | `268435456` | Approximate byte budget across resident pending selections. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
