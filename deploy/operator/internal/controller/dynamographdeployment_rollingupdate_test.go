@@ -336,6 +336,111 @@ func TestBridgeState_NoOpUpgradeUsesExistingWorkerGeneration(t *testing.T) {
 	require.Equal(t, "test-dgd-worker-"+activeHash, dcds["worker"].Name)
 }
 
+func TestBridgeState_LeftoverLegacyDCDDoesNotTriggerAnotherRollout(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+		},
+	})
+	activeHash := "v1hash00"
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash:   activeHash,
+		consts.AnnotationCurrentWorkerHashV2: v2Hash,
+	}
+	legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          consts.LegacyWorkerHash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				ServiceName:   "worker",
+			},
+		},
+	})
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	require.False(t, trigger)
+
+	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	require.Equal(t, activeHash, rollingCtx.NewWorkerHash)
+	require.False(t, rollingCtx.InProgress())
+}
+
+func TestLegacyMigrationFinishesOnV1TargetWithoutSecondRollout(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+		},
+	})
+	v1Hash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
+	require.NotEqual(t, v1Hash, v2Hash)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash: consts.LegacyWorkerHash,
+	}
+	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	target, err := r.desiredWorkerGeneration(dgd)
+	require.NoError(t, err)
+	require.Equal(t, v1Hash, target.generation)
+	require.Equal(t, v2Hash, target.v2Fingerprint)
+
+	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	require.Equal(t, v1Hash, rollingCtx.NewWorkerHash)
+
+	require.NoError(t, r.completeRollingUpdate(context.Background(), dgd, v1Hash))
+	require.Equal(t, v1Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	require.False(t, trigger)
+}
+
+func TestBridgeState_StaleInProgressCompletionPreservesFingerprint(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+		},
+	})
+	v1Hash := "v1hash00"
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash:   v1Hash,
+		consts.AnnotationCurrentWorkerHashV2: v2Hash,
+	}
+	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+	}
+
+	r := createTestReconcilerWithStatus(dgd)
+	require.NoError(t, r.reconcileRollingUpdate(context.Background(), dgd))
+	require.Equal(t, v1Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	require.False(t, trigger)
+}
+
 func TestBridgeState_WorkerSpecChangeUsesNewV2Generation(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {

@@ -2106,9 +2106,9 @@ func TestDynamoGraphDeploymentReconciler_checkpointWorkerHashForComponentUsesAct
 			},
 		},
 	})
-	desired, err := reconciler.desiredWorkerHash(dgd)
+	target, err := reconciler.desiredWorkerGeneration(dgd)
 	if err != nil {
-		t.Fatalf("desiredWorkerHash() error = %v", err)
+		t.Fatalf("desiredWorkerGeneration() error = %v", err)
 	}
 	reconciler.setCurrentWorkerState(dgd, workerGenerationState{activeGeneration: "oldhash"})
 
@@ -2116,7 +2116,7 @@ func TestDynamoGraphDeploymentReconciler_checkpointWorkerHashForComponentUsesAct
 	if err != nil {
 		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
 	}
-	want := reconciler.activeWorkerHashForDCDGeneration(dgd, desired)
+	want := activeWorkerHashForDCDGeneration(target)
 	if workerHash != want {
 		t.Fatalf("checkpoint worker hash = %s, want active generated hash %s", workerHash, want)
 	}

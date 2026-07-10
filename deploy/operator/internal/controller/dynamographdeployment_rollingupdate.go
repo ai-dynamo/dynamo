@@ -40,11 +40,21 @@ import (
 // generation from the v2 fingerprint of its rendered worker spec. Dynamo 1.2
 // stored a v1 generation identity in current-worker-hash and the corresponding
 // v2 fingerprint in current-worker-hash-v2. Keeping both values until a real
-// worker change lets 1.4 stop computing v1 hashes without rolling unchanged
-// workers merely to rename their generation.
+// worker change lets normal 1.4 reconciliation stop computing v1 hashes without
+// rolling unchanged workers merely to rename their generation. The literal
+// legacy migration remains the sole exception until it reaches its 1.2 target.
 type workerGenerationState struct {
 	activeGeneration string
 	v2Fingerprint    string
+}
+
+// workerGenerationTarget is the generation this reconcile must create or
+// continue, plus the v2 fingerprint that determines whether the worker spec
+// changed. They differ while retaining a 1.2 v1-named generation, including
+// while finishing a literal legacy migration on its original v1 target.
+type workerGenerationTarget struct {
+	generation    string
+	v2Fingerprint string
 }
 
 func (s workerGenerationState) empty() bool {
@@ -81,6 +91,29 @@ func (r *DynamoGraphDeploymentReconciler) desiredWorkerHash(
 	return hash, nil
 }
 
+func (r *DynamoGraphDeploymentReconciler) desiredWorkerGeneration(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (workerGenerationTarget, error) {
+	v2Fingerprint, err := r.desiredWorkerHash(dgd)
+	if err != nil {
+		return workerGenerationTarget{}, err
+	}
+
+	current := r.currentWorkerState(dgd)
+	if current.activeGeneration == consts.LegacyWorkerHash {
+		generation, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+		if err != nil {
+			return workerGenerationTarget{}, fmt.Errorf("failed to compute in-progress legacy migration target: %w", err)
+		}
+		return workerGenerationTarget{generation: generation, v2Fingerprint: v2Fingerprint}, nil
+	}
+
+	return workerGenerationTarget{
+		generation:    workerHashForDCDGeneration(current, v2Fingerprint),
+		v2Fingerprint: v2Fingerprint,
+	}, nil
+}
+
 func (r *DynamoGraphDeploymentReconciler) currentWorkerState(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) workerGenerationState {
@@ -97,6 +130,16 @@ func workerHashForDCDGeneration(current workerGenerationState, desired string) s
 	return desired
 }
 
+func workerStateForCompletedGeneration(newWorkerHash string, target workerGenerationTarget) workerGenerationState {
+	if newWorkerHash == target.v2Fingerprint {
+		return workerGenerationState{activeGeneration: newWorkerHash}
+	}
+	return workerGenerationState{
+		activeGeneration: newWorkerHash,
+		v2Fingerprint:    target.v2Fingerprint,
+	}
+}
+
 // shouldTriggerRollingUpdate compares desired worker hashes with the active
 // generation recorded on the DGD.
 //
@@ -106,19 +149,24 @@ func workerHashForDCDGeneration(current workerGenerationState, desired string) s
 func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, error) {
-	desired, err := r.desiredWorkerHash(dgd)
+	current := r.currentWorkerState(dgd)
+	if current.empty() {
+		return false, nil
+	}
+
+	target, err := r.desiredWorkerGeneration(dgd)
 	if err != nil {
 		return false, err
 	}
 
-	return !r.currentWorkerState(dgd).matchesDesired(desired), nil
+	return current.activeHash() != target.generation, nil
 }
 
 // initializeWorkerHashIfNeeded establishes the DGD's active worker generation.
 // New DGDs use the v2 hash directly. DGDs created before managed rolling updates
 // may already have worker DCDs without a hash label; in that case we label those
-// DCDs with the legacy sentinel and let the normal rolling update path migrate
-// from that sentinel to the desired v2 hash.
+// DCDs with the legacy sentinel and let the normal rolling update path finish
+// the v1 target selected by 1.2. That target then becomes a normal v1/v2 bridge.
 func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -217,25 +265,24 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 
 // activeWorkerHashForDCDGeneration returns the hash used for generated worker
 // DCD names and worker-hash labels in this reconcile. An unchanged 1.2 bridge
-// state keeps its v1 generation identity; a real worker change uses the desired
-// v2 hash and converges to a single-hash state when the rollout completes.
-func (r *DynamoGraphDeploymentReconciler) activeWorkerHashForDCDGeneration(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	desired string,
+// state keeps its v1 generation identity; a literal legacy migration keeps its
+// 1.2 v1 target; every later real change uses v2 and converges to one hash.
+func activeWorkerHashForDCDGeneration(
+	target workerGenerationTarget,
 ) string {
-	return r.activeWorkerHashCandidates(dgd, desired)[0]
+	return target.generation
 }
 
 func (r *DynamoGraphDeploymentReconciler) activeWorkerHashCandidates(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	desired string,
+	target workerGenerationTarget,
 ) []string {
 	current := r.currentWorkerState(dgd)
 	candidates := make([]string, 0, 2)
-	generated := workerHashForDCDGeneration(current, desired)
+	generated := target.generation
 	candidates = append(candidates, generated)
-	if current.v2Fingerprint == desired && desired != generated {
-		candidates = append(candidates, desired)
+	if current.v2Fingerprint == target.v2Fingerprint && target.v2Fingerprint != generated {
+		candidates = append(candidates, target.v2Fingerprint)
 	}
 	return candidates
 }
@@ -372,11 +419,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(dgd)
 
-	desired, err := r.desiredWorkerHash(dgd)
+	target, err := r.desiredWorkerGeneration(dgd)
 	if err != nil {
 		return err
 	}
-	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, desired)
+	newWorkerHash := activeWorkerHashForDCDGeneration(target)
 	current := r.currentWorkerState(dgd)
 
 	logger.Info("Reconciling rolling update",
@@ -384,7 +431,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		"activeWorkerGeneration", current.activeHash(),
 		"currentV2Fingerprint", current.v2Fingerprint,
 		"newWorkerHash", newWorkerHash,
-		"desiredWorkerHash", desired)
+		"desiredWorkerHash", target.v2Fingerprint)
 
 	if rollingUpdateStatus.Phase == nvidiacomv1beta1.RollingUpdatePhaseCompleted && current.activeHash() != newWorkerHash {
 		// Check if DCDs with the new hash already exist and are serving.
@@ -396,7 +443,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 				"activeWorkerGeneration", current.activeHash(),
 				"currentV2Fingerprint", current.v2Fingerprint,
 				"newHash", newWorkerHash)
-			r.setCurrentWorkerState(dgd, workerGenerationState{activeGeneration: newWorkerHash})
+			r.setCurrentWorkerState(dgd, workerStateForCompletedGeneration(newWorkerHash, target))
 			return r.Update(ctx, dgd)
 		}
 		// New spec change: reset to start a proper rolling update cycle with surge/drain.
@@ -563,13 +610,17 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	newWorkerHash string,
 ) error {
 	logger := log.FromContext(ctx)
+	target, err := r.desiredWorkerGeneration(dgd)
+	if err != nil {
+		return err
+	}
 
 	// Delete all non-current worker DCDs (any number of old generations)
 	if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
 		return fmt.Errorf("failed to delete old worker DCDs: %w", err)
 	}
 
-	r.setCurrentWorkerState(dgd, workerGenerationState{activeGeneration: newWorkerHash})
+	r.setCurrentWorkerState(dgd, workerStateForCompletedGeneration(newWorkerHash, target))
 	if err := r.Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to update current worker hash: %w", err)
 	}
@@ -1072,11 +1123,11 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 ) (dynamo.RollingUpdateContext, error) {
 	logger := log.FromContext(ctx)
 
-	desiredHash, err := r.desiredWorkerHash(dgd)
+	target, err := r.desiredWorkerGeneration(dgd)
 	if err != nil {
 		return dynamo.RollingUpdateContext{}, err
 	}
-	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, desiredHash)
+	newWorkerHash := activeWorkerHashForDCDGeneration(target)
 	current := r.currentWorkerState(dgd)
 
 	if current.activeHash() == newWorkerHash {

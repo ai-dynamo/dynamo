@@ -247,6 +247,8 @@ const (
 	// fingerprint of that same generation, allowing the controller to detect real
 	// worker changes without recomputing the old hash. The next genuine worker
 	// update creates a v2-identified generation and removes the sidecar annotation.
+	// A literal "legacy" generation is the one exception: it keeps computing its
+	// frozen v1 target until the migration already defined by 1.2 completes.
 
 	// AnnotationCurrentWorkerHash stores the active worker generation identity.
 	AnnotationCurrentWorkerHash = "nvidia.com/current-worker-hash"

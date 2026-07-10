@@ -232,14 +232,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	} else {
 		if r.currentWorkerState(dynamoDeployment).empty() {
-			hash, err := r.desiredWorkerHash(dynamoDeployment)
+			target, err := r.desiredWorkerGeneration(dynamoDeployment)
 			if err != nil {
 				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
-			r.setCurrentWorkerState(dynamoDeployment, workerGenerationState{activeGeneration: hash})
+			r.setCurrentWorkerState(dynamoDeployment, workerStateForCompletedGeneration(target.generation, target))
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
@@ -264,10 +264,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			r.Recorder.Event(dynamoDeployment, corev1.EventTypeWarning, "RollingUpdateNotSupported",
 				"Worker spec changed but custom rolling updates are not supported for Grove/multinode deployments")
 
-			// Update the hash to prevent repeated warnings. This branch only runs
-			// for a real v2 worker-spec change; unchanged 1.2 bridge state compares
-			// equal through current-worker-hash-v2 and remains untouched.
-			hash, err := r.desiredWorkerHash(dynamoDeployment)
+			// Update the hash to prevent repeated warnings. Unchanged 1.2 bridge
+			// state compares equal through current-worker-hash-v2. A literal legacy
+			// migration retains the 1.2 v1 target and its v2 fingerprint.
+			target, err := r.desiredWorkerGeneration(dynamoDeployment)
 			if err != nil {
 				logger.Error(err, "Failed to compute worker hash for unsupported pathway")
 				state = nvidiacomv1beta1.DGDStateFailed
@@ -275,7 +275,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
-			r.setCurrentWorkerState(dynamoDeployment, workerGenerationState{activeGeneration: hash})
+			r.setCurrentWorkerState(dynamoDeployment, workerStateForCompletedGeneration(target.generation, target))
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to update worker hash for unsupported pathway")
 			}
@@ -1456,13 +1456,13 @@ func (r *DynamoGraphDeploymentReconciler) checkComponentFullyUpdated(ctx context
 		return checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
 	}
 
-	hash, err := r.desiredWorkerHash(dgd)
+	target, err := r.desiredWorkerGeneration(dgd)
 	if err != nil {
 		return false, err.Error()
 	}
 
 	var lastReason string
-	for _, candidate := range r.activeWorkerHashCandidates(dgd, hash) {
+	for _, candidate := range r.activeWorkerHashCandidates(dgd, target) {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, candidate)
 		ready, reason := checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
 		if ready || reason != "resource not found" {
@@ -1769,11 +1769,11 @@ func (r *DynamoGraphDeploymentReconciler) preserveExistingDCDBackendFramework(ct
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]string, error) {
 	logger := log.FromContext(ctx)
 
-	hash, err := r.desiredWorkerHash(dgd)
+	target, err := r.desiredWorkerGeneration(dgd)
 	if err != nil {
 		return nil, err
 	}
-	workerHashes := r.activeWorkerHashCandidates(dgd, hash)
+	workerHashes := r.activeWorkerHashCandidates(dgd, target)
 
 	restartAnnotations := make(map[string]string)
 	for i := range dgd.Spec.Components {
@@ -2336,11 +2336,11 @@ func (r *DynamoGraphDeploymentReconciler) checkpointWorkerHashForComponent(dgd *
 	if r == nil {
 		return "", nil
 	}
-	desired, err := r.desiredWorkerHash(dgd)
+	target, err := r.desiredWorkerGeneration(dgd)
 	if err != nil {
 		return "", err
 	}
-	return r.activeWorkerHashForDCDGeneration(dgd, desired), nil
+	return activeWorkerHashForDCDGeneration(target), nil
 }
 
 // buildCheckpointJobPodTemplate builds a checkpoint job template from the same
