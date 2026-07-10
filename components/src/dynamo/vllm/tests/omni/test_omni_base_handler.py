@@ -30,6 +30,9 @@ _SKIP_FIELDS = {
     "sequence_parallel_size",
     "enable_expert_parallel",
     "ulysses_mode",
+    # Diffusion sequence-parallel mask padding; internal SP detail, defaults False
+    # and is not a benchmark-facing knob (same rationale as sequence_parallel_size).
+    "mask_sp_padding",
 }
 
 
