@@ -17,6 +17,11 @@ pytestmark = [
 REPO_ROOT = Path(__file__).parents[2]
 WORKFLOW_PATH = REPO_ROOT / ".github/workflows/build-on-demand.yml"
 BASE_IMAGE = "registry.example.com/ai-dynamo/dynamo@sha256:" + "a" * 64
+REQUIRED_BASE_IMAGE = (
+    "dynamoci.azurecr.io/ai-dynamo/dynamo:"
+    "cuda-zp234-28894200421-runtime"
+    "@sha256:694ae15aa5759af86c3c520a4b15ef86e9453a9388a2ab07a029d4e16e133e53"
+)
 
 
 def _workflow() -> dict:
@@ -66,6 +71,56 @@ def _run_validator(
     if output.exists():
         outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
     return result, outputs
+
+
+@pytest.mark.parametrize(
+    "base_image",
+    [
+        REQUIRED_BASE_IMAGE,
+        "repository@sha256:" + "b" * 64,
+        "registry.example.com:5000/team/nested/image:release-1.2@sha256:" + "c" * 64,
+    ],
+)
+def test_direct_placeholder_validator_accepts_digest_pinned_base_images(
+    tmp_path: Path, base_image: str
+):
+    result, outputs = _run_validator(tmp_path, base_image=base_image)
+
+    assert result.returncode == 0, result.stderr
+    assert outputs["base_image"] == base_image
+
+
+@pytest.mark.parametrize(
+    "base_image",
+    [
+        "",
+        "registry.example.com/ai-dynamo/dynamo:latest",
+        "registry.example.com/ai-dynamo/dynamo@md5:" + "a" * 64,
+        "registry.example.com/ai-dynamo/dynamo@sha256:not-hex",
+        "registry.example.com/ai-dynamo/dynamo@sha256:" + "a" * 63,
+        "registry.example.com/ai-dynamo/dynamo@sha256:" + "a" * 65,
+        "registry.example.com/ai dynamo@sha256:" + "a" * 64,
+        "registry.example.com/ai-dynamo/dynamo@sha256:" + "a" * 64 + "\nevil",
+        "registry.example.com/'ai-dynamo'/dynamo@sha256:" + "a" * 64,
+        'registry.example.com/"ai-dynamo"/dynamo@sha256:' + "a" * 64,
+        "registry.example.com/`id`/dynamo@sha256:" + "a" * 64,
+        "registry.example.com/$(id)/dynamo@sha256:" + "a" * 64,
+        "registry.example.com/ai-dynamo/dynamo;id@sha256:" + "a" * 64,
+        "registry.example.com/ai\\dynamo@sha256:" + "a" * 64,
+        "registry.example.com/ai=dynamo@sha256:" + "a" * 64,
+        "registry.example.com/ai|dynamo@sha256:" + "a" * 64,
+        "registry.example.com/ai>dynamo@sha256:" + "a" * 64,
+        "registry.example.com/ai<dynamo@sha256:" + "a" * 64,
+        "registry.example.com/ai&dynamo@sha256:" + "a" * 64,
+    ],
+)
+def test_direct_placeholder_validator_rejects_unsafe_base_images(
+    tmp_path: Path, base_image: str
+):
+    result, outputs = _run_validator(tmp_path, base_image=base_image)
+
+    assert result.returncode != 0
+    assert outputs == {}
 
 
 @pytest.mark.parametrize(

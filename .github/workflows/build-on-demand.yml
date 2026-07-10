@@ -208,8 +208,9 @@ jobs:
           CRIU_REF_INPUT: ${{ inputs.snapshot_criu_ref }}
         run: |
           image_name='([a-z0-9]+([.-][a-z0-9]+)*(:[0-9]+)?/)?[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*'
+          image_tag='[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}'
           digest='sha256:[0-9a-fA-F]{64}'
-          if [[ ! "${BASE_IMAGE_INPUT}" =~ ^${image_name}@${digest}$ ]]; then
+          if [[ ! "${BASE_IMAGE_INPUT}" =~ ^${image_name}(:${image_tag})?@${digest}$ ]]; then
             echo "::error::vllm_placeholder_base_image must be a digest-pinned image (...@sha256:<64 hex>)"
             exit 1
           fi
