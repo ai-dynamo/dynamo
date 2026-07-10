@@ -182,7 +182,7 @@ Ray can keep model invocation separate from selector admission:
 
 1. Call `POST /select` with a `selection_id`.
 2. Send the request to the returned `endpoint` and `dp_rank`.
-3. Call `POST /reservations` using the cached selection replay form, or the 
+3. Call `POST /reservations` using the cached selection replay form, or the
    explicit form with the full worker identity and prompt.
 4. Report prefill completion and request completion through the lifecycle API.
 
@@ -217,9 +217,11 @@ Content-Type: application/json
   replay returns `404` (`no pending selection`).
 - **Retryable on failure**: A booking that fails before landing (worker no
   longer schedulable, service not ready) re-inserts the entry, so the same call
-  can be retried once the condition clears.
-- **Bounded window**: Entries expire after 120 seconds, and each selector
-  retains at most 4096 pending selections, evicting oldest first.
+  can be retried once the condition clears. A `reservation_id` conflict (`409`)
+  likewise keeps the selection, retryable under a fresh `reservation_id`.
+- **Bounded window**: By default, entries expire after 120 seconds and each
+  selector retains at most 4096 pending selections within a 256 MiB budget,
+  evicting oldest first. All three limits are configurable.
 - **Replica-local**: The cache lives in the selector process that served the
   `/select`. With multiple selector replicas, route the reservation to the
   same replica or use the explicit form.
@@ -233,9 +235,9 @@ different replica) the call returns `404`; fall back to the explicit form.
 ### Explicit form
 
 The self-contained form carries the worker identity and prompt and needs no
-cached selection; it wins whenever `worker_id` is present. It also discards
-any cached selection for `selection_id` (or, when absent, `reservation_id`),
-so a delayed replay of the same id cannot book stale state:
+cached selection; it wins whenever `worker_id` is present. When the request
+also carries a `selection_id`, it discards that cached selection, so a later
+replay of the same id cannot book stale state:
 
 ```http
 POST /reservations
@@ -334,8 +336,8 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   reservation form is local to the selector that served the `/select`. Use
   `/select_and_reserve` for atomic local booking.
 - Reservation IDs must be globally unique. Duplicate bookings for the same ID
-  conflict (`409`); no idempotency ledger is added. An explicit booking also
-  discards any pending cached selection for its ID.
+  conflict (`409`); no idempotency ledger is added. An explicit booking that
+  carries a `selection_id` also discards that cached selection.
 
 ## Inspection APIs
 
