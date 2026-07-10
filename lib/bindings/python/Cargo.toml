@@ -111,6 +111,11 @@ dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
 
+[patch.crates-io]
+# Keep the excluded Python bindings workspace on the same protocol revision as
+# the repository workspace while the frontend-crates change is unreleased.
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "9ac258904fc4b3569eb0661e959285882e045c4d" }
+
 [profile.profiling]
 inherits = "release"
 debug = true
