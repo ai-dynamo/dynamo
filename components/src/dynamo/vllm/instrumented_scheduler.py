@@ -1747,7 +1747,7 @@ class InstrumentedScheduler(AsyncScheduler):
         return cached_tokens
 
     def _bench_generate_decode_grid(self) -> None:
-        if self.max_model_len < 2:
+        if self.max_model_len < 3:
             logger.warning("max_model_len too small for decode grid, skipping")
             return
 
@@ -1827,7 +1827,10 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         except ValueError:
             return False
-        if any(context_len + 1 > self.max_model_len for context_len in context_lengths):
+        # Fake decode requests carry one prompt-padding token at ``context_len``
+        # so async input-slot reuse never reads its -1 placeholder, then sample
+        # one output token in the measured iteration. Both tokens must fit.
+        if any(context_len + 2 > self.max_model_len for context_len in context_lengths):
             return False
         required_blocks = sum(
             self._bench_blocks_per_req(context_len + 1)
@@ -1839,7 +1842,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_max_decode_kv_read_tokens(self, batch_size: int) -> int:
         low = batch_size
-        high = batch_size * (self.max_model_len - 1)
+        high = batch_size * (self.max_model_len - 2)
         best = 0
         while low <= high:
             mid = (low + high) // 2

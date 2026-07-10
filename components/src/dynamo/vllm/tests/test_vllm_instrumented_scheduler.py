@@ -997,6 +997,16 @@ def test_decode_grid_first_ctx_yields_block_aligned_capacity():
     )
 
 
+def test_decode_grid_reserves_padding_and_sample_under_model_length():
+    """The fake request adds one prompt-padding token and samples one token."""
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=64, block_size=16)
+    stub.max_model_len = 8
+
+    assert InstrumentedScheduler._bench_decode_point_feasible(stub, 1, 6)
+    assert not InstrumentedScheduler._bench_decode_point_feasible(stub, 1, 7)
+    assert InstrumentedScheduler._bench_max_decode_kv_read_tokens(stub, 1) == 6
+
+
 def test_decode_grid_accounts_for_all_hybrid_kv_cache_groups():
     """Every KV-cache group allocates from the same physical block pool."""
     block_size = 16
