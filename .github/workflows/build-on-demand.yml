@@ -25,7 +25,7 @@ on:
       vllm_git_sha:
         description: 'Exact vLLM overlay commit'
         type: string
-        default: '40c177671946e3fa7c8544e14a68ec84afecf10c'
+        default: 'b198491a7163c636d58ee1796c433d83a9ec1b0d'
       flashinfer_git_url:
         description: 'Exact FlashInfer repository'
         type: string
