@@ -124,11 +124,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Deep containerd overlay lowerdir mountinfo records can exceed 4 KiB.
 RUN git init /tmp/criu \
     && cd /tmp/criu \
     && git remote add origin ${CRIU_REPO} \
     && git fetch --depth 1 origin ${CRIU_REF} \
     && git checkout FETCH_HEAD \
+    && old='#define BUF_SIZE 4096 /* Good enough value - can be changed */' \
+    && new='#define BUF_SIZE 65536 /* Good enough value - can be changed */' \
+    && matches="$(grep -Fxc "${old}" criu/proc_parse.c || true)" \
+    && if [ "${matches}" != 1 ]; then \
+         echo "ERROR: expected one CRIU proc parser buffer definition, found ${matches}" >&2; \
+         exit 1; \
+       fi \
+    && sed -i 's|^#define BUF_SIZE 4096 /\* Good enough value - can be changed \*/$|#define BUF_SIZE 65536 /* Good enough value - can be changed */|' criu/proc_parse.c \
+    && matches="$(grep -Fxc "${new}" criu/proc_parse.c || true)" \
+    && if [ "${matches}" != 1 ] || grep -Fqx "${old}" criu/proc_parse.c; then \
+         echo "ERROR: failed to set CRIU proc parser buffer to 65536" >&2; \
+         exit 1; \
+       fi \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
