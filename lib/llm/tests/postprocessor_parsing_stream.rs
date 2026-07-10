@@ -1266,6 +1266,33 @@ fn streaming_tool_request(
     request
 }
 
+/// Streaming chat completion request with OpenAI structured output.
+fn streaming_json_schema_request(enable_thinking: bool) -> NvCreateChatCompletionRequest {
+    serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Return a country and its capital."}],
+        "stream": true,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": enable_thinking},
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "capital",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "country": {"type": "string"},
+                        "capital": {"type": "string"}
+                    },
+                    "required": ["country", "capital"],
+                    "additionalProperties": false
+                }
+            }
+        }
+    }))
+    .unwrap()
+}
+
 fn enable_opt_in_reasoning(request: &mut NvCreateChatCompletionRequest, reasoning_parser: &str) {
     if matches!(reasoning_parser, "deepseek_v3" | "deepseek_v3_1") {
         request.chat_template_args =
@@ -1761,6 +1788,79 @@ async fn tool_choice_matrix_non_force_required_prompt_injected_bare_json_contrac
         reasoning.contains("get_weather"),
         "{case}: parser pins the JSON in reasoning_content under the broken contract, got: {reasoning:?}"
     );
+}
+
+/// `enable_thinking=true` still preserves genuine reasoning followed by a
+/// response_format JSON payload in their respective OpenAI fields.
+#[tokio::test]
+async fn response_format_qwen3_prompt_injected_reasoning_then_json_preserves_channels() {
+    let json = r#"{"country":"France","capital":"Paris"}"#;
+    let stream_text = format!("France is a country in Europe.</think>{json}");
+    let preprocessor = build_preprocessor(Some("qwen3"), None);
+    let request = streaming_json_schema_request(true);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(&stream_text), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert_eq!(reasoning.trim(), "France is a country in Europe.");
+    assert_eq!(content, json);
+}
+
+/// If SGLang emits response_format JSON immediately after a prompt-injected
+/// Qwen `<think>`, Dynamo must recover the structured answer as assistant
+/// content instead of classifying the JSON as reasoning.
+#[tokio::test]
+async fn response_format_qwen3_prompt_injected_bare_json_stays_content() {
+    let json = r#"{"country":"France","capital":"Paris"}"#;
+    let preprocessor = build_preprocessor(Some("qwen3"), None);
+    let request = streaming_json_schema_request(true);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
+    );
+    assert_eq!(content, json);
+}
+
+/// With thinking disabled, response_format JSON is ordinary assistant content.
+#[tokio::test]
+async fn response_format_qwen3_no_thinking_json_stays_content() {
+    let json = r#"{"country":"France","capital":"Paris"}"#;
+    let preprocessor = build_preprocessor(Some("qwen3"), None);
+    let request = streaming_json_schema_request(false);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(reasoning.is_empty());
+    assert_eq!(content, json);
 }
 
 /// DeepSeek V4 + required + `prompt_injected_reasoning=true` + bare JSON.
