@@ -825,7 +825,7 @@ mod tests {
         let resp = reqwest::Client::new()
             .post(format!("http://localhost:{}/inference/v1/generate", port))
             .header("content-type", "application/json")
-            .body(r#"{"token_ids":[1,2,3],"sampling_params":{}}"#)
+            .body(r#"{"token_ids":[1,2,3],"sampling_params":{"top_k":-1}}"#)
             .send()
             .await
             .expect("generate request failed");

@@ -151,7 +151,8 @@ pub struct SamplingParams {
     // reads only the controls it needs; `raw` remains authoritative.
     temperature: Option<f32>,
     top_p: Option<f32>,
-    top_k: Option<u32>,
+    // vLLM uses -1 as the sentinel for disabling top-k sampling.
+    top_k: Option<i64>,
     seed: Option<i64>,
     max_tokens: Option<u32>,
     min_tokens: Option<u32>,
@@ -722,6 +723,21 @@ mod tests {
     }
 
     #[test]
+    fn generate_request_preserves_disabled_top_k_sentinel() {
+        let raw_sampling = json!({"top_k": -1});
+        let req: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [5, 6],
+            "sampling_params": raw_sampling.clone()
+        }))
+        .expect("deserialize");
+
+        assert_eq!(req.sampling_params.top_k, Some(-1));
+        assert_eq!(req.sampling_params.as_value(), &raw_sampling);
+        let back = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(back["sampling_params"], raw_sampling);
+    }
+
+    #[test]
     fn generate_request_matches_rust_integer_types() {
         for raw in [
             json!({
@@ -732,10 +748,6 @@ mod tests {
             json!({
                 "token_ids": [1],
                 "sampling_params": {"max_tokens": -1}
-            }),
-            json!({
-                "token_ids": [1],
-                "sampling_params": {"top_k": -1}
             }),
             json!({
                 "token_ids": [1],
