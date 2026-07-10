@@ -500,7 +500,7 @@ def _run_mocked_thorough(dgdr, ops, backend: str):
     trust_patch = patch(
         "dynamo.profiler.utils.dgd_materialization."
         "model_ref_allows_implicit_trust_remote_code",
-        side_effect=lambda model_ref: str(model_ref).startswith("/"),
+        return_value=True,
     )
 
     with kv_patch, trust_patch:
