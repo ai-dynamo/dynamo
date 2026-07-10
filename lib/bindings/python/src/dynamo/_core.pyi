@@ -264,20 +264,9 @@ class Client:
 
     def instance_tcp_addresses(self) -> Dict[int, str]:
         """
-        Get the TCP transport addresses of this endpoint's current instances,
-        keyed by instance id.
-
-        Returns a dict mapping each currently-registered instance's id (as
-        returned by ``instance_ids``) to its TCP transport string (e.g.
-        "host:port/.../<endpoint>"), so a caller can reach the peer
-        worker's node (e.g. a startup RDMA connectivity check) via a dynamo API
-        rather than reading the discovery/etcd registry layout directly. Non-TCP
-        transports (e.g. NATS) are skipped. Snapshot of the watched instance set
-        (like ``instance_ids``); pair with ``wait_for_instances`` to block until
-        instances exist.
-
-        Returns:
-            A dict of instance id -> TCP transport string for the current instances
+        Get a snapshot of the current instances' TCP transport addresses,
+        as a dict of instance id -> "host:port/.../<endpoint>".
+        Non-TCP transports (e.g. NATS) are skipped.
         """
         ...
 
