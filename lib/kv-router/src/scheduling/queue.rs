@@ -140,6 +140,7 @@ struct SchedulerQueueActor<
     pending: PolicyQueue<QueuedRequest>,
     admission: PolicyClassAdmissionController,
     tracked_admissions: HashMap<String, TrackedAdmission>,
+    cancelled_ready_classes: FxHashSet<usize>,
     profile: PolicyProfile,
     pending_count: Arc<AtomicUsize>,
     pending_isl_tokens: Arc<AtomicUsize>,
@@ -327,6 +328,7 @@ impl<
             pending: PolicyQueue::new(profile.clone()),
             admission,
             tracked_admissions: HashMap::new(),
+            cancelled_ready_classes: FxHashSet::default(),
             profile,
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
@@ -889,17 +891,35 @@ impl<
     }
 
     fn handle_cancelled(&mut self, request_id: &str) -> bool {
-        let rollback_booking = self
-            .tracked_admissions
-            .get(request_id)
-            .is_some_and(|tracked| tracked.worker.is_some() && !tracked.dispatched);
+        let Some(tracked) = self.tracked_admissions.get(request_id).copied() else {
+            return false;
+        };
+        let rollback_booking = tracked.worker.is_some() && !tracked.dispatched;
         if rollback_booking
             && let Err(error) = self.slots.free(&request_id.to_owned(), Instant::now())
         {
             tracing::error!(%request_id, %error, "Failed to roll back cancelled scheduler booking");
         }
-        let made_ready = self.handle_finished(request_id, RequestOutcome::Aborted);
-        rollback_booking || made_ready
+        if tracked.worker.is_some() {
+            let made_ready = self.handle_finished(request_id, RequestOutcome::Aborted);
+            return rollback_booking || made_ready;
+        }
+
+        if let Some(entry) = self
+            .pending
+            .remove_deferred(tracked.ticket.class_index, tracked.ticket.id)
+        {
+            self.tracked_admissions.remove(request_id);
+            self.subtract_pending_counters(entry.class_index(), entry.snapshot());
+            return self.abort_admission(tracked.ticket);
+        }
+
+        // Ready heaps do not have an admission-ID index. Batch cancellations so
+        // one reconcile scans each affected class once instead of once per drop.
+        self.tracked_admissions.remove(request_id);
+        self.cancelled_ready_classes
+            .insert(tracked.ticket.class_index);
+        self.abort_admission(tracked.ticket)
     }
 
     fn handle_finished(&mut self, request_id: &str, outcome: RequestOutcome) -> bool {
@@ -907,16 +927,25 @@ impl<
             return false;
         };
         if tracked.worker.is_none() {
-            let removed = self
+            if let Some(entry) = self
                 .pending
-                .take_if(|queued| queued.request.mode.tracked_request_id() == Some(request_id));
-            debug_assert_eq!(
-                removed.len(),
-                1,
-                "pending admission must have one queue entry"
-            );
-            for entry in removed {
+                .remove_deferred(tracked.ticket.class_index, tracked.ticket.id)
+            {
                 self.subtract_pending_counters(entry.class_index(), entry.snapshot());
+            } else {
+                let removed = self
+                    .pending
+                    .take_if_in_class(tracked.ticket.class_index, |queued| {
+                        queued.request.mode.tracked_request_id() == Some(request_id)
+                    });
+                debug_assert_eq!(
+                    removed.len(),
+                    1,
+                    "pending admission must have one queue entry"
+                );
+                for entry in removed {
+                    self.subtract_pending_counters(entry.class_index(), entry.snapshot());
+                }
             }
         }
         match outcome {
@@ -1005,22 +1034,22 @@ impl<
     }
 
     async fn handle_reconcile(&mut self) {
-        let cancelled = self
-            .pending
-            .take_if(|queued| queued.admission.is_some() && queued.request.response_is_closed());
-        let mut actions = Vec::new();
-        for entry in cancelled {
-            let class_index = entry.class_index();
-            let snapshot = entry.snapshot();
-            self.subtract_pending_counters(class_index, snapshot);
-            if let Some(admission) = entry.payload().admission.as_ref() {
-                if let Some(request_id) = entry.payload().request.mode.tracked_request_id() {
-                    self.tracked_admissions.remove(request_id);
-                }
-                actions.extend(self.admission.aborted(admission.ticket));
+        for class_index in std::mem::take(&mut self.cancelled_ready_classes) {
+            let tracked_admissions = &self.tracked_admissions;
+            let cancelled = self.pending.take_if_in_class(class_index, |queued| {
+                queued.admission.is_some()
+                    && queued.request.response_is_closed()
+                    && queued
+                        .request
+                        .mode
+                        .tracked_request_id()
+                        .is_some_and(|request_id| !tracked_admissions.contains_key(request_id))
+            });
+            for entry in cancelled {
+                self.subtract_pending_counters(class_index, entry.snapshot());
             }
         }
-        actions.extend(self.admission.reconcile());
+        let actions = self.admission.reconcile();
         self.apply_admission_actions(actions);
         self.handle_update(None).await;
     }
@@ -1105,6 +1134,16 @@ impl<
             let queued = popped.into_payload();
             let admission = queued.admission;
             let request = queued.request;
+            // A ready cancellation removes lifecycle state before its batched
+            // heap cleanup; an intervening capacity update may pop it first.
+            if admission.is_some()
+                && request
+                    .mode
+                    .tracked_request_id()
+                    .is_some_and(|request_id| !self.tracked_admissions.contains_key(request_id))
+            {
+                continue;
+            }
             tracing::debug!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
@@ -2496,7 +2535,7 @@ policy_classes:
     }
 
     #[tokio::test]
-    async fn cancelled_ready_request_is_removed_while_worker_stays_busy() {
+    async fn cancelled_ready_requests_are_batched_by_reconcile() {
         let state = Arc::new(StdMutex::new(GateState::default()));
         let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
             state: Arc::clone(&state),
@@ -2506,20 +2545,47 @@ policy_classes:
         queue.enqueue(blocker).await;
         blocker_response.await.unwrap().unwrap();
 
-        let (mut cancelled, cancelled_response) = make_admission_request("cancelled-ready", 64);
-        cancelled.policy_class = Some("agents".to_owned());
-        let cancellation = queue.cancellation_guard(Some("cancelled-ready")).unwrap();
-        queue.enqueue(cancelled).await;
-        assert_eq!(queue.pending_count(), 1);
-        drop(cancelled_response);
-
-        drop(cancellation);
+        for request_id in [
+            "cancelled-ready-0",
+            "cancelled-ready-1",
+            "cancelled-ready-2",
+        ] {
+            let (mut cancelled, cancelled_response) = make_admission_request(request_id, 64);
+            cancelled.policy_class = Some("agents".to_owned());
+            let cancellation = queue.cancellation_guard(Some(request_id)).unwrap();
+            queue.enqueue(cancelled).await;
+            drop(cancelled_response);
+            drop(cancellation);
+        }
+        assert_eq!(queue.pending_count(), 3);
         queue.update().await;
+        assert_eq!(state.lock().unwrap().aborted.len(), 3);
+
+        queue.reconcile().await;
 
         assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.pending_isl_tokens(), 0);
+        assert_eq!(
+            queue.class_queue_stats(1),
+            Some(ClassQueueStats {
+                pending_count: 0,
+                pending_isl_tokens: 0,
+                pending_cached_tokens: 0,
+            })
+        );
         let state = state.lock().unwrap();
         assert!(state.dispatched.is_empty());
-        assert_eq!(state.aborted, vec![AdmissionId::new(0)]);
+        assert_eq!(state.aborted.len(), 3);
+        assert_eq!(
+            state.aborted.iter().copied().collect::<HashSet<_>>(),
+            [
+                AdmissionId::new(0),
+                AdmissionId::new(1),
+                AdmissionId::new(2)
+            ]
+            .into_iter()
+            .collect()
+        );
         slots.free(&"blocker".to_owned(), decay_now()).unwrap();
     }
 
