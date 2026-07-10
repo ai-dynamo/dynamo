@@ -9021,13 +9021,13 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 	compCtx2 := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
 	assert.Empty(t, compCtx2.WorkerHashSuffix)
 
-	// Legacy is a migration sentinel, not a real runtime namespace suffix.
+	// Legacy is the active suffix for DCD generations created before managed rolling updates.
 	componentLegacy := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash},
 	}
 	compCtxLegacy := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
-	assert.Empty(t, compCtxLegacy.WorkerHashSuffix)
+	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
 	// Frontend never gets WorkerHashSuffix, even with the label
 	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{

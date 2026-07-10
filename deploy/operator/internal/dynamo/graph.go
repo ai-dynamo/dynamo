@@ -1868,7 +1868,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
-	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; IsWorkerComponent(string(component.ComponentType)) && workerHash != "" && workerHash != commonconsts.LegacyWorkerHash {
+	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; IsWorkerComponent(string(component.ComponentType)) && workerHash != "" {
 		workerHashSuffix = workerHash
 	}
 

@@ -170,10 +170,10 @@ func TestComponentRuntimeNamespace(t *testing.T) {
 			want:             "base",
 		},
 		{
-			name:             "legacy worker hash is not a suffix",
+			name:             "legacy worker hash remains active suffix",
 			componentType:    commonconsts.ComponentTypeWorker,
 			workerHashSuffix: commonconsts.LegacyWorkerHash,
-			want:             "base",
+			want:             "base-legacy",
 		},
 	}
 
@@ -250,7 +250,7 @@ func TestGetDCDRuntimeNamespaceUsesPodTemplateWorkerHashWhenMetadataMissing(t *t
 	}
 }
 
-func TestGetDCDRuntimeNamespaceIgnoresLegacyMetadataOnlyHash(t *testing.T) {
+func TestGetDCDRuntimeNamespaceUsesLegacyMetadataOnlyHash(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dcd",
@@ -267,15 +267,15 @@ func TestGetDCDRuntimeNamespaceIgnoresLegacyMetadataOnlyHash(t *testing.T) {
 		},
 	}
 
-	if got := GetDCDEffectiveWorkerHash(dcd); got != "" {
-		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want empty", got)
+	if got := GetDCDEffectiveWorkerHash(dcd); got != commonconsts.LegacyWorkerHash {
+		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want legacy", got)
 	}
-	if got := GetDCDRuntimeNamespace(dcd); got != "base" {
-		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base", got)
+	if got := GetDCDRuntimeNamespace(dcd); got != "base-legacy" {
+		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base-legacy", got)
 	}
 }
 
-func TestGetDCDRuntimeNamespaceIgnoresLegacyPodTemplateHash(t *testing.T) {
+func TestGetDCDRuntimeNamespaceUsesLegacyPodTemplateHash(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dcd",
@@ -298,11 +298,11 @@ func TestGetDCDRuntimeNamespaceIgnoresLegacyPodTemplateHash(t *testing.T) {
 		},
 	}
 
-	if got := GetDCDEffectiveWorkerHash(dcd); got != "" {
-		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want empty", got)
+	if got := GetDCDEffectiveWorkerHash(dcd); got != commonconsts.LegacyWorkerHash {
+		t.Fatalf("GetDCDEffectiveWorkerHash() = %q, want legacy", got)
 	}
-	if got := GetDCDRuntimeNamespace(dcd); got != "base" {
-		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base", got)
+	if got := GetDCDRuntimeNamespace(dcd); got != "base-legacy" {
+		t.Fatalf("GetDCDRuntimeNamespace() = %q, want base-legacy", got)
 	}
 }
 

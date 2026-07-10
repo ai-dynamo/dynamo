@@ -1328,20 +1328,24 @@ func TestMergeWorkerComponentStatuses(t *testing.T) {
 			componentStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{},
 			oldWorkerStatuses: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
 				"prefill": {
-					ComponentKind:    "Deployment",
-					ComponentNames:   []string{"dgd-prefill-oldhash1"},
-					Replicas:         2,
-					ReadyReplicas:    ptr.To(int32(2)),
-					RuntimeNamespace: "dynamo-oldhash1",
+					ComponentKind:     "Deployment",
+					ComponentNames:    []string{"dgd-prefill-oldhash1"},
+					Replicas:          2,
+					UpdatedReplicas:   2,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(2)),
+					RuntimeNamespace:  "dynamo-oldhash1",
 				},
 			},
 			expected: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
 				"prefill": {
-					ComponentKind:    "Deployment",
-					ComponentNames:   []string{"dgd-prefill-oldhash1"},
-					Replicas:         2,
-					ReadyReplicas:    ptr.To(int32(2)),
-					RuntimeNamespace: "dynamo-oldhash1",
+					ComponentKind:     "Deployment",
+					ComponentNames:    []string{"dgd-prefill-oldhash1"},
+					Replicas:          2,
+					UpdatedReplicas:   0,
+					ReadyReplicas:     ptr.To(int32(2)),
+					AvailableReplicas: ptr.To(int32(2)),
+					RuntimeNamespace:  "dynamo-oldhash1",
 				},
 			},
 		},
@@ -1527,6 +1531,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 				CreationTimestamp: now,
 				Labels: map[string]string{
 					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoNamespace:           "base",
 					consts.KubeLabelDynamoWorkerHash:          "hashbbbb",
 				},
 			},
@@ -1539,11 +1544,10 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 			},
 			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
 				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-					ComponentKind:    "Deployment",
-					ComponentNames:   []string{"test-dgd-worker-hashbbbb"},
-					RuntimeNamespace: "base-hashbbbb",
-					Replicas:         2,
-					ReadyReplicas:    ptr.To(int32(2)),
+					ComponentKind:  "Deployment",
+					ComponentNames: []string{"test-dgd-worker-hashbbbb"},
+					Replicas:       2,
+					ReadyReplicas:  ptr.To(int32(2)),
 				},
 			},
 		})

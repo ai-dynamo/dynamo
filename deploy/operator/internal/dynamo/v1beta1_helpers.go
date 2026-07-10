@@ -261,13 +261,12 @@ func GetDCDDynamoNamespace(dcd *v1beta1.DynamoComponentDeployment) string {
 }
 
 // ComponentRuntimeNamespace returns the effective Dynamo runtime namespace for a
-// component. Worker-class components append their concrete worker hash suffix;
-// non-workers and legacy worker generations use the base Dynamo namespace.
+// component. Worker-class components append their active worker hash suffix.
 func ComponentRuntimeNamespace(dynamoNamespace string, componentType string, workerHashSuffix string) string {
 	if dynamoNamespace == "" {
 		return ""
 	}
-	if IsWorkerComponent(componentType) && workerHashSuffix != "" && workerHashSuffix != commonconsts.LegacyWorkerHash {
+	if IsWorkerComponent(componentType) && workerHashSuffix != "" {
 		return dynamoNamespace + "-" + workerHashSuffix
 	}
 	return dynamoNamespace
@@ -281,17 +280,10 @@ func GetDCDEffectiveWorkerHash(dcd *v1beta1.DynamoComponentDeployment) string {
 		return ""
 	}
 	if workerHash := dcd.GetLabels()[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" {
-		if workerHash == commonconsts.LegacyWorkerHash {
-			return ""
-		}
 		return workerHash
 	}
 	labels := GetPodTemplateLabels(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-	workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]
-	if workerHash == commonconsts.LegacyWorkerHash {
-		return ""
-	}
-	return workerHash
+	return labels[commonconsts.KubeLabelDynamoWorkerHash]
 }
 
 // GetDCDRuntimeNamespace returns the effective Dynamo runtime namespace used by

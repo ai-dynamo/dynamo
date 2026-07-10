@@ -1123,19 +1123,27 @@ func selectOldWorkerRuntimeNamespace(
 	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
 	replicaTargets map[string]int32,
 ) string {
+	for _, dcd := range dcds {
+		if replicaTargets[dcd.Name] > 0 {
+			return oldWorkerRuntimeNamespace(dcd)
+		}
+	}
+
 	fallback := ""
 	for _, dcd := range dcds {
-		if dcd.Status.Component == nil || dcd.Status.Component.RuntimeNamespace == "" {
-			continue
-		}
-		if fallback == "" {
-			fallback = dcd.Status.Component.RuntimeNamespace
-		}
-		if replicaTargets[dcd.Name] > 0 {
-			return dcd.Status.Component.RuntimeNamespace
+		if namespace := oldWorkerRuntimeNamespace(dcd); namespace != "" {
+			fallback = namespace
+			break
 		}
 	}
 	return fallback
+}
+
+func oldWorkerRuntimeNamespace(dcd nvidiacomv1beta1.DynamoComponentDeployment) string {
+	if dcd.Status.Component != nil && dcd.Status.Component.RuntimeNamespace != "" {
+		return dcd.Status.Component.RuntimeNamespace
+	}
+	return dynamo.GetDCDRuntimeNamespace(&dcd)
 }
 
 // resolveRollingUpdateParams reads the deployment strategy annotations from a component spec
@@ -1274,6 +1282,7 @@ func mergeWorkerComponentStatuses(
 	for componentName, oldStatus := range oldWorkerStatuses {
 		newStatus, exists := componentStatuses[componentName]
 		if !exists {
+			oldStatus.UpdatedReplicas = 0
 			componentStatuses[componentName] = oldStatus
 			continue
 		}
