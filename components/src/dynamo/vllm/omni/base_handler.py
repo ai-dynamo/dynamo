@@ -21,6 +21,7 @@ from dynamo._core import Context
 from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
+from dynamo.vllm.lora_state import LoRAState
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,12 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         self.config = config
         self.model_max_len = config.engine_args.max_model_len
         self.shutdown_event = shutdown_event
+
+        self._lora_state = LoRAState()
+        # Keep historical attribute names for compatibility with existing code.
+        self.loaded_loras = self._lora_state.loaded_loras
+        self._lora_load_locks = self._lora_state.lora_load_locks
+        self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
 
         logger.info(f"{self.__class__.__name__} initialized successfully")
 

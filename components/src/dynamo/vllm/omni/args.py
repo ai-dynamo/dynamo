@@ -24,6 +24,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +373,10 @@ class OmniConfig(DynamoRuntimeConfig):
 
     # Realtime (bidirectional) serving mode
     realtime: bool = False
+
+    # Compatibility fields used by shared LoRA registration logic.
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
+    route_to_encoder: bool = False
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "OmniConfig":

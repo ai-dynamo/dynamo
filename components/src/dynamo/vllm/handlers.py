@@ -9,7 +9,6 @@ import math
 import os
 import struct
 import tempfile
-import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -86,6 +85,7 @@ from dynamo.vllm.kv_connector_protocols import (
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
+from .lora_state import LoRAState
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
     MissingMultimodalHandoffError,
@@ -1045,12 +1045,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.model_config = model_config
-        # LoRA tracking: name -> LoRAInfo(id, path)
-        self.loaded_loras: dict[str, LoRAInfo] = {}
-        # Per-LoRA locks to prevent concurrent load operations for the same LoRA
-        self._lora_load_locks: dict[str, asyncio.Lock] = {}
-        # Guard lock-map access in case handlers are invoked from multiple threads.
-        self._lora_load_locks_guard = threading.Lock()
+        self._lora_state = LoRAState()
+        # Keep historical attribute names for compatibility with existing code.
+        self.loaded_loras = self._lora_state.loaded_loras
+        self._lora_load_locks = self._lora_state.lora_load_locks
+        self._lora_load_locks_guard = self._lora_state.lora_load_locks_guard
         self._paused: bool = False
         self._weight_version: str = "initial"
 
@@ -1894,22 +1893,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest if model_name is a loaded adapter, else None."""
-        if model_name and (lora := self.loaded_loras.get(model_name)):
-            return LoRARequest(
-                lora_name=model_name,
-                lora_int_id=lora.id,
-                lora_path=lora.path,
-            )
-        return None
+        return self._lora_state.resolve_request(model_name)
 
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
-        with self._lora_load_locks_guard:
-            lock = self._lora_load_locks.get(lora_name)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._lora_load_locks[lora_name] = lock
-            return lock
+        return self._lora_state.get_lock(lora_name)
 
     async def load_lora(self, request=None):
         """
@@ -2222,12 +2210,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 finally:
                     # Avoid lock-map growth on failed loads: if this attempt did not leave the LoRA
                     # loaded, remove the lock entry (best-effort).
-                    with self._lora_load_locks_guard:
-                        if (
-                            lora_name not in self.loaded_loras
-                            and self._lora_load_locks.get(lora_name) is lock
-                        ):
-                            self._lora_load_locks.pop(lora_name, None)
+                    self._lora_state.cleanup_lock_if_not_loaded(lora_name, lock)
         except Exception as e:
             logger.exception(f"Failed to load LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
@@ -2334,12 +2317,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     }
                 finally:
                     # Remove lock entry once the LoRA is not loaded (or never was).
-                    with self._lora_load_locks_guard:
-                        if (
-                            lora_name not in self.loaded_loras
-                            and self._lora_load_locks.get(lora_name) is lock
-                        ):
-                            self._lora_load_locks.pop(lora_name, None)
+                    self._lora_state.cleanup_lock_if_not_loaded(lora_name, lock)
         except Exception as e:
             logger.exception(f"Failed to unload LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
@@ -2350,7 +2328,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         Returns a dictionary of lora_name -> lora_id mappings.
         """
         try:
-            loras = {name: lora.id for name, lora in self.loaded_loras.items()}
+            loras = self._lora_state.list_lora_ids()
             yield {
                 "status": "success",
                 "loras": loras,

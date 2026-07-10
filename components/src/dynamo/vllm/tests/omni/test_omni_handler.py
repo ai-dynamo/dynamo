@@ -16,7 +16,9 @@ try:
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
     from dynamo.common.utils.output_modalities import RequestType
+    from dynamo.vllm.lora_state import LoRAState
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
+    from dynamo.vllm.omni.main import _register_lora_engine_routes
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
     from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
 except ImportError:
@@ -57,6 +59,14 @@ def _make_handler(stage_types=("diffusion",)):
         stage_type=stage_types[i]
     )
     handler.engine_client = engine_client
+
+    # BaseOmniHandler.__init__ is mocked out in tests; recreate LoRA state attrs
+    # expected by BaseWorkerHandler helpers called by OmniHandler.
+    handler._lora_state = LoRAState()
+    handler.loaded_loras = handler._lora_state.loaded_loras
+    handler._lora_load_locks = handler._lora_state.lora_load_locks
+    handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
+
     return handler
 
 
@@ -246,6 +256,57 @@ class TestBuildSamplingParamsList:
         sp = OmniDiffusionSamplingParams()
         handler._build_sampling_params_list(sp)
         handler.engine_client.default_sampling_params_list[0].clone.assert_called_once()
+
+
+class TestLoraEngineRouteRegistration:
+    @pytest.mark.asyncio
+    async def test_register_lora_engine_routes_dispatches_each_handler(self):
+        runtime = MagicMock()
+        handler = SimpleNamespace(
+            load_lora=MagicMock(),
+            unload_lora=MagicMock(),
+            list_loras=MagicMock(),
+        )
+
+        async def _yield_once(payload):
+            yield {"status": "ok", "payload": payload}
+
+        handler.load_lora.side_effect = _yield_once
+        handler.unload_lora.side_effect = _yield_once
+        handler.list_loras.side_effect = _yield_once
+
+        _register_lora_engine_routes(runtime, handler)
+
+        registered = {
+            call.args[0]: call.args[1]
+            for call in runtime.register_engine_route.call_args_list
+        }
+
+        assert set(registered) == {"load_lora", "unload_lora", "list_loras"}
+
+        body = {"lora_name": "adapterA"}
+        assert await registered["load_lora"](body) == {"status": "ok", "payload": body}
+        assert await registered["unload_lora"](body) == {
+            "status": "ok",
+            "payload": body,
+        }
+        assert await registered["list_loras"](body) == {"status": "ok", "payload": body}
+
+
+class TestLoraRequestParsing:
+    def test_extract_lora_name_accepts_delete_route_alias_shape(self):
+        handler = _make_handler()
+
+        assert (
+            handler._extract_lora_name_from_request({"name": "adapterA"}) == "adapterA"
+        )
+        assert (
+            handler._extract_lora_name_from_request({"adapter_name": "adapterA"})
+            == "adapterA"
+        )
+        assert (
+            handler._extract_lora_name_from_request({"model": "adapterA"}) == "adapterA"
+        )
 
 
 class TestBuildOriginalPrompt:
