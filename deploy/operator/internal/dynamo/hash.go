@@ -29,9 +29,9 @@ import (
 
 const dgdWorkerHashPlaceholderValue = "worker-hash-placeholder"
 
-// ComputeLegacyAlphaDGDWorkersSpecHash returns the frozen v1alpha1 worker hash.
-// New and stable generations must not use it; it exists only so an in-progress
-// literal "legacy" migration can finish on the target selected by Dynamo 1.2.
+// ComputeLegacyAlphaDGDWorkersSpecHash returns the v1alpha1 worker hash that a
+// pre-v1beta1 controller would compute for the DGD's current spec. Conversion
+// must preserve every v1alpha1 hash input shape this depends on.
 func ComputeLegacyAlphaDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, error) {
 	alpha := &v1alpha1.DynamoGraphDeployment{}
 	if err := alpha.ConvertFrom(dgd); err != nil {
