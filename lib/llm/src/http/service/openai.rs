@@ -61,10 +61,7 @@ use crate::protocols::openai::{
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
-    responses::{
-        NvCreateResponse, NvResponse, PromptCacheMode, PromptCacheOptions, ResponseParams,
-        chat_completion_to_response,
-    },
+    responses::{NvCreateResponse, NvResponse, ResponseParams, chat_completion_to_response},
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -74,6 +71,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::PromptCacheMode;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -2267,7 +2265,7 @@ async fn responses(
         prompt_cache_retention: request.inner.prompt_cache_retention,
         safety_identifier: request.inner.safety_identifier.clone(),
     };
-    let prompt_cache_options = request.prompt_cache_options;
+    let retention_ttl_seconds = response_kv_retention_ttl_seconds(&request);
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
@@ -2305,8 +2303,8 @@ async fn responses(
         });
 
     let mut request = context.map(|mut _req| chat_request);
-    if let Some(ttl_seconds) = prompt_cache_options_ttl_seconds(prompt_cache_options.as_ref()) {
-        request.insert(KV_RETENTION_TTL_CONTEXT_KEY, ttl_seconds);
+    if let Some(ttl_seconds) = retention_ttl_seconds {
+        request.insert_metadata(KV_RETENTION_TTL_CONTEXT_KEY, ttl_seconds.to_string());
     }
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
@@ -2482,10 +2480,13 @@ async fn responses(
     }
 }
 
-fn prompt_cache_options_ttl_seconds(options: Option<&PromptCacheOptions>) -> Option<u32> {
-    options
-        .is_some_and(|options| options.mode == PromptCacheMode::Implicit)
-        .then_some(30 * 60)
+fn response_kv_retention_ttl_seconds(request: &NvCreateResponse) -> Option<u32> {
+    request
+        .inner
+        .prompt_cache_options
+        .as_ref()
+        .filter(|options| options.mode == PromptCacheMode::Implicit)
+        .map(|options| options.ttl.seconds())
 }
 
 /// Checks for unsupported fields in the request.
@@ -2538,7 +2539,7 @@ pub fn validate_response_unsupported_fields(
             VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
         ));
     }
-    if request
+    if inner
         .prompt_cache_options
         .is_some_and(|options| options.mode == PromptCacheMode::Explicit)
     {
@@ -3428,7 +3429,9 @@ mod tests {
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
-    use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
+    use dynamo_protocols::types::responses::{
+        CreateResponse, Input, PromptCacheOptions, PromptConfig,
+    };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -3587,7 +3590,6 @@ mod tests {
 
     fn make_base_request() -> NvCreateResponse {
         NvCreateResponse {
-            prompt_cache_options: None,
             inner: CreateResponse {
                 input: Input::Text("hello".into()),
                 model: Some("test-model".into()),
@@ -4035,18 +4037,17 @@ mod tests {
 
     #[test]
     fn prompt_cache_options_maps_implicit_mode_only() {
-        assert_eq!(prompt_cache_options_ttl_seconds(None), None);
-        assert_eq!(
-            prompt_cache_options_ttl_seconds(Some(&PromptCacheOptions::default())),
-            Some(1_800)
-        );
-        assert_eq!(
-            prompt_cache_options_ttl_seconds(Some(&PromptCacheOptions {
-                mode: PromptCacheMode::Explicit,
-                ..Default::default()
-            })),
-            None
-        );
+        let mut request = make_base_request();
+        assert_eq!(response_kv_retention_ttl_seconds(&request), None);
+
+        request.inner.prompt_cache_options = Some(PromptCacheOptions::default());
+        assert_eq!(response_kv_retention_ttl_seconds(&request), Some(1_800));
+
+        request.inner.prompt_cache_options = Some(PromptCacheOptions {
+            mode: PromptCacheMode::Explicit,
+            ..Default::default()
+        });
+        assert_eq!(response_kv_retention_ttl_seconds(&request), None);
     }
 
     #[test]
@@ -4056,15 +4057,16 @@ mod tests {
             Some(dynamo_protocols::types::responses::PromptCacheRetention::Hours24);
 
         assert_eq!(
-            prompt_cache_options_ttl_seconds(request.prompt_cache_options.as_ref()),
-            None
+            response_kv_retention_ttl_seconds(&request),
+            None,
+            "the deprecated field must not cross the normalization boundary"
         );
     }
 
     #[test]
     fn test_validate_unsupported_fields_rejects_explicit_prompt_cache_mode() {
         let mut request = make_base_request();
-        request.prompt_cache_options = Some(PromptCacheOptions {
+        request.inner.prompt_cache_options = Some(PromptCacheOptions {
             mode: PromptCacheMode::Explicit,
             ..Default::default()
         });

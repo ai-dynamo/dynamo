@@ -40,9 +40,8 @@ use super::{
 use crate::preprocessor::KV_RETENTION_TTL_CONTEXT_KEY;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
-    AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
-    AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse,
-    AnthropicMessageContent, CacheControl, CacheControlType, SystemContent,
+    AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
+    AnthropicErrorBody, AnthropicErrorResponse, SystemContent,
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
@@ -155,6 +154,17 @@ async fn handler_anthropic_messages(
             "max_tokens: must be greater than 0",
         ));
     }
+    let retention_ttl_seconds =
+        match super::anthropic_cache_control::cache_retention_ttl_seconds(&request) {
+            Ok(ttl) => ttl,
+            Err(message) => {
+                return Err(anthropic_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    message,
+                ));
+            }
+        };
     gate_anthropic_nvext(&mut request, state.nvext_enabled());
 
     // Create request context
@@ -174,6 +184,9 @@ async fn handler_anthropic_messages(
         )
     })?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    if let Some(ttl_seconds) = retention_ttl_seconds {
+        request.insert_metadata(KV_RETENTION_TTL_CONTEXT_KEY, ttl_seconds.to_string());
+    }
     attach_x_request_id(&mut request, &headers);
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
@@ -267,7 +280,6 @@ async fn anthropic_messages(
 
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
-    let retention_ttl_seconds = anthropic_cache_retention_ttl_seconds(&orig_request);
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
@@ -340,11 +352,7 @@ async fn anthropic_messages(
             .or_insert(serde_json::Value::Bool(false));
     }
 
-    let mut request = context.map(|_req| chat_request);
-    if let Some(ttl_seconds) = retention_ttl_seconds {
-        request.insert(KV_RETENTION_TTL_CONTEXT_KEY, ttl_seconds);
-    }
-
+    let request = context.map(|_req| chat_request);
     // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
     // streaming gate (required/named + structural-tag stay on the v1 finalize path).
     let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
@@ -541,37 +549,6 @@ async fn anthropic_messages(
 
         Ok(Json(response).into_response())
     }
-}
-
-fn cache_control_ttl_seconds(cache_control: &CacheControl) -> Option<u32> {
-    if cache_control.control_type != CacheControlType::Ephemeral {
-        return None;
-    }
-    u32::try_from(cache_control.ttl_seconds()).ok()
-}
-
-fn final_block_cache_control(request: &AnthropicCreateMessageRequest) -> Option<&CacheControl> {
-    let message = request.messages.last()?;
-    let AnthropicMessageContent::Blocks { content } = &message.content else {
-        return None;
-    };
-    match content.last()? {
-        AnthropicContentBlock::Text { cache_control, .. }
-        | AnthropicContentBlock::ToolUse { cache_control, .. }
-        | AnthropicContentBlock::ToolResult { cache_control, .. }
-        | AnthropicContentBlock::Thinking { cache_control, .. } => cache_control.as_ref(),
-        _ => None,
-    }
-}
-
-fn anthropic_cache_retention_ttl_seconds(request: &AnthropicCreateMessageRequest) -> Option<u32> {
-    request
-        .cache_control
-        .as_ref()
-        .and_then(cache_control_ttl_seconds)
-        .into_iter()
-        .chain(final_block_cache_control(request).and_then(cache_control_ttl_seconds))
-        .max()
 }
 
 // ---------------------------------------------------------------------------
@@ -919,56 +896,6 @@ mod tests {
             }
         }))
         .unwrap()
-    }
-
-    fn request_with_cache_control(value: serde_json::Value) -> AnthropicCreateMessageRequest {
-        serde_json::from_value(value).unwrap()
-    }
-
-    #[test]
-    fn top_level_cache_control_maps_to_full_prefix_ttl() {
-        let request = request_with_cache_control(serde_json::json!({
-            "model": "test-model",
-            "max_tokens": 16,
-            "messages": [{"role": "user", "content": "hi"}],
-            "cache_control": {"type": "ephemeral", "ttl": "1h"}
-        }));
-
-        assert_eq!(anthropic_cache_retention_ttl_seconds(&request), Some(3600));
-    }
-
-    #[test]
-    fn final_block_cache_control_maps_to_full_prefix_ttl() {
-        let request = request_with_cache_control(serde_json::json!({
-            "model": "test-model",
-            "max_tokens": 16,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "first", "cache_control": {"type": "ephemeral"}},
-                    {"type": "text", "text": "last", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
-                ]
-            }]
-        }));
-
-        assert_eq!(anthropic_cache_retention_ttl_seconds(&request), Some(3600));
-    }
-
-    #[test]
-    fn earlier_block_cache_control_is_deferred() {
-        let request = request_with_cache_control(serde_json::json!({
-            "model": "test-model",
-            "max_tokens": 16,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "first", "cache_control": {"type": "ephemeral"}},
-                    {"type": "text", "text": "last"}
-                ]
-            }]
-        }));
-
-        assert_eq!(anthropic_cache_retention_ttl_seconds(&request), None);
     }
 
     #[test]

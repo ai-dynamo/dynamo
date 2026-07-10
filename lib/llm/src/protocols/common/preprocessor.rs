@@ -159,17 +159,14 @@ pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalDat
 
 /// Provider-neutral KV cache hints forwarded to inference backends.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct KvHintEnvelope {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub retention: Vec<KvRetentionHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_full_prompt: Option<KvRetentionHint>,
 }
 
-/// Retain the cumulative token prefix for the requested duration.
+/// Retain the full prompt KV for the requested duration.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct KvRetentionHint {
-    pub prefix_tokens: u32,
     pub ttl_seconds: u32,
 }
 
@@ -600,25 +597,13 @@ mod tests {
         let hints = req.kv_hints.as_ref().unwrap();
 
         assert_eq!(
-            hints.retention,
-            vec![
-                KvRetentionHint {
-                    prefix_tokens: 2,
-                    ttl_seconds: 300,
-                },
-                KvRetentionHint {
-                    prefix_tokens: 4,
-                    ttl_seconds: 3600,
-                },
-            ]
+            hints.retain_full_prompt,
+            Some(KvRetentionHint { ttl_seconds: 3600 })
         );
         assert_eq!(
             serde_json::to_value(&req).unwrap()["kv_hints"],
             serde_json::json!({
-                "retention": [
-                    {"prefix_tokens": 2, "ttl_seconds": 300},
-                    {"prefix_tokens": 4, "ttl_seconds": 3600},
-                ]
+                "retain_full_prompt": {"ttl_seconds": 3600}
             })
         );
     }

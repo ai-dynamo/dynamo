@@ -404,7 +404,7 @@ class SglangLLMEngine(LLMEngine):
             sampling_params=sampling_params,
             stream=True,
             **require_reasoning_kwargs(self.engine, request),
-            **kv_hint_kwargs(self.engine, request),
+            **kv_hint_kwargs(self.engine, request, context),
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
             **telemetry.engine_trace_kwargs(

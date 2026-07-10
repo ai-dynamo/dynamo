@@ -19,6 +19,7 @@
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
 mod anthropic;
+mod anthropic_cache_control;
 pub mod metadata;
 mod openai;
 

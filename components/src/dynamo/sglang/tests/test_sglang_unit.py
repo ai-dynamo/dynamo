@@ -308,7 +308,7 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
 
 
-def test_kv_hint_kwargs_are_forwarded_only_when_supported():
+def test_kv_hint_kwargs_are_forwarded_or_fail_visibly():
     class OldEngine:
         async def async_generate(self, input_ids=None):
             return None
@@ -317,11 +317,24 @@ def test_kv_hint_kwargs_are_forwarded_only_when_supported():
         async def async_generate(self, input_ids=None, kv_hints=None):
             return None
 
-    request = {"kv_hints": {"retention": [{"prefix_tokens": 4, "ttl_seconds": 300}]}}
+    request = {"kv_hints": {"retain_full_prompt": {"ttl_seconds": 300}}}
 
-    assert kv_hint_kwargs(OldEngine(), request) == {}
+    with pytest.raises(RuntimeError, match="does not support kv_hints"):
+        kv_hint_kwargs(OldEngine(), request)
     assert kv_hint_kwargs(NewEngine(), request) == {"kv_hints": request["kv_hints"]}
     assert kv_hint_kwargs(NewEngine(), {}) == {}
+
+
+def test_kv_hint_kwargs_materialize_from_context_metadata():
+    class NewEngine:
+        async def async_generate(self, input_ids=None, kv_hints=None):
+            return None
+
+    context = SimpleNamespace(metadata={"dynamo.llm.kv_retention_ttl_seconds": "3600"})
+
+    assert kv_hint_kwargs(NewEngine(), {}, context) == {
+        "kv_hints": {"retain_full_prompt": {"ttl_seconds": 3600}}
+    }
 
 
 @pytest.mark.parametrize(

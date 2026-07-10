@@ -262,29 +262,17 @@ fn attach_agent_context_from_context(
 }
 
 fn attach_kv_hints_from_context(request: &mut PreprocessedRequest, context: &PipelineContext<()>) {
-    if request.prompt_embeds.is_some()
-        || request
-            .multi_modal_data
-            .as_ref()
-            .is_some_and(|media| !media.is_empty())
-    {
-        return;
-    }
-    let Ok(ttl_seconds) = context.get::<u32>(KV_RETENTION_TTL_CONTEXT_KEY) else {
+    let Some(ttl_seconds) = context
+        .metadata()
+        .get(KV_RETENTION_TTL_CONTEXT_KEY)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|ttl| *ttl > 0)
+    else {
         return;
     };
-    let prefix_tokens = u32::try_from(request.token_ids.len()).unwrap_or(u32::MAX);
-    if prefix_tokens == 0 || *ttl_seconds == 0 {
-        return;
-    }
-    request
-        .kv_hints
-        .get_or_insert_with(KvHintEnvelope::default)
-        .retention
-        .push(KvRetentionHint {
-            prefix_tokens,
-            ttl_seconds: *ttl_seconds,
-        });
+    request.kv_hints = Some(KvHintEnvelope {
+        retain_full_prompt: Some(KvRetentionHint { ttl_seconds }),
+    });
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3658,33 +3646,33 @@ mod tests {
     }
 
     #[test]
-    fn context_retention_becomes_full_token_prefix_hint() {
+    fn serialized_context_retention_becomes_full_prompt_hint() {
         let mut context = PipelineContext::new(());
-        context.insert(KV_RETENTION_TTL_CONTEXT_KEY, 600_u32);
+        context.insert_metadata(KV_RETENTION_TTL_CONTEXT_KEY, "600");
         let mut request = preprocessed_with_media(None);
 
         attach_kv_hints_from_context(&mut request, &context);
 
         assert_eq!(
-            request.kv_hints.unwrap().retention,
-            vec![KvRetentionHint {
-                prefix_tokens: 3,
-                ttl_seconds: 600,
-            }]
+            request.kv_hints.unwrap().retain_full_prompt,
+            Some(KvRetentionHint { ttl_seconds: 600 })
         );
     }
 
     #[test]
-    fn context_retention_ignores_unaligned_multimodal_prompt() {
+    fn context_retention_survives_multimodal_preprocessing() {
         let mut context = PipelineContext::new(());
-        context.insert(KV_RETENTION_TTL_CONTEXT_KEY, 600_u32);
+        context.insert_metadata(KV_RETENTION_TTL_CONTEXT_KEY, "600");
         let mut media = MultimodalDataMap::new();
         media.insert("image_url".to_string(), vec![url_entry("http://x/a.png")]);
         let mut request = preprocessed_with_media(Some(media));
 
         attach_kv_hints_from_context(&mut request, &context);
 
-        assert!(request.kv_hints.is_none());
+        assert_eq!(
+            request.kv_hints.unwrap().retain_full_prompt,
+            Some(KvRetentionHint { ttl_seconds: 600 })
+        );
     }
 
     #[test]
