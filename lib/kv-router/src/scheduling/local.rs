@@ -536,6 +536,13 @@ where
         loads
     }
 
+    /// Fast path for empty-token potential-load queries.
+    /// Returns current active load per worker without touching the indexer or
+    /// computing cache-hit overlap.
+    pub fn get_current_loads(&self) -> Vec<PotentialLoad> {
+        self.get_potential_loads(None, 0, HashMap::new(), false)
+    }
+
     pub fn get_active_lora_counts(&self) -> HashMap<String, usize> {
         self.slots.get_active_lora_counts()
     }
@@ -855,6 +862,44 @@ mod tests {
 
         let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), false);
         assert_eq!(loads[0].active_requests, 0);
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_get_current_loads_matches_empty_potential_loads() {
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+
+        // Book a request so active_requests and potential_decode_blocks are non-zero,
+        // pinning the semantics rather than trivially comparing all-zero fields.
+        scheduler
+            .schedule_request(request(ScheduleMode::Tracked {
+                request_id: ("test-req-1".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let mut current = scheduler.get_current_loads();
+        let mut expected = scheduler.get_potential_loads(None, 0, HashMap::new(), false);
+
+        current.sort_by_key(|l| (l.worker_id, l.dp_rank));
+        expected.sort_by_key(|l| (l.worker_id, l.dp_rank));
+
+        assert_eq!(current.len(), expected.len());
+        for (c, e) in current.iter().zip(expected.iter()) {
+            assert_eq!(c.worker_id, e.worker_id);
+            assert_eq!(c.dp_rank, e.dp_rank);
+            assert_eq!(c.potential_decode_blocks, e.potential_decode_blocks);
+            assert_eq!(c.active_requests, e.active_requests);
+            assert_eq!(c.potential_prefill_tokens, e.potential_prefill_tokens);
+        }
+
+        // Verify at least one worker has active load from the booked request
+        assert!(current.iter().any(|f| f.active_requests > 0));
+
         cancel_token.cancel();
     }
 

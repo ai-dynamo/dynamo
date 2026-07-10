@@ -873,6 +873,29 @@ impl SelectionCore {
     ) -> Result<Vec<PotentialLoad>, SelectionError> {
         let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
         let entry = self.ready_entry(&key)?;
+
+        // Fast path: empty token list -> skip indexer/cache-hit work and return
+        // current load snapshot directly
+        let tokens_empty = req.prompt.token_ids.as_ref().is_some_and(|t| t.is_empty())
+            && req
+                .prompt
+                .mm_routing_info
+                .as_ref()
+                .map_or(true, |mm| mm.routing_token_ids.is_empty())
+            && req
+                .prompt
+                .block_hashes
+                .as_ref()
+                .map_or(true, |hashes| hashes.is_empty())
+            && req
+                .prompt
+                .sequence_hashes
+                .as_ref()
+                .map_or(true, |hashes| hashes.is_empty());
+        if tokens_empty {
+            return Ok(entry.scheduler.get_current_loads());
+        }
+
         let prepared = self.prepare_selection_inputs(&entry, &req.prompt).await?;
         let track_prefill_tokens = req
             .router_config_override

@@ -357,6 +357,31 @@ async fn overlap_scores_returns_all_schedulable_worker_ranks() {
 }
 
 #[tokio::test]
+async fn potential_loads_empty_tokens_returns_ok() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/potential_loads")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model_name": "model", "token_ids": []}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert!(body.is_array(), "expected array of potential loads");
+}
+
+#[tokio::test]
 async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let app = app();
     assert_eq!(
