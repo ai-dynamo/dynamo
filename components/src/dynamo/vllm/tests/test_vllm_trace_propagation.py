@@ -71,8 +71,12 @@ def _make_engine(engine_client) -> VllmLLMEngine:
     return engine
 
 
-async def _drain(engine: VllmLLMEngine, ctx: _FakeContext) -> None:
-    async for _ in engine.generate({"token_ids": [1, 2, 3]}, ctx):
+async def _drain(
+    engine: VllmLLMEngine,
+    ctx: _FakeContext,
+    request: dict | None = None,
+) -> None:
+    async for _ in engine.generate(request or {"token_ids": [1, 2, 3]}, ctx):
         pass
 
 
@@ -112,6 +116,70 @@ async def test_omits_trace_headers_when_no_trace_context(mock_build_sampling):
 
     # kwarg omitted (engine_trace_kwargs returns {}).
     assert "trace_headers" not in captured
+
+
+@patch("dynamo.vllm.llm_engine.build_sampling_params")
+async def test_forwards_agent_context_session_id_when_vllm_accepts_it(
+    mock_build_sampling,
+):
+    mock_build_sampling.return_value = SimpleNamespace()
+    captured: dict = {}
+
+    def fake_generate(
+        prompt,
+        sampling_params,
+        request_id,
+        *,
+        data_parallel_rank=None,
+        lora_request=None,
+        session_id=None,
+    ):
+        captured["session_id"] = session_id
+        return _empty_async_iter()
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "agent_context": {"session_id": "session-1"},
+    }
+
+    await _drain(
+        _make_engine(SimpleNamespace(generate=fake_generate)),
+        _FakeContext(),
+        request,
+    )
+
+    assert captured["session_id"] == "session-1"
+
+
+@patch("dynamo.vllm.llm_engine.build_sampling_params")
+async def test_drops_agent_context_session_id_for_old_vllm(mock_build_sampling):
+    mock_build_sampling.return_value = SimpleNamespace()
+    called = False
+
+    def fake_generate(
+        prompt,
+        sampling_params,
+        request_id,
+        *,
+        data_parallel_rank=None,
+        lora_request=None,
+    ):
+        nonlocal called
+        called = True
+        return _empty_async_iter()
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "agent_context": {"session_id": "session-1"},
+    }
+
+    await _drain(
+        _make_engine(SimpleNamespace(generate=fake_generate)),
+        _FakeContext(),
+        request,
+    )
+
+    assert called
 
 
 @patch("dynamo.vllm.llm_engine.build_sampling_params")

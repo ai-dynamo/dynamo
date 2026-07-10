@@ -54,6 +54,10 @@ class GenerateRequest(TypedDict, total=False):
     ``model`` carries the requested model name (set by the Rust
     preprocessor). Engines that support dynamic LoRA read it to route a
     request to a loaded adapter.
+
+    ``agent_context`` carries agent/request identity metadata from the
+    frontend. vLLM reads ``agent_context.session_id`` when the installed vLLM
+    engine exposes typed session identity.
     """
 
     token_ids: Required[list[int]]
@@ -69,6 +73,7 @@ class GenerateRequest(TypedDict, total=False):
     mm_routing_info: dict[str, Any]
     encoder_result: dict[str, Any]
     extra_args: dict[str, Any]
+    agent_context: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):

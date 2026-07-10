@@ -96,6 +96,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
+_GENERATE_SESSION_ID_SUPPORT_CACHE_ATTR = "_dynamo_generate_session_id_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
@@ -979,6 +980,56 @@ def _request_reasoning_metadata(
             reasoning_parser_kwargs = extra_args.get("reasoning_parser_kwargs")
 
     return reasoning_ended, reasoning_parser_kwargs
+
+
+def _session_id_for_vllm(request: Mapping[str, Any]) -> str | None:
+    agent_context = request.get("agent_context")
+    if not isinstance(agent_context, Mapping):
+        return None
+    session_id = agent_context.get("session_id")
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def _engine_generate_session_kwargs(
+    engine_client: Any,
+    session_id: str | None,
+) -> dict[str, Any]:
+    if not session_id:
+        return {}
+    if not _engine_generate_accepts_session_id(engine_client):
+        logger.debug(
+            "vLLM generate does not accept session_id; "
+            "running without request-local session metadata"
+        )
+        return {}
+    return {"session_id": session_id}
+
+
+def _engine_generate_accepts_session_id(engine_client: Any) -> bool:
+    try:
+        cached = vars(engine_client).get(_GENERATE_SESSION_ID_SUPPORT_CACHE_ATTR)
+    except TypeError:
+        cached = None
+    if cached is not None:
+        return cached
+
+    try:
+        parameters = inspect.signature(engine_client.generate).parameters
+    except (TypeError, ValueError):
+        logger.debug("Unable to inspect vLLM generate signature; dropping session_id")
+        return False
+
+    support = (
+        any(
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+        )
+        or "session_id" in parameters
+    )
+    try:
+        setattr(engine_client, _GENERATE_SESSION_ID_SUPPORT_CACHE_ATTR, support)
+    except Exception:
+        pass
+    return support
 
 
 def get_dp_range_for_worker(vllm_config: VllmConfig) -> tuple[int, int]:
@@ -2621,6 +2672,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_sequence_length=None,
         trace_headers=None,
         priority=0,
+        session_id=None,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
     ):
@@ -2639,6 +2691,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 data_parallel_rank=data_parallel_rank,
                 trace_headers=trace_headers,
                 priority=priority,
+                **_engine_generate_session_kwargs(self.engine_client, session_id),
                 **_engine_generate_reasoning_kwargs(
                     self.engine_client,
                     reasoning_ended,
@@ -2996,6 +3049,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         embedding_sequence_length=embedding_sequence_length,
                         trace_headers=trace_headers,
                         priority=priority,
+                        session_id=_session_id_for_vllm(request),
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
                     ):
@@ -3099,6 +3153,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    **_engine_generate_session_kwargs(
+                        self.engine_client,
+                        _session_id_for_vllm(request),
+                    ),
                 )
 
                 async for res in gen:
@@ -3293,6 +3351,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     priority=priority,
+                    **_engine_generate_session_kwargs(
+                        self.engine_client,
+                        _session_id_for_vllm(request),
+                    ),
                     **_engine_generate_reasoning_kwargs(
                         self.engine_client,
                         reasoning_ended,
