@@ -127,7 +127,7 @@ Service Options:
   --event-plane PLANE       nats|zmq (default: nats)
   --frontend-port PORT      Frontend HTTP port (default: 8000)
   --planner-profile PATH    Planner profile data path
-  --tokenizer-backend NAME  Tokenizer backend: "fast" or "hf" (default: unset, uses HF)
+  --tokenizer-backend NAME  Tokenizer backend: "fast" or "hf" (default: unset, uses fastokens)
   --fast-tokens             Shorthand for --tokenizer-backend fast
   --num-models N            Number of model instances (default: 1). Each gets --workers workers
                             with names model-1, model-2, ...
@@ -212,7 +212,7 @@ echo "║          Unified Observability Capture                      ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Output:    $OUTPUT_DIR"
-echo "Tokenizer: ${TOKENIZER_BACKEND:-hf (default)}"
+echo "Tokenizer: ${TOKENIZER_BACKEND:-fastokens (default)}"
 echo ""
 
 # ─── Pre-flight: detect available tools ──────────────────────────────────────
@@ -433,10 +433,10 @@ FRONTEND_ENV=(
 
 if [[ -n "$TOKENIZER_BACKEND" ]]; then
     # Map human-readable CLI values to DYN_TOKENIZER env var values
-    # (Rust model_card.rs reads DYN_TOKENIZER, expects "fastokens" or "default")
+    # (Rust model_card.rs reads DYN_TOKENIZER, expects "fastokens" or "huggingface")
     case "$TOKENIZER_BACKEND" in
         fast|fastokens) _DYN_TOK_VAL="fastokens" ;;
-        hf|default|"")  _DYN_TOK_VAL="default" ;;
+        hf|huggingface|"")  _DYN_TOK_VAL="huggingface" ;;
         *)               _DYN_TOK_VAL="$TOKENIZER_BACKEND" ;;
     esac
     FRONTEND_ENV+=(DYN_TOKENIZER="$_DYN_TOK_VAL")

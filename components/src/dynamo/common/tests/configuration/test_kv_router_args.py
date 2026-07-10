@@ -473,7 +473,7 @@ def test_frontend_tokenizer_defaults_to_fastokens(monkeypatch) -> None:
 
 
 def test_frontend_tokenizer_env_and_cli_precedence(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_TOKENIZER", "default")
+    monkeypatch.setenv("DYN_TOKENIZER", "huggingface")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 

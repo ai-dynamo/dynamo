@@ -129,7 +129,7 @@ spec:
           args: ["python3 -m dynamo.frontend --router-mode round-robin --http-port 8000"]
           env:
             - name: DYN_TOKENIZER
-              value: "default"
+              value: "huggingface"
             - name: DYN_PERF_DIAG
               value: "1"
             - name: HF_HOME

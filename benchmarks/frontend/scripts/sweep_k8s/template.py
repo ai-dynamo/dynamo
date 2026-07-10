@@ -18,10 +18,10 @@ from sweep_core.models import DeployDimension, SweepConfig
 from sweep_k8s.kubectl import apply_yaml
 
 # Tokenizer name mapping for template substitution (DYN_TOKENIZER accepts
-# "default" or "fastokens")
+# "huggingface" or "fastokens")
 TOKENIZER_TEMPLATE_MAP = {
-    "hf": "default",
-    "default": "default",
+    "hf": "huggingface",
+    "huggingface": "huggingface",
     "fast": "fastokens",
     "fastokens": "fastokens",
 }

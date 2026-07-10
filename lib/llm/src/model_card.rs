@@ -948,7 +948,7 @@ impl ModelDeploymentCard {
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
     /// Env-var controls:
-    /// - `DYN_TOKENIZER=default` — use HuggingFace encoding instead of the default `fastokens` backend
+    /// - `DYN_TOKENIZER=huggingface` — use HuggingFace encoding instead of the default `fastokens` backend
     /// - `DYN_TOKENIZER_CACHE=1` — wrap the tokenizer in an L1 prefix cache that records
     ///   tokenizations at special-token boundaries (massive speed-up for shared chat
     ///   prefixes; default off, zero cost when unset)
@@ -960,12 +960,12 @@ impl ModelDeploymentCard {
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = match std::env::var("DYN_TOKENIZER") {
-            Ok(v) if v == "default" => false,
+            Ok(v) if v == "huggingface" => false,
             Ok(v) if v == "fastokens" || v.is_empty() => true,
             Ok(v) => {
                 tracing::warn!(
                     value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to fastokens"
+                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'huggingface'; falling back to fastokens"
                 );
                 true
             }

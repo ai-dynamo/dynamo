@@ -14,7 +14,7 @@ The Dynamo Frontend supports multiple tokenizer backends for BPE-based `tokenize
 The default `fastokens` backend uses the [`fastokens`](https://github.com/Atero-ai/fastokens) crate, a purpose-built encoder optimized for throughput on supported BPE `tokenizer.json` models.
 It is a _hybrid_ backend: encoding uses `fastokens` while decoding falls back to HuggingFace so that incremental detokenization, byte-fallback, and special-token handling work correctly.
 
-#### `default` HuggingFace Tokenizers
+#### `huggingface` Tokenizers
 
 The HuggingFace backend uses the [HuggingFace `tokenizers`](https://github.com/huggingface/tokenizers) library (Rust).
 It supports features in `tokenizer.json` files (normalizers, pre-tokenizers, post-processors, decoders, added tokens with special-token flags, and byte-fallback).
@@ -33,7 +33,7 @@ Set the backend with a CLI flag or environment variable. The CLI flag takes prec
 
 | CLI Argument | Env Var | Valid values | Default |
 |---|---|---|---|
-| `--tokenizer` | `DYN_TOKENIZER` | `fastokens`, `default` | `fastokens` |
+| `--tokenizer` | `DYN_TOKENIZER` | `fastokens`, `huggingface` | `fastokens` |
 
 **Examples:**
 
@@ -42,7 +42,7 @@ Set the backend with a CLI flag or environment variable. The CLI flag takes prec
 python -m dynamo.frontend
 
 # Explicit environment variable
-export DYN_TOKENIZER=default
+export DYN_TOKENIZER=huggingface
 python -m dynamo.frontend
 ```
 
@@ -53,4 +53,4 @@ When `fastokens` is selected by default, by `--tokenizer fastokens`, or by `DYN_
 1. The frontend passes the environment variable to the Rust runtime.
 2. When building the tokenizer for a model, `ModelDeploymentCard::tokenizer()` attempts to load `fastokens::Tokenizer` from the same `tokenizer.json` file.
 3. If loading succeeds, a hybrid `FastTokenizer` is created that encodes with `fastokens` and decodes with HuggingFace.
-4. If loading fails (unsupported tokenizer features, missing file, etc.), the frontend logs a warning and falls back to the standard HuggingFace backend; no operator intervention is needed.
+4. If loading fails (unsupported tokenizer features, missing file, etc.), the frontend logs a warning and falls back to the `huggingface` backend; no operator intervention is needed.

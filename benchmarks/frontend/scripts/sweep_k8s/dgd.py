@@ -28,10 +28,10 @@ from sweep_k8s.kubectl import (
 )
 
 # Tokenizer name mapping for DGD env vars (DYN_TOKENIZER accepts
-# "default" or "fastokens")
+# "huggingface" or "fastokens")
 TOKENIZER_BACKEND_MAP = {
-    "hf": "default",
-    "default": "default",
+    "hf": "huggingface",
+    "huggingface": "huggingface",
     "fast": "fastokens",
     "fastokens": "fastokens",
 }

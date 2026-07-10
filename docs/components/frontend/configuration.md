@@ -116,7 +116,7 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--tokenizer` | `DYN_TOKENIZER` | `fastokens` | Tokenizer: `fastokens` (high-performance Rust tokenizer) or `default` (HuggingFace). See [Tokenizer](Tokenizer.md) |
+| `--tokenizer` | `DYN_TOKENIZER` | `fastokens` | Tokenizer: `fastokens` (high-performance Rust tokenizer) or `huggingface` (HuggingFace). See [Tokenizer](Tokenizer.md) |
 
 ## Experimental
 

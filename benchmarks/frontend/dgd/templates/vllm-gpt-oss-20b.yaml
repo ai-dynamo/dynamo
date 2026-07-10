@@ -12,7 +12,7 @@
 # Template variables (substituted by sweep_runner.py --deploy-template):
 #   ${DGD_NAME}              - DynamoGraphDeployment name
 #   ${IMAGE}                 - Container image
-#   ${DYN_TOKENIZER}         - "default" (hf) or "fastokens"
+#   ${DYN_TOKENIZER}         - "huggingface" (hf) or "fastokens"
 #   ${FRONTEND_PORT}         - Frontend HTTP port (default: 8000)
 #   ${ROUTER_MODE}           - Frontend router mode (default: round-robin)
 #   ${MODEL}                 - Model path (HF ID or local path on PVC)
