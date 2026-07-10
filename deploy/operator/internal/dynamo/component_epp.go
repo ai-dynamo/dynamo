@@ -11,6 +11,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 )
 
@@ -25,6 +26,21 @@ func NewEPPDefaults() *EPPDefaults {
 
 func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	container := e.getCommonContainer(context)
+
+	// Default resource requests so EPP is Burstable rather than BestEffort QoS.
+	// Without requests the pod is BestEffort and is the first thing the kubelet
+	// evicts under node pressure (e.g. DiskPressure), which can leave the
+	// InferencePool with no endpoint picker and stall the whole deployment.
+	// The ephemeral-storage request additionally lowers EPP's ranking in the
+	// kubelet's DiskPressure eviction ordering. These are defaults only and are
+	// overridable via extraPodSpec.mainContainer.resources.
+	container.Resources = corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:              resource.MustParse("100m"),
+			corev1.ResourceMemory:           resource.MustParse("256Mi"),
+			corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+		},
+	}
 
 	// EPP uses gRPC, so we need gRPC probes (not HTTP)
 	// Port 9002: gRPC endpoint for InferencePool communication
@@ -92,8 +108,13 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Value: "true",
 		},
 		{
+			// Match the Rust EPP's documented default (info). debug/trace here
+			// streams continuously to the container log, which counts against
+			// the node's ephemeral storage and can trigger DiskPressure eviction
+			// of this pod (see ephemeral-storage request above). Override per
+			// deployment via extraPodSpec if verbose logs are needed.
 			Name:  "RUST_LOG",
-			Value: "debug,dynamo_llm::kv_router=trace",
+			Value: "info",
 		},
 		{
 			Name:  "DYN_ENFORCE_DISAGG",
