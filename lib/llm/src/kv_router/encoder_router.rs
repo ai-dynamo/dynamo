@@ -125,14 +125,32 @@ impl EncoderRouter {
             EncodePushRouter::from_client_with_monitor(client, RouterMode::RoundRobin, None)
                 .await?;
         let _ = self.router.set(Arc::new(router));
-        self.lifecycle
-            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
-        tracing::info!(
-            model = %self.model_name,
-            namespace = %self.namespace,
-            "Encoder router activated"
-        );
+        if self.mark_active_if_pending() {
+            tracing::info!(
+                model = %self.model_name,
+                namespace = %self.namespace,
+                "Encoder router activated"
+            );
+        } else {
+            tracing::debug!(
+                model = %self.model_name,
+                namespace = %self.namespace,
+                state = ?self.lifecycle_state(),
+                "Encoder router initialized after its activation was superseded"
+            );
+        }
         Ok(())
+    }
+
+    fn mark_active_if_pending(&self) -> bool {
+        self.lifecycle
+            .compare_exchange(
+                EncoderLifecycleState::Pending as u8,
+                EncoderLifecycleState::Active as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     fn lifecycle_state(&self) -> EncoderLifecycleState {
@@ -140,17 +158,17 @@ impl EncoderRouter {
     }
 
     pub fn deactivate(&self) {
-        if self.router.get().is_some() {
-            self.lifecycle
-                .store(EncoderLifecycleState::Unavailable as u8, Ordering::Release);
-        }
+        self.lifecycle
+            .store(EncoderLifecycleState::Unavailable as u8, Ordering::Release);
     }
 
     pub fn reactivate(&self) {
-        if self.router.get().is_some() {
-            self.lifecycle
-                .store(EncoderLifecycleState::Active as u8, Ordering::Release);
-        }
+        let _ = self.lifecycle.compare_exchange(
+            EncoderLifecycleState::Unavailable as u8,
+            EncoderLifecycleState::Active as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     pub fn is_deactivated(&self) -> bool {
@@ -211,33 +229,56 @@ impl
             return next.generate(context.map(|_| request)).await;
         }
 
-        let router = self
-            .router
-            .get()
-            .context("Encoder router is active but not initialized")?;
         let encode_context = Context::with_id_and_metadata(
             request.clone(),
             context.id().to_string(),
             context.metadata().clone(),
         );
-        let response = router.generate(encode_context).await?;
-        let (encoder_result, worker_link) = Self::consume_encode_stream(response).await?;
+        let encode_result = async {
+            let router = self
+                .router
+                .get()
+                .context("Encoder router is active but not initialized")?;
+            let response = router.generate(encode_context).await?;
+            Self::consume_encode_stream(response).await
+        }
+        .await;
 
-        // Once the Encode worker has emitted a transfer handle, always hand it
-        // to the downstream worker even if the caller disconnected. The
-        // receiver owns transfer completion and buffer release.
-        request.encoder_result = Some(encoder_result);
-        request.migration_link = worker_link;
+        match encode_result {
+            Ok((encoder_result, worker_link)) => {
+                // Once the Encode worker has emitted a transfer handle, always hand it
+                // to the downstream worker even if the caller disconnected. The
+                // receiver owns transfer completion and buffer release.
+                request.encoder_result = Some(encoder_result);
+                request.migration_link = worker_link;
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    model = %self.model_name,
+                    namespace = %self.namespace,
+                    "Encoder hop failed; falling back to downstream inline encoding"
+                );
+            }
+        }
         next.generate(context.map(|_| request)).await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Mutex};
+
     use futures::stream;
     use serde_json::json;
 
-    use dynamo_runtime::pipeline::{ResponseStream, context::Controller};
+    use dynamo_runtime::{
+        engine::AsyncEngineContextProvider,
+        pipeline::{Error, ResponseStream, context::Controller},
+    };
+
+    use crate::protocols::common::preprocessor::MultimodalData;
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 
     use super::*;
 
@@ -246,6 +287,47 @@ mod tests {
             Box::pin(stream::iter(items)),
             Arc::new(Controller::default()),
         )
+    }
+
+    #[derive(Default)]
+    struct CaptureEngine {
+        request: Mutex<Option<PreprocessedRequest>>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for CaptureEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> std::result::Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            self.request
+                .lock()
+                .unwrap()
+                .replace(request.content().clone());
+            Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                request.context(),
+            ))
+        }
+    }
+
+    fn multimodal_request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .multi_modal_data(Some(HashMap::from([(
+                "image".to_string(),
+                vec![MultimodalData::RawUrl(
+                    "data:image/png;base64,cGF5bG9hZA==".to_string(),
+                )],
+            )])))
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap()
     }
 
     #[tokio::test]
@@ -257,6 +339,41 @@ mod tests {
         drop(router);
 
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn deactivation_wins_an_in_flight_activation() {
+        let router = EncoderRouter::disabled();
+
+        router.deactivate();
+
+        assert!(!router.mark_active_if_pending());
+        assert_eq!(router.lifecycle_state(), EncoderLifecycleState::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn encoder_failure_falls_back_to_downstream() {
+        let router = EncoderRouter::disabled();
+        router
+            .lifecycle
+            .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+        let downstream = Arc::new(CaptureEngine::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            downstream.clone();
+
+        let _response = router
+            .generate(SingleIn::new(multimodal_request()), next)
+            .await
+            .expect("encoder failure should fall through to downstream");
+
+        let request = downstream
+            .request
+            .lock()
+            .unwrap()
+            .take()
+            .expect("downstream must receive the original request");
+        assert!(request.encoder_result.is_none());
+        assert!(request.multi_modal_data.is_some());
     }
 
     #[tokio::test]

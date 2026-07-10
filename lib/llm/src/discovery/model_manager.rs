@@ -1354,22 +1354,6 @@ impl ModelManager {
     /// Publish an Encode endpoint and activate any waiting token pipeline.
     pub fn activate_encoder_router(&self, model_name: &str, namespace: &str, endpoint: Endpoint) {
         let key = Self::model_namespace_key(model_name, namespace);
-        let reactivate_if_needed = || {
-            if let Some(model) = self.get_model(model_name)
-                && let Some(ws) = model
-                    .worker_sets()
-                    .into_iter()
-                    .find(|ws| ws.namespace() == namespace && ws.encoder_router.is_some())
-                && let Some(ref router) = ws.encoder_router
-                && router.is_deactivated()
-            {
-                router.reactivate();
-                true
-            } else {
-                false
-            }
-        };
-
         let sender = match self.encoder_router_activators.entry(key) {
             Entry::Occupied(mut o) => {
                 let state = o.get_mut();
@@ -1396,15 +1380,35 @@ impl ModelManager {
                 );
             }
         } else {
-            reactivate_if_needed();
+            self.reactivate_encoder_routers(model_name, namespace);
+        }
+    }
+
+    fn reactivate_encoder_routers(&self, model_name: &str, namespace: &str) {
+        if let Some(model) = self.get_model(model_name) {
+            for ws in model.worker_sets() {
+                if ws.namespace() == namespace
+                    && let Some(ref router) = ws.encoder_router
+                    && router.is_deactivated()
+                {
+                    router.reactivate();
+                }
+            }
         }
     }
 
     /// Drop a stale Encode endpoint and make existing token pipelines bypass it.
     pub fn remove_encoder_activator(&self, model_name: &str, namespace: &str) {
         let key = Self::model_namespace_key(model_name, namespace);
-        if let Some(mut state) = self.encoder_router_activators.get_mut(&key) {
-            state.endpoint = None;
+        if let Entry::Occupied(mut o) = self.encoder_router_activators.entry(key) {
+            let should_remove = {
+                let state = o.get_mut();
+                state.endpoint = None;
+                state.consumer.is_none()
+            };
+            if should_remove {
+                o.remove();
+            }
         }
     }
 
@@ -2109,6 +2113,46 @@ mod tests {
         assert!(mm.register_encoder_router("llama", "ns2").is_some());
     }
 
+    #[test]
+    fn test_remove_encoder_activator_drops_stale_state_without_waiter() {
+        let mm = ModelManager::new();
+        let key = ModelManager::model_namespace_key("llama", "ns1");
+        mm.encoder_router_activators.insert(
+            key.clone(),
+            EncoderActivationState {
+                routing_enabled: true,
+                ..Default::default()
+            },
+        );
+
+        mm.remove_encoder_activator("llama", "ns1");
+
+        assert!(!mm.encoder_router_activators.contains_key(&key));
+        let _receiver = mm
+            .register_encoder_router("llama", "ns1")
+            .expect("registration after cleanup must succeed");
+        let state = mm.encoder_router_activators.get(&key).unwrap();
+        assert!(!state.routing_enabled);
+        assert!(state.consumer.is_some());
+    }
+
+    #[test]
+    fn test_remove_encoder_activator_preserves_waiting_consumer() {
+        let mm = ModelManager::new();
+        let key = ModelManager::model_namespace_key("llama", "ns1");
+        let _receiver = mm
+            .register_encoder_router("llama", "ns1")
+            .expect("consumer registration must succeed");
+        mm.enable_encoder_routing("llama", "ns1");
+
+        mm.remove_encoder_activator("llama", "ns1");
+
+        let state = mm.encoder_router_activators.get(&key).unwrap();
+        assert!(state.consumer.is_some());
+        assert!(state.endpoint.is_none());
+        assert!(state.routing_enabled);
+    }
+
     #[derive(Clone, Copy)]
     enum EncoderActivationSignal {
         Register,
@@ -2189,6 +2233,28 @@ mod tests {
 
         assert_eq!(receiver.await.unwrap(), endpoint);
         runtime.shutdown();
+    }
+
+    #[test]
+    fn test_encoder_router_reactivates_every_matching_worker_set() {
+        let router_a = crate::kv_router::EncoderRouter::disabled();
+        let router_b = crate::kv_router::EncoderRouter::disabled();
+        let mm = ModelManager::new();
+        let mut ws_a = make_worker_set("ns1", "checksum-a");
+        ws_a.encoder_router = Some(router_a.clone());
+        let mut ws_b = make_worker_set("ns1", "checksum-b");
+        ws_b.encoder_router = Some(router_b.clone());
+        mm.add_worker_set("llama", "ns1:chat:decode", ws_a);
+        mm.add_worker_set("llama", "ns1:completions:decode", ws_b);
+
+        mm.deactivate_encoder_router_for_consumers("llama", "ns1");
+        assert!(router_a.is_deactivated());
+        assert!(router_b.is_deactivated());
+
+        mm.reactivate_encoder_routers("llama", "ns1");
+
+        assert!(!router_a.is_deactivated());
+        assert!(!router_b.is_deactivated());
     }
 
     // -- remove_decode_prefill_waiter tests (stale-DecodeWaiting cleanup) --
