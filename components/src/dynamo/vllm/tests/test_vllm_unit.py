@@ -949,8 +949,8 @@ class TestBenchmarkConfig:
             "warmup_iterations": "2",
             "output_path": str(output),
             "timeout": 300,
-            "prefill_max_new_token_samples": 32,
-            "prefill_max_kv_read_token_samples": 8,
+            "prefill_max_new_token_samples": 64,
+            "prefill_max_kv_read_token_samples": 16,
             "decode_max_kv_read_token_samples": 128,
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
@@ -1241,6 +1241,14 @@ def _make_dynamo_config(**overrides):
         "multimodal_decode_worker": False,
         "fpm_trace": False,
         "benchmark_mode": None,
+        "benchmark_warmup_iterations": 5,
+        "benchmark_output_path": "/tmp/benchmark_results.json",
+        "benchmark_timeout": 300,
+        "prefill_max_new_token_samples": 64,
+        "prefill_max_kv_read_token_samples": 16,
+        "decode_max_kv_read_token_samples": 128,
+        "decode_max_batch_size_samples": 128,
+        "prefix_max_batch_size_samples": 3,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)

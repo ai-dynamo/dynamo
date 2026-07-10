@@ -143,8 +143,8 @@ class BenchmarkConfig:
     warmup_iterations: int = 5
     output_path: str = "/tmp/benchmark_results.json"
     timeout: int = 300
-    prefill_max_new_token_samples: int = 32
-    prefill_max_kv_read_token_samples: int = 8
+    prefill_max_new_token_samples: int = 64
+    prefill_max_kv_read_token_samples: int = 16
     decode_max_kv_read_token_samples: int = 128
     decode_max_batch_size_samples: int = 128
     prefix_max_batch_size_samples: int = 3
