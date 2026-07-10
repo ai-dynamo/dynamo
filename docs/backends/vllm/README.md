@@ -80,8 +80,10 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 >   --kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 > ```
 >
-> Use a unique port for each worker process that shares a host or network
-> namespace. If workers will not publish events, start the frontend with
+> `endpoint` is the base ZMQ port, and vLLM offsets it by data-parallel rank.
+> For worker processes that share a host or network namespace, reserve one port
+> per rank and choose base ports whose resulting ranges do not overlap. If
+> workers will not publish events, start the frontend with
 > `--no-router-kv-events` for approximate cache prediction or `--load-aware` for
 > load-only routing.
 

@@ -36,6 +36,8 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 > If workers will not publish events, use `--no-router-kv-events` for approximate
 > cache prediction or `--load-aware` for load-only routing.
 
+For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service.
+
 ### Standalone Router
 
 You can also run the KV router as a standalone service (without the Dynamo frontend). See the [Standalone Router component](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/router/) for more details.
