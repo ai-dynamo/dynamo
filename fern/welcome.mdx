@@ -3,13 +3,13 @@
 # SPDX-License-Identifier: Apache-2.0
 title: Welcome to NVIDIA Dynamo
 sidebar-title: Welcome
-subtitle: High-throughput, low-latency inference framework for serving generative AI across distributed GPU fleets.
+subtitle: NVIDIA Dynamo is an open-source inference framework for serving generative AI workloads in distributed environments. It is Kubernetes-native for production, while the same frontend, router, and worker stack also runs in local containers for evaluation or incremental adoption.
 hide-toc: true
 ---
 
-<div className="welcome-gradient" />
+import { TerminalDemo } from "@/components/TerminalDemo";
 
-NVIDIA Dynamo is an open-source inference framework for serving generative AI workloads in distributed environments. It is Kubernetes-native for production, while the same frontend, router, and worker stack also runs in local containers for evaluation or incremental adoption.
+<div className="welcome-gradient" />
 
 <div className="github-buttons">
 
@@ -17,6 +17,13 @@ NVIDIA Dynamo is an open-source inference framework for serving generative AI wo
 <iframe src="https://ghbtns.com/github-btn.html?user=ai-dynamo&repo=dynamo&type=fork&count=true&size=large" frameBorder="0" scrolling="0" width="170" height="30" title="Fork ai-dynamo/dynamo on GitHub"></iframe>
 
 </div>
+
+<TerminalDemo
+  src="https://asciinema.org/a/SM72BaDsHFTBKSFQ.cast"
+  title="Deploy Qwen3-235B with Dynamo"
+  idleTimeLimit={1.5}
+  speed={1.2}
+/>
 
 ## Why Dynamo
 

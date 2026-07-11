@@ -59,7 +59,7 @@ navigation:
   - tab: home
     layout:
       - page: Welcome
-        path: welcome.mdx
+        path: ../fern/welcome.mdx
 
   - tab: user-guide
     layout:
