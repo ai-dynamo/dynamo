@@ -24,7 +24,7 @@ import time
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import torch
 from PIL import Image
@@ -116,13 +116,17 @@ class _StaticQwen3VLVisionForward(torch.nn.Module):
         device: torch.device,
     ) -> None:
         super().__init__()
-        self.visual = visual
+        # Transformers models expose dynamically-generated module attributes whose
+        # stubs collapse to ``Tensor | Module``. Runtime validation happens when the
+        # parent backend extracts the visual tower; keep these HF internals dynamic.
+        self.visual: Any = visual
+        dynamic_visual: Any = visual
         grid_cpu = torch.tensor([grid_key] * batch_size, dtype=torch.long, device="cpu")
         grid_device = grid_cpu.to(device)
         with torch.inference_mode():
-            pos_embeds = visual.fast_pos_embed_interpolate(grid_device)
-            pos_embeds = pos_embeds.to(dtype=visual.dtype)
-            rotary_pos_emb = visual.rot_pos_emb(grid_device)
+            pos_embeds = dynamic_visual.fast_pos_embed_interpolate(grid_device)
+            pos_embeds = pos_embeds.to(dtype=dynamic_visual.dtype)
+            rotary_pos_emb = dynamic_visual.rot_pos_emb(grid_device)
             rotary_pos_emb = rotary_pos_emb.reshape(pos_embeds.shape[0], -1)
             rotary = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
             cos, sin = rotary.cos(), rotary.sin()
@@ -165,17 +169,18 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
     )
 
     def __init__(self) -> None:
-        self._cached_preprocess = None
-        self._embedding_cache = None
+        self._device: torch.device
+        self._cached_preprocess: Any | None = None
+        self._embedding_cache: MultimodalEmbeddingCacheManager | None = None
         self._embedding_cache_oversize = 0
         self._embedding_cache_peak_bytes = 0
         self._embedding_cache_coalesced = 0
-        self._processor = None
-        self._visual = None
-        self._graphs = {}
-        self._graph_pool = None
-        self._graph_grid_keys = frozenset()
-        self.tokenizer = None
+        self._processor: Any | None = None
+        self._visual: Any | None = None
+        self._graphs: dict[tuple[tuple[int, int, int], int], _CapturedVisionGraph] = {}
+        self._graph_pool: Any | None = None
+        self._graph_grid_keys: frozenset[tuple[int, int, int]] = frozenset()
+        self.tokenizer: Any = None
 
     def build(self, model_id: str) -> None:
         """Load the public checkpoint, retain only its vision module, and warm it."""
@@ -206,8 +211,9 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             if embedding_cache_bytes
             else None
         )
-        self._processor = AutoProcessor.from_pretrained(model_id)
-        self.tokenizer = self._processor.tokenizer
+        processor = AutoProcessor.from_pretrained(model_id)
+        self._processor = processor
+        self.tokenizer = processor.tokenizer
 
         logger.info(
             "[Qwen3VLVisionEncoder] loading %s vision tower on %s "
@@ -231,7 +237,7 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
         del full_model
         gc.collect()
 
-        self._graphs: dict[tuple[tuple[int, int, int], int], _CapturedVisionGraph] = {}
+        self._graphs = {}
         self._graph_pool = torch.cuda.graph_pool_handle()
         if self._device.type == "cuda" and self.buckets:
             self._capture_cuda_graphs()
@@ -247,6 +253,20 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             self.max_batch_cost,
             len(self._graphs),
         )
+
+    def _require_processor(self) -> Any:
+        processor = self._processor
+        if processor is None:
+            raise RuntimeError("Qwen3VLVisionEncoder processor is not loaded")
+        return processor
+
+    def _require_visual(self) -> Any:
+        visual = self._visual
+        if visual is None:
+            raise RuntimeError(
+                "Qwen3VLVisionEncoder.forward_batch() called before build()"
+            )
+        return visual
 
     def preprocess(self, raw: str) -> Preprocessed[Qwen3VLImageInputs]:
         """Fetch/decode one image and run the CPU Qwen3-VL image processor."""
@@ -289,7 +309,8 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
     def _process_image(
         self, image: Image.Image, *, content_digest: bytes | None = None
     ) -> Qwen3VLImageInputs:
-        inputs = self._processor.image_processor(images=[image], return_tensors="pt")
+        processor = self._require_processor()
+        inputs = processor.image_processor(images=[image], return_tensors="pt")
         return Qwen3VLImageInputs(
             pixel_values=inputs["pixel_values"].contiguous(),
             image_grid_thw=inputs["image_grid_thw"].to(dtype=torch.long),
@@ -309,6 +330,7 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
     def _capture_cuda_graphs(self) -> None:
         if not self.buckets:
             raise RuntimeError("CUDA graph capture requires non-empty buckets")
+        visual = self._require_visual()
         buckets = self.buckets
         free_before, _ = torch.cuda.mem_get_info(self._device)
         templates: dict[tuple[int, int, int], Qwen3VLImageInputs] = {}
@@ -326,12 +348,12 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
                 grid_key[0]
                 * grid_key[1]
                 * grid_key[2]
-                // self._visual.spatial_merge_size**2
+                // visual.spatial_merge_size**2
             )
             for bucket in reversed(buckets):
                 static_pixel_values = torch.zeros(
                     (bucket * patches_per_item, feature_size),
-                    dtype=self._visual.dtype,
+                    dtype=visual.dtype,
                     device=self._device,
                 )
                 # Reused pinned staging makes the following H2D copy genuinely
@@ -344,7 +366,7 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
                     pin_memory=True,
                 )
                 forward = _StaticQwen3VLVisionForward(
-                    self._visual, grid_key, bucket, self._device
+                    visual, grid_key, bucket, self._device
                 ).eval()
 
                 warmup_stream = torch.cuda.Stream(device=self._device)
@@ -406,10 +428,7 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             raise ValueError(
                 f"batch size {len(items)} exceeds target bucket {target_bucket}"
             )
-        if getattr(self, "_visual", None) is None:
-            raise RuntimeError(
-                "Qwen3VLVisionEncoder.forward_batch() called before build()"
-            )
+        self._require_visual()
 
         cache = getattr(self, "_embedding_cache", None)
         if cache is None:
@@ -508,7 +527,7 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             )
         owned: list[torch.Tensor] = []
         hidden_size: int | None = None
-        merge_size = self._visual.spatial_merge_size
+        merge_size = self._require_visual().spatial_merge_size
         for item, output in zip(items, outputs):
             expected_tokens = int(item.image_grid_thw.prod().item() // merge_size**2)
             if (
@@ -539,22 +558,23 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
         return owned
 
     def _forward_eager(self, items: List[Qwen3VLImageInputs]) -> List[torch.Tensor]:
+        visual = self._require_visual()
         events = self._timing_events()
         if events:
             events[0].record()
         pixel_values = torch.cat([item.pixel_values for item in items], dim=0).to(
-            device=self._device, dtype=self._visual.dtype, non_blocking=True
+            device=self._device, dtype=visual.dtype, non_blocking=True
         )
         image_grid_thw_cpu = torch.cat([item.image_grid_thw for item in items], dim=0)
         image_grid_thw = image_grid_thw_cpu.to(self._device, non_blocking=True)
         if events:
             events[1].record()
         split_sizes = (
-            image_grid_thw_cpu.prod(dim=-1) // self._visual.spatial_merge_size**2
+            image_grid_thw_cpu.prod(dim=-1) // visual.spatial_merge_size**2
         ).tolist()
 
         with torch.inference_mode():
-            visual_output = self._visual(pixel_values, grid_thw=image_grid_thw)
+            visual_output = visual(pixel_values, grid_thw=image_grid_thw)
         # Transformers 4.x returns ``(merged, deepstack)``. Transformers 5.x
         # returns BaseModelOutputWithDeepstackFeatures, where the merged image
         # embeddings live in pooler_output (last_hidden_state is pre-merger).
