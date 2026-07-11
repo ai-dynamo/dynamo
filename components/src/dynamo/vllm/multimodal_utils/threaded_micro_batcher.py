@@ -478,7 +478,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 results = self._fn(items)
             else:
                 results = self._fn(items, target_bucket)
-        except BaseException as exc:  # noqa: BLE001 — a bad batch must not hang awaiters
+        except (
+            BaseException
+        ) as exc:  # noqa: BLE001 — a bad batch must not hang awaiters
             for work in runnable:
                 self._consume(work, error=exc)
             return
