@@ -6,7 +6,6 @@ use rustc_hash::FxHashMap;
 #[cfg(debug_assertions)]
 use rustc_hash::FxHashSet;
 use slotmap::{SlotMap, new_key_type};
-use std::collections::hash_map::Entry;
 use std::num::NonZeroU32;
 
 new_key_type! {
@@ -175,45 +174,45 @@ impl BlockTracker {
         let mut current = tail;
 
         while let Some(node_id) = current {
-            let node = self
-                .nodes
-                .get(node_id)
-                .expect("request chain references a missing block node");
-            let incoming = node.incoming.get();
-
-            if incoming > 1 {
-                self.nodes
+            let shared = {
+                let node = self
+                    .nodes
                     .get_mut(node_id)
-                    .expect("request chain references a missing block node")
-                    .incoming = NonZeroU32::new(incoming - 1)
-                    .expect("shared block ownership count cannot become zero");
+                    .expect("request chain references a missing block node");
+                let incoming = node.incoming.get();
+                if incoming > 1 {
+                    node.incoming = NonZeroU32::new(incoming - 1)
+                        .expect("shared block ownership count cannot become zero");
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if shared {
                 retained = Some(node_id);
                 break;
             }
 
             let node = self
                 .nodes
-                .get(node_id)
-                .expect("request chain references a missing block node");
+                .remove(node_id)
+                .expect("validated block node disappeared before removal");
             let hash = node.hash;
             let depth = node.depth;
             let parent = node.parent;
 
-            match self.unique_blocks.entry(hash) {
-                Entry::Occupied(entry) => {
-                    assert_eq!(
-                        *entry.get(),
-                        node_id,
-                        "block hash index references a different live node"
-                    );
-                    entry.remove();
-                }
-                Entry::Vacant(_) => panic!("live block node is missing from the hash index"),
+            let indexed_node_id = self
+                .unique_blocks
+                .remove(&hash)
+                .expect("live block node is missing from the hash index");
+            debug_assert_eq!(
+                indexed_node_id, node_id,
+                "block hash index references a different live node"
+            );
+            if !self.fractional_blocks.is_empty() {
+                self.fractional_blocks.remove(&hash);
             }
-            self.fractional_blocks.remove(&hash);
-            self.nodes
-                .remove(node_id)
-                .expect("validated block node disappeared before removal");
 
             if depth <= prompt_depth {
                 removed_prompt_rev.push(hash);
