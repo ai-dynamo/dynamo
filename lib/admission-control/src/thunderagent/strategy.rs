@@ -252,15 +252,8 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             return AdmissionDecision::Defer;
         }
 
-        // Preserve source fairness: a new program cannot bypass a paused continuation
-        // that is actually waiting to run. Idle suspended programs have no request to serve.
-        let suspended_continuation_waits = self
-            .sessions
-            .values()
-            .filter_map(|requests| requests.current)
-            .filter_map(|id| self.requests.get(&id))
-            .any(|request| request.prior.as_ref().is_some_and(Program::is_suspended));
-        if was_new && suspended_continuation_waits {
+        // Preserve source fairness: a new program cannot bypass an already-paused one.
+        if was_new && self.programs.values().any(Program::is_suspended) {
             self.defer_request(session_id, id, now, false);
             return AdmissionDecision::Defer;
         }
@@ -1026,40 +1019,6 @@ mod tests {
         assert_eq!(
             strategy.admit(request(2, Some("a"), 120)),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
-        );
-    }
-
-    #[test]
-    fn new_session_does_not_wait_for_idle_suspended_program() {
-        let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
-        strategy.programs.insert(
-            "paused".to_owned(),
-            suspended_program(100, Instant::now(), 1),
-        );
-
-        assert_eq!(
-            strategy.admit(request(1, Some("new"), 100)),
-            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
-        );
-    }
-
-    #[test]
-    fn new_session_waits_for_deferred_suspended_continuation() {
-        let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
-        strategy.programs.insert(
-            "paused".to_owned(),
-            suspended_program(100, Instant::now(), 1),
-        );
-        assert_eq!(
-            strategy.admit(request(1, Some("paused"), 120)),
-            AdmissionDecision::Defer
-        );
-
-        assert_eq!(
-            strategy.admit(request(2, Some("new"), 100)),
-            AdmissionDecision::Defer
         );
     }
 
