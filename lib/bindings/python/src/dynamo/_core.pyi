@@ -730,28 +730,27 @@ class SelectionService:
         ...
 
     async def create_reservation(self, request: JsonLike) -> JsonLike:
-        """Book a request's load against a chosen worker.
+        """Book a request's load against a worker, keyed by ``selection_id``.
 
-        With a ``selection_id``, replays the matching ``select``'s cached
-        selection (same model/routing-group), booked under ``reservation_id``; other
-        request fields are ignored. With a ``worker_id`` and the prompt, books
-        explicitly and discards any cached selection for the id; ``worker_id``
-        takes precedence when both are present. A request with neither raises
-        ``ValueError``.
+        Without a ``worker_id``, replays the matching ``select``'s cached
+        selection (same model/routing-group), booked under ``selection_id``;
+        other request fields are ignored. With a ``worker_id`` and the prompt,
+        books explicitly under ``selection_id`` on that worker and discards any
+        cached selection for the id. ``selection_id`` is required.
         """
         ...
 
-    async def prefill_complete(self, reservation_id: str) -> None:
+    async def prefill_complete(self, selection_id: str) -> None:
         """Mark a reservation's prefill complete; its load shifts prefill -> decode."""
         ...
 
     def add_output_block(
-        self, reservation_id: str, *, decay_fraction: Optional[float] = None
+        self, selection_id: str, *, decay_fraction: Optional[float] = None
     ) -> None:
         """Record one decode output block for a reservation, advancing its decode load."""
         ...
 
-    async def free_reservation(self, reservation_id: str) -> None:
+    async def free_reservation(self, selection_id: str) -> None:
         """Free a finished reservation, releasing its tracked load."""
         ...
 

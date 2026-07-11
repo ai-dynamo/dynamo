@@ -126,12 +126,11 @@ Select a worker without booking active load:
 ### `POST /select_and_reserve`
 
 Select and atomically book load in the receiving selector process. Supply a
-globally unique `reservation_id`, or allow the service to generate one:
+globally unique `selection_id`, or allow the service to generate one:
 
 ```json
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
   "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
@@ -145,7 +144,6 @@ Both endpoints return the same selection shape:
 ```json
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
   "routing_group": "default",
   "worker_id": 1,
@@ -163,7 +161,7 @@ Both endpoints return the same selection shape:
 }
 ```
 
-`selection_id` and `reservation_id` are omitted when absent. All `overlap`
+`selection_id` is omitted when absent. All `overlap`
 values are matched token counts. `gpu`, `cpu`, and `disk` use the cumulative
 Mooncake tier semantics documented in the standalone indexer's
 [per-instance tier breakdown](standalone-indexer.md#per-instance-tier-breakdown).
@@ -196,7 +194,7 @@ chosen worker, the normalized prompt, `effective_prefill_tokens`,
 `expected_output_tokens`, and the prefill-tracking decision) on the selector
 that served it. A reservation that passes the same `selection_id`,
 `model_name`, and `routing_group` replays the cached selection, booked under
-its own `reservation_id`, without re-sending the prompt:
+that `selection_id`, without re-sending the prompt:
 
 ```http
 POST /reservations
@@ -204,7 +202,6 @@ Content-Type: application/json
 
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
   "routing_group": "default"
 }
@@ -213,15 +210,14 @@ Content-Type: application/json
 - **Id namespace**: `selection_id` is client-chosen and scoped per
   `(model_name, routing_group)`; use a distinct id per in-flight select. A new
   `select` reusing a pending id replaces it (latest wins), and an explicit
-  booking discards only the selection named by its own `selection_id`.
-- **Required id**: A reservation with neither `selection_id` nor `worker_id`
-  is rejected with `400`.
+  booking discards the cached selection for its `selection_id`.
+- **Required id**: `selection_id` is always required (the replay key and the
+  booking id); a request without it is rejected.
 - **Single-use**: The first successful booking consumes the entry; a repeat
   replay returns `404` (`no pending selection`).
 - **Retryable on failure**: A booking that fails before landing (worker no
   longer schedulable, service not ready) re-inserts the entry, so the same call
-  can be retried once the condition clears. A `reservation_id` conflict (`409`)
-  likewise keeps the selection, retryable under a fresh `reservation_id`.
+  can be retried once the condition clears.
 - **Bounded window**: By default, entries expire after 120 seconds and each
   selector retains at most 4096 pending selections within a 256 MiB budget,
   evicting oldest first. All three limits are configurable.
@@ -238,16 +234,16 @@ different replica) the call returns `404`; fall back to the explicit form.
 ### Explicit form
 
 The self-contained form carries the worker identity and prompt and needs no
-cached selection; it wins whenever `worker_id` is present. When the request
-also carries a `selection_id`, it discards that cached selection, so a later
-replay of the same id cannot book stale state:
+cached selection; it wins whenever `worker_id` is present. It discards the
+cached selection for its `selection_id`, so a later replay of the same id
+cannot book stale state:
 
 ```http
 POST /reservations
 Content-Type: application/json
 
 {
-  "reservation_id": "request-123",
+  "selection_id": "request-123",
   "model_name": "model",
   "routing_group": "default",
   "worker_id": 1,
@@ -266,9 +262,9 @@ reservation API does not accept or derive accounting from overlap fields.
 ## Reservation Lifecycle
 
 ```http
-POST /reservations/{reservation_id}/prefill_complete
-POST /reservations/{reservation_id}/output_block
-DELETE /reservations/{reservation_id}
+POST /reservations/{selection_id}/prefill_complete
+POST /reservations/{selection_id}/output_block
+DELETE /reservations/{selection_id}
 ```
 
 `prefill_complete` clears active prefill load. `output_block` updates only the

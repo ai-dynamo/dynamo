@@ -435,8 +435,6 @@ pub struct SelectAndReserveRequest {
     pub routing_group: String,
     #[serde(default)]
     pub selection_id: Option<String>,
-    #[serde(default)]
-    pub reservation_id: Option<String>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
     #[serde(default)]
@@ -466,13 +464,11 @@ pub struct ReservationRequest {
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    pub reservation_id: String,
-    /// The matching `select`'s `selection_id` to replay (same model/routing-group).
-    /// Required unless `worker_id` is supplied.
-    #[serde(default)]
-    pub selection_id: Option<String>,
-    /// The worker for the explicit, self-contained form; discards any cached
-    /// selection for the id. Omit it to replay `selection_id`.
+    /// The single booking id: the cache key to replay and the scheduler request
+    /// id the booking lands under (the `selection_id` from the matching `select`).
+    pub selection_id: String,
+    /// Explicit, self-contained form: books under `selection_id` on this worker
+    /// without a cached select. Omit to replay the cached `selection_id`.
     #[serde(default)]
     pub worker_id: Option<WorkerId>,
     #[serde(default)]
@@ -521,8 +517,6 @@ pub struct OverlapScoresRequest {
 pub struct SelectResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reservation_id: Option<String>,
     pub model_name: String,
     pub routing_group: String,
     pub worker_id: WorkerId,
@@ -535,7 +529,7 @@ pub struct SelectResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ReservationResponse {
-    pub reservation_id: String,
+    pub selection_id: String,
     pub model_name: String,
     pub routing_group: String,
     pub worker_id: WorkerId,

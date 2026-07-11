@@ -58,6 +58,7 @@ parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 
 rustc-hash = "2.1.1"
+slotmap = "1"
 
 # standalone-indexer (optional)
 axum = { workspace = true, optional = true }

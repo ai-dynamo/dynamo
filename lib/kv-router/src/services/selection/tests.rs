@@ -380,12 +380,12 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let response = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-a"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-a"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["reservation_id"], "res-a");
+    assert_eq!(body["selection_id"], "res-a");
     assert_eq!(body["effective_prefill_tokens"], 4);
 
     let loads_response = app
@@ -404,7 +404,7 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let duplicate = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-a"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-a"}"#,
     )
     .await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
@@ -463,7 +463,7 @@ policy_classes:
     let reserved = post_with_policy_class(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"latency-active"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"latency-active"}"#,
         Some("latency"),
     )
     .await;
@@ -504,7 +504,7 @@ async fn output_block_endpoint_updates_reserved_load() {
     let response = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-output"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-output"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -575,7 +575,7 @@ async fn explicit_reservation_books_after_select() {
 
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-b",
+        "selection_id": "res-b",
         "worker_id": selected["worker_id"],
         "dp_rank": selected["dp_rank"],
         "sequence_hashes": [1],
@@ -611,7 +611,7 @@ async fn explicit_reservation_rejects_effective_prefill_above_isl() {
     );
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-too-large",
+        "selection_id": "res-too-large",
         "worker_id": 1,
         "sequence_hashes": [1],
         "isl_tokens": 4,
@@ -647,7 +647,7 @@ async fn explicit_reservation_rejects_unschedulable_worker() {
 
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-unschedulable",
+        "selection_id": "res-unschedulable",
         "worker_id": 1,
         "sequence_hashes": [1],
         "isl_tokens": 4
@@ -675,17 +675,17 @@ async fn cached_reservation_books_from_select() {
     let selected = response_json(select_response).await;
     assert_eq!(selected["effective_prefill_tokens"], 4);
 
-    // `create_reservation` replays by selection_id and books under its own
-    // reservation_id: no worker_id, no token_ids.
+    // `create_reservation` replays and books under selection_id: no worker_id,
+    // no token_ids.
     let reserve_response = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"sel-1","reservation_id":"req-1"}"#,
+        r#"{"model_name":"model","selection_id":"sel-1"}"#,
     )
     .await;
     assert_eq!(reserve_response.status(), StatusCode::CREATED);
     let reservation = response_json(reserve_response).await;
-    assert_eq!(reservation["reservation_id"], "req-1");
+    assert_eq!(reservation["selection_id"], "sel-1");
     assert_eq!(reservation["worker_id"], selected["worker_id"]);
     assert_eq!(reservation["dp_rank"], selected["dp_rank"]);
 
@@ -704,14 +704,14 @@ async fn cached_reservation_books_from_select() {
     assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 4);
 
     // Lifecycle endpoints work for a cache-booked reservation.
-    let prefill_response = post(app.clone(), "/reservations/req-1/prefill_complete", "{}").await;
+    let prefill_response = post(app.clone(), "/reservations/sel-1/prefill_complete", "{}").await;
     assert_eq!(prefill_response.status(), StatusCode::OK);
 
     // The cached entry is single-use: a second replay finds nothing.
     let replay = post(
         app,
         "/reservations",
-        r#"{"model_name":"model","selection_id":"sel-1","reservation_id":"req-1b"}"#,
+        r#"{"model_name":"model","selection_id":"sel-1"}"#,
     )
     .await;
     assert_eq!(replay.status(), StatusCode::NOT_FOUND);
@@ -725,12 +725,7 @@ async fn cached_reservation_needs_prior_select() {
         StatusCode::CREATED
     );
 
-    let response = post(
-        app,
-        "/reservations",
-        r#"{"selection_id":"never-selected","reservation_id":"req-1"}"#,
-    )
-    .await;
+    let response = post(app, "/reservations", r#"{"selection_id":"never-selected"}"#).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(
         response_json(response).await["error"]
@@ -741,20 +736,22 @@ async fn cached_reservation_needs_prior_select() {
 }
 
 #[tokio::test]
-async fn reservation_needs_selection_id_or_worker_id() {
+async fn reservation_requires_selection_id() {
     let app = app();
     assert_eq!(
         register_worker(app.clone(), None).await.status(),
         StatusCode::CREATED
     );
 
+    // selection_id is the single booking id and is always required, even for
+    // the explicit worker_id form.
     let response = post(
         app,
         "/reservations",
-        r#"{"model_name":"model","reservation_id":"req-1"}"#,
+        r#"{"model_name":"model","worker_id":1}"#,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
         response_json(response).await["error"]
             .as_str()
@@ -783,7 +780,7 @@ async fn cached_reservation_ignores_request_overrides() {
     let response = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1","effective_prefill_tokens":5}"#,
+        r#"{"model_name":"model","selection_id":"req-1","effective_prefill_tokens":5}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::CREATED);
@@ -820,7 +817,7 @@ async fn cached_reservation_needs_matching_model() {
     let mismatch = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"other","selection_id":"req-1","reservation_id":"req-1"}"#,
+        r#"{"model_name":"other","selection_id":"req-1"}"#,
     )
     .await;
     assert_eq!(mismatch.status(), StatusCode::NOT_FOUND);
@@ -829,7 +826,7 @@ async fn cached_reservation_needs_matching_model() {
     let matched = post(
         app,
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
     )
     .await;
     assert_eq!(matched.status(), StatusCode::CREATED);
@@ -868,7 +865,7 @@ async fn failed_cached_booking_is_retryable() {
     let failed = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
     )
     .await;
     assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -882,7 +879,7 @@ async fn failed_cached_booking_is_retryable() {
     let retried = post(
         app,
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
     )
     .await;
     assert_eq!(retried.status(), StatusCode::CREATED);
@@ -903,32 +900,44 @@ async fn cached_booking_reinserts_when_scheduler_booking_fails() {
     .await;
     assert_eq!(select_response.status(), StatusCode::OK);
 
-    // Book reservation_id "dup" explicitly (no selection_id, so the cached
-    // "sel-1" is untouched) to occupy that id in the scheduler.
+    // Occupy the scheduler id "sel-1" with an atomic select_and_reserve, which
+    // does not touch the cache, so replaying the cached "sel-1" collides there.
     let occupy = post(
         app.clone(),
-        "/reservations",
-        r#"{"model_name":"model","reservation_id":"dup","worker_id":1,"sequence_hashes":[1],"isl_tokens":4}"#,
+        "/select_and_reserve",
+        r#"{"model_name":"model","selection_id":"sel-1","token_ids":[1,2,3,4]}"#,
     )
     .await;
-    assert_eq!(occupy.status(), StatusCode::CREATED);
+    assert_eq!(occupy.status(), StatusCode::OK);
 
-    // Replaying "sel-1" under the same "dup" id resolves (worker still
-    // schedulable) but fails at the scheduler with a duplicate conflict.
+    // Replaying "sel-1" fails at the scheduler with a duplicate conflict.
     let conflict = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"sel-1","reservation_id":"dup"}"#,
+        r#"{"model_name":"model","selection_id":"sel-1"}"#,
     )
     .await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
 
-    // The booking never landed, so the selection must survive: the same replay
-    // under a fresh reservation_id books without re-sending the prompt.
+    // The booking never landed, so the selection survives. Freeing the occupant
+    // lets the same replay book without re-sending the prompt.
+    let free = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/reservations/sel-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(free.status().is_success());
+
     let retried = post(
         app,
         "/reservations",
-        r#"{"model_name":"model","selection_id":"sel-1","reservation_id":"res-ok"}"#,
+        r#"{"model_name":"model","selection_id":"sel-1"}"#,
     )
     .await;
     assert_eq!(retried.status(), StatusCode::CREATED);
@@ -965,7 +974,7 @@ async fn cached_reservation_rejects_stale_dp_rank() {
     let stale = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
     )
     .await;
     assert_eq!(stale.status(), StatusCode::NOT_FOUND);
@@ -984,14 +993,14 @@ async fn cached_reservation_rejects_stale_dp_rank() {
     let retried = post(
         app,
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
     )
     .await;
     assert_eq!(retried.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]
-async fn explicit_reservation_discards_by_selection_id_only() {
+async fn explicit_reservation_discards_cached_selection() {
     let app = app();
     assert_eq!(
         register_worker(app.clone(), None).await.status(),
@@ -1005,48 +1014,24 @@ async fn explicit_reservation_discards_by_selection_id_only() {
     .await;
     assert_eq!(select_response.status(), StatusCode::OK);
 
-    // An explicit booking (worker_id wins even with selection_id present)
-    // supersedes the cached selection...
+    // An explicit booking (worker_id) for the same selection_id supersedes the
+    // cached selection...
     let explicit = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1","worker_id":1,"sequence_hashes":[1],"isl_tokens":4}"#,
+        r#"{"model_name":"model","selection_id":"req-1","worker_id":1,"sequence_hashes":[1],"isl_tokens":4}"#,
     )
     .await;
     assert_eq!(explicit.status(), StatusCode::CREATED);
 
     // ...and discards it: a later replay cannot book stale state.
     let replay = post(
-        app.clone(),
+        app,
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1b"}"#,
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
     )
     .await;
     assert_eq!(replay.status(), StatusCode::NOT_FOUND);
-
-    // Without a selection_id, an explicit booking leaves the cache alone: it
-    // does not delete a pending selection that happens to share reservation_id.
-    let select_response = post(
-        app.clone(),
-        "/select",
-        r#"{"model_name":"model","selection_id":"req-2","token_ids":[1,2,3,4]}"#,
-    )
-    .await;
-    assert_eq!(select_response.status(), StatusCode::OK);
-    let explicit = post(
-        app.clone(),
-        "/reservations",
-        r#"{"model_name":"model","reservation_id":"req-2","worker_id":1,"sequence_hashes":[1],"isl_tokens":4}"#,
-    )
-    .await;
-    assert_eq!(explicit.status(), StatusCode::CREATED);
-    let replay = post(
-        app,
-        "/reservations",
-        r#"{"model_name":"model","selection_id":"req-2","reservation_id":"req-2b"}"#,
-    )
-    .await;
-    assert_eq!(replay.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]
@@ -1073,7 +1058,7 @@ async fn cached_booking_honors_prefill_tracking() {
     let reserve_response = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-1","reservation_id":"req-1"}"#,
+        r#"{"model_name":"model","selection_id":"req-1"}"#,
     )
     .await;
     assert_eq!(reserve_response.status(), StatusCode::CREATED);
@@ -1105,7 +1090,7 @@ async fn cached_booking_honors_prefill_tracking() {
     let reserve_response = post(
         app.clone(),
         "/reservations",
-        r#"{"model_name":"model","selection_id":"req-2","reservation_id":"req-2"}"#,
+        r#"{"model_name":"model","selection_id":"req-2"}"#,
     )
     .await;
     assert_eq!(reserve_response.status(), StatusCode::CREATED);
@@ -1170,7 +1155,7 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
     let response = post(
         app_a.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"replicated"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"replicated"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
