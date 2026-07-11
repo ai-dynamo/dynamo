@@ -5,23 +5,16 @@
 
 #include <cuda.h>
 #include <dlfcn.h>
-#include <fcntl.h>
-#include <nixl.h>
-#include <nixl_descriptors.h>
-#include <nixl_params.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
-#include <cerrno>
 #include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <iostream>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -31,13 +24,13 @@
 
 #include "cuda_checkpoint_compat.h"
 #include "storage_manifest.h"
+#include "transfer_config.h"
+#include "transfer_engine.h"
 
 namespace {
 
-constexpr size_t kChunkSize = 64ULL * 1024ULL * 1024ULL;
-constexpr size_t kPageSize = 4096;
-
 namespace storage = cuda_checkpoint_storage;
+namespace transfer = cuda_checkpoint_transfer;
 
 class RetainedContexts {
  public:
@@ -99,64 +92,6 @@ class RetainedContexts {
   std::vector<Entry> contexts_;
 };
 
-class FileDescriptor {
- public:
-  explicit FileDescriptor(int fd = -1) : fd_(fd) {}
-  FileDescriptor(const FileDescriptor&) = delete;
-  FileDescriptor& operator=(const FileDescriptor&) = delete;
-
-  ~FileDescriptor()
-  {
-    if (fd_ >= 0) {
-      (void)close(fd_);
-    }
-  }
-
-  int get() const { return fd_; }
-
-  bool Close()
-  {
-    if (fd_ < 0) {
-      return true;
-    }
-    const int fd = fd_;
-    fd_ = -1;
-    return close(fd) == 0;
-  }
-
- private:
-  int fd_;
-};
-
-class RegisteredBuffer {
- public:
-  CUresult Allocate()
-  {
-    if (posix_memalign(&data_, kPageSize, kChunkSize) != 0) {
-      return CUDA_ERROR_OUT_OF_MEMORY;
-    }
-    CUresult status = cuMemHostRegister(data_, kChunkSize, 0);
-    if (status != CUDA_SUCCESS) {
-      free(data_);
-      data_ = nullptr;
-    }
-    return status;
-  }
-
-  ~RegisteredBuffer()
-  {
-    if (data_ != nullptr) {
-      (void)cuMemHostUnregister(data_);
-      free(data_);
-    }
-  }
-
-  void* data() const { return data_; }
-
- private:
-  void* data_ = nullptr;
-};
-
 int
 PrintUsage(FILE* stream)
 {
@@ -167,9 +102,21 @@ PrintUsage(FILE* stream)
              "  cuda-checkpoint-helper --get-restore-tid --pid <pid>\n"
              "  cuda-checkpoint-helper --action lock|checkpoint|restore|unlock --pid <pid> "
              "[--timeout <ms>] [--device-map <uuids>] "
-             "[--storage-mode posix --storage-dir <absolute-directory>]\n") < 0
+             "[--storage-mode posix --storage-dir <absolute-directory> "
+             "--transfer-buffer-count <count> --transfer-chunk-bytes <bytes>]\n"
+             "\n"
+             "POSIX transfer defaults: --transfer-buffer-count %zu "
+             "--transfer-chunk-bytes %zu\n",
+             transfer::kDefaultBufferCount, transfer::kDefaultChunkBytes) < 0
              ? 1
              : 0;
+}
+
+int
+PrintUsageError()
+{
+  (void)PrintUsage(stderr);
+  return 1;
 }
 
 void
@@ -291,176 +238,6 @@ ProcessStateString(CUprocessState state)
   }
 }
 
-bool
-NixlTransfer(
-    nixlAgent* agent, const std::string& agent_name, nixl_xfer_op_t operation, void* buffer, int file_fd,
-    size_t file_offset, size_t length, std::string* error)
-{
-  nixl_xfer_dlist_t dram(DRAM_SEG);
-  nixl_xfer_dlist_t file(FILE_SEG);
-  dram.addDesc(nixlBlobDesc(reinterpret_cast<uintptr_t>(buffer), length, 0));
-  file.addDesc(nixlBlobDesc(file_offset, length, file_fd));
-  nixlXferReqH* request = nullptr;
-  nixl_status_t status = agent->createXferReq(operation, dram, file, agent_name, request);
-  if (status != NIXL_SUCCESS) {
-    *error = "NIXL createXferReq failed with status " + std::to_string(status);
-    return false;
-  }
-  status = agent->postXferReq(request);
-  while (status == NIXL_IN_PROG) {
-    status = agent->getXferStatus(request);
-    if (status == NIXL_IN_PROG) {
-      std::this_thread::yield();
-    }
-  }
-  nixl_status_t release_status = agent->releaseXferReq(request);
-  if (status != NIXL_SUCCESS) {
-    *error = "NIXL transfer failed with status " + std::to_string(status);
-    if (release_status != NIXL_SUCCESS) {
-      *error += "; releaseXferReq also failed with status " + std::to_string(release_status);
-    }
-    return false;
-  }
-  if (release_status != NIXL_SUCCESS) {
-    *error = "NIXL releaseXferReq failed with status " + std::to_string(release_status);
-    return false;
-  }
-  return true;
-}
-
-void
-AppendError(std::string* error, const std::string& detail)
-{
-  if (!error->empty()) {
-    *error += "; ";
-  }
-  *error += detail;
-}
-
-bool
-TransferExtent(
-    const cuda_checkpoint_compat::PerDeviceData& device_data, CUcontext context, const std::filesystem::path& path,
-    bool checkpoint, std::string* error)
-{
-  CUresult cuda_status = cuCtxSetCurrent(context);
-  if (cuda_status != CUDA_SUCCESS) {
-    *error = "set retained primary context";
-    return false;
-  }
-
-  RegisteredBuffer buffer;
-  cuda_status = buffer.Allocate();
-  if (cuda_status != CUDA_SUCCESS) {
-    *error = "allocate CUDA-registered transfer buffer";
-    return false;
-  }
-
-  int flags = O_RDWR | O_CLOEXEC;
-  if (checkpoint) {
-    flags |= O_CREAT | O_TRUNC;
-  }
-  if (device_data.size > static_cast<size_t>(std::numeric_limits<off_t>::max())) {
-    *error = "extent is too large for POSIX file offsets";
-    return false;
-  }
-  FileDescriptor file_fd(open(path.c_str(), flags | O_NOFOLLOW, 0600));
-  if (file_fd.get() < 0) {
-    *error = "open extent file";
-    return false;
-  }
-  if (checkpoint && fchmod(file_fd.get(), 0600) != 0) {
-    *error = "set extent file permissions";
-    return false;
-  }
-  struct stat file_stat {};
-  if ((!checkpoint && (fstat(file_fd.get(), &file_stat) != 0 || !S_ISREG(file_stat.st_mode) || file_stat.st_size < 0 ||
-                       static_cast<size_t>(file_stat.st_size) != device_data.size)) ||
-      (checkpoint && ftruncate(file_fd.get(), static_cast<off_t>(device_data.size)) != 0)) {
-    *error = checkpoint ? "size extent file" : "extent file size mismatch";
-    return false;
-  }
-
-  const std::string agent_name = "cuda-custom-storage-" + path.filename().string();
-  nixlAgentConfig config;
-  config.useProgThread = true;
-  nixlAgent agent(agent_name, config);
-  nixl_b_params_t params;
-  params["use_aio"] = "true";
-  nixlBackendH* backend = nullptr;
-  nixl_status_t nixl_status = agent.createBackend("POSIX", params, backend);
-  if (nixl_status != NIXL_SUCCESS) {
-    *error = "create NIXL POSIX backend failed with status " + std::to_string(nixl_status);
-    return false;
-  }
-
-  nixl_reg_dlist_t dram_registration(DRAM_SEG);
-  nixl_reg_dlist_t file_registration(FILE_SEG);
-  dram_registration.addDesc(nixlBlobDesc(reinterpret_cast<uintptr_t>(buffer.data()), kChunkSize, 0));
-  file_registration.addDesc(nixlBlobDesc(0, device_data.size, file_fd.get()));
-  nixl_status = agent.registerMem(dram_registration);
-  if (nixl_status != NIXL_SUCCESS) {
-    *error = "register NIXL DRAM failed with status " + std::to_string(nixl_status);
-    return false;
-  }
-  nixl_status = agent.registerMem(file_registration);
-  if (nixl_status != NIXL_SUCCESS) {
-    const nixl_status_t deregister_status = agent.deregisterMem(dram_registration);
-    *error = "register NIXL file failed with status " + std::to_string(nixl_status);
-    if (deregister_status != NIXL_SUCCESS) {
-      AppendError(error, "NIXL DRAM cleanup failed with status " + std::to_string(deregister_status));
-    }
-    return false;
-  }
-
-  bool success = true;
-  for (size_t offset = 0; offset < device_data.size && success; offset += kChunkSize) {
-    const size_t length = std::min(kChunkSize, device_data.size - offset);
-    if (checkpoint) {
-      cuda_status = cuMemcpyDtoHAsync(buffer.data(), device_data.devPtr + offset, length, device_data.stream);
-      if (cuda_status == CUDA_SUCCESS) {
-        cuda_status = cuStreamSynchronize(device_data.stream);
-      }
-      if (cuda_status != CUDA_SUCCESS) {
-        *error = "CUDA device-to-host copy failed with status " + std::to_string(cuda_status);
-        success = false;
-      } else {
-        success = NixlTransfer(&agent, agent_name, NIXL_WRITE, buffer.data(), file_fd.get(), offset, length, error);
-      }
-    } else {
-      success = NixlTransfer(&agent, agent_name, NIXL_READ, buffer.data(), file_fd.get(), offset, length, error);
-      if (success) {
-        cuda_status = cuMemcpyHtoDAsync(device_data.devPtr + offset, buffer.data(), length, device_data.stream);
-        if (cuda_status == CUDA_SUCCESS) {
-          cuda_status = cuStreamSynchronize(device_data.stream);
-        }
-        success = cuda_status == CUDA_SUCCESS;
-        if (!success) {
-          *error = "CUDA host-to-device copy failed with status " + std::to_string(cuda_status);
-        }
-      }
-    }
-  }
-  if (success && checkpoint && fsync(file_fd.get()) != 0) {
-    success = false;
-    *error = "fsync extent file";
-  }
-  const nixl_status_t file_deregister_status = agent.deregisterMem(file_registration);
-  const nixl_status_t dram_deregister_status = agent.deregisterMem(dram_registration);
-  if (file_deregister_status != NIXL_SUCCESS) {
-    success = false;
-    AppendError(error, "NIXL file deregistration failed with status " + std::to_string(file_deregister_status));
-  }
-  if (dram_deregister_status != NIXL_SUCCESS) {
-    success = false;
-    AppendError(error, "NIXL DRAM deregistration failed with status " + std::to_string(dram_deregister_status));
-  }
-  if (!file_fd.Close()) {
-    success = false;
-    AppendError(error, "close extent file failed: " + std::string(std::strerror(errno)));
-  }
-  return success;
-}
-
 cuda_checkpoint_compat::OperationCompleteFn
 ResolveOperationComplete()
 {
@@ -470,7 +247,9 @@ ResolveOperationComplete()
 }
 
 CUresult
-DoCustomStorage(int pid, bool checkpoint, const std::string& device_map, const std::filesystem::path& storage_dir)
+DoCustomStorage(
+    int pid, bool checkpoint, const std::string& device_map, const std::filesystem::path& storage_dir,
+    const transfer::TransferOptions& transfer_options)
 {
   cuda_checkpoint_compat::OperationCompleteFn operation_complete = ResolveOperationComplete();
   if (operation_complete == nullptr) {
@@ -548,6 +327,13 @@ DoCustomStorage(int pid, bool checkpoint, const std::string& device_map, const s
     return CUDA_ERROR_INVALID_VALUE;
   }
 
+  size_t pinned_bytes = 0;
+  std::string transfer_config_error;
+  if (!transfer::CalculatePinnedBytes(info->deviceCount, transfer_options, &pinned_bytes, &transfer_config_error)) {
+    std::fprintf(stderr, "custom storage transfer configuration invalid: %s\n", transfer_config_error.c_str());
+    return CUDA_ERROR_INVALID_VALUE;
+  }
+
   std::vector<CUcontext> contexts(info->deviceCount);
   std::vector<CUdevice> devices(info->deviceCount);
   std::vector<storage::DeviceExtent> device_extents;
@@ -578,10 +364,21 @@ DoCustomStorage(int pid, bool checkpoint, const std::string& device_map, const s
     return CUDA_ERROR_INVALID_VALUE;
   }
 
+  size_t total_bytes = 0;
+  for (const auto& extent : manifest) {
+    if (extent.size > std::numeric_limits<size_t>::max() - total_bytes) {
+      std::fprintf(stderr, "custom storage byte count overflow\n");
+      return CUDA_ERROR_INVALID_VALUE;
+    }
+    total_bytes += extent.size;
+  }
+
   const auto start = std::chrono::steady_clock::now();
   std::vector<std::thread> workers;
   std::vector<unsigned char> worker_success(transfer_jobs.size(), 0);
   std::vector<std::string> worker_errors(transfer_jobs.size());
+  std::vector<transfer::TransferMetrics> worker_metrics(transfer_jobs.size());
+  transfer::TransferCancellation cancellation;
   std::string worker_start_error;
   try {
     workers.reserve(transfer_jobs.size());
@@ -589,23 +386,33 @@ DoCustomStorage(int pid, bool checkpoint, const std::string& device_map, const s
       workers.emplace_back([&, job_index] {
         const auto& job = transfer_jobs[job_index];
         try {
-          worker_success[job_index] = TransferExtent(
-              info->perDeviceData[job.device_index], contexts[job.device_index],
-              storage_dir / manifest[job.extent_index].filename, checkpoint, &worker_errors[job_index]);
+          const auto& device_data = info->perDeviceData[job.device_index];
+          const transfer::StorageLayout layout{
+              {{storage_dir / manifest[job.extent_index].filename, device_data.size}},
+              {{0, device_data.size, 0, 0}},
+          };
+          worker_success[job_index] = transfer::TransferExtent(
+              device_data.devPtr, device_data.size, device_data.stream, contexts[job.device_index], layout,
+              checkpoint ? transfer::TransferOperation::kCheckpoint : transfer::TransferOperation::kRestore,
+              transfer_options, &cancellation, &worker_metrics[job_index], &worker_errors[job_index]);
         }
         catch (const std::exception& exception) {
+          cancellation.Cancel();
           worker_errors[job_index] = exception.what();
         }
         catch (...) {
+          cancellation.Cancel();
           worker_errors[job_index] = "unknown worker exception";
         }
       });
     }
   }
   catch (const std::exception& exception) {
+    cancellation.Cancel();
     worker_start_error = exception.what();
   }
   catch (...) {
+    cancellation.Cancel();
     worker_start_error = "unknown thread creation exception";
   }
   for (auto& worker : workers) {
@@ -624,6 +431,33 @@ DoCustomStorage(int pid, bool checkpoint, const std::string& device_map, const s
     }
   }
 
+  size_t transferred_bytes = 0;
+  double setup_service_seconds = 0.0;
+  double pipeline_service_seconds = 0.0;
+  double storage_service_seconds = 0.0;
+  double cuda_wait_service_seconds = 0.0;
+  double fsync_service_seconds = 0.0;
+  double cleanup_service_seconds = 0.0;
+  for (const auto& metrics : worker_metrics) {
+    if (metrics.bytes > std::numeric_limits<size_t>::max() - transferred_bytes) {
+      std::fprintf(stderr, "custom storage transferred byte count overflow\n");
+      return CUDA_ERROR_OPERATING_SYSTEM;
+    }
+    transferred_bytes += metrics.bytes;
+    setup_service_seconds += metrics.setup_seconds;
+    pipeline_service_seconds += metrics.pipeline_seconds;
+    storage_service_seconds += metrics.storage_seconds;
+    cuda_wait_service_seconds += metrics.cuda_wait_seconds;
+    fsync_service_seconds += metrics.fsync_seconds;
+    cleanup_service_seconds += metrics.cleanup_seconds;
+  }
+  if (transferred_bytes != total_bytes) {
+    std::fprintf(
+        stderr, "custom storage transfer coverage mismatch: transferred=%zu expected=%zu\n", transferred_bytes,
+        total_bytes);
+    return CUDA_ERROR_OPERATING_SYSTEM;
+  }
+
   if (checkpoint) {
     if (!storage::ValidateExtentFiles(storage_dir, manifest, &manifest_error)) {
       std::fprintf(stderr, "custom storage extent validation failed: %s\n", manifest_error.c_str());
@@ -633,11 +467,6 @@ DoCustomStorage(int pid, bool checkpoint, const std::string& device_map, const s
       std::fprintf(stderr, "custom storage manifest write failed: %s\n", manifest_error.c_str());
       return CUDA_ERROR_OPERATING_SYSTEM;
     }
-  }
-
-  size_t total_bytes = 0;
-  for (const auto& extent : manifest) {
-    total_bytes += extent.size;
   }
 
   // This is the sole acknowledgment point; CUDA exposes no public abort for failures above.
@@ -656,9 +485,17 @@ DoCustomStorage(int pid, bool checkpoint, const std::string& device_map, const s
       seconds == 0.0 ? 0.0 : static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0) / seconds;
   std::fprintf(
       stdout,
-      "cuda_custom_storage action=%s devices=%zu bytes=%zu duration_seconds=%.6f "
-      "throughput_gib_per_second=%.3f\n",
-      checkpoint ? "checkpoint" : "restore", manifest.size(), total_bytes, seconds, gib_per_second);
+      "{\"event\":\"cuda_custom_storage_transfer\",\"schema_version\":1,"
+      "\"operation\":\"%s\",\"devices\":%zu,\"bytes\":%zu,\"duration_seconds\":%.6f,"
+      "\"effective_gib_per_second\":%.6f,\"transfer_buffer_count\":%zu,"
+      "\"transfer_chunk_bytes\":%zu,\"pinned_bytes\":%zu,\"setup_service_seconds\":%.6f,"
+      "\"pipeline_service_seconds\":%.6f,\"storage_service_seconds\":%.6f,"
+      "\"cuda_wait_service_seconds\":%.6f,\"fsync_service_seconds\":%.6f,"
+      "\"cleanup_service_seconds\":%.6f}\n",
+      checkpoint ? "checkpoint" : "restore", manifest.size(), total_bytes, seconds, gib_per_second,
+      transfer_options.buffer_count, transfer_options.chunk_bytes, pinned_bytes, setup_service_seconds,
+      pipeline_service_seconds, storage_service_seconds, cuda_wait_service_seconds, fsync_service_seconds,
+      cleanup_service_seconds);
   return CUDA_SUCCESS;
 }
 
@@ -689,9 +526,11 @@ main(int argc, char** argv)
   bool get_state = false;
   bool get_restore_tid = false;
   unsigned int timeout_ms = 0;
+  transfer::TransferOptions transfer_options;
+  bool transfer_options_set = false;
 
   if (argc == 1) {
-    return PrintUsage(stderr);
+    return PrintUsageError();
   }
   for (int index = 1; index < argc; ++index) {
     std::string argument = argv[index];
@@ -711,23 +550,39 @@ main(int argc, char** argv)
       storage_mode = argv[index];
     } else if (argument == "--storage-dir" && ++index < argc) {
       storage_dir = argv[index];
+    } else if (
+        argument == "--transfer-buffer-count" && ++index < argc &&
+        transfer::ParseSize(argv[index], &transfer_options.buffer_count)) {
+      transfer_options_set = true;
+    } else if (
+        argument == "--transfer-chunk-bytes" && ++index < argc &&
+        transfer::ParseSize(argv[index], &transfer_options.chunk_bytes)) {
+      transfer_options_set = true;
     } else if (argument == "--help" || argument == "-h") {
       return PrintUsage(stdout);
     } else {
-      return PrintUsage(stderr);
+      return PrintUsageError();
     }
   }
 
   if (static_cast<int>(get_state) + static_cast<int>(get_restore_tid) + static_cast<int>(!action.empty()) != 1 ||
       !have_pid || (storage_mode != "legacy" && storage_mode != "posix") ||
       ((storage_mode == "posix") != !storage_dir.empty())) {
-    return PrintUsage(stderr);
+    return PrintUsageError();
+  }
+  std::string transfer_error;
+  if (!transfer::ValidateTransferOptions(transfer_options, &transfer_error)) {
+    std::fprintf(stderr, "invalid transfer configuration: %s\n", transfer_error.c_str());
+    return 1;
+  }
+  if (transfer_options_set && storage_mode != "posix") {
+    return PrintUsageError();
   }
 
   CUresult status = CUDA_SUCCESS;
   if (get_state) {
     if (timeout_ms != 0 || !device_map.empty() || storage_mode != "legacy") {
-      return PrintUsage(stderr);
+      return PrintUsageError();
     }
     CUprocessState state;
     status = cuCheckpointProcessGetState(pid, &state);
@@ -736,7 +591,7 @@ main(int argc, char** argv)
     }
   } else if (get_restore_tid) {
     if (timeout_ms != 0 || !device_map.empty() || storage_mode != "legacy") {
-      return PrintUsage(stderr);
+      return PrintUsageError();
     }
     int tid = 0;
     status = cuCheckpointProcessGetRestoreThreadId(pid, &tid);
@@ -745,35 +600,35 @@ main(int argc, char** argv)
     }
   } else if (action == "lock") {
     if (!device_map.empty() || storage_mode != "legacy") {
-      return PrintUsage(stderr);
+      return PrintUsageError();
     }
     CUcheckpointLockArgs args{};
     args.timeoutMs = timeout_ms;
     status = cuCheckpointProcessLock(pid, &args);
   } else if (action == "checkpoint") {
     if (timeout_ms != 0 || !device_map.empty()) {
-      return PrintUsage(stderr);
+      return PrintUsageError();
     }
     if (storage_mode == "posix") {
-      status = DoCustomStorage(pid, true, "", storage_dir);
+      status = DoCustomStorage(pid, true, "", storage_dir, transfer_options);
     } else {
       CUcheckpointCheckpointArgs args{};
       status = cuCheckpointProcessCheckpoint(pid, &args);
     }
   } else if (action == "restore") {
     if (timeout_ms != 0) {
-      return PrintUsage(stderr);
+      return PrintUsageError();
     }
-    status = storage_mode == "posix" ? DoCustomStorage(pid, false, device_map, storage_dir)
+    status = storage_mode == "posix" ? DoCustomStorage(pid, false, device_map, storage_dir, transfer_options)
                                      : DoLegacyRestore(pid, device_map);
   } else if (action == "unlock") {
     if (timeout_ms != 0 || !device_map.empty() || storage_mode != "legacy") {
-      return PrintUsage(stderr);
+      return PrintUsageError();
     }
     CUcheckpointUnlockArgs args{};
     status = cuCheckpointProcessUnlock(pid, &args);
   } else {
-    return PrintUsage(stderr);
+    return PrintUsageError();
   }
 
   if (status != CUDA_SUCCESS) {

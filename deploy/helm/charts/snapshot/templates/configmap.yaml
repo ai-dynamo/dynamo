@@ -12,6 +12,26 @@ kind: ConfigMap
 {{- if not (has .Values.config.cudaCheckpoint.storageMode (list "legacy" "posix")) }}
 {{- fail (printf "snapshot.config.cudaCheckpoint.storageMode=%q is not supported; expected legacy or posix" .Values.config.cudaCheckpoint.storageMode) }}
 {{- end }}
+{{/* Helm decodes values such as 2.0 as float64, so check integrality before normalizing to an integer. */}}
+{{- $transferBufferCountValue := .Values.config.cudaCheckpoint.transferBufferCount }}
+{{- if not (or (kindIs "int" $transferBufferCountValue) (kindIs "int64" $transferBufferCountValue) (and (kindIs "float64" $transferBufferCountValue) (eq $transferBufferCountValue (floor $transferBufferCountValue)))) }}
+{{- fail "snapshot.config.cudaCheckpoint.transferBufferCount must be an integral numeric value; fractional numbers, booleans, strings, and null are not accepted" }}
+{{- end }}
+{{- $transferChunkBytesValue := .Values.config.cudaCheckpoint.transferChunkBytes }}
+{{- if not (or (kindIs "int" $transferChunkBytesValue) (kindIs "int64" $transferChunkBytesValue) (and (kindIs "float64" $transferChunkBytesValue) (eq $transferChunkBytesValue (floor $transferChunkBytesValue)))) }}
+{{- fail "snapshot.config.cudaCheckpoint.transferChunkBytes must be an integral numeric value; fractional numbers, booleans, strings, and null are not accepted" }}
+{{- end }}
+{{- $transferBufferCount := int $transferBufferCountValue }}
+{{- $transferChunkBytes := int64 $transferChunkBytesValue }}
+{{- if or (lt $transferBufferCount 1) (gt $transferBufferCount 8) }}
+{{- fail "snapshot.config.cudaCheckpoint.transferBufferCount must be between 1 and 8" }}
+{{- end }}
+{{- if or (lt $transferChunkBytes 1048576) (gt $transferChunkBytes 268435456) (ne (mod $transferChunkBytes 4096) 0) }}
+{{- fail "snapshot.config.cudaCheckpoint.transferChunkBytes must be a 4096-byte multiple between 1048576 and 268435456" }}
+{{- end }}
+{{- if gt (mul $transferBufferCount $transferChunkBytes) 1073741824 }}
+{{- fail "snapshot.config.cudaCheckpoint transfer buffers exceed the 1 GiB per-device pinned-memory limit" }}
+{{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -28,6 +48,8 @@ data:
 
     cudaCheckpoint:
       storageMode: {{ .Values.config.cudaCheckpoint.storageMode | quote }}
+      transferBufferCount: {{ $transferBufferCount }}
+      transferChunkBytes: {{ $transferChunkBytes }}
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}

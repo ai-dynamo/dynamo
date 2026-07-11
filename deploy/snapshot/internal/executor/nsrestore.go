@@ -19,6 +19,7 @@ import (
 type RestoreOptions struct {
 	CheckpointPath string
 	CUDADeviceMap  string
+	CUDATransfer   types.CUDATransferSettings
 	CgroupRoot     string
 	TargetPodIP    string
 }
@@ -33,6 +34,10 @@ type RestoreInNamespaceResult struct {
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
 func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logger) (*RestoreInNamespaceResult, error) {
 	restoreStart := time.Now()
+	opts.CUDATransfer = opts.CUDATransfer.WithDefaults()
+	if err := opts.CUDATransfer.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid CUDA transfer settings: %w", err)
+	}
 	log.Info("Starting nsrestore workflow",
 		"checkpoint_path", opts.CheckpointPath,
 		"has_cuda_map", opts.CUDADeviceMap != "",
@@ -172,7 +177,15 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaStorageMode, opts.CheckpointPath, log)
+		_, err = cuda.RestoreAndUnlockProcessTree(
+			ctx,
+			restorePIDs,
+			opts.CUDADeviceMap,
+			cudaStorageMode,
+			opts.CheckpointPath,
+			opts.CUDATransfer,
+			log,
+		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}

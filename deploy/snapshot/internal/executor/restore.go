@@ -30,6 +30,7 @@ type RestoreRequest struct {
 	ContainerID                 string
 	StartedAt                   time.Time
 	NSRestorePath               string
+	CUDATransfer                types.CUDATransferSettings
 	PodName                     string
 	PodNamespace                string
 	TargetPodIP                 string
@@ -200,6 +201,10 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
+	cudaTransfer := req.CUDATransfer.WithDefaults()
+	if err := cudaTransfer.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid CUDA transfer settings: %w", err)
+	}
 	args := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
@@ -211,6 +216,11 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
+	args = append(
+		args,
+		"--cuda-transfer-buffer-count", strconv.Itoa(cudaTransfer.BufferCount),
+		"--cuda-transfer-chunk-bytes", strconv.FormatUint(cudaTransfer.ChunkBytes, 10),
+	)
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
 	}

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func main() {
@@ -18,6 +19,16 @@ func main() {
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
+	cudaTransferBufferCount := flag.Int(
+		"cuda-transfer-buffer-count",
+		types.DefaultCUDATransferBufferCount,
+		"Pinned transfer buffer count per CUDA device",
+	)
+	cudaTransferChunkBytes := flag.Uint64(
+		"cuda-transfer-chunk-bytes",
+		types.DefaultCUDATransferChunkBytes,
+		"Pinned transfer chunk size in bytes",
+	)
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
 	flag.Parse()
@@ -25,10 +36,18 @@ func main() {
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
+	transferSettings := types.CUDATransferSettings{
+		BufferCount: *cudaTransferBufferCount,
+		ChunkBytes:  *cudaTransferChunkBytes,
+	}
+	if err := transferSettings.Validate(); err != nil {
+		fatal(log, err, "invalid CUDA transfer settings")
+	}
 
 	opts := executor.RestoreOptions{
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,
+		CUDATransfer:   transferSettings,
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
 	}

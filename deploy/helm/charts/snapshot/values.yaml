@@ -163,6 +163,16 @@ config:
     # CUDA GPU-memory storage implementation. legacy preserves the CUDA driver
     # host-memory path; posix opts into CUDA 13.4 custom storage backed by NIXL.
     storageMode: legacy
+    # Pinned transfer slots per CUDA device. Slots add pipeline depth, not
+    # worker threads. Use an integral numeric value from 1 through 8; Helm
+    # normalizes exact integral forms such as 2.0 to 2. The default preserves
+    # the original serialized behavior.
+    transferBufferCount: 1
+    # Bytes in each pinned transfer slot. Use an integral numeric 4096-byte
+    # multiple from 1048576 through 268435456; exact integral decimal forms are
+    # normalized to integer output. Pinned use is approximately active GPUs *
+    # transferBufferCount * transferChunkBytes.
+    transferChunkBytes: 67108864
 
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized

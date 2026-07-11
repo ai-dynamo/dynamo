@@ -17,6 +17,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"k8s.io/client-go/kubernetes"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 const (
@@ -320,8 +322,12 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 
 // LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
 // On failure, the caller is expected to fail the operation and terminate the workload.
-func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, storageMode, checkpointDir string, log logr.Logger) (CheckpointPhaseTimings, error) {
-	return lockAndCheckpointProcessTree(ctx, cudaPIDs, storageMode, checkpointDir, commandHelperActionRunner{}, log)
+func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, storageMode, checkpointDir string, transferSettings types.CUDATransferSettings, log logr.Logger) (CheckpointPhaseTimings, error) {
+	transferSettings = transferSettings.WithDefaults()
+	if err := transferSettings.Validate(); err != nil {
+		return CheckpointPhaseTimings{}, fmt.Errorf("invalid CUDA transfer settings: %w", err)
+	}
+	return lockAndCheckpointProcessTree(ctx, cudaPIDs, storageMode, checkpointDir, transferSettings, commandHelperActionRunner{}, log)
 }
 
 func lockAndCheckpointProcessTree(
@@ -329,6 +335,7 @@ func lockAndCheckpointProcessTree(
 	cudaPIDs []int,
 	storageMode,
 	checkpointDir string,
+	transferSettings types.CUDATransferSettings,
 	runner helperActionRunner,
 	log logr.Logger,
 ) (CheckpointPhaseTimings, error) {
@@ -336,7 +343,7 @@ func lockAndCheckpointProcessTree(
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := runner.run(ctx, pid, actionLock, "", "", "", log); err != nil {
+		if err := runner.run(ctx, pid, actionLock, "", "", "", transferSettings, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
@@ -344,7 +351,7 @@ func lockAndCheckpointProcessTree(
 
 	for index, pid := range cudaPIDs {
 		processDir := customStorageProcessDir(checkpointDir, index)
-		if err := runner.run(ctx, pid, actionCheckpoint, "", storageMode, processDir, log); err != nil {
+		if err := runner.run(ctx, pid, actionCheckpoint, "", storageMode, processDir, transferSettings, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
@@ -359,13 +366,18 @@ func customStorageProcessDir(checkpointDir string, processIndex int) string {
 }
 
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, storageMode, checkpointDir string, log logr.Logger) (RestorePhaseTimings, error) {
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, storageMode, checkpointDir string, transferSettings types.CUDATransferSettings, log logr.Logger) (RestorePhaseTimings, error) {
+	transferSettings = transferSettings.WithDefaults()
+	if err := transferSettings.Validate(); err != nil {
+		return RestorePhaseTimings{}, fmt.Errorf("invalid CUDA transfer settings: %w", err)
+	}
 	return restoreAndUnlockProcessTree(
 		ctx,
 		cudaPIDs,
 		deviceMap,
 		storageMode,
 		checkpointDir,
+		transferSettings,
 		commandHelperActionRunner{},
 		log,
 	)
@@ -377,6 +389,7 @@ func restoreAndUnlockProcessTree(
 	deviceMap,
 	storageMode,
 	checkpointDir string,
+	transferSettings types.CUDATransferSettings,
 	runner helperActionRunner,
 	log logr.Logger,
 ) (RestorePhaseTimings, error) {
@@ -385,14 +398,14 @@ func restoreAndUnlockProcessTree(
 	start := time.Now()
 	for index, pid := range cudaPIDs {
 		processDir := customStorageProcessDir(checkpointDir, index)
-		if err := runner.run(ctx, pid, actionRestore, deviceMap, storageMode, processDir, log); err != nil {
+		if err := runner.run(ctx, pid, actionRestore, deviceMap, storageMode, processDir, transferSettings, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := runner.run(ctx, pid, actionUnlock, "", "", "", log); err != nil {
+		if err := runner.run(ctx, pid, actionUnlock, "", "", "", transferSettings, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			state, stateErr := runner.state(ctx, pid)
 			if stateErr == nil && state == "running" {

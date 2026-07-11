@@ -87,7 +87,16 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	phaseTimings.PrepareDuration = time.Since(prepareStart)
 
 	// Phase 3: Capture — CRIU dump, rootfs diff
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
+	captureTimings, err := captureCheckpoint(
+		ctx,
+		criuOpts,
+		&cfg.CRIU,
+		cfg.CUDACheckpoint.TransferSettings(),
+		data,
+		state,
+		tmpDir,
+		log,
+	)
 	if err != nil {
 		return err
 	}
@@ -250,7 +259,16 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(
+	ctx context.Context,
+	criuOpts *criurpc.CriuOpts,
+	criuSettings *types.CRIUSettings,
+	cudaTransfer types.CUDATransferSettings,
+	data *types.CheckpointManifest,
+	state *types.CheckpointContainerSnapshot,
+	checkpointDir string,
+	log logr.Logger,
+) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
@@ -259,7 +277,14 @@ func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSett
 		if err != nil {
 			return nil, err
 		}
-		cudaTimings, err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAHostPIDs, storageMode, checkpointDir, log)
+		cudaTimings, err := cuda.LockAndCheckpointProcessTree(
+			ctx,
+			state.CUDAHostPIDs,
+			storageMode,
+			checkpointDir,
+			cudaTransfer,
+			log,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}

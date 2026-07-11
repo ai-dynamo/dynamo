@@ -110,6 +110,9 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `daemonset.image.repository` | Snapshot-agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
 | `daemonset.image.tag` | Snapshot-agent image tag | `1.0.0` |
 | `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
+| `config.cudaCheckpoint.storageMode` | CUDA checkpoint storage mode (`legacy` or NIXL-backed `posix`) | `legacy` |
+| `config.cudaCheckpoint.transferBufferCount` | Integral numeric count of pinned pipeline slots per CUDA device for POSIX custom storage (1–8) | `1` |
+| `config.cudaCheckpoint.transferChunkBytes` | Integral numeric bytes per pinned POSIX custom-storage slot (1–256 MiB, 4096-byte aligned) | `67108864` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |
 | `runtime.socketPath` | CRI socket (empty = default for `runtime.type`) | `""` |
 | `openshift.enabled` | OpenShift RBAC / SCC-related chart pieces | `false` |
@@ -147,6 +150,14 @@ restores, multi-node simultaneous access, or backends that cannot reattach an
 RWO volume to the node selected for restore.
 
 See [values.yaml](./values.yaml) for the full configuration surface.
+
+For POSIX custom storage, pinned memory is approximately active GPUs multiplied
+by `transferBufferCount` and `transferChunkBytes`. The chart keeps the original
+one-slot, 64 MiB behavior by default. Change these values only after measuring
+the target storage and keep enough headroom under the DaemonSet memory limit.
+Both settings must be numeric and integral. Exact integral decimal forms such as
+`2.0` are accepted and rendered as integers; fractional values are rejected
+before conversion, as are booleans, numeric strings, and null values.
 
 ## Next steps
 

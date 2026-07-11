@@ -797,6 +797,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		ContainerID:                 containerID,
 		StartedAt:                   startedAt,
 		NSRestorePath:               w.config.Restore.NSRestorePath,
+		CUDATransfer:                w.config.CUDACheckpoint.TransferSettings(),
 		PodName:                     pod.Name,
 		PodNamespace:                pod.Namespace,
 		TargetPodIP:                 pod.Status.PodIP,

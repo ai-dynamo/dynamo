@@ -11,6 +11,7 @@ import (
 	"github.com/go-logr/logr"
 
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 )
 
 type helperActionRunner interface {
-	run(context.Context, int, string, string, string, string, logr.Logger) error
+	run(context.Context, int, string, string, string, string, types.CUDATransferSettings, logr.Logger) error
 	state(context.Context, int) (string, error)
 }
 
@@ -36,9 +37,10 @@ func (commandHelperActionRunner) run(
 	deviceMap,
 	storageMode,
 	storageDir string,
+	transferSettings types.CUDATransferSettings,
 	log logr.Logger,
 ) error {
-	return runAction(ctx, pid, action, deviceMap, storageMode, storageDir, log)
+	return runAction(ctx, pid, action, deviceMap, storageMode, storageDir, transferSettings, log)
 }
 
 func (commandHelperActionRunner) state(ctx context.Context, pid int) (string, error) {
@@ -58,19 +60,25 @@ func getState(ctx context.Context, pid int) (string, error) {
 	return state, nil
 }
 
-func helperActionArgs(pid int, action, deviceMap, storageMode, storageDir string) []string {
+func helperActionArgs(pid int, action, deviceMap, storageMode, storageDir string, transferSettings types.CUDATransferSettings) []string {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
 	if storageMode == "posix" {
-		args = append(args, "--storage-mode", storageMode, "--storage-dir", storageDir)
+		args = append(
+			args,
+			"--storage-mode", storageMode,
+			"--storage-dir", storageDir,
+			"--transfer-buffer-count", strconv.Itoa(transferSettings.BufferCount),
+			"--transfer-chunk-bytes", strconv.FormatUint(transferSettings.ChunkBytes, 10),
+		)
 	}
 	return args
 }
 
-func runAction(ctx context.Context, pid int, action, deviceMap, storageMode, storageDir string, log logr.Logger) error {
-	args := helperActionArgs(pid, action, deviceMap, storageMode, storageDir)
+func runAction(ctx context.Context, pid int, action, deviceMap, storageMode, storageDir string, transferSettings types.CUDATransferSettings, log logr.Logger) error {
+	args := helperActionArgs(pid, action, deviceMap, storageMode, storageDir, transferSettings)
 	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,
@@ -96,6 +104,15 @@ func runAction(ctx context.Context, pid int, action, deviceMap, storageMode, sto
 			"output", out,
 		)
 		return fmt.Errorf("cuda-checkpoint-helper %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
+	}
+	if storageMode == "posix" && (action == actionCheckpoint || action == actionRestore) {
+		log.Info("CUDA custom-storage transfer succeeded",
+			"pid", pid,
+			"action", action,
+			"duration", duration,
+			"output", out,
+		)
+		return nil
 	}
 	log.V(1).Info("cuda-checkpoint-helper command succeeded",
 		"pid", pid,

@@ -20,9 +20,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func TestHelperActionArgs(t *testing.T) {
+	defaultTransfer := types.CUDATransferSettings{
+		BufferCount: types.DefaultCUDATransferBufferCount,
+		ChunkBytes:  types.DefaultCUDATransferChunkBytes,
+	}
 	tests := []struct {
 		name string
 		got  []string
@@ -30,18 +36,38 @@ func TestHelperActionArgs(t *testing.T) {
 	}{
 		{
 			name: "legacy checkpoint unchanged",
-			got:  helperActionArgs(42, actionCheckpoint, "", "legacy", "/ignored"),
+			got:  helperActionArgs(42, actionCheckpoint, "", "legacy", "/ignored", defaultTransfer),
 			want: []string{"--action", "checkpoint", "--pid", "42"},
 		},
 		{
 			name: "posix checkpoint",
-			got:  helperActionArgs(42, actionCheckpoint, "", "posix", "/checkpoints/cuda-custom-storage/process-0000"),
-			want: []string{"--action", "checkpoint", "--pid", "42", "--storage-mode", "posix", "--storage-dir", "/checkpoints/cuda-custom-storage/process-0000"},
+			got: helperActionArgs(
+				42,
+				actionCheckpoint,
+				"",
+				"posix",
+				"/checkpoints/cuda-custom-storage/process-0000",
+				types.CUDATransferSettings{BufferCount: 4, ChunkBytes: 32 * 1024 * 1024},
+			),
+			want: []string{
+				"--action", "checkpoint", "--pid", "42",
+				"--storage-mode", "posix",
+				"--storage-dir", "/checkpoints/cuda-custom-storage/process-0000",
+				"--transfer-buffer-count", "4",
+				"--transfer-chunk-bytes", "33554432",
+			},
 		},
 		{
 			name: "posix restore with map",
-			got:  helperActionArgs(84, actionRestore, "GPU-a=GPU-b", "posix", "/checkpoints/cuda-custom-storage/process-0001"),
-			want: []string{"--action", "restore", "--pid", "84", "--device-map", "GPU-a=GPU-b", "--storage-mode", "posix", "--storage-dir", "/checkpoints/cuda-custom-storage/process-0001"},
+			got:  helperActionArgs(84, actionRestore, "GPU-a=GPU-b", "posix", "/checkpoints/cuda-custom-storage/process-0001", defaultTransfer),
+			want: []string{
+				"--action", "restore", "--pid", "84",
+				"--device-map", "GPU-a=GPU-b",
+				"--storage-mode", "posix",
+				"--storage-dir", "/checkpoints/cuda-custom-storage/process-0001",
+				"--transfer-buffer-count", "1",
+				"--transfer-chunk-bytes", "67108864",
+			},
 		},
 	}
 	for _, test := range tests {
@@ -82,6 +108,7 @@ func (r *recordingHelperActionRunner) run(
 	deviceMap,
 	storageMode,
 	storageDir string,
+	_ types.CUDATransferSettings,
 	_ logr.Logger,
 ) error {
 	r.calls = append(r.calls, helperActionCall{
@@ -111,6 +138,7 @@ func TestRestoreAndUnlockProcessTreeRestoresAllBeforeFirstUnlock(t *testing.T) {
 		"GPU-old=GPU-new",
 		"posix",
 		"/checkpoints/example",
+		types.CUDATransferSettings{BufferCount: 1, ChunkBytes: 64 * 1024 * 1024},
 		runner,
 		logr.Discard(),
 	)
@@ -151,6 +179,7 @@ func TestLockAndCheckpointProcessTreePreservesPIDOrderInStorageDirectories(t *te
 		pids,
 		"posix",
 		"/checkpoints/example",
+		types.CUDATransferSettings{BufferCount: 1, ChunkBytes: 64 * 1024 * 1024},
 		runner,
 		logr.Discard(),
 	)
@@ -190,6 +219,7 @@ func TestRestoreAndUnlockProcessTreeRestoreFailureSkipsAllUnlocks(t *testing.T) 
 		"",
 		"posix",
 		"/checkpoints/example",
+		types.CUDATransferSettings{BufferCount: 1, ChunkBytes: 64 * 1024 * 1024},
 		runner,
 		logr.Discard(),
 	)

@@ -22,7 +22,15 @@ type AgentConfig struct {
 
 // CUDACheckpointSettings holds CUDA checkpoint storage settings.
 type CUDACheckpointSettings struct {
-	StorageMode string `yaml:"storageMode"`
+	StorageMode         string  `yaml:"storageMode"`
+	TransferBufferCount *int    `yaml:"transferBufferCount"`
+	TransferChunkBytes  *uint64 `yaml:"transferChunkBytes"`
+}
+
+// CUDATransferSettings holds validated custom-storage transfer settings.
+type CUDATransferSettings struct {
+	BufferCount int
+	ChunkBytes  uint64
 }
 
 const (
@@ -36,7 +44,59 @@ const (
 	CUDAStorageModeLegacy = "legacy"
 	// CUDAStorageModePOSIX stores CUDA custom-storage extents in checkpoint files.
 	CUDAStorageModePOSIX = "posix"
+	// DefaultCUDATransferBufferCount preserves the original single-buffer path.
+	DefaultCUDATransferBufferCount = 1
+	// DefaultCUDATransferChunkBytes preserves the original 64 MiB chunks.
+	DefaultCUDATransferChunkBytes = 64 * 1024 * 1024
+	maxCUDATransferBufferCount    = 8
+	minCUDATransferChunkBytes     = 1 * 1024 * 1024
+	maxCUDATransferChunkBytes     = 256 * 1024 * 1024
+	maxCUDAPinnedBytesPerDevice   = 1 * 1024 * 1024 * 1024
+	cudaTransferBufferAlignment   = 4096
 )
+
+func (c CUDACheckpointSettings) TransferSettings() CUDATransferSettings {
+	settings := CUDATransferSettings{
+		BufferCount: DefaultCUDATransferBufferCount,
+		ChunkBytes:  DefaultCUDATransferChunkBytes,
+	}
+	if c.TransferBufferCount != nil {
+		settings.BufferCount = *c.TransferBufferCount
+	}
+	if c.TransferChunkBytes != nil {
+		settings.ChunkBytes = *c.TransferChunkBytes
+	}
+	return settings
+}
+
+func (c CUDATransferSettings) WithDefaults() CUDATransferSettings {
+	settings := c
+	if settings.BufferCount == 0 {
+		settings.BufferCount = DefaultCUDATransferBufferCount
+	}
+	if settings.ChunkBytes == 0 {
+		settings.ChunkBytes = DefaultCUDATransferChunkBytes
+	}
+	return settings
+}
+
+func (c CUDATransferSettings) Validate() error {
+	if c.BufferCount < 1 || c.BufferCount > maxCUDATransferBufferCount {
+		return fmt.Errorf("buffer count must be between 1 and %d", maxCUDATransferBufferCount)
+	}
+	if c.ChunkBytes < minCUDATransferChunkBytes || c.ChunkBytes > maxCUDATransferChunkBytes || c.ChunkBytes%cudaTransferBufferAlignment != 0 {
+		return fmt.Errorf(
+			"chunk bytes must be a %d-byte multiple between %d and %d",
+			cudaTransferBufferAlignment,
+			minCUDATransferChunkBytes,
+			maxCUDATransferChunkBytes,
+		)
+	}
+	if uint64(c.BufferCount) > maxCUDAPinnedBytesPerDevice/c.ChunkBytes {
+		return fmt.Errorf("buffers exceed the 1 GiB per-device pinned-memory limit")
+	}
+	return nil
+}
 
 func (c *AgentConfig) LoadEnvOverrides() {
 	if v := os.Getenv("NODE_NAME"); v != "" {
@@ -89,6 +149,20 @@ func (c *AgentConfig) Validate() error {
 		}
 	}
 	c.CUDACheckpoint.StorageMode = storageMode
+	if c.CUDACheckpoint.TransferBufferCount == nil {
+		value := DefaultCUDATransferBufferCount
+		c.CUDACheckpoint.TransferBufferCount = &value
+	}
+	if c.CUDACheckpoint.TransferChunkBytes == nil {
+		value := uint64(DefaultCUDATransferChunkBytes)
+		c.CUDACheckpoint.TransferChunkBytes = &value
+	}
+	if err := c.CUDACheckpoint.TransferSettings().Validate(); err != nil {
+		return &ConfigError{
+			Field:   "cudaCheckpoint",
+			Message: err.Error(),
+		}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",

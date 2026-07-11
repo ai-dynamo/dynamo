@@ -155,10 +155,21 @@ COPY cmd/cuda-checkpoint-helper/cuda_checkpoint_compat.h ./cmd/cuda-checkpoint-h
 COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
 COPY cmd/cuda-checkpoint-helper/storage_manifest.h ./cmd/cuda-checkpoint-helper/storage_manifest.h
 COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.h ./cmd/cuda-checkpoint-helper/transfer_config.h
+COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_engine.cpp ./cmd/cuda-checkpoint-helper/transfer_engine.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_engine.h ./cmd/cuda-checkpoint-helper/transfer_engine.h
+COPY cmd/cuda-checkpoint-helper/benchmark.cpp ./cmd/cuda-checkpoint-helper/benchmark.cpp
+COPY cmd/cuda-checkpoint-helper/benchmark_cache.cpp ./cmd/cuda-checkpoint-helper/benchmark_cache.cpp
+COPY cmd/cuda-checkpoint-helper/benchmark_cache.h ./cmd/cuda-checkpoint-helper/benchmark_cache.h
+COPY cmd/cuda-checkpoint-helper/benchmark_cache_test.cpp ./cmd/cuda-checkpoint-helper/benchmark_cache_test.cpp
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.cpp \
     ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+    ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+    ./cmd/cuda-checkpoint-helper/transfer_engine.cpp \
     -I/usr/local/cuda/include \
     -I/usr/local/include \
     -L/usr/local/cuda/lib64/stubs \
@@ -166,11 +177,35 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper
     -Wl,-rpath,/usr/local/lib \
     -lnixl -lnixl_build -lcuda -ldl
 
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-nixl-posix-benchmark \
+    ./cmd/cuda-checkpoint-helper/benchmark.cpp \
+    ./cmd/cuda-checkpoint-helper/benchmark_cache.cpp \
+    ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+    ./cmd/cuda-checkpoint-helper/transfer_engine.cpp \
+    -I/usr/local/cuda/include \
+    -I/usr/local/include \
+    -L/usr/local/cuda/lib64/stubs \
+    -L/usr/local/lib \
+    -Wl,-rpath,/usr/local/lib \
+    -lnixl -lnixl_build -lcuda
+
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       -o /cuda-checkpoint-helper-storage-test \
       ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
       ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
     && /cuda-checkpoint-helper-storage-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-transfer-test \
+      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
+    && /cuda-checkpoint-helper-transfer-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-benchmark-cache-test \
+      ./cmd/cuda-checkpoint-helper/benchmark_cache.cpp \
+      ./cmd/cuda-checkpoint-helper/benchmark_cache_test.cpp \
+    && /cuda-checkpoint-helper-benchmark-cache-test
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -258,13 +293,17 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=cuda-helper-builder /cuda-nixl-posix-benchmark /usr/local/bin/cuda-nixl-posix-benchmark
 COPY --from=nixl-builder /nixl-runtime/lib /usr/local/lib
 COPY --from=nixl-builder /nixl-runtime/NIXL_COMMIT /usr/local/share/nixl/NIXL_COMMIT
 COPY --from=nixl-builder /tmp/nixl/LICENSE /legal/NIXL/LICENSE
 COPY --from=nixl-builder /nixl-runtime/liburing-LICENSE /legal/liburing/LICENSE
 ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
 RUN ldconfig
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
+RUN chmod +x \
+    /usr/local/sbin/cuda-checkpoint \
+    /usr/local/bin/cuda-checkpoint-helper \
+    /usr/local/bin/cuda-nixl-posix-benchmark
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent

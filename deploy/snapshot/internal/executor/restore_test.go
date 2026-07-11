@@ -19,6 +19,28 @@ type restoreFakeRuntime struct {
 	resolveByPodHit bool
 }
 
+func TestExecNSRestoreRejectsInvalidCUDATransferSettings(t *testing.T) {
+	_, err := execNSRestore(
+		context.Background(),
+		testr.New(t),
+		RestoreRequest{
+			ContainerCheckpointLocation: "/checkpoints/example",
+			NSRestorePath:               "/usr/local/bin/nsrestore",
+			CUDATransfer: types.CUDATransferSettings{
+				BufferCount: 9,
+				ChunkBytes:  types.DefaultCUDATransferChunkBytes,
+			},
+		},
+		&types.RestoreContainerSnapshot{
+			CheckpointPath: "/host/checkpoints/example",
+			PlaceholderPID: 1,
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "invalid CUDA transfer settings") {
+		t.Fatalf("execNSRestore() error = %v, want transfer validation error", err)
+	}
+}
+
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	r.resolvedID = id
 	return 123, &specs.Spec{}, nil

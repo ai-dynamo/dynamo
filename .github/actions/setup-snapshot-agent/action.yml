@@ -40,6 +40,14 @@ inputs:
     description: 'CUDA checkpoint storage mode (legacy or posix)'
     required: false
     default: legacy
+  cuda_checkpoint_transfer_buffer_count:
+    description: 'Pinned transfer slots per CUDA device'
+    required: false
+    default: '1'
+  cuda_checkpoint_transfer_chunk_bytes:
+    description: 'Bytes per pinned CUDA custom-storage transfer slot'
+    required: false
+    default: '67108864'
 
 runs:
   using: "composite"
@@ -66,6 +74,8 @@ runs:
         STORAGE_PVC_ACCESS_MODE: ${{ inputs.storage_pvc_access_mode }}
         STORAGE_BASE_PATH: ${{ inputs.storage_base_path }}
         CUDA_CHECKPOINT_STORAGE_MODE: ${{ inputs.cuda_checkpoint_storage_mode }}
+        CUDA_CHECKPOINT_TRANSFER_BUFFER_COUNT: ${{ inputs.cuda_checkpoint_transfer_buffer_count }}
+        CUDA_CHECKPOINT_TRANSFER_CHUNK_BYTES: ${{ inputs.cuda_checkpoint_transfer_chunk_bytes }}
       run: |
         echo "::group::Install snapshot-agent"
         set -euo pipefail
@@ -94,6 +104,8 @@ runs:
           --set storage.pvc.create=false \
           --set storage.pvc.size="${STORAGE_SIZE}" \
           --set config.cudaCheckpoint.storageMode="${CUDA_CHECKPOINT_STORAGE_MODE}" \
+          --set config.cudaCheckpoint.transferBufferCount="${CUDA_CHECKPOINT_TRANSFER_BUFFER_COUNT}" \
+          --set config.cudaCheckpoint.transferChunkBytes="${CUDA_CHECKPOINT_TRANSFER_CHUNK_BYTES}" \
           --debug
 
         DAEMONSET_NAME="$(kubectl get daemonset \
