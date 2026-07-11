@@ -116,12 +116,14 @@ stages; no source outside the verified clone is used by a build stage:
 ```bash
 kubectl exec -n bis-rl-3 biswa-dind -- env \
   REVISION="$REVISION" IMAGE="$IMAGE" sh -lc '
+    set -eu
     cd /build/valkey-router-src
     test "$(git rev-parse HEAD)" = "$REVISION"
     test -z "$(git status --porcelain)"
     if test "$(git rev-parse --is-shallow-repository)" = true; then
       git fetch --quiet --unshallow origin
     fi
+    test "$(git rev-parse --is-shallow-repository)" = false
     git fsck --strict
     context=$(mktemp -d)
     trap "rm -rf \"$context\"" EXIT

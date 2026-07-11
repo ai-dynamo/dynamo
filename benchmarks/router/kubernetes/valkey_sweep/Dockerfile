@@ -24,6 +24,7 @@ RUN apt-get -o Acquire::Check-Valid-Until=false update \
 COPY source.bundle /tmp/source.bundle
 RUN GIT_LFS_SKIP_SMUDGE=1 git clone /tmp/source.bundle /source \
     && test "$(git -C /source rev-parse HEAD)" = "${GIT_REVISION}" \
+    && test "$(git -C /source rev-parse --is-shallow-repository)" = false \
     && git -C /source fsck --strict \
     && test -z "$(git -C /source status --porcelain)"
 
