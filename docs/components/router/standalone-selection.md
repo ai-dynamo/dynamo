@@ -214,10 +214,11 @@ Content-Type: application/json
 - **Required id**: `selection_id` is always required (the replay key and the
   booking id); a request without it is rejected.
 - **Single-use**: The first successful booking consumes the entry; a repeat
-  replay returns `404` (`no pending selection`).
+  replay returns `404` (`no pending selection`). Concurrent replays of the same
+  id collide at the scheduler, so only one books.
 - **Retryable on failure**: A booking that fails before landing (worker no
-  longer schedulable, service not ready) re-inserts the entry, so the same call
-  can be retried once the condition clears.
+  longer schedulable, service not ready) leaves the entry in place, so the same
+  call can be retried once the condition clears.
 - **Bounded window**: By default, entries expire after 120 seconds and each
   selector retains at most 4096 pending selections within a 256 MiB budget,
   evicting oldest first. All three limits are configurable.

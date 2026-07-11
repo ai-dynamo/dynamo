@@ -886,7 +886,7 @@ async fn failed_cached_booking_is_retryable() {
 }
 
 #[tokio::test]
-async fn cached_booking_reinserts_when_scheduler_booking_fails() {
+async fn cached_booking_retryable_after_scheduler_conflict() {
     let app = app();
     assert_eq!(
         register_worker(app.clone(), None).await.status(),

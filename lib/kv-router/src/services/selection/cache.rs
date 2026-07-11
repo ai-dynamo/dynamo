@@ -1,19 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-flight selection cache.
-//!
-//! `/select` computes everything needed to later book a reservation (the
-//! chosen worker, the normalized sequence hashes, and the prefill and
-//! output-token accounting). Caching that here lets a follow-up
-//! `/reservations` call replay it by `selection_id` instead of re-sending
-//! the prompt.
-//!
-//! Entries that are never claimed by a `create_reservation` (an abandoned or
-//! failed request) are evicted inline: every [`SelectionCache::insert`] sweeps
-//! expired entries and enforces a size cap.
+//! In-flight selection cache: holds the booking inputs a `/select` computed so
+//! a later `/reservations` replays them by `selection_id` without re-sending
+//! the prompt. Unclaimed entries are swept and capped on every insert.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dynamo_tokens::SequenceHash;
@@ -26,13 +19,11 @@ use super::types::SelectionKey;
 /// How long a pending selection lives before it is evicted.
 const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);
 
-/// Upper bound on resident pending selections, evicting oldest first. Only
-/// reached when many selects go unclaimed (e.g. a crashed client).
+/// Max resident pending selections; oldest-first eviction.
 const SELECTION_CACHE_MAX_ENTRIES: usize = 4096;
 
-/// Upper bound on resident bytes (approximate: sequence hashes plus id
-/// strings). Bounds memory when prompts are large, since request bodies can
-/// reach several MiB and the entry cap alone does not.
+/// Approximate resident-byte budget; the entry cap alone does not bound memory
+/// when prompts are large.
 const SELECTION_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// Runtime-tunable bounds for the pending-selection cache.
@@ -56,8 +47,7 @@ impl Default for SelectionCacheConfig {
     }
 }
 
-/// Booking inputs captured by `select`, replayed by a later `create_reservation`
-/// without re-sending the prompt. Single-use, hence not `Clone`.
+/// Booking inputs captured by `select`, replayed by a later `create_reservation`.
 pub(super) struct PendingSelection {
     pub key: SelectionKey,
     pub worker: WorkerWithDpRank,
@@ -70,18 +60,16 @@ pub(super) struct PendingSelection {
 }
 
 struct Entry {
-    selection: PendingSelection,
+    selection: Arc<PendingSelection>,
     inserted_at: Instant,
     generation: u64,
     bytes: usize,
 }
 
-/// Pending selections are scoped by `(SelectionKey, selection_id)`, where
-/// `SelectionKey` is the (model, routing_group) scope.
+/// Scoped by `(SelectionKey, selection_id)`; `SelectionKey` is (model, routing_group).
 type CacheKey = (SelectionKey, String);
 
-/// Approximate resident bytes of an entry: the variable-length sequence hashes
-/// plus the id and scope strings.
+/// Approximate resident bytes: sequence hashes plus id and scope strings.
 fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
     selection.sequence_hashes.len() * std::mem::size_of::<SequenceHash>()
         + key.1.len()
@@ -122,32 +110,12 @@ impl SelectionCache {
         }
     }
 
-    /// Record (or replace) the pending selection under `(selection.key, selection_id)`,
-    /// sweeping expired entries and evicting oldest-first if over the cap.
+    /// Insert (or replace) the selection, sweeping expired entries and enforcing the cap.
     pub(super) fn insert(&self, selection_id: String, selection: PendingSelection, now: Instant) {
         self.insert_at(selection_id, selection, now, now);
     }
 
-    /// Re-insert a selection taken earlier for a failed booking, keeping its
-    /// original TTL anchor so retries cannot extend its life. A newer select
-    /// for the same id wins, so this is a no-op when the id is already present.
-    pub(super) fn reinsert(
-        &self,
-        selection_id: String,
-        selection: PendingSelection,
-        inserted_at: Instant,
-        now: Instant,
-    ) {
-        let cache_key = (selection.key.clone(), selection_id);
-        let mut state = self.state.lock();
-        if state.entries.contains_key(&cache_key) {
-            return;
-        }
-        self.insert_locked(&mut state, cache_key, selection, inserted_at, now);
-    }
-
-    /// `inserted_at` anchors the entry's TTL (equal to `now` for a fresh insert,
-    /// the original time for a re-insert); `now` drives the sweep.
+    /// `inserted_at` anchors the entry's TTL; `now` drives the sweep.
     fn insert_at(
         &self,
         selection_id: String,
@@ -186,11 +154,11 @@ impl SelectionCache {
             .order
             .insert((inserted_at, generation), cache_key.clone());
         state.total_bytes = state.total_bytes.saturating_add(bytes);
-        // Replacing a live selection drops its old order entry and byte count.
+        // A replaced entry drops its old order key and bytes.
         if let Some(old) = state.entries.insert(
             cache_key,
             Entry {
-                selection,
+                selection: Arc::new(selection),
                 inserted_at,
                 generation,
                 bytes,
@@ -199,8 +167,7 @@ impl SelectionCache {
             state.order.remove(&(old.inserted_at, old.generation));
             state.total_bytes = state.total_bytes.saturating_sub(old.bytes);
         }
-        // Evict oldest-first while over the entry cap or byte budget. An entry
-        // larger than the whole budget is evicted immediately (not cached).
+        // Evict oldest-first over the cap or byte budget (an over-budget entry evicts itself).
         while state.entries.len() > self.max_entries || state.total_bytes > self.max_bytes {
             let Some((_, key)) = state.order.pop_first() else {
                 break;
@@ -211,24 +178,50 @@ impl SelectionCache {
         }
     }
 
-    /// Remove and return the pending selection for `(key, selection_id)` with
-    /// its original TTL anchor (for a possible [`reinsert`](Self::reinsert)). An
-    /// entry older than the TTL is treated as already gone (and dropped).
-    pub(super) fn take(
+    /// Return a shared `Arc` handle to the selection and its `generation` without
+    /// removing it (past-TTL is treated as gone); the caller `remove`s it only
+    /// once the booking lands.
+    pub(super) fn peek(
         &self,
         key: &SelectionKey,
         selection_id: &str,
         now: Instant,
-    ) -> Option<(PendingSelection, Instant)> {
+    ) -> Option<(Arc<PendingSelection>, u64)> {
         let cache_key = (key.clone(), selection_id.to_string());
-        let mut state = self.state.lock();
-        let entry = state.entries.remove(&cache_key)?;
-        state.order.remove(&(entry.inserted_at, entry.generation));
-        state.total_bytes = state.total_bytes.saturating_sub(entry.bytes);
+        let state = self.state.lock();
+        let entry = state.entries.get(&cache_key)?;
         if now.duration_since(entry.inserted_at) > self.ttl {
             return None;
         }
-        Some((entry.selection, entry.inserted_at))
+        Some((Arc::clone(&entry.selection), entry.generation))
+    }
+
+    /// Consume the entry after a booking lands, only if its `generation` still
+    /// matches the peek; a newer `select` for the id survives.
+    pub(super) fn remove(&self, key: &SelectionKey, selection_id: &str, generation: u64) {
+        let cache_key = (key.clone(), selection_id.to_string());
+        let mut state = self.state.lock();
+        if state
+            .entries
+            .get(&cache_key)
+            .is_some_and(|entry| entry.generation == generation)
+        {
+            self.remove_locked(&mut state, &cache_key);
+        }
+    }
+
+    /// Drop any cached selection for the id (an explicit booking supersedes it).
+    pub(super) fn discard(&self, key: &SelectionKey, selection_id: &str) {
+        let cache_key = (key.clone(), selection_id.to_string());
+        let mut state = self.state.lock();
+        self.remove_locked(&mut state, &cache_key);
+    }
+
+    fn remove_locked(&self, state: &mut State, cache_key: &CacheKey) {
+        if let Some(entry) = state.entries.remove(cache_key) {
+            state.order.remove(&(entry.inserted_at, entry.generation));
+            state.total_bytes = state.total_bytes.saturating_sub(entry.bytes);
+        }
     }
 
     #[cfg(test)]
@@ -278,27 +271,40 @@ mod tests {
         }
     }
 
+    /// Peek an entry and consume it (as a successful booking would).
+    fn peek_and_remove(
+        cache: &SelectionCache,
+        id: &str,
+        now: Instant,
+    ) -> Option<Arc<PendingSelection>> {
+        let (selection, generation) = cache.peek(&key(), id, now)?;
+        cache.remove(&key(), id, generation);
+        Some(selection)
+    }
+
     #[test]
-    fn take_returns_entry_exactly_once() {
+    fn peek_then_remove_consumes_once() {
         let cache = cache();
         let now = Instant::now();
         cache.insert("req-1".to_string(), pending(1), now);
 
-        let (taken, _) = cache.take(&key(), "req-1", now).expect("entry present");
-        assert_eq!(taken.worker.worker_id, 1);
-        assert_eq!(taken.isl_tokens, 12);
-        assert!(cache.take(&key(), "req-1", now).is_none());
+        let (peeked, generation) = cache.peek(&key(), "req-1", now).expect("entry present");
+        assert_eq!(peeked.worker.worker_id, 1);
+        assert_eq!(peeked.isl_tokens, 12);
+        // A peek leaves the entry; only remove consumes it.
+        assert!(cache.peek(&key(), "req-1", now).is_some());
+        cache.remove(&key(), "req-1", generation);
+        assert!(cache.peek(&key(), "req-1", now).is_none());
     }
 
     #[test]
-    fn take_refuses_expired_entry() {
+    fn peek_refuses_expired_entry() {
         let cache = cache();
         let inserted = Instant::now();
         cache.insert("req-1".to_string(), pending(1), inserted);
 
         let later = inserted + TTL + Duration::from_secs(1);
-        assert!(cache.take(&key(), "req-1", later).is_none());
-        assert_eq!(cache.len(), 0);
+        assert!(cache.peek(&key(), "req-1", later).is_none());
     }
 
     #[test]
@@ -311,8 +317,8 @@ mod tests {
         let later = t0 + TTL + Duration::from_secs(1);
         cache.insert("new".to_string(), pending(2), later);
         assert_eq!(cache.len(), 1);
-        assert!(cache.take(&key(), "old", later).is_none());
-        assert!(cache.take(&key(), "new", later).is_some());
+        assert!(cache.peek(&key(), "old", later).is_none());
+        assert!(cache.peek(&key(), "new", later).is_some());
     }
 
     #[test]
@@ -325,9 +331,9 @@ mod tests {
 
         let now = t + Duration::from_millis(3);
         assert_eq!(cache.len(), 2);
-        assert!(cache.take(&key(), "a", now).is_none());
-        assert!(cache.take(&key(), "b", now).is_some());
-        assert!(cache.take(&key(), "c", now).is_some());
+        assert!(cache.peek(&key(), "a", now).is_none());
+        assert!(cache.peek(&key(), "b", now).is_some());
+        assert!(cache.peek(&key(), "c", now).is_some());
     }
 
     #[test]
@@ -342,50 +348,28 @@ mod tests {
 
         let now = t + Duration::from_millis(3);
         assert_eq!(cache.len(), 2);
-        assert!(cache.take(&key(), "a", now).is_none());
-        assert!(cache.take(&key(), "b", now).is_some());
-        assert!(cache.take(&key(), "c", now).is_some());
+        assert!(cache.peek(&key(), "a", now).is_none());
+        assert!(cache.peek(&key(), "b", now).is_some());
+        assert!(cache.peek(&key(), "c", now).is_some());
     }
 
     #[test]
-    fn reinsert_preserves_original_ttl_anchor() {
-        let cache = cache();
-        let t0 = Instant::now();
-        cache.insert("req-1".to_string(), pending(1), t0);
-        let (pending, inserted_at) = cache.take(&key(), "req-1", t0).expect("entry present");
-        assert_eq!(inserted_at, t0);
-
-        // The failed-booking path re-inserts later but keeps the original
-        // anchor, so a retry loop cannot extend the entry past its TTL.
-        let later = t0 + Duration::from_secs(5);
-        cache.reinsert("req-1".to_string(), pending, inserted_at, later);
-
-        let past_original_ttl = t0 + TTL + Duration::from_secs(1);
-        assert!(cache.take(&key(), "req-1", past_original_ttl).is_none());
-    }
-
-    #[test]
-    fn reinsert_yields_to_newer_selection() {
+    fn remove_yields_to_newer_selection() {
         let cache = cache();
         let t = Instant::now();
         cache.insert("req-1".to_string(), pending(1), t);
-        let (old, old_at) = cache.take(&key(), "req-1", t).expect("entry present");
-        // A newer select repopulates the id while the failed replay is in flight.
+        let (_old, stale_generation) = cache.peek(&key(), "req-1", t).expect("entry present");
+        // A newer select replaces the id while the first replay is in flight.
         cache.insert(
             "req-1".to_string(),
             pending(2),
             t + Duration::from_millis(1),
         );
-        // The failed replay must not clobber the newer selection.
-        cache.reinsert(
-            "req-1".to_string(),
-            old,
-            old_at,
-            t + Duration::from_millis(2),
-        );
+        // A remove for the stale generation must not drop the newer selection.
+        cache.remove(&key(), "req-1", stale_generation);
 
         let (survivor, _) = cache
-            .take(&key(), "req-1", t + Duration::from_millis(3))
+            .peek(&key(), "req-1", t + Duration::from_millis(2))
             .expect("entry present");
         assert_eq!(survivor.worker.worker_id, 2);
     }
@@ -394,38 +378,16 @@ mod tests {
     fn order_index_bounded_by_live_entries_under_pinned_front() {
         let cache = cache_with(1024, usize::MAX);
         let t = Instant::now();
-        // One live entry pinned at the front, never taken.
+        // One live entry pinned at the front, never consumed.
         cache.insert("pinned".to_string(), pending(0), t);
-        // Heavy insert/take traffic behind it must not grow the index.
+        // Heavy insert/consume traffic behind it must not grow the index.
         for i in 1..=50u64 {
             let id = format!("req-{i}");
             let at = t + Duration::from_millis(i);
             cache.insert(id.clone(), pending(i), at);
-            assert!(cache.take(&key(), &id, at).is_some());
+            assert!(peek_and_remove(&cache, &id, at).is_some());
         }
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.order_len(), 1);
-    }
-
-    #[test]
-    fn cap_evicts_oldest_by_anchor_including_reinserted() {
-        let cache = cache(); // CAP = 2
-        let t = Instant::now();
-        // "old" is selected first (oldest anchor) and taken.
-        cache.insert("old".to_string(), pending(1), t);
-        let (old, old_at) = cache.take(&key(), "old", t).expect("old present");
-        // A newer selection arrives, then "old" is reinserted with its original anchor.
-        cache.insert("mid".to_string(), pending(2), t + Duration::from_millis(5));
-        cache.reinsert("old".to_string(), old, old_at, t + Duration::from_millis(6));
-        // A third selection pushes over the cap.
-        cache.insert("new".to_string(), pending(3), t + Duration::from_millis(7));
-
-        // "old" has the oldest anchor and is evicted first, though it was
-        // reinserted most recently.
-        let now = t + Duration::from_millis(8);
-        assert_eq!(cache.len(), 2);
-        assert!(cache.take(&key(), "old", now).is_none());
-        assert!(cache.take(&key(), "mid", now).is_some());
-        assert!(cache.take(&key(), "new", now).is_some());
     }
 }

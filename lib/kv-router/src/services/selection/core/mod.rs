@@ -791,20 +791,19 @@ impl SelectionCore {
 
         let key = SelectionKey::new(req.model_name.clone(), req.routing_group.clone());
 
-        // The explicit form (worker_id) books under selection_id on that worker.
-        // It discards any cached selection for the id so a later replay cannot
-        // book stale state.
+        // Explicit form: book on the given worker under selection_id, discarding
+        // any cached selection for the id so a later replay can't book stale state.
         if let Some(worker_id) = req.worker_id {
-            self.selection_cache
-                .take(&key, &req.selection_id, Instant::now());
+            self.selection_cache.discard(&key, &req.selection_id);
             return self.reserve_explicit(key, worker_id, req).await;
         }
 
-        // The replay form books the selection cached by the matching `select`
-        // under selection_id.
-        let Some((pending, inserted_at)) =
+        // Replay form: peek, book, and consume only once the booking lands. A
+        // failure leaves the entry for a retry; concurrent replays of the same
+        // id collide at the scheduler, so they can't double-book.
+        let Some((pending, generation)) =
             self.selection_cache
-                .take(&key, &req.selection_id, Instant::now())
+                .peek(&key, &req.selection_id, Instant::now())
         else {
             return Err(SelectionError::NotFound(format!(
                 "no pending selection {} for {key} (expired, already used, \
@@ -812,47 +811,27 @@ impl SelectionCore {
                 req.selection_id
             )));
         };
-        self.reserve_from_cached_selection(req, pending, inserted_at)
-            .await
+        let response = self.book_cached_selection(pending, &req).await?;
+        self.selection_cache
+            .remove(&key, &req.selection_id, generation);
+        Ok(response)
     }
 
-    /// Book a reservation replaying exactly what the matching `select`
-    /// captured; request fields other than the ids are ignored. The selection
-    /// is consumed only when the booking lands: any failure before that
-    /// (worker not ready or gone, scheduler conflict) re-inserts it with its
-    /// original TTL anchor, so a retry sees the real error and can still book
-    /// once it clears.
-    async fn reserve_from_cached_selection(
-        &self,
-        req: ReservationRequest,
-        pending: PendingSelection,
-        inserted_at: Instant,
-    ) -> Result<ReservationResponse, SelectionError> {
-        let selection_id = req.selection_id.clone();
-        let result = self.book_cached_selection(&pending, req).await;
-        if result.is_err() {
-            self.selection_cache
-                .reinsert(selection_id, pending, inserted_at, Instant::now());
-        }
-        result
-    }
-
-    /// Resolve and book a cached selection, borrowing `pending` so the caller
-    /// can re-insert it on failure. Clones only the fields the scheduler booking
-    /// consumes; the rest of `pending` stays whole for a re-insert.
+    /// Book a reservation replaying what the matching `select` captured; request
+    /// fields other than the ids are ignored.
     async fn book_cached_selection(
         &self,
-        pending: &PendingSelection,
-        req: ReservationRequest,
+        pending: Arc<PendingSelection>,
+        req: &ReservationRequest,
     ) -> Result<ReservationResponse, SelectionError> {
-        let (entry, endpoint, prefill_load_hint) = self.resolve_cached_booking(pending)?;
+        let (entry, endpoint, prefill_load_hint) = self.resolve_cached_booking(&pending)?;
         let track_prefill_tokens = pending.track_prefill_tokens;
         self.finalize_reservation(
             entry,
             endpoint,
             ReservationBooking {
                 key: pending.key.clone(),
-                selection_id: req.selection_id,
+                selection_id: req.selection_id.clone(),
                 worker: pending.worker,
                 sequence_hashes: pending.sequence_hashes.clone(),
                 prefill_load_hint: track_prefill_tokens.then_some(prefill_load_hint),
@@ -865,15 +844,15 @@ impl SelectionCore {
     }
 
     /// Resolve everything a cached booking needs (ready entry, schedulable
-    /// endpoint, prefill hint) before the selection is consumed, so the only
-    /// fallible step left in `finalize_reservation` is the scheduler call.
+    /// endpoint, prefill hint), so the only fallible step left in
+    /// `finalize_reservation` is the scheduler call.
     fn resolve_cached_booking(
         &self,
         pending: &PendingSelection,
     ) -> Result<(Arc<SelectionEntry>, String, PrefillLoadHint), SelectionError> {
         let entry = self.ready_entry(&pending.key)?;
-        // Validate the full cached worker/rank against current topology so a
-        // rank a PATCH removed during the window is rejected (and re-inserted).
+        // Validate the full worker/rank against current topology; a rank a PATCH
+        // removed during the window is rejected (the entry stays for a retry).
         let endpoint = self
             .catalog
             .schedulable_worker_endpoint(pending.worker, &pending.key)
@@ -951,7 +930,7 @@ impl SelectionCore {
 
     /// Register the booking with the scheduler. All fallible resolution happens
     /// in the caller; the scheduler add here is the last step that can fail, and
-    /// the cached path re-inserts its selection if it does.
+    /// the cached path leaves its selection in place (to retry) if it does.
     async fn finalize_reservation(
         &self,
         entry: Arc<SelectionEntry>,
