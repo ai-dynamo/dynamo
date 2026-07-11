@@ -287,6 +287,33 @@ def _load_write_mode(
     default_loader,
     target_device: torch.device,
 ) -> torch.nn.Module:
+    """Load a writer model, releasing its lease on every failed preparation."""
+    try:
+        return _load_write_mode_impl(
+            gms_client,
+            vllm_config,
+            model_config,
+            default_loader,
+            target_device,
+        )
+    except BaseException:
+        try:
+            if _pending_gms_client is gms_client:
+                abort_pending_gms_write()
+            else:
+                gms_client.close(best_effort=True)
+        except BaseException:
+            logger.exception("[GMS] Failed to release failed write-mode load")
+        raise
+
+
+def _load_write_mode_impl(
+    gms_client: "GMSClientMemoryManager",
+    vllm_config,
+    model_config,
+    default_loader,
+    target_device: torch.device,
+) -> torch.nn.Module:
     """Load model from disk and prepare weights for GMS publication (RW mode).
 
     Initializes model using GMS memory pool, loads weights from disk,
