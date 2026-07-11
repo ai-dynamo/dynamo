@@ -520,14 +520,14 @@ pub enum ErrorType {
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     model: String,
-    // Per-model metric handles resolved once at construction. The collector lives for a
-    // single request and `model` is fixed, so caching these avoids re-hashing the `model`
-    // label via `with_label_values` on every chunk (and, for ITL, on every output token —
-    // it was previously resolved inside a `for _ in 0..num_tokens` loop). Each handle
-    // shares the underlying metric with its vec, so observations are equivalent.
+    // Per-model metric handles cached for the request. Most are resolved at construction;
+    // ITL is resolved lazily on its first observation so requests that never produce ITL
+    // do not allocate a local histogram. Caching avoids re-hashing the `model` label on
+    // every chunk or output token. Each handle shares the underlying metric with its vec,
+    // so observations are equivalent.
     output_tokens_counter: prometheus::IntCounter,
     time_to_first_token: prometheus::Histogram,
-    inter_token_latency: prometheus::local::LocalHistogram,
+    inter_token_latency: Option<prometheus::local::LocalHistogram>,
     itl_pending_tokens: u64,
     input_sequence_length: prometheus::Histogram,
     cached_tokens: prometheus::Histogram,
@@ -1547,10 +1547,6 @@ impl ResponseMetricCollector {
         // per-chunk / per-token hot path in `observe_response` does no label hashing.
         let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
         let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
-        let inter_token_latency = metrics
-            .inter_token_latency
-            .with_label_values(&[&model])
-            .local();
         let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
         let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
         let images_per_request = metrics.images_per_request.with_label_values(&[&model]);
@@ -1561,7 +1557,7 @@ impl ResponseMetricCollector {
             model,
             output_tokens_counter,
             time_to_first_token,
-            inter_token_latency,
+            inter_token_latency: None,
             itl_pending_tokens: 0,
             input_sequence_length,
             cached_tokens,
@@ -1646,6 +1642,17 @@ impl ResponseMetricCollector {
             metrics.decode_dp_rank,
             decode_worker_type,
         );
+    }
+
+    fn local_inter_token_latency(&mut self) -> &mut prometheus::local::LocalHistogram {
+        let metrics = &self.metrics;
+        let model = self.model.as_str();
+        self.inter_token_latency.get_or_insert_with(|| {
+            metrics
+                .inter_token_latency
+                .with_label_values(&[model])
+                .local()
+        })
     }
 
     /// Observe the current output sequence length
@@ -1772,14 +1779,20 @@ impl ResponseMetricCollector {
             let itl = response_duration.as_secs_f64() / num_tokens as f64;
             self.itl_sum_secs += itl * num_tokens as f64;
             self.itl_count += num_tokens as u64;
-            // Handle resolved once at construction — the observe loop no longer re-hashes
-            // the `model` label on every output token.
-            for _ in 0..num_tokens {
-                self.inter_token_latency.observe(itl);
-            }
             self.itl_pending_tokens = self.itl_pending_tokens.saturating_add(num_tokens as u64);
-            if self.itl_pending_tokens >= ITL_LOCAL_FLUSH_TOKENS {
-                self.inter_token_latency.flush();
+            let should_flush = self.itl_pending_tokens >= ITL_LOCAL_FLUSH_TOKENS;
+            {
+                // Resolve the request-local histogram on the first ITL only, then reuse
+                // it without re-hashing the model label for each output token.
+                let histogram = self.local_inter_token_latency();
+                for _ in 0..num_tokens {
+                    histogram.observe(itl);
+                }
+                if should_flush {
+                    histogram.flush();
+                }
+            }
+            if should_flush {
                 self.itl_pending_tokens = 0;
             }
 
@@ -1820,7 +1833,9 @@ impl ResponseMetricCollector {
 
 impl Drop for ResponseMetricCollector {
     fn drop(&mut self) {
-        self.inter_token_latency.flush();
+        if let Some(histogram) = &self.inter_token_latency {
+            histogram.flush();
+        }
         self.itl_pending_tokens = 0;
 
         if !self.detokenize_latency_total.is_zero() && self.detokenize_count_total > 0 {
@@ -2361,10 +2376,46 @@ mod tests {
     }
 
     #[test]
+    fn test_local_itl_histogram_is_initialized_lazily() {
+        let metrics = Arc::new(Metrics::new());
+        let model = "lazy-local-itl-model";
+        let global = metrics.inter_token_latency.with_label_values(&[model]);
+        let mut collector = metrics.create_response_collector(model);
+
+        assert!(collector.inter_token_latency.is_none());
+
+        collector.observe_response(10, 0);
+        assert!(
+            collector.inter_token_latency.is_none(),
+            "zero-token responses must not allocate a local histogram"
+        );
+
+        collector.observe_response(10, 1);
+        assert!(
+            collector.inter_token_latency.is_none(),
+            "the TTFT-only response must not allocate a local histogram"
+        );
+
+        collector.observe_response(10, 1);
+        assert!(
+            collector.inter_token_latency.is_some(),
+            "the first ITL observation must allocate a local histogram"
+        );
+        assert_eq!(
+            global.get_sample_count(),
+            0,
+            "the first ITL observation must remain local until flush or drop"
+        );
+
+        drop(collector);
+        assert_eq!(global.get_sample_count(), 1);
+    }
+
+    #[test]
     fn test_cached_handles_record_through_vec() {
-        // The collector resolves per-model handles once at construction; observing
-        // through them must update the same metric the vec exposes. Regression guard
-        // for the handle cache (incl. the per-token ITL loop using the cached handle).
+        // The collector caches per-model handles; observing through them must update
+        // the same metric the vec exposes. Regression guard for the handle cache
+        // (including the lazily resolved handle used by the per-token ITL loop).
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
@@ -2419,7 +2470,9 @@ mod tests {
 
         let mut collector = metrics.clone().create_response_collector(model);
         collector.observe_response(10, 1); // TTFT only.
+        assert!(collector.inter_token_latency.is_none());
         collector.observe_response(10, 63);
+        assert!(collector.inter_token_latency.is_some());
         assert_eq!(
             global.get_sample_count(),
             0,
