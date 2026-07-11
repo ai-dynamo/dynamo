@@ -16,11 +16,11 @@ python examples/custom_encoder/benchmark/generate_workload.py
 examples/custom_encoder/benchmark/run_aiperf.sh
 ```
 
-The generator creates five 299×299 and four 500×500 deterministic JPEGs, then
-cycles them across 100 requests. Every request contains one image and the same
-text prompt. It pads that prompt so the estimated mean server-side ISL is near
-515 after the variable number of visual tokens is spliced in. The benchmark
-uses concurrency 8 and forces 70 generated tokens with `ignore_eos:true`.
+The generator creates one deterministic 300×300 JPEG and repeats the same
+request 1,000 times. It calibrates the prompt to exactly 600 server-side input
+tokens after visual-token expansion and fails if exact calibration is not
+possible. The default run uses 32 warmups, concurrency 8, deterministic greedy
+sampling, and exactly 70 generated tokens.
 
 Artifacts are written below `logs/qwen3_vl_custom_encoder/`. The command uses
 server token counts because client-side tokenization cannot see the visual-token
@@ -130,7 +130,7 @@ a latency/throughput tradeoff and must be swept for the deployment's concurrency
 and shape distribution; it is not assumed to improve throughput. Nonzero values
 are rejected for backends without CUDA graph buckets.
 
-For this workload, a matched 1,000-request H100 sweep favored the zero-delay
+For the earlier variable-image workload, a matched 1,000-request H100 sweep favored the zero-delay
 default at every tested concurrency: 4.095/7.813/14.257/24.315 req/s at
 concurrency 1/2/4/8, versus 4.094/7.708/14.152/24.144 req/s with a 1 ms delay.
 
@@ -180,3 +180,37 @@ Qwen3-VL's native path also injects DeepStack vision features into intermediate
 language-model layers. The current CustomEncoder interface carries only primary
 image embeddings, so this workload measures the real ViT/projector and Dynamo
 batching path but is not a native-output parity test.
+
+## Async-mp versus sync-inproc
+
+The experimental engine-mode sweep compares Dynamo's default `AsyncLLM`
+EngineCore subprocess with the default-off synchronous in-process engine facade.
+It uses five fresh paired launches for every requested concurrency, alternates
+mode order, fixes the KV cache at 8 GiB, and records process RSS and GPU usage:
+
+```bash
+GPU=0 examples/custom_encoder/benchmark/run_engine_mode_sweep.sh
+```
+
+The headline run keeps custom-encoder timing disabled because per-batch CUDA
+event synchronization perturbs throughput. `paired_summary.csv` reports paired
+percentage deltas and 95% confidence intervals for throughput, TTFT, ITL,
+request latency, process RSS, and GPU memory. This repeated-input workload
+intentionally measures a warm prefix-cache regime; it does not establish
+performance for unique prompts or cache misses.
+
+The five-repeat H100 reference run completed 40,000 measured requests with no
+errors and exact server-reported ISL 600 / OSL 70. Mean paired deltas for
+`sync-inproc` relative to `async-mp` were:
+
+| Concurrency | Request throughput | p99 latency | p99 TTFT | p99 ITL | Peak GPU memory |
+|---:|---:|---:|---:|---:|---:|
+| 1 | +0.25% | +0.23% | +0.70% | +0.15% | -7.34% |
+| 2 | +2.17% | -1.66% | -2.34% | -2.30% | -7.68% |
+| 4 | +1.64% | -2.81% | -25.56% | -2.56% | -7.51% |
+| 8 | -0.06% | -2.67% | +1.10% | -3.73% | -7.87% |
+
+Negative latency deltas are improvements. No throughput result approached the
+10% materiality threshold, so `async-mp` remains the supported default. The
+in-process mode is useful as an experimental memory and tail-latency option;
+the large concurrency-4 TTFT improvement did not generalize across the sweep.

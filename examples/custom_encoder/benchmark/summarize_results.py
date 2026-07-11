@@ -10,6 +10,7 @@ import csv
 import json
 import math
 import re
+import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -18,6 +19,8 @@ TIMING_MARKER = "custom_encoder_timing"
 GRAPH_MARKER = "custom_encoder_graph"
 FIELD_PATTERN = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)=([^\s]+)")
 PREFIX_CACHE_PATTERN = re.compile(r"Prefix cache hit rate: ([0-9.]+)%")
+REPEAT_PATTERN = re.compile(r"^rep(?:eat)?[-_]?([0-9]+)$")
+T_CRITICAL_95 = {2: 12.706, 3: 4.303, 4: 3.182, 5: 2.776}
 
 
 def _fields_after_marker(line: str, marker: str) -> dict[str, str] | None:
@@ -45,11 +48,64 @@ def _metric(document: dict[str, Any], name: str, statistic: str = "avg") -> Any:
     return value.get(statistic, "") if isinstance(value, dict) else ""
 
 
+def _profiling_concurrency(document: dict[str, Any]) -> Any:
+    phases = document.get("input_config", {}).get("phases", [])
+    for phase in phases:
+        if isinstance(phase, dict) and phase.get("name") == "profiling":
+            return phase.get("concurrency", "")
+    return ""
+
+
+def _resource_peaks(path: Path) -> dict[str, float | int | str]:
+    peaks: dict[str, float | int | str] = {
+        "peak_gpu_memory_mib": "",
+        "peak_process_count": "",
+        "peak_total_rss_kib": "",
+    }
+    if not path.is_file():
+        return peaks
+
+    gpu_memory: list[float] = []
+    process_counts: list[int] = []
+    total_rss: list[int] = []
+    with path.open("r", encoding="utf-8", newline="") as resource_file:
+        for row in csv.DictReader(resource_file):
+            try:
+                gpu_value = float(row["gpu_memory_mib"])
+                process_value = int(row["process_count"])
+                rss_value = int(row["total_rss_kib"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            gpu_memory.append(gpu_value)
+            process_counts.append(process_value)
+            total_rss.append(rss_value)
+    if gpu_memory:
+        peaks["peak_gpu_memory_mib"] = max(gpu_memory)
+        peaks["peak_process_count"] = max(process_counts)
+        peaks["peak_total_rss_kib"] = max(total_rss)
+    return peaks
+
+
 def _run_name(root: Path, result_path: Path) -> str:
     try:
         return str(result_path.parent.relative_to(root))
     except ValueError:
         return str(result_path.parent)
+
+
+def _run_dimensions(root: Path, result_path: Path) -> tuple[str, str]:
+    try:
+        parts = result_path.parent.relative_to(root).parts
+    except ValueError:
+        parts = result_path.parent.parts
+    mode = next((part for part in parts if part in {"async-mp", "sync-inproc"}), "")
+    repeat = ""
+    for part in parts:
+        match = REPEAT_PATTERN.match(part)
+        if match is not None:
+            repeat = match.group(1)
+            break
+    return mode, repeat
 
 
 def _log_paths(run_dir: Path) -> list[Path]:
@@ -112,11 +168,13 @@ def summarize(
         with result_path.open("r", encoding="utf-8") as result_file:
             document = json.load(result_file)
         run = _run_name(root, result_path)
-        loadgen = document.get("input_config", {}).get("loadgen", {})
+        mode, repeat = _run_dimensions(root, result_path)
         aiperf_rows.append(
             {
                 "run": run,
-                "concurrency": loadgen.get("concurrency", ""),
+                "mode": mode,
+                "repeat": repeat,
+                "concurrency": _profiling_concurrency(document),
                 "request_count": _metric(document, "request_count"),
                 "mean_isl": _metric(document, "input_sequence_length"),
                 "mean_osl": _metric(document, "output_sequence_length"),
@@ -125,7 +183,15 @@ def summarize(
                 "latency_mean_ms": _metric(document, "request_latency"),
                 "latency_p50_ms": _metric(document, "request_latency", "p50"),
                 "latency_p95_ms": _metric(document, "request_latency", "p95"),
+                "latency_p99_ms": _metric(document, "request_latency", "p99"),
+                "ttft_p50_ms": _metric(document, "time_to_first_token", "p50"),
+                "ttft_p95_ms": _metric(document, "time_to_first_token", "p95"),
+                "ttft_p99_ms": _metric(document, "time_to_first_token", "p99"),
+                "itl_p50_ms": _metric(document, "inter_token_latency", "p50"),
+                "itl_p95_ms": _metric(document, "inter_token_latency", "p95"),
+                "itl_p99_ms": _metric(document, "inter_token_latency", "p99"),
                 "errors": len(document.get("error_summary", [])),
+                **_resource_peaks(result_path.parent.parent / "resources.csv"),
             }
         )
 
@@ -162,6 +228,64 @@ def summarize(
                 }
             )
     return aiperf_rows, timing_rows, graph_rows
+
+
+def paired_comparisons(aiperf_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    metrics = [
+        "request_throughput_rps",
+        "output_throughput_tps",
+        "latency_p99_ms",
+        "ttft_p99_ms",
+        "itl_p99_ms",
+        "peak_gpu_memory_mib",
+        "peak_total_rss_kib",
+    ]
+    by_pair: dict[tuple[str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in aiperf_rows:
+        mode = str(row.get("mode", ""))
+        repeat = str(row.get("repeat", ""))
+        concurrency = str(row.get("concurrency", ""))
+        if mode and repeat and concurrency:
+            by_pair[(repeat, concurrency)][mode] = row
+
+    samples: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for (_, concurrency), modes in by_pair.items():
+        if "async-mp" not in modes or "sync-inproc" not in modes:
+            continue
+        for metric in metrics:
+            async_value = modes["async-mp"].get(metric)
+            sync_value = modes["sync-inproc"].get(metric)
+            if not isinstance(async_value, (int, float)) or not isinstance(
+                sync_value, (int, float)
+            ):
+                continue
+            if async_value == 0:
+                continue
+            samples[(concurrency, metric)].append(
+                (sync_value / async_value - 1.0) * 100.0
+            )
+
+    rows: list[dict[str, Any]] = []
+    for (concurrency, metric), deltas in sorted(samples.items()):
+        sample_count = len(deltas)
+        mean_delta = statistics.mean(deltas)
+        if sample_count >= 2:
+            critical = T_CRITICAL_95.get(sample_count, 1.96)
+            half_width = critical * statistics.stdev(deltas) / math.sqrt(sample_count)
+        else:
+            half_width = math.nan
+        rows.append(
+            {
+                "concurrency": concurrency,
+                "metric": metric,
+                "pairs": sample_count,
+                "mean_delta_pct": mean_delta,
+                "median_delta_pct": statistics.median(deltas),
+                "ci95_low_pct": mean_delta - half_width,
+                "ci95_high_pct": mean_delta + half_width,
+            }
+        )
+    return rows
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
@@ -204,6 +328,8 @@ def main() -> None:
     aiperf_rows, timing_rows, graph_rows = summarize(args.root.resolve())
     aiperf_fields = [
         "run",
+        "mode",
+        "repeat",
         "concurrency",
         "request_count",
         "mean_isl",
@@ -213,7 +339,17 @@ def main() -> None:
         "latency_mean_ms",
         "latency_p50_ms",
         "latency_p95_ms",
+        "latency_p99_ms",
+        "ttft_p50_ms",
+        "ttft_p95_ms",
+        "ttft_p99_ms",
+        "itl_p50_ms",
+        "itl_p95_ms",
+        "itl_p99_ms",
         "prefix_cache_hit_rate_pct",
+        "peak_gpu_memory_mib",
+        "peak_process_count",
+        "peak_total_rss_kib",
         "errors",
     ]
     timing_fields = [
@@ -235,12 +371,24 @@ def main() -> None:
         "count",
     ]
     _print_table("aiperf", aiperf_rows, aiperf_fields)
+    paired_rows = paired_comparisons(aiperf_rows)
+    paired_fields = [
+        "concurrency",
+        "metric",
+        "pairs",
+        "mean_delta_pct",
+        "median_delta_pct",
+        "ci95_low_pct",
+        "ci95_high_pct",
+    ]
+    _print_table("paired sync-inproc vs async-mp", paired_rows, paired_fields)
     _print_table("custom encoder stage timings", timing_rows, timing_fields)
     _print_table("CUDA graph bucket histogram", graph_rows, graph_fields)
 
     if args.output_dir is not None:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         _write_csv(args.output_dir / "aiperf_summary.csv", aiperf_rows, aiperf_fields)
+        _write_csv(args.output_dir / "paired_summary.csv", paired_rows, paired_fields)
         _write_csv(
             args.output_dir / "stage_timing_summary.csv", timing_rows, timing_fields
         )

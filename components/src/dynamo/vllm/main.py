@@ -64,6 +64,7 @@ from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
+from .sync_inproc_engine import SyncInprocEngineClient, validate_sync_inproc_config
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -476,7 +477,7 @@ def setup_vllm_engine(
     config: Config,
     stat_logger: Optional[StatLoggerFactory] = None,
     fpm_worker_id: Optional[str] = None,
-) -> tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]:
+) -> tuple[Any, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]:
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
@@ -524,6 +525,12 @@ def setup_vllm_engine(
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     engine_args = config.engine_args
+    engine_client_mode = getattr(config, "engine_client_mode", "async-mp")
+
+    if engine_client_mode == "sync-inproc":
+        # LLMEngine selects vLLM's InprocClient only when V1 multiprocessing is
+        # disabled before config/executor construction.
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     if engine_args.enable_lora:
         if "VLLM_ALLOW_RUNTIME_LORA_UPDATING" not in os.environ:
@@ -563,6 +570,9 @@ def setup_vllm_engine(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
+    if engine_client_mode == "sync-inproc":
+        validate_sync_inproc_config(engine_args, vllm_config)
+
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None
     if _uses_dynamo_connector(config.engine_args):
@@ -599,18 +609,30 @@ def setup_vllm_engine(
         logger.info("Benchmark config injected into additional_config")
 
     factory = []
-    if stat_logger:
+    if stat_logger and engine_client_mode == "async-mp":
         factory.append(stat_logger)
+    elif stat_logger:
+        logger.warning(
+            "sync-inproc mode disables Dynamo's asynchronous stat publisher; "
+            "vLLM's native loggers remain available"
+        )
 
     # Time engine initialization
     start_time = time.time()
-    engine_client = AsyncLLM.from_vllm_config(
-        vllm_config=vllm_config,
-        usage_context=usage_context,
-        stat_loggers=factory,
-        enable_log_requests=engine_args.enable_log_requests,
-        disable_log_stats=engine_args.disable_log_stats,
-    )
+    if engine_client_mode == "sync-inproc":
+        engine_client = SyncInprocEngineClient.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
+    else:
+        engine_client = AsyncLLM.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            stat_loggers=factory,
+            enable_log_requests=engine_args.enable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
     load_time = time.time() - start_time
 
     # Record model load time. ``component_gauges`` is None on the
@@ -770,7 +792,7 @@ async def register_vllm_model(
     )
 
 
-def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
+def get_engine_cache_info(engine: Any) -> dict[str, Any]:
     """Return vLLM cache and scheduler limits used for model registration."""
 
     try:

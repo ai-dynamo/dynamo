@@ -164,6 +164,19 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--engine-client-mode",
+            env_var="DYN_VLLM_ENGINE_CLIENT_MODE",
+            default="async-mp",
+            choices=["async-mp", "sync-inproc"],
+            help=(
+                "vLLM engine client topology. 'async-mp' is the supported default; "
+                "'sync-inproc' is an experimental single-GPU mode for aggregated "
+                "CustomEncoder performance studies."
+            ),
+        )
+
+        add_argument(
+            g,
             flag_name="--embedding-transfer-mode",
             env_var="DYN_VLLM_EMBEDDING_TRANSFER_MODE",
             default=EmbeddingTransferMode.NIXL_WRITE.value,
@@ -352,6 +365,7 @@ class DynamoVllmConfig(ConfigBase):
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
+    engine_client_mode: str = "async-mp"
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
@@ -381,7 +395,36 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
+        self._validate_engine_client_mode()
         self._validate_benchmark_config()
+
+    def _validate_engine_client_mode(self) -> None:
+        if self.engine_client_mode == "async-mp":
+            return
+        if self.engine_client_mode != "sync-inproc":
+            raise ValueError("--engine-client-mode must be 'async-mp' or 'sync-inproc'")
+        if not self.custom_encoder_class:
+            raise ValueError(
+                "--engine-client-mode=sync-inproc requires --custom-encoder-class"
+            )
+        incompatible: list[str] = []
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            incompatible.append("disaggregated serving")
+        if self.route_to_encoder:
+            incompatible.append("--route-to-encoder")
+        if self.enable_rl:
+            incompatible.append("--enable-rl")
+        if self.headless:
+            incompatible.append("--headless")
+        if self.gms_shadow_mode:
+            incompatible.append("--gms-shadow-mode")
+        if self.benchmark_mode is not None:
+            incompatible.append("--benchmark-mode")
+        if incompatible:
+            raise ValueError(
+                "--engine-client-mode=sync-inproc is incompatible with "
+                + ", ".join(incompatible)
+            )
 
     def _validate_benchmark_config(self) -> None:
         if self.benchmark_mode is None:

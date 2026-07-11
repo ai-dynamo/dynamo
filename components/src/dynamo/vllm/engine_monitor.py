@@ -15,6 +15,8 @@ from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .sync_inproc_engine import SyncInprocEngineClient
+
 configure_dynamo_logging
 logger = logging.getLogger(__name__)
 
@@ -27,16 +29,16 @@ class VllmEngineMonitor:
     def __init__(
         self,
         runtime: DistributedRuntime,
-        engine_client: AsyncLLM,
+        engine_client: AsyncLLM | SyncInprocEngineClient,
         shutdown_event: asyncio.Event | None = None,
     ):
         if not isinstance(runtime, DistributedRuntime):
             raise ValueError(
                 f"{self.__class__.__name__} requires an instance of DistributedRuntime."
             )
-        if not isinstance(engine_client, AsyncLLM):
+        if not isinstance(engine_client, (AsyncLLM, SyncInprocEngineClient)):
             raise ValueError(
-                f"{self.__class__.__name__} requires an instance of AsyncLLM."
+                f"{self.__class__.__name__} requires an AsyncLLM-compatible engine."
             )
 
         self.runtime = runtime

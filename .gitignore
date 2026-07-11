@@ -151,6 +151,7 @@ worklogs/
 # Benchmarks
 benchmarks/results
 profiling_results*
+examples/custom_encoder/benchmark/.data/
 
 # Direnv
 .envrc

@@ -42,6 +42,8 @@ def create_config() -> DynamoVllmConfig:
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
+    config.engine_client_mode = "async-mp"
+    config.route_to_encoder = False
     return config
 
 
@@ -281,6 +283,46 @@ class TestValidateCustomEncoder:
         config.custom_encoder_class = None
         config.enable_multimodal = False
         config._validate_custom_encoder()
+
+
+class TestValidateEngineClientMode:
+    def _sync_config(self) -> DynamoVllmConfig:
+        config = create_config()
+        config.engine_client_mode = "sync-inproc"
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        return config
+
+    def test_async_mp_is_default(self):
+        config = create_config()
+        config._validate_engine_client_mode()
+
+    def test_sync_inproc_accepts_aggregated_custom_encoder(self):
+        config = self._sync_config()
+        config._validate_engine_client_mode()
+
+    def test_sync_inproc_requires_custom_encoder(self):
+        config = self._sync_config()
+        config.custom_encoder_class = None
+        with pytest.raises(ValueError, match="custom-encoder-class"):
+            config._validate_engine_client_mode()
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("route_to_encoder", True, "route-to-encoder"),
+            ("enable_rl", True, "enable-rl"),
+            ("headless", True, "headless"),
+            ("gms_shadow_mode", True, "gms-shadow-mode"),
+            ("benchmark_mode", "agg", "benchmark-mode"),
+        ],
+    )
+    def test_sync_inproc_rejects_incompatible_modes(self, field, value, message):
+        config = self._sync_config()
+        setattr(config, field, value)
+        with pytest.raises(ValueError, match=message):
+            config._validate_engine_client_mode()
 
 
 class TestValidateBenchmarkConfig:

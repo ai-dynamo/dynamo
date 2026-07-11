@@ -47,6 +47,8 @@ ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_vision_e
 # host or single-GPU container, GPU 0 is the natural choice).
 WORKER_GPU="${DYN_WORKER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+FRONTEND_SYSTEM_PORT="${DYN_FRONTEND_SYSTEM_PORT:-8080}"
+WORKER_SYSTEM_PORT="${DYN_WORKER_SYSTEM_PORT:-8081}"
 MAX_MODEL_LEN="${DYN_MAX_MODEL_LEN:-16384}"
 # A text-only LM's own chat template can't render image content parts, so default
 # to the bundled minimal template that emits the <|image_pad|> placeholder.
@@ -106,14 +108,14 @@ export DYN_HTTP_BODY_LIMIT_MB=200
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 echo "[1/2] Starting frontend (port $HTTP_PORT)..."
-python -m dynamo.frontend &
+DYN_SYSTEM_PORT=$FRONTEND_SYSTEM_PORT python -m dynamo.frontend &
 
 # ── Aggregated worker ─────────────────────────────────────────────────────────
 echo "[2/2] Starting aggregated worker (model=$MODEL, GPU=$WORKER_GPU)..."
 JINJA_ARG=()
 [[ -n "$CUSTOM_JINJA_TEMPLATE" ]] && JINJA_ARG=(--custom-jinja-template "$CUSTOM_JINJA_TEMPLATE")
 CUDA_VISIBLE_DEVICES=$WORKER_GPU \
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+DYN_SYSTEM_PORT=$WORKER_SYSTEM_PORT \
 python -m dynamo.vllm \
     --model "$MODEL" \
     --custom-encoder-class "$ENCODER_CLASS" \
