@@ -119,6 +119,10 @@ kubectl exec -n bis-rl-3 biswa-dind -- env \
     cd /build/valkey-router-src
     test "$(git rev-parse HEAD)" = "$REVISION"
     test -z "$(git status --porcelain)"
+    if test "$(git rev-parse --is-shallow-repository)" = true; then
+      git fetch --quiet --unshallow origin
+    fi
+    git fsck --strict
     context=$(mktemp -d)
     trap "rm -rf \"$context\"" EXIT
     mkdir "$context/root"
