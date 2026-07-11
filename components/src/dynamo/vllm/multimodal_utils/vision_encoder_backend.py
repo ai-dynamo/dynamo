@@ -19,14 +19,15 @@ mixed ``EmbedsPrompt`` at the placeholder positions (see
 Division of labour (author vs. Dynamo):
 
 - ``build(model_id)`` — **actor thread, once.** Load weights / tokenizer; warm up
-  to peak; if ``buckets`` is set (once CUDA-graph batching is supported), capture
-  one CUDA graph per rung here so it is bound to the thread that later replays it
+  to peak; if ``buckets`` is set, capture every reachable compatibility-key/rung
+  graph here so it is bound to the thread that later replays it
   in ``forward_batch``. Pick the device yourself (``"cuda"`` / the current device).
-- ``preprocess(raw) -> Preprocessed{item, cost}`` — **off the actor thread,
+- ``preprocess(raw) -> Preprocessed{item, cost, bucket_key}`` — **off the actor thread,
   concurrent.** Deterministic, thread-safe, CUDA-free (fetch / resize / patchify
   on CPU/pinned memory). ``cost`` is a **scalar** — how much the item adds toward
   ``max_batch_cost`` (e.g. its visual-token count). Raise to reject a bad input —
-  it fails only that image, before any GPU work. **Off by default:** override
+  ``bucket_key`` optionally partitions graph-compatible shapes. Raise to reject a
+  bad or unsupported input — it fails only that image, before any GPU work. **Off by default:** override
   ``preprocess`` *and* set ``preprocess_concurrency > 0`` together to enable this
   pool. With the defaults (identity passthrough, ``preprocess_concurrency = 0``)
   there is no preprocess phase — ``preprocess`` is never called and raws go
@@ -37,8 +38,8 @@ Division of labour (author vs. Dynamo):
   the budget). Fence (stream event + sync) and **copy outputs to CPU** before
   returning, so results are safe to consume from another thread and splice
   directly. Returns one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per
-  item, in input order. ``target_bucket`` is reserved for CUDA-graph batching,
-  once supported (the ladder rung to pad to); it is ``None`` until then.
+  item, in input order. In graph mode ``target_bucket`` is the smallest captured
+  rung that fits summed cost; in eager mode it is ``None``.
 - ``close()`` — actor thread, on teardown. Release any thread-affine resources.
 
 Attributes read **once at setup** (never per-request):
@@ -49,21 +50,23 @@ Attributes read **once at setup** (never per-request):
 - ``max_batch_cost`` — the scalar dispatch ceiling the batcher packs up to; a
   *chosen* budget (a token budget when ``cost`` is a token count). ``None`` (the
   default) ⇒ **pass-through**: no cap (the author owns sizing).
-- ``buckets`` — sorted graph ladder, forward-compatible (unused until CUDA-graph
-  batching is supported). ``None``/empty ⇒ eager.
+- ``buckets`` — sorted graph ladder; its largest rung equals
+  ``max_batch_cost``. ``None``/empty ⇒ eager.
 - ``preprocess_concurrency`` — size of the off-thread pool Dynamo runs
   ``preprocess`` on. ``0`` (the **default**) ⇒ no preprocess phase: raws go
   straight to ``forward_batch``. Set ``> 0`` (with an overridden ``preprocess``)
   for off-loop fetch / resize / patchify.
 
-Batching is **one-dimensional**: Dynamo packs by scalar ``cost`` up to
-``max_batch_cost`` and never inspects item shape — the author owns any
-shape/padding concerns inside ``forward_batch``.
+Within each optional author-supplied ``bucket_key``, batching is
+**one-dimensional**: Dynamo packs by scalar ``cost`` up to
+``max_batch_cost``. Dynamo treats the key as opaque; the author still owns
+all shape/padding concerns inside ``forward_batch``.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Hashable
 from dataclasses import dataclass
 from typing import Generic, List, Optional, Sequence, TypeVar
 
@@ -87,10 +90,14 @@ class Preprocessed(Generic[ItemT]):
             **pass-through mode** (``max_batch_cost`` is ``None``) the batcher
             never reads it, so a pass-through author can leave it at the default
             ``1``.
+        bucket_key: Optional graph-compatibility key. Items with different keys
+            are never placed in the same ``forward_batch`` call. Leave ``None``
+            when the backend can pack every preprocessed shape together.
     """
 
     item: ItemT
     cost: int = 1
+    bucket_key: Optional[Hashable] = None
 
 
 class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
@@ -116,8 +123,9 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     #: (the author owns sizing; ``cost`` is ignored).
     max_batch_cost: Optional[int] = None
 
-    #: Sorted graph ladder (the captured rungs), **forward-compatible** — unused
-    #: until CUDA-graph batching is supported. ``None``/empty ⇒ eager.
+    #: Sorted graph ladder (the captured cost rungs). ``None``/empty ⇒ eager;
+    #: otherwise Dynamo rounds each packed batch's summed cost up to the nearest
+    #: rung and passes it to ``forward_batch`` as ``target_bucket``.
     buckets: Optional[Sequence[int]] = None
 
     #: Off-loop preprocess pool size Dynamo runs ``preprocess`` on. Not just a
@@ -164,8 +172,9 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
         Fence (stream event + sync) and **copy outputs to CPU** before returning,
         so results are safe to consume from another thread and splice directly.
         Return one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per item, in
-        input order. ``target_bucket`` is reserved for CUDA-graph batching, once
-        supported (the ladder rung to pad to), and is ``None`` until then.
+        input order. In graph mode ``target_bucket`` is the smallest configured
+        ``buckets`` rung that fits the batch's summed cost; the backend pads to
+        that rung and replays its captured graph. It is ``None`` in eager mode.
         """
         ...
 
