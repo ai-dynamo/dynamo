@@ -62,6 +62,7 @@ impl Program {
         }
     }
 
+    #[cfg(test)]
     fn is_idle_resident(&self) -> bool {
         matches!(self.state, ProgramState::IdleResident { .. })
     }
@@ -139,7 +140,6 @@ pub struct ThunderAgent<P> {
     capacity: P,
     config: ThunderAgentConfig,
     programs: IndexMap<String, Program>,
-    paused: IndexSet<String>,
     requests: HashMap<AdmissionId, RequestState>,
     sessions: HashMap<String, SessionRequests>,
     next_tick: Instant,
@@ -163,7 +163,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             capacity,
             config,
             programs: IndexMap::new(),
-            paused: IndexSet::new(),
             requests: HashMap::new(),
             sessions: HashMap::new(),
             next_tick,
@@ -272,7 +271,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         }
 
         // Preserve source fairness: a new program cannot bypass an already-paused one.
-        if was_new && !self.paused.is_empty() {
+        if was_new && self.programs.values().any(Program::is_suspended) {
             self.defer_request(session_id, id, now, false);
             return AdmissionDecision::Defer;
         }
@@ -336,7 +335,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 .and_then(|requests| requests.current),
             Some(id)
         );
-        self.paused.insert(session_id.to_owned());
     }
 
     fn dispatched(&mut self, id: AdmissionId, worker: WorkerWithDpRank) {
@@ -389,17 +387,10 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         if completed_context_tokens.is_none() {
             match request.prior {
                 Some(prior) => {
-                    let suspended = prior.is_suspended();
                     self.programs.insert(request.session_id.clone(), prior);
-                    if suspended {
-                        self.paused.insert(request.session_id.clone());
-                    } else {
-                        self.paused.shift_remove(&request.session_id);
-                    }
                 }
                 None => {
                     self.programs.shift_remove(&request.session_id);
-                    self.paused.shift_remove(&request.session_id);
                 }
             }
         } else if let Some(context_tokens) = completed_context_tokens
@@ -442,7 +433,11 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         }
         self.next_tick = now + Duration::from_secs_f64(self.config.scheduler_interval_seconds);
         let expired_programs = self.expire_retained_programs(now);
-        let paused_before = self.paused.len();
+        let paused_before = self
+            .programs
+            .values()
+            .filter(|program| program.is_suspended())
+            .count();
         let marked_before = self
             .programs
             .values()
@@ -468,18 +463,23 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             .values()
             .filter(|program| program.pause_after_completion())
             .count();
+        let paused = self
+            .programs
+            .values()
+            .filter(|program| program.is_suspended())
+            .count();
         if greedy_resumes > 0
             || forced_resumes > 0
             || paused_now > 0
             || marked_now > 0
             || expired_programs > 0
-            || self.paused.len() != paused_before
+            || paused != paused_before
             || marked != marked_before
         {
             tracing::info!(
                 programs = self.programs.len(),
-                active = self.programs.len().saturating_sub(self.paused.len()),
-                paused = self.paused.len(),
+                active = self.programs.len().saturating_sub(paused),
+                paused,
                 marked,
                 greedy_resumed_programs = greedy_resumes,
                 forced_resumed_programs = forced_resumes,
@@ -510,7 +510,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
 
         for session_id in &expired {
             self.programs.shift_remove(session_id);
-            self.paused.shift_remove(session_id);
         }
         expired.len()
     }
@@ -534,16 +533,15 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
         eligibility: &HashMap<AdmissionId, WorkerEligibilitySnapshot>,
     ) -> (Vec<AdmissionAction>, usize) {
-        if self.paused.is_empty() {
+        let mut paused: Vec<String> = self
+            .programs
+            .iter()
+            .filter(|(_, program)| program.is_suspended())
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        if paused.is_empty() {
             return (Vec::new(), 0);
         }
-
-        let mut paused: Vec<String> = self
-            .paused
-            .iter()
-            .filter(|session_id| self.programs.contains_key(*session_id))
-            .cloned()
-            .collect();
         paused.sort_by_key(|session_id| {
             let program = &self.programs[session_id];
             let group = if program.step_count <= 1 {
@@ -639,19 +637,17 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
     ) -> (Vec<AdmissionAction>, usize) {
         let timeout = Duration::from_secs_f64(self.config.resume_timeout_seconds);
         let timed_out: Vec<String> = self
-            .paused
+            .programs
             .iter()
-            .filter(|session_id| {
+            .filter(|(session_id, program)| {
                 self.sessions
-                    .get(*session_id)
+                    .get(session_id.as_str())
                     .is_some_and(|requests| requests.current.is_some())
-                    && self
-                        .programs
-                        .get(*session_id)
-                        .and_then(Program::suspended_since)
+                    && program
+                        .suspended_since()
                         .is_some_and(|since| now.saturating_duration_since(since) >= timeout)
             })
-            .cloned()
+            .map(|(session_id, _)| session_id.clone())
             .collect();
 
         let mut actions = Vec::new();
@@ -750,9 +746,10 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
     }
 
     fn deferred_eligibility_snapshots(&self) -> HashMap<AdmissionId, WorkerEligibilitySnapshot> {
-        self.paused
+        self.programs
             .iter()
-            .filter_map(|session_id| {
+            .filter(|(_, program)| program.is_suspended())
+            .filter_map(|(session_id, _)| {
                 let id = self.sessions.get(session_id)?.current?;
                 let request = self.requests.get(&id)?;
                 Some((id, request.worker_eligibility.snapshot()))
@@ -825,7 +822,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             footprint,
             since: last_activity,
         };
-        self.paused.insert(session_id.to_owned());
     }
 
     fn resume_program(
@@ -863,7 +859,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             },
         };
         program.assigned_worker = worker;
-        self.paused.shift_remove(session_id);
         match deferred_id {
             Some(id) => vec![AdmissionAction::MakeReady {
                 id,
@@ -1073,7 +1068,6 @@ mod tests {
         strategy
             .programs
             .insert("paused".to_owned(), suspended_program(0, Instant::now(), 0));
-        strategy.paused.insert("paused".to_owned());
         let live_allowed = Arc::clone(&allowed);
         assert_eq!(
             strategy.admit(filtered_request(1, Some("paused"), 100, move || {
@@ -1289,7 +1283,6 @@ mod tests {
         ] {
             strategy.programs.insert(session_id.to_owned(), program);
         }
-        strategy.paused.insert("expired-paused".to_owned());
         strategy.sessions.insert(
             "busy".to_owned(),
             SessionRequests {
@@ -1301,7 +1294,6 @@ mod tests {
         assert_eq!(strategy.expire_retained_programs(now), 2);
         assert!(!strategy.programs.contains_key("expired-active"));
         assert!(!strategy.programs.contains_key("expired-paused"));
-        assert!(!strategy.paused.contains("expired-paused"));
         assert!(strategy.programs.contains_key("fresh"));
         assert!(strategy.programs.contains_key("reasoning"));
         assert!(strategy.programs.contains_key("busy"));
@@ -1397,7 +1389,6 @@ mod tests {
         strategy
             .programs
             .insert("paused".to_owned(), suspended_program(0, Instant::now(), 0));
-        strategy.paused.insert("paused".to_owned());
         assert_eq!(
             strategy.admit(request(1, Some("paused"), 100)),
             AdmissionDecision::Defer
@@ -1434,7 +1425,6 @@ mod tests {
         strategy
             .programs
             .insert("paused".to_owned(), suspended_program(0, Instant::now(), 0));
-        strategy.paused.insert("paused".to_owned());
         assert_eq!(
             strategy.admit(request(1, Some("paused"), 50)),
             AdmissionDecision::Defer
