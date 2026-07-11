@@ -52,6 +52,12 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"manage_cgroups_mode", m.CRIUDump.CRIU.ManageCgroupsMode,
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
+	if !m.CUDA.IsEmpty() {
+		_, err = m.CUDA.EffectiveStorageMode()
+		if err != nil {
+			return nil, fmt.Errorf("invalid CUDA artifact metadata: %w", err)
+		}
+	}
 
 	// Phase 1: Configure — build CRIU opts from manifest
 	configureStart := time.Now()
@@ -153,6 +159,10 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
 	// current visible restored PIDs before invoking cuda-checkpoint.
 	if !m.CUDA.IsEmpty() {
+		cudaStorageMode, err := m.CUDA.EffectiveStorageMode()
+		if err != nil {
+			return nil, 0, err
+		}
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, int(restoredPID), m.CUDA.PIDs)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err)
@@ -162,7 +172,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
+		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, cudaStorageMode, opts.CheckpointPath, log)
 		if err != nil {
 			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
 		}

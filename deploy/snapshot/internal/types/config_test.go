@@ -15,6 +15,34 @@ func validAgentConfig() *AgentConfig {
 	}
 }
 
+func TestAgentConfigValidateDefaultsCUDAStorageMode(t *testing.T) {
+	cfg := validAgentConfig()
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if cfg.CUDACheckpoint.StorageMode != CUDAStorageModeLegacy {
+		t.Fatalf("CUDA storage mode = %q, want %q", cfg.CUDACheckpoint.StorageMode, CUDAStorageModeLegacy)
+	}
+}
+
+func TestAgentConfigValidateCUDAStorageMode(t *testing.T) {
+	cfg := validAgentConfig()
+	cfg.CUDACheckpoint.StorageMode = " POSIX "
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if cfg.CUDACheckpoint.StorageMode != CUDAStorageModePOSIX {
+		t.Fatalf("CUDA storage mode = %q, want %q", cfg.CUDACheckpoint.StorageMode, CUDAStorageModePOSIX)
+	}
+
+	cfg.CUDACheckpoint.StorageMode = "object-store"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected unsupported CUDA storage mode error")
+	}
+}
+
 func TestAgentConfigValidateRequiresAbsoluteStorageBasePath(t *testing.T) {
 	cfg := validAgentConfig()
 	cfg.Storage.BasePath = "checkpoints"

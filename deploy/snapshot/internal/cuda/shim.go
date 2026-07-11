@@ -22,20 +22,27 @@ const (
 	actionUnlock     = "unlock"
 )
 
-func lock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionLock, "", log)
+type helperActionRunner interface {
+	run(context.Context, int, string, string, string, string, logr.Logger) error
+	state(context.Context, int) (string, error)
 }
 
-func checkpoint(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionCheckpoint, "", log)
+type commandHelperActionRunner struct{}
+
+func (commandHelperActionRunner) run(
+	ctx context.Context,
+	pid int,
+	action,
+	deviceMap,
+	storageMode,
+	storageDir string,
+	log logr.Logger,
+) error {
+	return runAction(ctx, pid, action, deviceMap, storageMode, storageDir, log)
 }
 
-func restoreProcess(ctx context.Context, pid int, deviceMap string, log logr.Logger) error {
-	return runAction(ctx, pid, actionRestore, deviceMap, log)
-}
-
-func unlock(ctx context.Context, pid int, log logr.Logger) error {
-	return runAction(ctx, pid, actionUnlock, "", log)
+func (commandHelperActionRunner) state(ctx context.Context, pid int) (string, error) {
+	return getState(ctx, pid)
 }
 
 func getState(ctx context.Context, pid int) (string, error) {
@@ -51,11 +58,19 @@ func getState(ctx context.Context, pid int) (string, error) {
 	return state, nil
 }
 
-func runAction(ctx context.Context, pid int, action, deviceMap string, log logr.Logger) error {
+func helperActionArgs(pid int, action, deviceMap, storageMode, storageDir string) []string {
 	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
 	if action == actionRestore && deviceMap != "" {
 		args = append(args, "--device-map", deviceMap)
 	}
+	if storageMode == "posix" {
+		args = append(args, "--storage-mode", storageMode, "--storage-dir", storageDir)
+	}
+	return args
+}
+
+func runAction(ctx context.Context, pid int, action, deviceMap, storageMode, storageDir string, log logr.Logger) error {
+	args := helperActionArgs(pid, action, deviceMap, storageMode, storageDir)
 	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
 	details := snapshotruntime.ProcessDetails{
 		ObservedPID:   pid,

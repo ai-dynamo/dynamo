@@ -128,17 +128,37 @@ func NewOverlayManifest(exclusions OverlaySettings, upperDir string, ociSpec *sp
 type CUDAManifest struct {
 	PIDs           []int    `yaml:"pids"`
 	SourceGPUUUIDs []string `yaml:"sourceGpuUuids"`
+	StorageMode    string   `yaml:"storageMode,omitempty"`
 }
 
-func NewCUDAManifest(pids []int, sourceGPUUUIDs []string) CUDAManifest {
+func NewCUDAManifest(pids []int, sourceGPUUUIDs []string, storageMode string) CUDAManifest {
+	if storageMode == CUDAStorageModeLegacy {
+		storageMode = ""
+	}
 	return CUDAManifest{
 		PIDs:           append([]int(nil), pids...),
 		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),
+		StorageMode:    storageMode,
 	}
 }
 
 func (m CUDAManifest) IsEmpty() bool {
 	return len(m.PIDs) == 0
+}
+
+// EffectiveStorageMode preserves compatibility with manifests written before
+// custom storage was introduced.
+func (m CUDAManifest) EffectiveStorageMode() (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(m.StorageMode))
+	if mode == "" {
+		return CUDAStorageModeLegacy, nil
+	}
+	switch mode {
+	case CUDAStorageModeLegacy, CUDAStorageModePOSIX:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported CUDA artifact storage mode %q", m.StorageMode)
+	}
 }
 
 // WriteManifest writes a checkpoint manifest file in the checkpoint directory.

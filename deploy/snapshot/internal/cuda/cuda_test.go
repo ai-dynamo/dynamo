@@ -3,8 +3,10 @@ package cuda
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,187 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 )
+
+func TestHelperActionArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{
+			name: "legacy checkpoint unchanged",
+			got:  helperActionArgs(42, actionCheckpoint, "", "legacy", "/ignored"),
+			want: []string{"--action", "checkpoint", "--pid", "42"},
+		},
+		{
+			name: "posix checkpoint",
+			got:  helperActionArgs(42, actionCheckpoint, "", "posix", "/checkpoints/cuda-custom-storage/process-0000"),
+			want: []string{"--action", "checkpoint", "--pid", "42", "--storage-mode", "posix", "--storage-dir", "/checkpoints/cuda-custom-storage/process-0000"},
+		},
+		{
+			name: "posix restore with map",
+			got:  helperActionArgs(84, actionRestore, "GPU-a=GPU-b", "posix", "/checkpoints/cuda-custom-storage/process-0001"),
+			want: []string{"--action", "restore", "--pid", "84", "--device-map", "GPU-a=GPU-b", "--storage-mode", "posix", "--storage-dir", "/checkpoints/cuda-custom-storage/process-0001"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !reflect.DeepEqual(test.got, test.want) {
+				t.Fatalf("helper args = %#v, want %#v", test.got, test.want)
+			}
+		})
+	}
+}
+
+func TestCustomStorageProcessDir(t *testing.T) {
+	got := customStorageProcessDir("/checkpoints/tmp/staged", 7)
+	want := "/checkpoints/tmp/staged/cuda-custom-storage/process-0007"
+	if got != want {
+		t.Fatalf("customStorageProcessDir() = %q, want %q", got, want)
+	}
+}
+
+type helperActionCall struct {
+	pid         int
+	action      string
+	deviceMap   string
+	storageMode string
+	storageDir  string
+}
+
+type recordingHelperActionRunner struct {
+	calls      []helperActionCall
+	failAction string
+	failPID    int
+}
+
+func (r *recordingHelperActionRunner) run(
+	_ context.Context,
+	pid int,
+	action,
+	deviceMap,
+	storageMode,
+	storageDir string,
+	_ logr.Logger,
+) error {
+	r.calls = append(r.calls, helperActionCall{
+		pid:         pid,
+		action:      action,
+		deviceMap:   deviceMap,
+		storageMode: storageMode,
+		storageDir:  storageDir,
+	})
+	if action == r.failAction && pid == r.failPID {
+		return errors.New("injected helper failure")
+	}
+	return nil
+}
+
+func (*recordingHelperActionRunner) state(context.Context, int) (string, error) {
+	return "", errors.New("unexpected state query")
+}
+
+func TestRestoreAndUnlockProcessTreeRestoresAllBeforeFirstUnlock(t *testing.T) {
+	runner := &recordingHelperActionRunner{}
+	pids := []int{41, 7, 99}
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		pids,
+		"GPU-old=GPU-new",
+		"posix",
+		"/checkpoints/example",
+		runner,
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("restoreAndUnlockProcessTree() error = %v", err)
+	}
+	if len(runner.calls) != 2*len(pids) {
+		t.Fatalf("helper calls = %v, want %d restore/unlock calls", runner.calls, 2*len(pids))
+	}
+	for index, pid := range pids {
+		call := runner.calls[index]
+		wantDir := filepath.Join(
+			"/checkpoints/example",
+			"cuda-custom-storage",
+			fmt.Sprintf("process-%04d", index),
+		)
+		if call.action != actionRestore || call.pid != pid || call.storageDir != wantDir {
+			t.Fatalf(
+				"helper call %d = %+v, want restore for PID %d and directory %q",
+				index,
+				call,
+				pid,
+				wantDir,
+			)
+		}
+	}
+	if runner.calls[len(pids)].action != actionUnlock {
+		t.Fatalf("first post-restore call = %+v, want unlock", runner.calls[len(pids)])
+	}
+}
+
+func TestLockAndCheckpointProcessTreePreservesPIDOrderInStorageDirectories(t *testing.T) {
+	runner := &recordingHelperActionRunner{}
+	pids := []int{300, 100, 200}
+
+	_, err := lockAndCheckpointProcessTree(
+		context.Background(),
+		pids,
+		"posix",
+		"/checkpoints/example",
+		runner,
+		logr.Discard(),
+	)
+	if err != nil {
+		t.Fatalf("lockAndCheckpointProcessTree() error = %v", err)
+	}
+
+	checkpointCalls := runner.calls[len(pids):]
+	for index, pid := range pids {
+		call := checkpointCalls[index]
+		wantDir := filepath.Join(
+			"/checkpoints/example",
+			"cuda-custom-storage",
+			fmt.Sprintf("process-%04d", index),
+		)
+		if call.action != actionCheckpoint || call.pid != pid || call.storageDir != wantDir {
+			t.Fatalf(
+				"checkpoint call %d = %+v, want PID %d and directory %q",
+				index,
+				call,
+				pid,
+				wantDir,
+			)
+		}
+	}
+}
+
+func TestRestoreAndUnlockProcessTreeRestoreFailureSkipsAllUnlocks(t *testing.T) {
+	runner := &recordingHelperActionRunner{
+		failAction: actionRestore,
+		failPID:    22,
+	}
+
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(),
+		[]int{11, 22, 33},
+		"",
+		"posix",
+		"/checkpoints/example",
+		runner,
+		logr.Discard(),
+	)
+	if err == nil {
+		t.Fatal("restoreAndUnlockProcessTree() error = nil, want restore failure")
+	}
+	for _, call := range runner.calls {
+		if call.action == actionUnlock {
+			t.Fatalf("unlock called after restore failure: %+v", runner.calls)
+		}
+	}
+}
 
 func TestBuildDeviceMap(t *testing.T) {
 	tests := []struct {

@@ -159,6 +159,11 @@ rbac:
 # Static configuration (loaded from ConfigMap)
 # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
+  cudaCheckpoint:
+    # CUDA GPU-memory storage implementation. legacy preserves the CUDA driver
+    # host-memory path; posix opts into CUDA 13.4 custom storage backed by NIXL.
+    storageMode: legacy
+
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized
     # relative to the tar root, and patterns starting with * are passed

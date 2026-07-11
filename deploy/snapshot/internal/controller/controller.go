@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -46,6 +47,9 @@ type NodeController struct {
 	inFlightMu sync.Mutex
 
 	stopCh chan struct{}
+
+	restoreExecutor func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest) (int, error)
+	signalProcess   func(logr.Logger, int, syscall.Signal, string) error
 }
 
 type checkpointLocations struct {
@@ -57,6 +61,7 @@ const (
 	containerResolveAttemptTimeout  = 1 * time.Second
 	restoreContainerResolveInterval = 50 * time.Millisecond
 	restoreContainerResolveTimeout  = 30 * time.Second
+	restoreFailureCleanupTimeout    = 10 * time.Second
 )
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
@@ -747,12 +752,12 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 	}
 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
 	log := w.log.WithValues("pod", podKey, "checkpoint_id", checkpointID, "container_id", containerID)
-	setRestoreStatus := func(value string) error {
+	setRestoreStatus := func(statusCtx context.Context, value string) error {
 		annotations, err := snapshotprotocol.RestoreStatusAnnotations(containerName, value, containerID)
 		if err != nil {
 			return err
 		}
-		if err := annotatePod(ctx, w.clientset, log, pod, annotations); err != nil {
+		if err := annotatePod(statusCtx, w.clientset, log, pod, annotations); err != nil {
 			if value == snapshotprotocol.RestoreStatusCompleted || value == snapshotprotocol.RestoreStatusFailed {
 				releaseOnExit = false
 				return fmt.Errorf("failed to persist terminal restore status %q: %w", value, err)
@@ -780,7 +785,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return nil
 	}
 
-	if err := setRestoreStatus(snapshotprotocol.RestoreStatusInProgress); err != nil {
+	if err := setRestoreStatus(ctx, snapshotprotocol.RestoreStatusInProgress); err != nil {
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
 	}
 
@@ -798,40 +803,103 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
 	}
-	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
+	placeholderHostPID, err := w.executeRestore(restoreCtx, log, req)
 	if err != nil {
 		log.Error(err, "External restore failed")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
-			return statusErr
+
+		// Restore can leave the placeholder unsafe even when the request or
+		// controller context has already been canceled. Resolve and kill it
+		// before publishing a terminal status so observers can never treat
+		// "failed" as meaning cleanup is still pending.
+		killErr := w.resolveAndKillRestorePlaceholder(log, containerID, "restore failed")
+		if killErr != nil {
+			log.Error(killErr, "Failed to kill placeholder after restore failure")
 		}
-		// Re-resolve: executor.Restore may have failed before resolving the placeholder.
-		placeholderHostPID, _, pidErr := w.runtime.ResolveContainer(ctx, containerID)
-		if pidErr != nil {
-			return fmt.Errorf("restore failed and placeholder PID could not be resolved: %w", pidErr)
+
+		statusCtx, cancelStatus := context.WithTimeout(context.Background(), restoreFailureCleanupTimeout)
+		statusErr := setRestoreStatus(statusCtx, snapshotprotocol.RestoreStatusFailed)
+		cancelStatus()
+		if statusErr != nil {
+			log.Error(statusErr, "Failed to persist restore failure status")
 		}
-		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore failed"); killErr != nil {
-			return fmt.Errorf("restore failed and placeholder could not be killed: %w", killErr)
+		eventCtx, cancelEvent := context.WithTimeout(context.Background(), restoreFailureCleanupTimeout)
+		emitPodEvent(eventCtx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		cancelEvent()
+
+		var cleanupFailure error
+		if killErr != nil {
+			cleanupFailure = fmt.Errorf("failed to terminate restore placeholder: %w", killErr)
 		}
-		return nil
+		return errors.Join(
+			fmt.Errorf("external restore failed: %w", err),
+			cleanupFailure,
+			statusErr,
+		)
 	}
 	// Any PID inside the container mount namespace reaches the control
 	// volume through /host/proc/<pid>/root.
 	if err := snapshotruntime.WriteControlSentinel(placeholderHostPID, snapshotprotocol.RestoreCompleteFile); err != nil {
 		log.Error(err, "Failed to write restore-complete sentinel")
-		emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
-		if statusErr := setRestoreStatus(snapshotprotocol.RestoreStatusFailed); statusErr != nil {
-			return statusErr
-		}
-		if killErr := snapshotruntime.SendSignalToPID(log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed"); killErr != nil {
+		killErr := w.sendSignal(log, placeholderHostPID, syscall.SIGKILL, "restore sentinel failed")
+		if killErr != nil {
 			log.Error(killErr, "Failed to kill placeholder after restore sentinel failure")
 		}
-		return fmt.Errorf("failed to write restore-complete sentinel: %w", err)
+
+		statusCtx, cancelStatus := context.WithTimeout(context.Background(), restoreFailureCleanupTimeout)
+		statusErr := setRestoreStatus(statusCtx, snapshotprotocol.RestoreStatusFailed)
+		cancelStatus()
+		if statusErr != nil {
+			log.Error(statusErr, "Failed to persist restore sentinel failure status")
+		}
+		eventCtx, cancelEvent := context.WithTimeout(context.Background(), restoreFailureCleanupTimeout)
+		emitPodEvent(eventCtx, w.clientset, log, pod, "snapshot", corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		cancelEvent()
+
+		var cleanupFailure error
+		if killErr != nil {
+			cleanupFailure = fmt.Errorf("failed to terminate restore placeholder: %w", killErr)
+		}
+		return errors.Join(
+			fmt.Errorf("failed to write restore-complete sentinel: %w", err),
+			cleanupFailure,
+			statusErr,
+		)
 	}
 
 	emitPodEvent(ctx, w.clientset, log, pod, "snapshot", corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from checkpoint %s", checkpointID))
-	if err := setRestoreStatus(snapshotprotocol.RestoreStatusCompleted); err != nil {
+	if err := setRestoreStatus(ctx, snapshotprotocol.RestoreStatusCompleted); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (w *NodeController) executeRestore(
+	ctx context.Context,
+	log logr.Logger,
+	req executor.RestoreRequest,
+) (int, error) {
+	if w.restoreExecutor != nil {
+		return w.restoreExecutor(ctx, w.runtime, log, req)
+	}
+	return executor.Restore(ctx, w.runtime, log, req)
+}
+
+func (w *NodeController) sendSignal(log logr.Logger, pid int, signal syscall.Signal, reason string) error {
+	if w.signalProcess != nil {
+		return w.signalProcess(log, pid, signal, reason)
+	}
+	return snapshotruntime.SendSignalToPID(log, pid, signal, reason)
+}
+
+func (w *NodeController) resolveAndKillRestorePlaceholder(log logr.Logger, containerID, reason string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), restoreFailureCleanupTimeout)
+	defer cancel()
+	placeholderHostPID, _, err := w.runtime.ResolveContainer(cleanupCtx, containerID)
+	if err != nil {
+		return fmt.Errorf("resolve restore placeholder %s for cleanup: %w", containerID, err)
+	}
+	if err := w.sendSignal(log, placeholderHostPID, syscall.SIGKILL, reason); err != nil {
+		return fmt.Errorf("SIGKILL restore placeholder PID %d: %w", placeholderHostPID, err)
 	}
 	return nil
 }

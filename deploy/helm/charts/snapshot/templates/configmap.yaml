@@ -9,6 +9,9 @@ kind: ConfigMap
 {{- if not (has .Values.storage.accessMode (list "agentMount" "podMount")) }}
 {{- fail (printf "snapshot.storage.accessMode=%q is not supported; expected agentMount or podMount" .Values.storage.accessMode) }}
 {{- end }}
+{{- if not (has .Values.config.cudaCheckpoint.storageMode (list "legacy" "posix")) }}
+{{- fail (printf "snapshot.config.cudaCheckpoint.storageMode=%q is not supported; expected legacy or posix" .Values.config.cudaCheckpoint.storageMode) }}
+{{- end }}
 metadata:
   name: {{ include "snapshot.fullname" . }}-config
   namespace: {{ .Release.Namespace }}
@@ -22,6 +25,9 @@ data:
       {{- if eq .Values.storage.type "pvc" }}
       basePath: {{ .Values.storage.pvc.basePath | quote }}
       {{- end }}
+
+    cudaCheckpoint:
+      storageMode: {{ .Values.config.cudaCheckpoint.storageMode | quote }}
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}

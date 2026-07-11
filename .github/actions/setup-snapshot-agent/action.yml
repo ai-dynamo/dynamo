@@ -36,6 +36,10 @@ inputs:
     description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
     required: false
     default: /checkpoints
+  cuda_checkpoint_storage_mode:
+    description: 'CUDA checkpoint storage mode (legacy or posix)'
+    required: false
+    default: legacy
 
 runs:
   using: "composite"
@@ -61,6 +65,7 @@ runs:
         STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
         STORAGE_PVC_ACCESS_MODE: ${{ inputs.storage_pvc_access_mode }}
         STORAGE_BASE_PATH: ${{ inputs.storage_base_path }}
+        CUDA_CHECKPOINT_STORAGE_MODE: ${{ inputs.cuda_checkpoint_storage_mode }}
       run: |
         echo "::group::Install snapshot-agent"
         set -euo pipefail
@@ -88,6 +93,7 @@ runs:
           --set storage.pvc.basePath="${STORAGE_BASE_PATH}" \
           --set storage.pvc.create=false \
           --set storage.pvc.size="${STORAGE_SIZE}" \
+          --set config.cudaCheckpoint.storageMode="${CUDA_CHECKPOINT_STORAGE_MODE}" \
           --debug
 
         DAEMONSET_NAME="$(kubectl get daemonset \

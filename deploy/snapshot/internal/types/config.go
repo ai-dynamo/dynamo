@@ -11,12 +11,18 @@ import (
 // AgentConfig holds the full agent configuration: static checkpoint settings
 // from the ConfigMap YAML, plus runtime fields from environment variables.
 type AgentConfig struct {
-	NodeName            string          `yaml:"-"`
-	RestrictedNamespace string          `yaml:"-"`
-	Storage             StorageSpec     `yaml:"storage"`
-	Overlay             OverlaySettings `yaml:"overlay"`
-	Restore             RestoreSpec     `yaml:"restore"`
-	CRIU                CRIUSettings    `yaml:"criu"`
+	NodeName            string                 `yaml:"-"`
+	RestrictedNamespace string                 `yaml:"-"`
+	Storage             StorageSpec            `yaml:"storage"`
+	CUDACheckpoint      CUDACheckpointSettings `yaml:"cudaCheckpoint"`
+	Overlay             OverlaySettings        `yaml:"overlay"`
+	Restore             RestoreSpec            `yaml:"restore"`
+	CRIU                CRIUSettings           `yaml:"criu"`
+}
+
+// CUDACheckpointSettings holds CUDA checkpoint storage settings.
+type CUDACheckpointSettings struct {
+	StorageMode string `yaml:"storageMode"`
 }
 
 const (
@@ -26,6 +32,10 @@ const (
 	// StorageAccessModePodMount means workload pods mount the checkpoint PVC,
 	// and snapshot-agent reaches it through /host/proc/<pid>/root.
 	StorageAccessModePodMount = "podMount"
+	// CUDAStorageModeLegacy uses the CUDA driver's existing host-memory storage.
+	CUDAStorageModeLegacy = "legacy"
+	// CUDAStorageModePOSIX stores CUDA custom-storage extents in checkpoint files.
+	CUDAStorageModePOSIX = "posix"
 )
 
 func (c *AgentConfig) LoadEnvOverrides() {
@@ -66,6 +76,19 @@ func (c *AgentConfig) Validate() error {
 		}
 	}
 	c.Storage.AccessMode = accessMode
+	storageMode := strings.ToLower(strings.TrimSpace(c.CUDACheckpoint.StorageMode))
+	if storageMode == "" {
+		storageMode = CUDAStorageModeLegacy
+	}
+	switch storageMode {
+	case CUDAStorageModeLegacy, CUDAStorageModePOSIX:
+	default:
+		return &ConfigError{
+			Field:   "cudaCheckpoint.storageMode",
+			Message: fmt.Sprintf("unsupported storage mode %q; expected %q or %q", c.CUDACheckpoint.StorageMode, CUDAStorageModeLegacy, CUDAStorageModePOSIX),
+		}
+	}
+	c.CUDACheckpoint.StorageMode = storageMode
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",

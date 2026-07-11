@@ -32,7 +32,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			BindMountDests: []string{"/data"},
 		},
 	)
-	original.CUDA = NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
+	original.CUDA = NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"}, CUDAStorageModePOSIX)
 
 	if err := WriteManifest(dir, original); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
@@ -85,6 +85,63 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 	if len(loaded.CUDA.SourceGPUUUIDs) != 2 || loaded.CUDA.SourceGPUUUIDs[0] != "GPU-aaa" {
 		t.Errorf("CUDA.SourceGPUUUIDs = %v", loaded.CUDA.SourceGPUUUIDs)
+	}
+	if loaded.CUDA.StorageMode != CUDAStorageModePOSIX {
+		t.Errorf("CUDA.StorageMode = %q, want %q", loaded.CUDA.StorageMode, CUDAStorageModePOSIX)
+	}
+}
+
+func TestCUDAManifestEffectiveStorageMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		recorded string
+		want     string
+		wantErr  bool
+	}{
+		{name: "old manifest defaults legacy", want: CUDAStorageModeLegacy},
+		{name: "explicit legacy", recorded: CUDAStorageModeLegacy, want: CUDAStorageModeLegacy},
+		{name: "posix", recorded: CUDAStorageModePOSIX, want: CUDAStorageModePOSIX},
+		{name: "unknown", recorded: "s3", wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := (CUDAManifest{StorageMode: test.recorded}).EffectiveStorageMode()
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("EffectiveStorageMode() = %q, want error", got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("EffectiveStorageMode() = %q, %v, want %q, nil", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestReadLegacyManifestWithoutStorageModeDefaultsLegacy(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte(`checkpointId: legacy-checkpoint
+cudaRestore:
+  pids:
+    - 42
+  sourceGpuUuids:
+    - GPU-aaa
+`)
+	if err := os.WriteFile(filepath.Join(dir, manifestFilename), content, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	manifest, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	mode, err := manifest.CUDA.EffectiveStorageMode()
+	if err != nil {
+		t.Fatalf("EffectiveStorageMode: %v", err)
+	}
+	if mode != CUDAStorageModeLegacy {
+		t.Fatalf("effective storage mode = %q, want %q", mode, CUDAStorageModeLegacy)
 	}
 }
 

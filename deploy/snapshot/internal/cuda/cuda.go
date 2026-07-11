@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -319,19 +320,31 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 
 // LockAndCheckpointProcessTree locks and checkpoints CUDA state for all given PIDs.
 // On failure, the caller is expected to fail the operation and terminate the workload.
-func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.Logger) (CheckpointPhaseTimings, error) {
+func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, storageMode, checkpointDir string, log logr.Logger) (CheckpointPhaseTimings, error) {
+	return lockAndCheckpointProcessTree(ctx, cudaPIDs, storageMode, checkpointDir, commandHelperActionRunner{}, log)
+}
+
+func lockAndCheckpointProcessTree(
+	ctx context.Context,
+	cudaPIDs []int,
+	storageMode,
+	checkpointDir string,
+	runner helperActionRunner,
+	log logr.Logger,
+) (CheckpointPhaseTimings, error) {
 	var timings CheckpointPhaseTimings
 
 	start := time.Now()
 	for _, pid := range cudaPIDs {
-		if err := lock(ctx, pid, log); err != nil {
+		if err := runner.run(ctx, pid, actionLock, "", "", "", log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
-	for _, pid := range cudaPIDs {
-		if err := checkpoint(ctx, pid, log); err != nil {
+	for index, pid := range cudaPIDs {
+		processDir := customStorageProcessDir(checkpointDir, index)
+		if err := runner.run(ctx, pid, actionCheckpoint, "", storageMode, processDir, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
@@ -341,22 +354,47 @@ func LockAndCheckpointProcessTree(ctx context.Context, cudaPIDs []int, log logr.
 	return timings, nil
 }
 
+func customStorageProcessDir(checkpointDir string, processIndex int) string {
+	return filepath.Join(checkpointDir, "cuda-custom-storage", fmt.Sprintf("process-%04d", processIndex))
+}
+
 // RestoreAndUnlockProcessTree restores and unlocks CUDA state for the given PIDs.
-func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap string, log logr.Logger) (RestorePhaseTimings, error) {
+func RestoreAndUnlockProcessTree(ctx context.Context, cudaPIDs []int, deviceMap, storageMode, checkpointDir string, log logr.Logger) (RestorePhaseTimings, error) {
+	return restoreAndUnlockProcessTree(
+		ctx,
+		cudaPIDs,
+		deviceMap,
+		storageMode,
+		checkpointDir,
+		commandHelperActionRunner{},
+		log,
+	)
+}
+
+func restoreAndUnlockProcessTree(
+	ctx context.Context,
+	cudaPIDs []int,
+	deviceMap,
+	storageMode,
+	checkpointDir string,
+	runner helperActionRunner,
+	log logr.Logger,
+) (RestorePhaseTimings, error) {
 	var timings RestorePhaseTimings
 
 	start := time.Now()
-	for _, pid := range cudaPIDs {
-		if err := restoreProcess(ctx, pid, deviceMap, log); err != nil {
+	for index, pid := range cudaPIDs {
+		processDir := customStorageProcessDir(checkpointDir, index)
+		if err := runner.run(ctx, pid, actionRestore, deviceMap, storageMode, processDir, log); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
 		}
 	}
 
 	for _, pid := range cudaPIDs {
-		if err := unlock(ctx, pid, log); err != nil {
+		if err := runner.run(ctx, pid, actionUnlock, "", "", "", log); err != nil {
 			timings.TotalDuration = time.Since(start)
-			state, stateErr := getState(ctx, pid)
+			state, stateErr := runner.state(ctx, pid)
 			if stateErr == nil && state == "running" {
 				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
 				continue
