@@ -50,6 +50,8 @@ use crate::proto as pb;
 // Keep these aligned with Dynamo's versioned request-plane protocol routes.
 const ENGINE_GENERATE_ENDPOINT: &str = "engine_generate_v1";
 const ENGINE_GENERATE_PREFILL_ENDPOINT: &str = "engine_generate_prefill_v1";
+const ENGINE_GENERATE_PROTOCOL_VERSION_KEY: &str = "engine_generate_protocol_version";
+const ENGINE_GENERATE_PROTOCOL_VERSION: u64 = 1;
 
 /// A Dynamo backend that proxies inference to a vLLM OpenEngine server.
 pub struct VllmSidecarEngine {
@@ -767,7 +769,11 @@ fn build_engine_config(discovery: &Discovery) -> EngineConfig {
     EngineConfig {
         model: model.model_id.clone(),
         served_model_name,
-        runtime_data: Default::default(),
+        runtime_data: [(
+            ENGINE_GENERATE_PROTOCOL_VERSION_KEY.to_string(),
+            serde_json::json!(ENGINE_GENERATE_PROTOCOL_VERSION),
+        )]
+        .into(),
         llm: Some(LlmRegistration {
             context_length: model.max_context_length,
             kv_cache_block_size: model.kv_block_size,

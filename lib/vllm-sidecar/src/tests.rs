@@ -734,6 +734,11 @@ async fn start_advertises_discovered_metadata() {
     let cfg = engine.start(0).await.expect("start");
     assert_eq!(cfg.model, "fake-model");
     assert_eq!(cfg.served_model_name.as_deref(), Some("fake-served"));
+    assert_eq!(
+        cfg.runtime_data.get("engine_generate_protocol_version"),
+        Some(&serde_json::json!(1)),
+        "versioned route publication must be paired with its model-card capability"
+    );
     let llm = cfg.llm.expect("sidecar must advertise LLM registration");
     assert_eq!(llm.context_length, Some(4096));
     assert_eq!(llm.kv_cache_block_size, Some(16));
