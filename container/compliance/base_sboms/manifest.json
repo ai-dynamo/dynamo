@@ -89,6 +89,17 @@
       "from_image": "vllm/vllm-openai",
       "from_tag": "nightly-2c17d33f4291a55b447317640c81eb61077b1b00",
       "platform": "linux/amd64"
+    },
+    {
+      "baseline_digest": "sha256:a671d5fcda70fe9ac6f245f9780821de459fb4ee22c018fd07a0f10a55279bf9",
+      "baseline_image": "vllm/vllm-openai",
+      "baseline_sbom": "vllm-openai@a671d5fc-amd64.cdx.json",
+      "baseline_tag": "nightly-95ed0feaa5cd7fb16d72c53ce04950aaf07c4698",
+      "capture_note": "Exact immutable external base for dedicated Python-overlay mode; AMD64 digest sha256:caafca24ae94171e2ece6610c28fde9157beb3ce6ee9f411a951dbd0af64ce0e; captured with Syft 1.46.0 so compliance attributes only Dynamo, FlashInfer, and two-file-overlay additions",
+      "from_digest": "sha256:a671d5fcda70fe9ac6f245f9780821de459fb4ee22c018fd07a0f10a55279bf9",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "nightly-95ed0feaa5cd7fb16d72c53ce04950aaf07c4698",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -103,6 +114,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX JSON using each captured artifact's declared specVersion, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-07-10T01:36:16+00:00",
+  "generated_at": "2026-07-11T03:52:44+00:00",
   "schema_version": 2
 }

@@ -133,10 +133,9 @@ jobs:
       build_timeout_minutes: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 90 || 60 }}
       build_only: true
       image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
-      # Test-only overlay: scan the full image instead of subtracting the stale
-      # SBOM captured from the previous nightly base.
+      # Test-only overlay: subtract the exact immutable nightly base.
       extra_build_args: |
-        BASELINE_SBOM_FILE=
+        BASELINE_SBOM_FILE=vllm-openai@a671d5fc
         FLASHINFER_GIT_URL=${{ inputs.flashinfer_git_url }}
         FLASHINFER_GIT_REF=${{ inputs.flashinfer_git_ref }}
         FLASHINFER_GIT_SHA=${{ inputs.flashinfer_git_sha }}
@@ -216,7 +215,7 @@ jobs:
   snapshot-agent:
     name: Snapshot Agent
     needs: [init]
-    if: inputs.build_snapshot_agent || inputs.build_vllm_placeholder
+    if: inputs.build_snapshot_agent
     runs-on: prod-default-v2
     steps:
       - name: Checkout code
