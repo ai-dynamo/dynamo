@@ -11,9 +11,11 @@ from typing import Any
 
 import pytest
 from vllm.sampling_params import SamplingParams
-from vllm.usage.usage_lib import UsageContext
 
-from dynamo.vllm import sync_inproc_engine as sync_engine
+usage_lib = pytest.importorskip("vllm.usage.usage_lib")
+UsageContext = usage_lib.UsageContext
+
+from dynamo.vllm import sync_inproc_engine as sync_engine  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,

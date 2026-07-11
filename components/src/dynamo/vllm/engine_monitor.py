@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import math
 import os
 import signal
 import traceback
+from typing import TYPE_CHECKING
 
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -15,7 +18,8 @@ from dynamo.common.engine_monitor import EngineHealthMonitorConfig
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .sync_inproc_engine import SyncInprocEngineClient
+if TYPE_CHECKING:
+    from .sync_inproc_engine import SyncInprocEngineClient
 
 configure_dynamo_logging
 logger = logging.getLogger(__name__)
@@ -36,10 +40,15 @@ class VllmEngineMonitor:
             raise ValueError(
                 f"{self.__class__.__name__} requires an instance of DistributedRuntime."
             )
-        if not isinstance(engine_client, (AsyncLLM, SyncInprocEngineClient)):
-            raise ValueError(
-                f"{self.__class__.__name__} requires an AsyncLLM-compatible engine."
-            )
+        if not isinstance(engine_client, AsyncLLM):
+            # Keep the experimental synchronous engine lazy: lightweight test
+            # environments intentionally provide only part of vLLM's package.
+            from .sync_inproc_engine import SyncInprocEngineClient
+
+            if not isinstance(engine_client, SyncInprocEngineClient):
+                raise ValueError(
+                    f"{self.__class__.__name__} requires an AsyncLLM-compatible engine."
+                )
 
         self.runtime = runtime
         self.engine_client = engine_client

@@ -97,7 +97,6 @@ from .multimodal_utils.request_processor import (
     VllmMultimodalRequestProcessor,
 )
 from .multimodal_utils.vision_encoder_backend import VisionEncoderBackend
-from .sync_inproc_engine import SyncInprocEngineClient
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -2439,7 +2438,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Run backend.close() on the actor thread, then stop it — executor
             # GC would only end the thread, never call close().
             self._custom_encoder.shutdown()
-        if isinstance(self.engine_client, SyncInprocEngineClient):
+        if getattr(self.config, "engine_client_mode", "async-mp") == "sync-inproc":
             self.engine_client.shutdown()
         for temp_dir in self.temp_dirs:
             try:
