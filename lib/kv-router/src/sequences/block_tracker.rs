@@ -174,22 +174,14 @@ impl BlockTracker {
         let mut current = tail;
 
         while let Some(node_id) = current {
-            let shared = {
-                let node = self
-                    .nodes
-                    .get_mut(node_id)
-                    .expect("request chain references a missing block node");
-                let incoming = node.incoming.get();
-                if incoming > 1 {
-                    node.incoming = NonZeroU32::new(incoming - 1)
-                        .expect("shared block ownership count cannot become zero");
-                    true
-                } else {
-                    false
-                }
-            };
-
-            if shared {
+            let node = self
+                .nodes
+                .get_mut(node_id)
+                .expect("request chain references a missing block node");
+            let incoming = node.incoming.get();
+            if incoming > 1 {
+                node.incoming = NonZeroU32::new(incoming - 1)
+                    .expect("shared block ownership count cannot become zero");
                 retained = Some(node_id);
                 break;
             }
@@ -740,6 +732,19 @@ mod tests {
         tracker.unique_blocks.insert(2, node_id);
         let _ = tracker.contains_block(&2);
         drop(chain);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "block hash index references a different live node")]
+    fn release_rejects_hash_index_alias() {
+        let mut tracker = BlockTracker::default();
+        let (first, _) = tracker.acquire_prompt(&[1]);
+        let (_second, _) = tracker.acquire_prompt(&[2]);
+        let aliased_node_id = tracker.node_id_for(2);
+
+        tracker.unique_blocks.insert(1, aliased_node_id);
+        let _ = tracker.release(first);
     }
 
     #[test]
