@@ -74,7 +74,7 @@ Resume-before-pause is intentional source behavior.
 
 ### Greedy resume
 
-The usable ceiling is `(pause_threshold - resume_hysteresis) * capacity`. Paused sessions are considered in these groups, then by increasing context size:
+The usable ceiling is `pause_target * capacity`. Paused sessions are considered in these groups, then by increasing context size:
 
 1. Continuing Running sessions after their first step.
 2. First-step sessions.
@@ -98,7 +98,7 @@ When a worker exceeds `pause_threshold * capacity`, ThunderAgent suspends the sm
 | Token accounting | Incoming and completed context sizes update one logical total per session. |
 | Block and resume | `Defer` keeps the request in the KV-router admission controller; `MakeReady` releases it. |
 | Retention capacity | Static device KV plus native-offload capacity from worker configuration. |
-| Pack and fairness | New-session fairness, grouped resume, largest-first placement, smallest-resident suspension, deferred Running suspension, hysteresis, and timeout. |
+| Pack and fairness | New-session fairness, grouped resume, largest-first placement, smallest-resident suspension, deferred Running suspension, high/low watermarks, and timeout. |
 | Sticky placement | `WorkerPlacement::Exact` preserves the selected worker/rank across turns. |
 | Session expiry | A quiescent retained session is forgotten after `session_retention_seconds`; a later request starts a new program. |
 

@@ -151,7 +151,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         tracing::info!(
             pause_threshold = config.pause_threshold,
             pause_target = config.pause_target,
-            resume_hysteresis = config.resume_hysteresis,
             resume_timeout_seconds = config.resume_timeout_seconds,
             session_retention_seconds = config.session_retention_seconds,
             scheduler_interval_seconds = config.scheduler_interval_seconds,
@@ -556,7 +555,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             (group, program.footprint())
         });
 
-        let ceiling = (self.config.pause_threshold - self.config.resume_hysteresis).max(0.0);
+        let ceiling = self.config.pause_target;
         let mut backend_caps: Vec<(WorkerWithDpRank, usize)> = capacities
             .iter()
             .filter_map(|capacity| {
