@@ -28,11 +28,11 @@ on:
       vllm_git_ref:
         description: 'Exact vLLM overlay branch'
         type: string
-        default: 'schwinns/snapshot-gms-nightly-95ed0fea-fi0615-20260710'
+        default: 'schwinns/snapshot-gms-nightly-95ed0fea-fi0615-metafix-20260711'
       vllm_git_sha:
         description: 'Exact vLLM overlay commit'
         type: string
-        default: '422ad75b99364320a6cf0d4cbad4c9a4e48b615b'
+        default: '7d08d52f088c10e13c0ef581bdbe141fffb91098'
       flashinfer_git_url:
         description: 'Exact FlashInfer repository'
         type: string

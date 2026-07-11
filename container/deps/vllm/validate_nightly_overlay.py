@@ -18,7 +18,7 @@ EXPECTED_BASE_COMMIT = "95ed0feaa5cd7fb16d72c53ce04950aaf07c4698"
 EXPECTED_BASE_DIGEST = (
     "sha256:a671d5fcda70fe9ac6f245f9780821de459fb4ee22c018fd07a0f10a55279bf9"
 )
-EXPECTED_VLLM_HEAD = "422ad75b99364320a6cf0d4cbad4c9a4e48b615b"
+EXPECTED_VLLM_HEAD = "7d08d52f088c10e13c0ef581bdbe141fffb91098"
 EXPECTED_FLASHINFER_SHA = "f2f9646ec388d9f178b2fbda6ae0ec4246d8e7dc"
 EXPECTED_FLASHINFER_VERSION = "0.6.15"
 EXPECTED_AMD64_DIGEST = (
@@ -35,6 +35,7 @@ OVERLAY_PATHS = (
     "vllm/distributed/device_communicators/cuda_communicator.py",
     "vllm/distributed/device_communicators/flashinfer_all_reduce.py",
     "vllm/distributed/parallel_state.py",
+    "vllm/model_executor/layers/fused_moe/expert_map_manager.py",
     "vllm/v1/worker/gpu_model_runner.py",
 )
 
@@ -246,7 +247,7 @@ def validate() -> None:
         "vllm_runtime_amd64_digest": EXPECTED_AMD64_DIGEST,
         "vllm_base_commit": EXPECTED_BASE_COMMIT,
         "vllm_source_sha": EXPECTED_VLLM_HEAD,
-        "vllm_overlay_commits": "2",
+        "vllm_overlay_commits": "3",
         "vllm_overlay_files": str(len(OVERLAY_PATHS)),
         "flashinfer_source_sha": EXPECTED_FLASHINFER_SHA,
         "flashinfer_source_version": EXPECTED_FLASHINFER_VERSION,

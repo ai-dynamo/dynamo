@@ -8,8 +8,8 @@ readonly EXPECTED_BASE_COMMIT=95ed0feaa5cd7fb16d72c53ce04950aaf07c4698
 readonly EXPECTED_BASE_DIGEST=sha256:a671d5fcda70fe9ac6f245f9780821de459fb4ee22c018fd07a0f10a55279bf9
 readonly EXPECTED_AMD64_DIGEST=sha256:caafca24ae94171e2ece6610c28fde9157beb3ce6ee9f411a951dbd0af64ce0e
 readonly EXPECTED_VLLM_URL=https://github.com/galletas1712/vllm.git
-readonly EXPECTED_VLLM_REF=schwinns/snapshot-gms-nightly-95ed0fea-fi0615-20260710
-readonly EXPECTED_VLLM_HEAD=422ad75b99364320a6cf0d4cbad4c9a4e48b615b
+readonly EXPECTED_VLLM_REF=schwinns/snapshot-gms-nightly-95ed0fea-fi0615-metafix-20260711
+readonly EXPECTED_VLLM_HEAD=7d08d52f088c10e13c0ef581bdbe141fffb91098
 readonly EXPECTED_FLASHINFER_URL=https://github.com/flashinfer-ai/flashinfer.git
 readonly EXPECTED_FLASHINFER_REF=refs/tags/nightly-v0.6.15-20260710
 readonly EXPECTED_FLASHINFER_SHA=f2f9646ec388d9f178b2fbda6ae0ec4246d8e7dc
@@ -24,15 +24,18 @@ readonly -a OVERLAY_PATHS=(
     vllm/distributed/device_communicators/cuda_communicator.py
     vllm/distributed/device_communicators/flashinfer_all_reduce.py
     vllm/distributed/parallel_state.py
+    vllm/model_executor/layers/fused_moe/expert_map_manager.py
     vllm/v1/worker/gpu_model_runner.py
 )
 
 readonly -a EXPECTED_DIFF=(
+    "A	tests/model_executor/layers/test_expert_map_manager.py"
     "M	vllm/distributed/device_communicators/all2all.py"
     "M	vllm/distributed/device_communicators/base_device_communicator.py"
     "M	vllm/distributed/device_communicators/cuda_communicator.py"
     "M	vllm/distributed/device_communicators/flashinfer_all_reduce.py"
     "M	vllm/distributed/parallel_state.py"
+    "M	vllm/model_executor/layers/fused_moe/expert_map_manager.py"
     "M	vllm/v1/worker/gpu_model_runner.py"
 )
 
@@ -94,7 +97,7 @@ validate_overlay_source() {
     git -C "${source}" cat-file -e "${EXPECTED_BASE_COMMIT}^{commit}"
     git -C "${source}" merge-base --is-ancestor "${EXPECTED_BASE_COMMIT}" HEAD
     [[ "$(git -C "${source}" rev-list --count "${EXPECTED_BASE_COMMIT}..HEAD")" \
-        == 2 ]] || die "vLLM overlay must contain exactly two commits"
+        == 3 ]] || die "vLLM overlay must contain exactly three commits"
 
     mapfile -t actual_diff < <(
         git -C "${source}" diff --no-renames --name-status \
@@ -162,7 +165,7 @@ clone_source \
     "${VLLM_GIT_SHA:-}" \
     /tmp/vllm-overlay-src \
     0 \
-    3
+    4
 validate_overlay_source /tmp/vllm-overlay-src
 vllm_package_dir="$(
     python3 - <<'PY'
@@ -203,8 +206,8 @@ vllm_base_commit=${EXPECTED_BASE_COMMIT}
 vllm_source_url=${EXPECTED_VLLM_URL}
 vllm_source_ref=${EXPECTED_VLLM_REF}
 vllm_source_sha=${EXPECTED_VLLM_HEAD}
-vllm_overlay_commits=2
-vllm_overlay_files=6
+vllm_overlay_commits=3
+vllm_overlay_files=7
 flashinfer_source_url=${EXPECTED_FLASHINFER_URL}
 flashinfer_source_ref=${EXPECTED_FLASHINFER_REF}
 flashinfer_source_sha=${EXPECTED_FLASHINFER_SHA}
