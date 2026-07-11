@@ -1,3 +1,5 @@
 source=https://github.com/ai-dynamo/openengine
 revision=7093bf087fcca367bd2b9b4fc233fb434d3c1c31
-proto_sha256=1add17e5f3dbb595f8b4aed5697daa212828d7e31d50769dcf51b83a37b4cfb8
+base_proto_sha256=1add17e5f3dbb595f8b4aed5697daa212828d7e31d50769dcf51b83a37b4cfb8
+profile=prime-rl-vllm-v1
+proto_sha256=ad7be818be967084c9ae47ba9db526810fd0020611bc5b6a00b6016601ba67b2
