@@ -220,6 +220,8 @@ navigation:
             contents:
               - page: Introduction
                 path: tool-calling/introduction.mdx
+              - page: Chat Processors
+                path: tool-calling/chat-processors.mdx
               - page: Tool Call Parsing
                 path: tool-calling/README.md
               - page: Reasoning Parsing

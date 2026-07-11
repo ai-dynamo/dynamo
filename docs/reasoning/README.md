@@ -7,30 +7,60 @@ subtitle: Configure Dynamo's built-in reasoning parsers for models that emit thi
 
 Some models emit reasoning or thinking content separately from their final response. Dynamo can split that output into `reasoning_content` and normal assistant content by configuring `--dyn-reasoning-parser` on the backend worker.
 
-This page covers parser names for the default Dynamo-native path. If Dynamo
-does not list a parser for your model, use
-[engine fallback](../tool-calling/introduction.mdx#engine-fallback). For how
-`--dyn-reasoning-parser` combines with `--dyn-chat-processor` and
-`--dyn-tool-call-parser` (and which combinations are invalid), see the
-[Introduction](../tool-calling/introduction.mdx).
+This page covers parser names for the default Dynamo-native path, where the
+`dynamo` [chat processor](../tool-calling/chat-processors.mdx) parses reasoning
+on the worker. If Dynamo does not list a parser for your model, use
+[engine fallback](../tool-calling/chat-processors.mdx#engine-fallback) instead.
 
-## Prerequisites
+## Enable reasoning parsing
 
-To enable reasoning parsing, set the following flag on the backend worker in your DynamoGraphDeployment (DGD):
+To enable reasoning parsing, add `--dyn-reasoning-parser` to your backend **worker**'s `args:` in the DynamoGraphDeployment (DGD), set to the parser that matches your model. Here is where it goes:
 
-- `--dyn-reasoning-parser`: select the reasoning parser from the supported list below
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: ...
+spec:
+  components:
+  - name: SGLangWorker
+    type: worker
+    ...
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          ...
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3.5-4B
+          - --served-model-name
+          - Qwen/Qwen3.5-4B
+          - --dyn-reasoning-parser   # add this to enable reasoning parsing
+          - qwen3                    # value comes from the table below
+```
 
-The flag is a worker `args:` entry — `dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`. For the full list of worker flags, see the backend guides ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) or run the worker with `--help`. New to authoring a DGD? Start with [Deploy with DGD](../kubernetes/dgd-guide.md).
+The Frontend needs no extra flags — the default `dynamo` chat processor parses reasoning for every backend.
+
+> [!IMPORTANT]
+> `--dyn-reasoning-parser` pairs with the default `dynamo` chat processor and goes on the **worker**. The bare `--reasoning-parser` (no `--dyn-` prefix) is a different flag — it drives [engine fallback](../tool-calling/chat-processors.mdx#engine-fallback) and goes on the Frontend. Don't use the bare flag with the default processor, and don't put `--dyn-reasoning-parser` on a `vllm`/`sglang` chat processor.
+
+The flag works on any worker — `dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`. For the full list of worker flags, see the backend guides ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) or run the worker with `--help`. New to authoring a DGD? Start with [Deploy with DGD](../kubernetes/dgd-guide.md).
 
 > [!TIP]
 > Some models need both a reasoning parser and a tool call parser. For supported tool call parser names, see [Tool Call Parsing (Dynamo)](../tool-calling/README.md).
 
 ## Supported Reasoning Parsers
 
-The table below lists the currently supported reasoning parsers in Dynamo's registry. The
-**Upstream name** column shows where the vLLM or SGLang parser name differs
+Set `--dyn-reasoning-parser` to the **Parser Name** (first column) that matches your model. These are all the values it accepts.
+
+The **Upstream name** column shows where the vLLM or SGLang parser name differs
 from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [engine fallback](../tool-calling/introduction.mdx#engine-fallback)). A blank upstream
+(see [engine fallback](../tool-calling/chat-processors.mdx#engine-fallback)). A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 
@@ -77,7 +107,7 @@ Reasoning parsing happens before tool call parsing. If a model emits both reason
 
 ### Deploy Frontend and worker
 
-Reasoning parsing is configured on the **worker** with `--dyn-reasoning-parser` (pair it with `--dyn-tool-call-parser` when the model also emits tool calls). The Frontend needs no extra flags. This DGD serves Qwen3.5-4B on SGLang — swap the worker for `dynamo.vllm` or `dynamo.trtllm` with the same `--dyn-*` flags:
+Here is the complete, runnable DGD for the worker snippet above. It serves Qwen3.5-4B on SGLang with reasoning parsing enabled (plus `--dyn-tool-call-parser`, since this model also emits tool calls) — swap the worker for `dynamo.vllm` or `dynamo.trtllm` with the same `--dyn-*` flags:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1

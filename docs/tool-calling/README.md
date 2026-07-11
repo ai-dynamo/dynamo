@@ -17,20 +17,49 @@ prompt with relevant external information.
 Tool calling is controlled using the `tool_choice` and `tools` request
 parameters.
 
-This page covers parser names for the default Dynamo-native path. If Dynamo
-does not list a parser for your model, use
-[engine fallback](introduction.mdx#engine-fallback). For how
-`--dyn-tool-call-parser` combines with `--dyn-chat-processor` and
-`--dyn-reasoning-parser` (and which combinations are invalid), see the
-[Introduction](introduction.mdx).
+This page covers parser names for the default Dynamo-native path, where the
+`dynamo` [chat processor](chat-processors.mdx) parses tool calls on the worker.
+If Dynamo does not list a parser for your model, use
+[engine fallback](chat-processors.mdx#engine-fallback) instead.
 
-## Prerequisites
+## Enable tool calling
 
-To enable this feature, set the following flag on the backend worker in your DynamoGraphDeployment (DGD):
+To enable tool calling, add `--dyn-tool-call-parser` to your backend **worker**'s `args:` in the DynamoGraphDeployment (DGD), set to the parser that matches your model. Here is where it goes:
 
-- `--dyn-tool-call-parser`: select the tool call parser from the supported list below
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: ...
+spec:
+  components:
+  - name: SGLangWorker
+    type: worker
+    ...
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          ...
+          command:
+          - python3
+          - -m
+          - dynamo.sglang
+          args:
+          - --model-path
+          - Qwen/Qwen3.5-4B
+          - --served-model-name
+          - Qwen/Qwen3.5-4B
+          - --dyn-tool-call-parser   # add this to enable tool calling
+          - qwen3_coder              # value comes from the table below
+```
 
-The flag is a worker `args:` entry — `dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`. For the full list of worker flags, see the backend guides ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) or run the worker with `--help`. New to authoring a DGD? Start with [Deploy with DGD](../kubernetes/dgd-guide.md).
+The Frontend needs no extra flags — the default `dynamo` chat processor parses tool calls for every backend.
+
+> [!IMPORTANT]
+> `--dyn-tool-call-parser` pairs with the default `dynamo` chat processor and goes on the **worker**. The bare `--tool-call-parser` (no `--dyn-` prefix) is a different flag — it drives [engine fallback](chat-processors.mdx#engine-fallback) and goes on the Frontend. Don't use the bare flag with the default processor, and don't put `--dyn-tool-call-parser` on a `vllm`/`sglang` chat processor.
+
+The flag works on any worker — `dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`. For the full list of worker flags, see the backend guides ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) or run the worker with `--help`. New to authoring a DGD? Start with [Deploy with DGD](../kubernetes/dgd-guide.md).
 
 > [!TIP]
 > If your model's default chat template doesn't support tool calling, but the model itself does, add `--custom-jinja-template /path/to/template.jinja` to the worker `args:` (the template must be readable inside the container).
@@ -40,10 +69,11 @@ The flag is a worker `args:` entry — `dynamo.vllm`, `dynamo.sglang`, or `dynam
 
 ## Supported Tool Call Parsers
 
-The table below lists the currently supported tool call parsers in Dynamo's registry. The
-**Upstream name** column shows where the vLLM or SGLang parser name differs
+Set `--dyn-tool-call-parser` to the **Parser Name** (first column) that matches your model. These are all the values it accepts.
+
+The **Upstream name** column shows where the vLLM or SGLang parser name differs
 from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [engine fallback](introduction.mdx#engine-fallback)). A blank upstream
+(see [engine fallback](chat-processors.mdx#engine-fallback)). A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 
@@ -78,7 +108,7 @@ parser exists for this format.
 
 ### Deploy Frontend and worker
 
-Tool-call parsing is configured on the **worker** with `--dyn-tool-call-parser`. The Frontend needs no extra flags (the default `dynamo` chat processor parses tool calls for every backend). This DGD serves Qwen3.5-4B on SGLang with tool-call and reasoning parsing enabled — swap the worker for `dynamo.vllm` or `dynamo.trtllm` with the same `--dyn-*` flags:
+Here is the complete, runnable DGD for the worker snippet above. It serves Qwen3.5-4B on SGLang with tool-call parsing enabled (plus `--dyn-reasoning-parser`, since this model also emits reasoning) — swap the worker for `dynamo.vllm` or `dynamo.trtllm` with the same `--dyn-*` flags:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1

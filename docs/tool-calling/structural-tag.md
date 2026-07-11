@@ -204,5 +204,5 @@ To pin the scope and schema, add `--dyn-structural-tag-scope` and `--dyn-structu
 ## See Also
 
 - [Tool Call Parsing (Dynamo)](README.md) — parser names and basic tool calling setup
-- [Introduction](introduction.mdx) — chat processor and engine-fallback parsers
+- [Chat Processors](chat-processors.mdx) — chat processor and engine-fallback parsers
 - [xgrammar Structural Tag Documentation](https://xgrammar.mlc.ai/docs/structural_tag/structural_tag_api.html) — xgrammar format specification

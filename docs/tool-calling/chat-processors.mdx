@@ -1,0 +1,207 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Chat Processors
+subtitle: Choose who parses model output with --dyn-chat-processor, and where the parser flags go
+---
+
+Every request to `/v1/chat/completions` is handled by a **chat processor**, selected with the `--dyn-chat-processor` frontend flag. The chat processor renders the chat template, tokenizes, routes to the worker, assembles the OpenAI-compatible response, and — for the formats it supports — parses tool calls and reasoning out of the model's raw output.
+
+New here? Read the [Introduction](introduction.mdx) first for how the chat processor relates to the tool-call and reasoning parsers.
+
+## The flag
+
+You usually don't set this flag at all — it **defaults to `dynamo`**, which is the right choice for most models. Set it only when you need engine fallback. It is a **Frontend** flag (env var `DYN_CHAT_PROCESSOR`) with three values:
+
+| Value | Who parses | When to use | Backends |
+|---|---|---|---|
+| `dynamo` (default) | Dynamo's framework-agnostic Rust frontend | Default path — keep it unless Dynamo lacks a parser for your model's format. | vLLM, SGLang, TRT-LLM |
+| `vllm` | vLLM's own Python parser ("engine fallback") | Only when Dynamo does not ship a parser for your model. | vLLM |
+| `sglang` | SGLang's own Python parser ("engine fallback") | Only when Dynamo does not ship a parser for your model. | SGLang |
+
+All three keep Dynamo's frontend tokenization, routing, and disaggregated serving — the only thing that moves is who runs the parser.
+
+## Where the parser flags go
+
+Your chat-processor choice decides both the *name* of the tool-call / reasoning parser flags and *which component* carries them. This is the pairing rule:
+
+| Chat processor | Parser flags | Live on | Parser names come from |
+|---|---|---|---|
+| `dynamo` (default) | `--dyn-tool-call-parser`, `--dyn-reasoning-parser` | the **worker** | Dynamo's registry — [Tool Call Parsing](README.md), [Reasoning Parsing](../reasoning/README.md) |
+| `vllm` / `sglang` | `--tool-call-parser`, `--reasoning-parser` (no `--dyn-` prefix) | the **Frontend** | the engine's registry |
+
+The `--dyn-*` flags belong to the `dynamo` processor; the bare flags belong to the engine processors. You never mix families — set the tool-call parser, the reasoning parser, both, or neither, but always from the family that matches your chat processor.
+
+## `dynamo` (default)
+
+To use the default path, do nothing: leave `--dyn-chat-processor` unset (or set `DYN_CHAT_PROCESSOR: dynamo` on the Frontend to be explicit). Dynamo's Rust processor works on every backend and with disaggregated serving, and ships built-in parsers for a broad set of model formats, so it is the right choice for most deployments.
+
+To turn on parsing, add the parser flags to the **worker** as `--dyn-tool-call-parser` / `--dyn-reasoning-parser`. The same worker flags work on vLLM, SGLang, or TRT-LLM — pick one worker:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-parsers
+spec:
+  components:
+  - name: Frontend            # chat processor defaults to `dynamo` — no args needed
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+  - name: VllmWorker          # worker selects the Dynamo parsers
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: ${RUNTIME_IMAGE}
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --dyn-tool-call-parser
+          - hermes
+          - --dyn-reasoning-parser
+          - qwen3
+```
+
+For the parser names themselves, see [Tool Call Parsing](README.md) and [Reasoning Parsing](../reasoning/README.md).
+
+## Engine fallback
+
+To fall back to the **engine's** own Python parser, set `--dyn-chat-processor vllm` or `sglang` on the Frontend. Use this only when Dynamo's registry does not list a parser for your model's format. Dynamo still owns tokenization and routing — only the parser changes.
+
+In fallback mode the parser flags differ from the default path in three ways:
+
+- they drop the `--dyn-` prefix — you use the bare `--tool-call-parser` / `--reasoning-parser`,
+- they move onto the **Frontend** (not the worker), and
+- they use the **engine's** parser names, which can differ from Dynamo's.
+
+<Warning>
+Engine fallback is supported on vLLM and SGLang only. TRT-LLM engine fallback is a work in progress — on a TRT-LLM worker, keep the default `dynamo` chat processor.
+</Warning>
+
+<Note title="Parser names differ across registries">
+The engine registries use different names than Dynamo's — for example vLLM `nemotron_v3` vs Dynamo `nemotron3`, and SGLang `deepseekv3` vs Dynamo `deepseek_v3`. When you set `--dyn-chat-processor vllm` or `sglang`, use the name from **that engine's** registry, not the Dynamo name. See the [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md) and [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md) pages for the engine names.
+</Note>
+
+Set `--dyn-chat-processor` to match the worker's backend, put the parser flags in the **Frontend** `args:`, and leave the worker clean:
+
+<Tabs>
+  <Tab title="vLLM" language="vllm">
+    ```yaml
+    apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeployment
+    metadata:
+      name: qwen3-vllm-fallback
+    spec:
+      components:
+      - name: Frontend            # frontend carries the engine-fallback parser flags
+        type: frontend
+        replicas: 1
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: ${RUNTIME_IMAGE}
+              command:
+              - python3
+              - -m
+              - dynamo.frontend
+              args:
+              - --dyn-chat-processor
+              - vllm
+              - --tool-call-parser
+              - hermes
+              - --reasoning-parser
+              - qwen3
+      - name: VllmWorker          # no parser flags on the worker
+        type: worker
+        replicas: 1
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: ${RUNTIME_IMAGE}
+              envFrom:
+              - secretRef:
+                  name: hf-token-secret
+              command:
+              - python3
+              - -m
+              - dynamo.vllm
+              args:
+              - --model
+              - Qwen/Qwen3-0.6B
+    ```
+  </Tab>
+  <Tab title="SGLang" language="sglang">
+    ```yaml
+    apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeployment
+    metadata:
+      name: qwen3-sglang-fallback
+    spec:
+      components:
+      - name: Frontend            # frontend carries the engine-fallback parser flags
+        type: frontend
+        replicas: 1
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: ${RUNTIME_IMAGE}
+              command:
+              - python3
+              - -m
+              - dynamo.frontend
+              args:
+              - --dyn-chat-processor
+              - sglang
+              - --tool-call-parser
+              - qwen25          # SGLang's parser name (Dynamo calls it hermes)
+              - --reasoning-parser
+              - qwen3
+      - name: SGLangWorker        # no parser flags on the worker
+        type: worker
+        replicas: 1
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: ${RUNTIME_IMAGE}
+              envFrom:
+              - secretRef:
+                  name: hf-token-secret
+              command:
+              - python3
+              - -m
+              - dynamo.sglang
+              args:
+              - --model-path
+              - Qwen/Qwen3-0.6B
+              - --served-model-name
+              - Qwen/Qwen3-0.6B
+    ```
+  </Tab>
+</Tabs>
+
+## See Also
+
+- [Introduction](introduction.mdx) — how the chat processor, tool-call parser, and reasoning parser fit together
+- [Tool Call Parsing](README.md) — Dynamo-native tool-call parser names
+- [Reasoning Parsing](../reasoning/README.md) — Dynamo-native reasoning parser names
+- [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md) / [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md) — engine-fallback processor details and engine parser names
+- [Frontend Configuration Reference](../components/frontend/configuration.md) — full CLI flag reference
