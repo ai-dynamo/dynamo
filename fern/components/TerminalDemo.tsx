@@ -322,13 +322,13 @@ const TERMINAL_DEMO_CSS = `
 .dynamo-terminal-demo__bar {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 10px 14px;
+  gap: 8px;
+  padding: 6px 13px;
   background: #252545;
 }
 .dynamo-terminal-demo__dot {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
   display: inline-block;
 }
@@ -361,8 +361,8 @@ const TERMINAL_DEMO_CSS = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 22px;
+  width: 24px;
+  height: 20px;
   padding: 0;
   border: 0;
   border-radius: 5px;
@@ -398,14 +398,14 @@ const TERMINAL_DEMO_CSS = `
  * full size instead of flashing a 0-height body under the title bar. The
  * asciinema player only sets the real terminal height in JS after the cast
  * fetches; until then this aspect-ratio holds the space (defaults to the
- * 120x32 hero cast; overridable via --dynamo-term-aspect). Once the player
+ * 120x25 hero cast; overridable via --dynamo-term-aspect). Once the player
  * mounts we drop the fixed ratio (via --loaded) so the box is free to grow
  * when the controls slide out.
  */
 .dynamo-terminal-demo__player {
   width: 100%;
-  aspect-ratio: var(--dynamo-term-aspect, 1.6875);
-  background: #101216;
+  aspect-ratio: var(--dynamo-term-aspect, 2.16);
+  background: #0d1117;
 }
 .dynamo-terminal-demo--loaded .dynamo-terminal-demo__player {
   aspect-ratio: auto;
@@ -416,7 +416,7 @@ const TERMINAL_DEMO_CSS = `
 }
 /* Match the player's terminal background to the cast's GitHub-Dark theme bg. */
 .dynamo-terminal-demo .asciinema-player {
-  background: #101216;
+  background: #0d1117;
 }
 /*
  * Playback-controls reveal: the player always builds its control bar (native
