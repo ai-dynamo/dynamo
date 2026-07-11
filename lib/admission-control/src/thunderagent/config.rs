@@ -24,7 +24,6 @@ pub struct ThunderAgentConfig {
     pub resume_timeout_seconds: f64,
     pub session_retention_seconds: f64,
     pub scheduler_interval_seconds: f64,
-    pub buffer_per_program: usize,
 }
 
 impl Default for ThunderAgentConfig {
@@ -36,7 +35,6 @@ impl Default for ThunderAgentConfig {
             resume_timeout_seconds: 1_800.0,
             session_retention_seconds: 1_800.0,
             scheduler_interval_seconds: 5.0,
-            buffer_per_program: 100,
         }
     }
 }

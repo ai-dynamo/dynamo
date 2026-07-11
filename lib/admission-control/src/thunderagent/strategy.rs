@@ -127,12 +127,12 @@ struct WorkerUsage {
 }
 
 impl WorkerUsage {
-    fn add_program(&mut self, tokens: usize, buffer: usize) {
-        self.used = self.used.saturating_add(tokens).saturating_add(buffer);
+    fn add_program(&mut self, tokens: usize) {
+        self.used = self.used.saturating_add(tokens);
     }
 
-    fn remove_program(&mut self, tokens: usize, buffer: usize) {
-        self.used = self.used.saturating_sub(tokens).saturating_sub(buffer);
+    fn remove_program(&mut self, tokens: usize) {
+        self.used = self.used.saturating_sub(tokens);
     }
 }
 
@@ -155,7 +155,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             resume_timeout_seconds = config.resume_timeout_seconds,
             session_retention_seconds = config.session_retention_seconds,
             scheduler_interval_seconds = config.scheduler_interval_seconds,
-            buffer_per_program = config.buffer_per_program,
             "ThunderAgent admission strategy configured"
         );
         let next_tick = Instant::now() + Duration::from_secs_f64(config.scheduler_interval_seconds);
@@ -284,7 +283,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             return AdmissionDecision::Ready(WorkerPlacement::Any);
         }
 
-        let required = context_tokens.saturating_add(self.config.buffer_per_program);
         let usage = self.worker_usage();
         let selected = capacities
             .iter()
@@ -294,7 +292,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 capacity
                     .tokens
                     .checked_sub(used)
-                    .is_some_and(|remaining| remaining >= required)
+                    .is_some_and(|remaining| remaining >= context_tokens)
                     .then_some((capacity.worker, used))
             })
             .min_by_key(|(worker, used)| (*used, *worker))
@@ -521,7 +519,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 && let Some(worker) = program.assigned_worker
             {
                 let worker_usage = usage.entry(worker).or_default();
-                worker_usage.add_program(program.footprint(), self.config.buffer_per_program);
+                worker_usage.add_program(program.footprint());
             }
         }
         usage
@@ -565,7 +563,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 let limit = scale_tokens(capacity.tokens, ceiling);
                 let remaining =
                     limit.saturating_sub(usage.get(&capacity.worker).map_or(0, |usage| usage.used));
-                (remaining > self.config.buffer_per_program).then_some((capacity.worker, remaining))
+                (remaining > 0).then_some((capacity.worker, remaining))
             })
             .collect();
         sort_backend_caps(&mut backend_caps);
@@ -579,9 +577,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let mut cumulative = 0usize;
         let mut resumable = Vec::new();
         for session_id in paused {
-            let required = self.programs[&session_id]
-                .footprint()
-                .saturating_add(self.config.buffer_per_program);
+            let required = self.programs[&session_id].footprint();
             if !backend_caps.iter().any(|(worker, remaining)| {
                 self.session_allows_worker(&session_id, *worker, eligibility)
                     && required <= *remaining
@@ -603,24 +599,19 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     .enumerate()
                     .find(|(_, (worker, remaining))| {
                         self.session_allows_worker(&session_id, *worker, eligibility)
-                            && self.programs[&session_id]
-                                .footprint()
-                                .saturating_add(self.config.buffer_per_program)
-                                <= *remaining
+                            && self.programs[&session_id].footprint() <= *remaining
                     })
             else {
                 continue;
             };
-            let required = self.programs[&session_id]
-                .footprint()
-                .saturating_add(self.config.buffer_per_program);
+            let required = self.programs[&session_id].footprint();
             actions.extend(self.resume_program(&session_id, Some(worker)));
             resumed += 1;
             let program = &self.programs[&session_id];
             let worker_usage = usage.entry(worker).or_default();
-            worker_usage.add_program(program.footprint(), self.config.buffer_per_program);
+            worker_usage.add_program(program.footprint());
             let updated = remaining - required;
-            if updated > self.config.buffer_per_program {
+            if updated > 0 {
                 backend_caps[position] = (worker, updated);
                 sort_backend_caps(&mut backend_caps);
             } else {
@@ -714,7 +705,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     self.suspend_idle(session_id);
                     paused += 1;
                     let worker_usage = usage.entry(capacity.worker).or_default();
-                    worker_usage.remove_program(used, self.config.buffer_per_program);
+                    worker_usage.remove_program(used);
                 }
             }
             if usage.get(&capacity.worker).map_or(0, |usage| usage.used) > target
@@ -1256,7 +1247,6 @@ mod tests {
     fn retention_expiry_removes_only_quiescent_acting_programs() {
         let config = ThunderAgentConfig {
             session_retention_seconds: 900.0,
-            buffer_per_program: 0,
             ..Default::default()
         };
         let mut strategy = ThunderAgent::new(Vec::<WorkerCapacity>::new, config).unwrap();
@@ -1338,7 +1328,6 @@ mod tests {
         let config = ThunderAgentConfig {
             pause_threshold: 0.8,
             pause_target: 0.5,
-            buffer_per_program: 0,
             ..Default::default()
         };
         let mut strategy = ThunderAgent::new(provider, config).unwrap();
@@ -1410,7 +1399,6 @@ mod tests {
     fn forced_resume_delegates_worker_selection() {
         let config = ThunderAgentConfig {
             resume_timeout_seconds: 1.0,
-            buffer_per_program: 0,
             ..Default::default()
         };
         let mut strategy = ThunderAgent::new(|| capacities(&[(1, 100), (2, 100)]), config).unwrap();
