@@ -47,6 +47,10 @@ use crate::args::{Args, TransportConfig, normalize_endpoint};
 use crate::client::{self, Client, Discovery, Pool};
 use crate::proto as pb;
 
+// Keep these aligned with Dynamo's versioned request-plane protocol routes.
+const ENGINE_GENERATE_ENDPOINT: &str = "engine_generate_v1";
+const ENGINE_GENERATE_PREFILL_ENDPOINT: &str = "engine_generate_prefill_v1";
+
 /// A Dynamo backend that proxies inference to a vLLM OpenEngine server.
 pub struct VllmSidecarEngine {
     /// Normalised gRPC endpoint (e.g. `http://127.0.0.1:50051`).
@@ -125,6 +129,7 @@ impl VllmSidecarEngine {
             namespace: args.namespace,
             component: component_for_role(role).to_string(),
             endpoint: args.endpoint,
+            endpoint_aliases: vec![endpoint_alias_for_role(role).to_string()],
             endpoint_types: args.endpoint_types,
             custom_jinja_template: args.custom_jinja_template,
             disaggregation_mode,
@@ -699,6 +704,14 @@ fn role_to_mode(role: pb::EngineRole) -> DisaggregationMode {
         pb::EngineRole::Prefill => DisaggregationMode::Prefill,
         pb::EngineRole::Decode => DisaggregationMode::Decode,
         _ => DisaggregationMode::Aggregated,
+    }
+}
+
+fn endpoint_alias_for_role(role: pb::EngineRole) -> &'static str {
+    if role == pb::EngineRole::Prefill {
+        ENGINE_GENERATE_PREFILL_ENDPOINT
+    } else {
+        ENGINE_GENERATE_ENDPOINT
     }
 }
 

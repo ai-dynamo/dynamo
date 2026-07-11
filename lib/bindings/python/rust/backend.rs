@@ -412,6 +412,7 @@ impl WorkerConfig {
                 namespace,
                 component,
                 endpoint,
+                endpoint_aliases: Vec::new(),
                 model_name,
                 served_model_name,
                 model_input: model_input_rs,

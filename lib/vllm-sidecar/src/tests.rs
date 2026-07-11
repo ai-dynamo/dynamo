@@ -1533,6 +1533,7 @@ fn from_args_discovers_aggregated_role() {
     assert_eq!(config.served_model_name.as_deref(), Some("fake-served"));
     assert_eq!(config.reasoning_parser.as_deref(), Some("deepseek_r1"));
     assert_eq!(config.tool_call_parser.as_deref(), Some("hermes"));
+    assert_eq!(config.endpoint_aliases, ["engine_generate_v1"]);
 }
 
 #[test]
@@ -1550,4 +1551,5 @@ fn from_args_discovers_prefill_role_and_component() {
 
     assert_eq!(config.component, "prefill");
     assert_eq!(config.disaggregation_mode, DisaggregationMode::Prefill);
+    assert_eq!(config.endpoint_aliases, ["engine_generate_prefill_v1"]);
 }

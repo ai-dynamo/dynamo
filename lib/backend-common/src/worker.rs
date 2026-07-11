@@ -8,6 +8,7 @@
 //! over the engine type so a PyO3-wrapped engine can feed in through the
 //! same `Arc<dyn LLMEngine>` path.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +26,7 @@ use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{EngineAdapter, RawEngineAdapter};
@@ -123,6 +125,11 @@ pub struct WorkerConfig {
     pub component: String,
     /// Endpoint name exposed by this worker (e.g. `"generate"`).
     pub endpoint: String,
+    /// Additional endpoint names that serve the same request handler as
+    /// `endpoint`. Model registration remains attached to the primary endpoint;
+    /// aliases provide protocol-versioned request routes such as
+    /// `engine_generate_v1`.
+    pub endpoint_aliases: Vec<String>,
     /// HF repo name or local model path. Empty means name-only registration
     /// (no tokenizer / chat-template on the card).
     pub model_name: String,
@@ -207,6 +214,7 @@ impl Default for WorkerConfig {
             namespace: "dynamo".to_string(),
             component: "backend".to_string(),
             endpoint: "generate".to_string(),
+            endpoint_aliases: Vec::new(),
             model_name: String::new(),
             served_model_name: None,
             model_input: ModelInput::Tokens,
@@ -458,6 +466,7 @@ impl Worker {
         // a listener task just to get an InvalidArgument error.
         validate_model_input(self.config.model_input, &self.engine)?;
         validate_route_to_encoder(&self.config)?;
+        validate_endpoint_aliases(&self.config)?;
 
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
@@ -567,6 +576,12 @@ impl Worker {
                 )
             })?;
         let endpoint = component.endpoint(&self.config.endpoint);
+        let endpoint_aliases = self
+            .config
+            .endpoint_aliases
+            .iter()
+            .map(|name| component.endpoint(name))
+            .collect();
         tracing::debug!(
             namespace = %self.config.namespace,
             component = %self.config.component,
@@ -627,7 +642,7 @@ impl Worker {
             return Ok(());
         }
 
-        self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
+        self.serve_with_orchestrator(&engine_config, endpoint, endpoint_aliases, shutdown.clone())
             .await
     }
 
@@ -697,6 +712,7 @@ impl Worker {
     async fn register_engine_controls(
         &self,
         endpoint: &dynamo_runtime::component::Endpoint,
+        serving_endpoints: &[dynamo_runtime::component::Endpoint],
     ) -> Result<(), DynamoError> {
         let controls = self.engine.supported_controls().await?;
         if controls.is_empty() {
@@ -715,7 +731,7 @@ impl Worker {
             let callback = wrap_engine_control_callback(
                 control_name.clone(),
                 callback,
-                endpoint.clone(),
+                serving_endpoints.to_vec(),
                 control_lock.clone(),
             );
             // Namespace control routes under `/engine/control/<name>` so they
@@ -834,6 +850,7 @@ impl Worker {
         &mut self,
         engine_config: &EngineConfig,
         endpoint: dynamo_runtime::component::Endpoint,
+        endpoint_aliases: Vec<dynamo_runtime::component::Endpoint>,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         let model_type = resolve_model_type(&self.config)?;
@@ -851,6 +868,10 @@ impl Worker {
         // still runs before `register_engine_controls`, so `/engine/*` cannot
         // fire before the engine has the endpoint.
         self.engine.on_endpoint_ready(endpoint.clone()).await?;
+
+        let serving_endpoints = std::iter::once(endpoint.clone())
+            .chain(endpoint_aliases.iter().cloned())
+            .collect::<Vec<_>>();
 
         local_model
             .attach(
@@ -870,7 +891,8 @@ impl Worker {
             })?;
         tracing::debug!("model registered with discovery");
 
-        self.register_engine_controls(&endpoint).await?;
+        self.register_engine_controls(&endpoint, &serving_endpoints)
+            .await?;
         self.register_engine_updates(&endpoint).await?;
 
         let supports_lora = engine_config
@@ -912,42 +934,6 @@ impl Worker {
             self.config.endpoint
         );
 
-        // Build the request adapter and a JSON-shaped health-check probe
-        // engine for the worker's modality. The token pipeline
-        // (`EngineAdapter`) needs a `JsonProbeAdapter` wrapper to expose a
-        // `serde_json::Value` probe surface; the raw pipeline
-        // (`RawEngineAdapter`) is already JSON-shaped, so it serves as its
-        // own probe. The tuple annotation drives the trait-object coercions.
-        let (ingress, probe_engine): (
-            Arc<dyn dynamo_runtime::pipeline::network::PushWorkHandler>,
-            dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
-        ) = match &self.engine {
-            EngineKind::Llm(engine) => {
-                let engine_adapter = Arc::new(EngineAdapter::new(
-                    engine.clone(),
-                    self.config.disaggregation_mode,
-                ));
-                let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("ingress: {e}"),
-                    )
-                })?;
-                let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
-                (ingress, probe)
-            }
-            EngineKind::Raw(engine) => {
-                let raw_adapter = Arc::new(RawEngineAdapter::new(engine.clone()));
-                let ingress = Ingress::for_engine(raw_adapter.clone()).map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("ingress: {e}"),
-                    )
-                })?;
-                (ingress, raw_adapter)
-            }
-        };
-
         let metrics_labels = if self.config.metrics_labels.is_empty() {
             None
         } else {
@@ -985,25 +971,41 @@ impl Worker {
                 .and_then(stamp_canary_marker),
         };
 
-        let mut builder = endpoint
-            .endpoint_builder()
-            .handler(ingress)
-            .metrics_labels(metrics_labels)
-            .graceful_shutdown(true);
-        if let Some(payload) = probe {
-            builder = builder.health_check_payload(payload);
-            // The runtime's `HealthCheckManager` fires the canary by looking
-            // up a `LocalAsyncEngine` for this endpoint name. Register the
-            // modality's JSON-shaped probe engine so the probe exercises the
-            // same `generate()` path as real traffic.
-            builder = builder.register_local_engine(probe_engine).map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::Unknown),
-                    format!("register_local_engine: {e}"),
-                )
-            })?;
+        // Endpoint handlers carry endpoint-specific metrics and health-check
+        // notifier state. Build one Ingress per route while sharing the
+        // underlying engine adapter across all routes.
+        let (request_handlers, probe_engine) = build_request_handlers(
+            &self.engine,
+            self.config.disaggregation_mode,
+            serving_endpoints.len(),
+        )?;
+        let serve_futures = FuturesUnordered::new();
+        for (serving_endpoint, request_handler) in
+            serving_endpoints.into_iter().zip(request_handlers)
+        {
+            let mut builder = serving_endpoint
+                .endpoint_builder()
+                .handler(request_handler)
+                .metrics_labels(metrics_labels.clone())
+                .graceful_shutdown(true);
+            if let Some(payload) = probe.clone() {
+                builder = builder.health_check_payload(payload);
+                // The runtime's `HealthCheckManager` fires the canary by
+                // looking up a `LocalAsyncEngine` for this endpoint name.
+                // Register the same JSON-shaped probe engine for every alias
+                // so all request-plane routes have equivalent health gating.
+                builder = builder
+                    .register_local_engine(probe_engine.clone())
+                    .map_err(|e| {
+                        err(
+                            ErrorType::Backend(BackendError::Unknown),
+                            format!("register_local_engine: {e}"),
+                        )
+                    })?;
+            }
+            serve_futures.push(builder.start());
         }
-        let serve_fut = builder.start();
+        let serve_fut = async move { serve_futures.into_future().await.0.unwrap_or(Ok(())) };
         tokio::pin!(serve_fut);
 
         let rl_endpoint = if crate::rl::enabled() {
@@ -1119,6 +1121,15 @@ impl Worker {
             && let Err(error) = rl_endpoint.unregister_endpoint_instance().await
         {
             tracing::warn!(%error, "RL discovery endpoint unregister failed");
+        }
+        for alias in &endpoint_aliases {
+            if let Err(error) = alias.unregister_endpoint_instance().await {
+                tracing::warn!(
+                    %error,
+                    endpoint = %alias.name(),
+                    "request endpoint alias unregister failed"
+                );
+            }
         }
         self.orchestrator_steps(&endpoint).await;
         if let Some(result) = terminal_result {
@@ -1479,13 +1490,13 @@ fn engine_update_callback(update_name: String, engine: EngineKind) -> EngineRout
 fn wrap_engine_control_callback(
     control_name: String,
     callback: EngineRouteCallback,
-    endpoint: dynamo_runtime::component::Endpoint,
+    serving_endpoints: Vec<dynamo_runtime::component::Endpoint>,
     control_lock: Arc<tokio::sync::Mutex<()>>,
 ) -> EngineRouteCallback {
     let policy = engine_control_policy(&control_name);
     Arc::new(move |body| {
         let callback = callback.clone();
-        let endpoint = endpoint.clone();
+        let serving_endpoints = serving_endpoints.clone();
         let control_name = control_name.clone();
         let control_lock = control_lock.clone();
         Box::pin(async move {
@@ -1500,10 +1511,33 @@ fn wrap_engine_control_callback(
                     // cannot re-register between them.
                     let _guard = control_lock.lock().await;
 
-                    if let Err(e) = endpoint.unregister_endpoint_instance().await {
-                        return Ok(control_error_response(format!(
-                            "failed to unregister endpoint before /engine/control/{control_name}: {e}"
-                        )));
+                    let mut unregistered: Vec<dynamo_runtime::component::Endpoint> =
+                        Vec::with_capacity(serving_endpoints.len());
+                    for endpoint in &serving_endpoints {
+                        if let Err(error) = endpoint.unregister_endpoint_instance().await {
+                            // The engine is still serving-safe because the
+                            // control has not run. Restore routes already
+                            // withdrawn; failures only reduce availability.
+                            let mut rollback_errors = Vec::new();
+                            for previous in &unregistered {
+                                if let Err(rollback_error) =
+                                    previous.register_endpoint_instance().await
+                                {
+                                    rollback_errors
+                                        .push(format!("{}: {rollback_error}", previous.name()));
+                                }
+                            }
+                            let rollback = if rollback_errors.is_empty() {
+                                String::new()
+                            } else {
+                                format!("; rollback failures: {}", rollback_errors.join(", "))
+                            };
+                            return Ok(control_error_response(format!(
+                                "failed to unregister endpoint {} before /engine/control/{control_name}: {error}{rollback}",
+                                endpoint.name()
+                            )));
+                        }
+                        unregistered.push(endpoint.clone());
                     }
 
                     match callback(body).await {
@@ -1532,17 +1566,35 @@ fn wrap_engine_control_callback(
                     let _guard = control_lock.lock().await;
 
                     let response = callback(body).await?;
-                    if !control_response_is_error(&response)
-                        && let Err(e) = endpoint.register_endpoint_instance().await
-                    {
-                        // The engine is serving-safe but absent from discovery. The
-                        // operation is idempotent: retrying /engine/control/{control_name}
-                        // re-registers without repeating the wake/resume work (the
-                        // controller short-circuits "already awake/resumed"), so surface
-                        // that it is safe to retry.
-                        return Ok(control_error_response(format!(
-                            "engine resumed but re-registration failed after /engine/control/{control_name}: {e}; retry /engine/control/{control_name} to rejoin discovery"
-                        )));
+                    if !control_response_is_error(&response) {
+                        for endpoint in &serving_endpoints {
+                            if let Err(error) = endpoint.register_endpoint_instance().await {
+                                // Avoid advertising only part of the route set.
+                                // The engine is awake, so withdrawing every
+                                // route is safe and a retry can re-register all.
+                                let mut cleanup_errors = Vec::new();
+                                for candidate in &serving_endpoints {
+                                    if let Err(cleanup_error) =
+                                        candidate.unregister_endpoint_instance().await
+                                    {
+                                        cleanup_errors
+                                            .push(format!("{}: {cleanup_error}", candidate.name()));
+                                    }
+                                }
+                                let cleanup = if cleanup_errors.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(
+                                        "; fail-closed unregister failures: {}",
+                                        cleanup_errors.join(", ")
+                                    )
+                                };
+                                return Ok(control_error_response(format!(
+                                    "engine resumed but endpoint {} re-registration failed after /engine/control/{control_name}: {error}{cleanup}; retry /engine/control/{control_name} to rejoin discovery",
+                                    endpoint.name()
+                                )));
+                            }
+                        }
                     }
                     Ok(response)
                 }
@@ -1659,6 +1711,77 @@ fn validate_route_to_encoder(config: &WorkerConfig) -> Result<(), DynamoError> {
             ),
         )),
     }
+}
+
+type RequestHandler = Arc<dyn dynamo_runtime::pipeline::network::PushWorkHandler>;
+
+/// Build independent request-plane handlers for the primary endpoint and
+/// every alias. `Ingress` stores endpoint-scoped metrics and health notifier
+/// state in `OnceLock`s, so sharing one instance across routes is invalid.
+fn build_request_handlers(
+    engine: &EngineKind,
+    mode: DisaggregationMode,
+    count: usize,
+) -> Result<
+    (
+        Vec<RequestHandler>,
+        dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
+    ),
+    DynamoError,
+> {
+    let map_ingress_error = |error| {
+        err(
+            ErrorType::Backend(BackendError::Unknown),
+            format!("ingress: {error}"),
+        )
+    };
+
+    match engine {
+        EngineKind::Llm(engine) => {
+            let adapter = Arc::new(EngineAdapter::new(engine.clone(), mode));
+            let handlers = (0..count)
+                .map(|_| {
+                    Ingress::for_engine(adapter.clone())
+                        .map(|handler| handler as RequestHandler)
+                        .map_err(map_ingress_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(adapter));
+            Ok((handlers, probe))
+        }
+        EngineKind::Raw(engine) => {
+            let adapter = Arc::new(RawEngineAdapter::new(engine.clone()));
+            let handlers = (0..count)
+                .map(|_| {
+                    Ingress::for_engine(adapter.clone())
+                        .map(|handler| handler as RequestHandler)
+                        .map_err(map_ingress_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((handlers, adapter))
+        }
+    }
+}
+
+/// Reject ambiguous request-plane aliases before runtime construction.
+fn validate_endpoint_aliases(config: &WorkerConfig) -> Result<(), DynamoError> {
+    let mut seen = HashSet::new();
+    seen.insert(config.endpoint.as_str());
+    for alias in &config.endpoint_aliases {
+        if alias.is_empty() || alias.trim() != alias {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                "endpoint aliases must be non-empty and must not contain surrounding whitespace",
+            ));
+        }
+        if !seen.insert(alias.as_str()) {
+            return Err(err(
+                ErrorType::Backend(BackendError::InvalidArgument),
+                format!("duplicate request endpoint name: {alias}"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
@@ -1844,6 +1967,45 @@ mod tests {
     fn parse_endpoint_types_happy_path() {
         let got = parse_endpoint_types("chat,completions").unwrap();
         assert_eq!(got, ModelType::Chat | ModelType::Completions);
+    }
+
+    #[test]
+    fn endpoint_aliases_accept_unique_nonempty_names() {
+        let config = WorkerConfig {
+            endpoint_aliases: vec!["engine_generate_v1".to_string()],
+            ..WorkerConfig::default()
+        };
+        assert!(validate_endpoint_aliases(&config).is_ok());
+    }
+
+    #[test]
+    fn endpoint_aliases_reject_primary_collision_duplicates_and_empty_names() {
+        for aliases in [
+            vec!["generate".to_string()],
+            vec![
+                "engine_generate_v1".to_string(),
+                "engine_generate_v1".to_string(),
+            ],
+            vec![String::new()],
+        ] {
+            let config = WorkerConfig {
+                endpoint_aliases: aliases,
+                ..WorkerConfig::default()
+            };
+            assert!(validate_endpoint_aliases(&config).is_err());
+        }
+    }
+
+    #[test]
+    fn endpoint_aliases_use_independent_request_handlers() {
+        let (handlers, _) = build_request_handlers(&llm_kind(), DisaggregationMode::Aggregated, 2)
+            .expect("request handlers should build");
+
+        assert_eq!(handlers.len(), 2);
+        assert!(
+            !Arc::ptr_eq(&handlers[0], &handlers[1]),
+            "each endpoint needs independent metrics and health-notifier state"
+        );
     }
 
     #[test]
@@ -3181,7 +3343,7 @@ mod handoff_integration_tests {
             .await
             .expect("handoff should succeed");
         worker
-            .register_engine_controls(&endpoint)
+            .register_engine_controls(&endpoint, std::slice::from_ref(&endpoint))
             .await
             .expect("control registration should succeed");
         worker
