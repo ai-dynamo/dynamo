@@ -118,6 +118,7 @@ def test_aiperf_command_run_point_and_image_binding(
             "primary_dbsize": ["0"],
             "replica_dbsize": ["0"],
         },
+        "router_write_durability": sweep.router_write_durability(),
         "tokenizer_reset": {
             "flush": ["OK"],
             "primary_dbsize": ["0"],
@@ -183,6 +184,7 @@ def test_aiperf_failure_still_cleans_remote_records(
         "pre_ha_snapshot": {"ha": "healthy"},
         "load_generator_capacity": {},
         "router_reset": {},
+        "router_write_durability": sweep.router_write_durability(),
         "tokenizer_reset": {},
     }
     monkeypatch.setattr(aiperf_runner, "valkey_telemetry", lambda *_: {})

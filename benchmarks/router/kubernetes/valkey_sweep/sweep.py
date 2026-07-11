@@ -52,6 +52,7 @@ from .model import (
     VALKEY_GIT_REVISION,
     MatrixPoint,
     matrix_points,
+    router_write_durability,
     runtime_namespace,
 )
 
@@ -79,6 +80,7 @@ def campaign_contract(
         "configured_isl": ISL,
         "configured_osl": OSL,
         "offered_request_rate": "inf",
+        "router_write_durability": router_write_durability(),
         "matrix": [point._asdict() for point in points],
     }
     return {**unsigned, "contract_digest": canonical_digest(unsigned)}
@@ -294,6 +296,7 @@ def configure_topology(
         "frontend_pods": [name for name, _ in ready_pods],
         "frontend_urls": urls,
         "router_reset": router_reset,
+        "router_write_durability": router_write_durability(),
         "tokenizer_reset": tokenizer_reset,
         "pre_runtime_snapshot": verify_active_images(cluster, binding, point),
         "pre_ha_snapshot": ha_snapshot(cluster),

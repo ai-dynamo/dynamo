@@ -23,6 +23,15 @@ FRONTEND_DEPLOYMENT = "valkey-sweep-frontend"
 MOCKER_DEPLOYMENT = "valkey-sweep-mocker"
 
 
+def router_write_durability() -> dict[str, bool | int | str]:
+    """Describe the explicit router write tradeoff exercised by this sweep."""
+    return {
+        "required_replica_acks": 1,
+        "allow_degraded_writes": True,
+        "mode": "availability-first-degraded-durability",
+    }
+
+
 class MatrixPoint(NamedTuple):
     frontends: int
     concurrency: int

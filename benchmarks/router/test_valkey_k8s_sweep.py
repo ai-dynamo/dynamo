@@ -135,7 +135,9 @@ def test_manifest_rendering_rejects_unscoped_network_policy(
         for document in yaml.safe_load_all(path.read_text(encoding="utf-8"))
         if document
     ]
-    policy = next(document for document in documents if document["kind"] == "NetworkPolicy")
+    policy = next(
+        document for document in documents if document["kind"] == "NetworkPolicy"
+    )
     policy["spec"]["podSelector"]["matchLabels"].pop("app.kubernetes.io/part-of")
     manifest = tmp_path / "stack.yaml"
     manifest.write_text(yaml.safe_dump_all(documents), encoding="utf-8")
@@ -477,6 +479,16 @@ def test_stack_is_namespaced_labeled_and_uses_distinct_valkey_memory_policies() 
     assert sentinels["spec"]["replicas"] == 3
     assert sentinels["spec"]["volumeClaimTemplates"]
     assert resources[("ConfigMap", "valkey-sweep-config")]["immutable"] is True
+    router_config = json.loads(
+        resources[("ConfigMap", "valkey-sweep-config")]["data"]["router-valkey-config"]
+    )
+    assert router_config["required_replica_acks"] == 1
+    assert router_config["allow_degraded_writes"] is True
+    assert sweep_model.router_write_durability() == {
+        "required_replica_acks": 1,
+        "allow_degraded_writes": True,
+        "mode": "availability-first-degraded-durability",
+    }
 
     disruption_budgets = {
         name for kind, name in resources if kind == "PodDisruptionBudget"

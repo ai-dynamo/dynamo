@@ -5,7 +5,11 @@ in `bis-rl-3`. The stack uses two independent Valkey replication groups behind
 the same three Sentinel witnesses:
 
 - the router group loads `dynkv.so`, uses `noeviction`, persists AOF data to
-  separate RWO volumes, and requires one replica acknowledgement;
+  separate RWO volumes, and requests one replica acknowledgement when a
+  replica is available. This is an availability-first sweep: after a
+  Sentinel-confirmed replication-quorum failure it permits a degraded,
+  unreplicated router write, and records that degraded-durability policy in
+  every campaign and point result;
 - the tokenizer group uses `allkeys-lru`, has no persistence, and can evict L2
   tokenization entries without evicting router metadata;
 - every frontend and mocker receives the same `DYN_ROUTER_VALKEY_CONFIG` JSON;

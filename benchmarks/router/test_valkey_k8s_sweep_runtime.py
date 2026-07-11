@@ -294,6 +294,7 @@ def test_configure_topology_uses_fresh_namespace_and_exact_counts(monkeypatch) -
     }
     assert topology["tokenizer_reset"] == expected_reset
     assert topology["router_reset"] == expected_reset
+    assert topology["router_write_durability"] == sweep.router_write_durability()
     assert topology["load_generator_capacity"]["ephemeral_ports"] == 64512
     assert "d" * 8 in topology["runtime_namespace"]
     assert any("--replicas=10" in operation for operation in operations)

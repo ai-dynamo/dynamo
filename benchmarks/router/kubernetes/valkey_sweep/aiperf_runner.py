@@ -29,6 +29,7 @@ class RuntimeTopology(TypedDict):
     frontend_pods: list[str]
     frontend_urls: list[str]
     router_reset: dict[str, list[str]]
+    router_write_durability: dict[str, bool | int | str]
     tokenizer_reset: dict[str, list[str]]
     pre_runtime_snapshot: dict[str, dict[str, Any]]
     pre_ha_snapshot: dict[str, Any]
@@ -416,6 +417,7 @@ def run_point(
             "post_ha_snapshot": post_ha_snapshot,
             "load_generator_capacity": topology["load_generator_capacity"],
             "router_reset": topology["router_reset"],
+            "router_write_durability": topology["router_write_durability"],
             "tokenizer_reset": topology["tokenizer_reset"],
             "elapsed_seconds": time.time() - started,
             "measurement_seconds": measured_seconds,
