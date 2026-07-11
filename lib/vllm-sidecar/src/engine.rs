@@ -37,6 +37,9 @@ use dynamo_backend_common::{
     LlmRegistration, LoraAdapter, MultimodalData, PreprocessedRequest, PromptLogprobEntry,
     StopReason, TopLogprob, WorkerConfig, rl_enabled, usage,
 };
+use dynamo_llm::protocols::inference::generate::{
+    GenerateSamplingParams, GenerateWorkerRequest, OneOrManyStrings,
+};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::stream::BoxStream;
 use tokio::sync::{OnceCell, watch};
@@ -803,67 +806,151 @@ fn lora_from_proto(adapter: pb::LoraAdapter) -> LoraAdapter {
 // Request building + terminal mapping
 // ============================================================================
 
+/// Engine-native `/inference/v1/generate` requests keep their authoritative
+/// sampling envelope in `PreprocessedRequest.generate_request`; the canonical
+/// fields are intentionally left empty for lossless worker forwarding. Legacy
+/// OpenAI requests use the canonical fields instead.
+struct NativeGenerateOptions {
+    request: GenerateWorkerRequest,
+    sampling: GenerateSamplingParams,
+}
+
+fn native_generate_options(
+    request: &PreprocessedRequest,
+) -> Result<Option<NativeGenerateOptions>, DynamoError> {
+    let Some(native) = request.generate_request.as_ref() else {
+        return Ok(None);
+    };
+    if native.features.is_some() {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 cannot consume engine-native preprocessed multimodal features",
+        ));
+    }
+    if native.kv_transfer_params.is_some() {
+        return Err(client::invalid_arg(
+            "OpenEngine v1 cannot merge caller-owned engine-native kv_transfer_params",
+        ));
+    }
+    if native
+        .model
+        .as_ref()
+        .is_some_and(|model| model != &request.model)
+    {
+        return Err(client::invalid_arg(
+            "engine-native generate_request.model does not match the routed model",
+        ));
+    }
+    if let (Some(native_salt), Some(routed_salt)) = (
+        native.cache_salt.as_deref(),
+        request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.cache_namespace.as_deref()),
+    ) && native_salt != routed_salt
+    {
+        return Err(client::invalid_arg(
+            "engine-native generate_request.cache_salt does not match routing cache_salt",
+        ));
+    }
+    let sampling = serde_json::from_value::<GenerateSamplingParams>(serde_json::Value::Object(
+        native.sampling_params.clone(),
+    ))
+    .map_err(|error| {
+        client::invalid_arg(format!(
+            "invalid engine-native generate_request.sampling_params: {error}"
+        ))
+    })?;
+    sampling.validate().map_err(|error| {
+        client::invalid_arg(format!(
+            "invalid engine-native generate_request.sampling_params: {error}"
+        ))
+    })?;
+    validate_native_sampling(&sampling)?;
+    Ok(Some(NativeGenerateOptions {
+        request: native.clone(),
+        sampling,
+    }))
+}
+
+fn validate_native_sampling(sampling: &GenerateSamplingParams) -> Result<(), DynamoError> {
+    let unsupported = [
+        ("flat_logprobs", sampling.flat_logprobs.is_some()),
+        ("logit_bias", sampling.logit_bias.is_some()),
+        ("allowed_token_ids", sampling.allowed_token_ids.is_some()),
+        ("bad_words", sampling.bad_words.is_some()),
+        (
+            "thinking_token_budget",
+            sampling.thinking_token_budget.is_some(),
+        ),
+        (
+            "repetition_detection",
+            sampling.repetition_detection.is_some(),
+        ),
+        (
+            "routed_experts_prompt_start",
+            sampling.routed_experts_prompt_start.is_some(),
+        ),
+        ("extra_args", sampling.extra_args.is_some()),
+        ("vllm_xargs", sampling.vllm_xargs.is_some()),
+    ];
+    if let Some((field, _)) = unsupported.into_iter().find(|(_, present)| *present) {
+        return Err(client::invalid_arg(format!(
+            "OpenEngine v1 does not represent engine-native sampling_params.{field}"
+        )));
+    }
+    if let Some(field) = sampling.other.keys().next() {
+        return Err(client::invalid_arg(format!(
+            "OpenEngine v1 does not represent engine-native sampling_params.{field}"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
     is_prefill: bool,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    let sampling = &request.sampling_options;
-    // Prefill only needs to populate the KV cache for the prompt: cap to one
-    // token regardless of the client's request.
-    validate_sampling_options(request)?;
-    validate_output_options(request)?;
-    let max_tokens = is_prefill
-        .then_some(1)
-        .or(request.stop_conditions.max_tokens);
-
-    let seed = match sampling.seed {
-        Some(seed) => Some(u64::try_from(seed).map_err(|_| {
-            client::invalid_arg("OpenEngine requires sampling.seed to be non-negative")
-        })?),
-        None => None,
+    let native = native_generate_options(request)?;
+    let (proto_sampling, stopping, response, guided) = if let Some(native) = native.as_ref() {
+        (
+            build_native_sampling_params(&native.sampling)?,
+            build_native_stopping_options(&native.sampling, is_prefill),
+            build_native_response_options(&native.sampling)?,
+            build_native_guided_decoding(&native.sampling)?,
+        )
+    } else {
+        let sampling = &request.sampling_options;
+        // Prefill only needs to populate the KV cache for the prompt: cap to
+        // one token regardless of the client's request.
+        validate_sampling_options(request)?;
+        validate_output_options(request)?;
+        let max_tokens = is_prefill
+            .then_some(1)
+            .or(request.stop_conditions.max_tokens);
+        let seed = non_negative_seed(sampling.seed)?;
+        let proto_sampling = pb::SamplingParams {
+            temperature: sampling.temperature.map(f64::from),
+            top_p: sampling.top_p.map(f64::from),
+            top_k: sampling.top_k,
+            min_p: sampling.min_p.map(f64::from),
+            frequency_penalty: sampling.frequency_penalty.map(f64::from),
+            presence_penalty: sampling.presence_penalty.map(f64::from),
+            repetition_penalty: sampling.repetition_penalty.map(f64::from),
+            seed,
+            num_sequences: sampling.n.map(u32::from),
+        };
+        let stopping = build_stopping_options(request, max_tokens)?.map(|mut stopping| {
+            stopping.conditions = canonical_stop_conditions(request);
+            stopping
+        });
+        (
+            proto_sampling,
+            stopping,
+            build_response_options(request),
+            build_guided_decoding(request)?,
+        )
     };
-
-    let proto_sampling = pb::SamplingParams {
-        temperature: sampling.temperature.map(f64::from),
-        top_p: sampling.top_p.map(f64::from),
-        top_k: sampling.top_k,
-        min_p: sampling.min_p.map(f64::from),
-        frequency_penalty: sampling.frequency_penalty.map(f64::from),
-        presence_penalty: sampling.presence_penalty.map(f64::from),
-        repetition_penalty: sampling.repetition_penalty.map(f64::from),
-        seed,
-        num_sequences: sampling.n.map(u32::from),
-    };
-
-    let stopping = build_stopping_options(request, max_tokens)?;
-    let response = build_response_options(request);
-    let guided = build_guided_decoding(request)?;
-
-    let mut conditions = Vec::new();
-    if let Some(strings) = &request.stop_conditions.stop {
-        for text in strings {
-            conditions.push(pb::StopCondition {
-                condition: Some(pb::stop_condition::Condition::StopText(text.clone())),
-            });
-        }
-    }
-    for ids in [
-        &request.stop_conditions.stop_token_ids,
-        &request.stop_conditions.stop_token_ids_visible,
-        &request.stop_conditions.stop_token_ids_hidden,
-    ] {
-        let Some(ids) = ids else { continue };
-        for id in ids {
-            conditions.push(pb::StopCondition {
-                condition: Some(pb::stop_condition::Condition::StopTokenId(*id)),
-            });
-        }
-    }
-    let stopping = stopping.map(|mut stopping| {
-        stopping.conditions = conditions;
-        stopping
-    });
 
     // Decode-role disaggregation: lift the prefill peer's handoff into a KV
     // session the engine forwards to its connector.
@@ -883,21 +970,37 @@ pub(crate) fn build_generate_request(
     // (`dynamo.common.backend.dp_rank.forced_dp_rank`); `prefill_dp_rank` is
     // never populated by the router.
     let data_parallel_rank = request.routing.as_ref().and_then(|r| r.dp_rank);
-    let cache_salt = request
-        .routing
+    let cache_salt = native
         .as_ref()
-        .and_then(|routing| routing.cache_namespace.clone());
-    let priority = request
-        .routing
-        .as_ref()
-        .and_then(|routing| routing.priority);
-    let kv = (kv_session.is_some() || data_parallel_rank.is_some() || cache_salt.is_some())
-        .then_some(pb::KvOptions {
-            session: kv_session,
-            data_parallel_rank,
-            bypass_prefix_cache: None,
-            cache_salt,
+        .and_then(|native| native.request.cache_salt.clone())
+        .or_else(|| {
+            request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.cache_namespace.clone())
         });
+    let bypass_prefix_cache = native
+        .as_ref()
+        .and_then(|native| native.sampling.skip_reading_prefix_cache);
+    let priority = native
+        .as_ref()
+        .map(|native| native.request.priority)
+        .or_else(|| {
+            request
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.priority)
+        });
+    let kv = (kv_session.is_some()
+        || data_parallel_rank.is_some()
+        || cache_salt.is_some()
+        || bypass_prefix_cache.is_some())
+    .then_some(pb::KvOptions {
+        session: kv_session,
+        data_parallel_rank,
+        bypass_prefix_cache,
+        cache_salt,
+    });
 
     let media = build_media(request)?;
     let lora_name = request
@@ -922,6 +1025,232 @@ pub(crate) fn build_generate_request(
         priority,
         metadata: Default::default(),
     })
+}
+
+fn non_negative_seed(seed: Option<i64>) -> Result<Option<u64>, DynamoError> {
+    seed.map(|seed| {
+        u64::try_from(seed).map_err(|_| {
+            client::invalid_arg("OpenEngine requires sampling.seed to be non-negative")
+        })
+    })
+    .transpose()
+}
+
+fn build_native_sampling_params(
+    sampling: &GenerateSamplingParams,
+) -> Result<pb::SamplingParams, DynamoError> {
+    Ok(pb::SamplingParams {
+        temperature: sampling.temperature.map(f64::from),
+        top_p: sampling.top_p.map(f64::from),
+        top_k: sampling.top_k,
+        min_p: sampling.min_p.map(f64::from),
+        frequency_penalty: sampling.frequency_penalty.map(f64::from),
+        presence_penalty: sampling.presence_penalty.map(f64::from),
+        repetition_penalty: sampling.repetition_penalty.map(f64::from),
+        seed: non_negative_seed(sampling.seed)?,
+        num_sequences: sampling.n,
+    })
+}
+
+fn build_native_stopping_options(
+    sampling: &GenerateSamplingParams,
+    is_prefill: bool,
+) -> Option<pb::StoppingOptions> {
+    let max_tokens = is_prefill.then_some(1).or(sampling.max_tokens);
+    let mut conditions = Vec::new();
+    if let Some(stop) = sampling.stop.as_ref() {
+        let strings: &[String] = match stop {
+            OneOrManyStrings::One(value) => std::slice::from_ref(value),
+            OneOrManyStrings::Many(values) => values,
+        };
+        conditions.extend(strings.iter().cloned().map(|text| pb::StopCondition {
+            condition: Some(pb::stop_condition::Condition::StopText(text)),
+        }));
+    }
+    if let Some(stop_token_ids) = sampling.stop_token_ids.as_ref() {
+        conditions.extend(stop_token_ids.iter().copied().map(|id| pb::StopCondition {
+            condition: Some(pb::stop_condition::Condition::StopTokenId(id)),
+        }));
+    }
+    let has_options = max_tokens.is_some()
+        || sampling.min_tokens.is_some()
+        || sampling.ignore_eos.is_some()
+        || sampling.include_stop_str_in_output.is_some()
+        || !conditions.is_empty();
+    has_options.then_some(pb::StoppingOptions {
+        max_tokens,
+        min_tokens: sampling.min_tokens,
+        conditions,
+        ignore_eos: sampling.ignore_eos,
+        include_stop_in_output: sampling.include_stop_str_in_output,
+    })
+}
+
+fn native_candidate_selection(
+    logprobs: Option<i32>,
+    token_ids: Option<&[u32]>,
+) -> Result<Option<pb::CandidateTokenSelection>, DynamoError> {
+    if let Some(token_ids) = token_ids {
+        if token_ids.is_empty() {
+            return Err(client::invalid_arg(
+                "engine-native sampling_params.logprob_token_ids must not be empty",
+            ));
+        }
+        return Ok(Some(pb::CandidateTokenSelection {
+            selection: Some(pb::candidate_token_selection::Selection::TokenIds(
+                pb::TokenIds {
+                    ids: token_ids.to_vec(),
+                },
+            )),
+        }));
+    }
+    logprobs
+        .map(|count| {
+            let selection = if count == -1 {
+                pb::candidate_token_selection::Selection::All(pb::AllCandidates {})
+            } else {
+                let count = u32::try_from(count).map_err(|_| {
+                    client::invalid_arg(
+                        "engine-native sampling_params.logprobs must be non-negative or -1",
+                    )
+                })?;
+                pb::candidate_token_selection::Selection::TopN(count)
+            };
+            Ok(pb::CandidateTokenSelection {
+                selection: Some(selection),
+            })
+        })
+        .transpose()
+}
+
+fn build_native_response_options(
+    sampling: &GenerateSamplingParams,
+) -> Result<Option<pb::ResponseOptions>, DynamoError> {
+    let output_candidates =
+        native_candidate_selection(sampling.logprobs, sampling.logprob_token_ids.as_deref())?;
+    let prompt_candidates = native_candidate_selection(sampling.prompt_logprobs, None)?;
+    let has_output = sampling.logprobs.is_some() || sampling.logprob_token_ids.is_some();
+    let has_prompt = sampling.prompt_logprobs.is_some();
+    Ok((has_output || has_prompt).then_some(pb::ResponseOptions {
+        return_prompt_logprobs: has_prompt.then_some(true),
+        prompt_candidates,
+        return_output_logprobs: has_output.then_some(true),
+        output_candidates,
+        prompt_logprob_start: None,
+    }))
+}
+
+fn build_native_guided_decoding(
+    sampling: &GenerateSamplingParams,
+) -> Result<Option<pb::GuidedDecoding>, DynamoError> {
+    let Some(value) = sampling.structured_outputs.as_ref() else {
+        return Ok(None);
+    };
+    let object = value.as_object().ok_or_else(|| {
+        client::invalid_arg("engine-native sampling_params.structured_outputs must be an object")
+    })?;
+    for field in [
+        "disable_any_whitespace",
+        "disable_additional_properties",
+        "whitespace_pattern",
+    ] {
+        if object
+            .get(field)
+            .is_some_and(|value| !value.is_null() && value != &serde_json::Value::Bool(false))
+        {
+            return Err(client::invalid_arg(format!(
+                "OpenEngine v1 does not represent structured_outputs.{field}"
+            )));
+        }
+    }
+
+    let mut guides = Vec::new();
+    if let Some(value) = object.get("json").filter(|value| !value.is_null()) {
+        let schema = value
+            .as_str()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| value.to_string());
+        guides.push(pb::guided_decoding::Guide::JsonSchema(schema));
+    }
+    if let Some(regex) = object.get("regex").filter(|value| !value.is_null()) {
+        guides.push(pb::guided_decoding::Guide::Regex(
+            regex
+                .as_str()
+                .ok_or_else(|| client::invalid_arg("structured_outputs.regex must be a string"))?
+                .to_string(),
+        ));
+    }
+    if let Some(grammar) = object.get("grammar").filter(|value| !value.is_null()) {
+        guides.push(pb::guided_decoding::Guide::EbnfGrammar(
+            grammar
+                .as_str()
+                .ok_or_else(|| client::invalid_arg("structured_outputs.grammar must be a string"))?
+                .to_string(),
+        ));
+    }
+    if let Some(choice) = object.get("choice").filter(|value| !value.is_null()) {
+        let choices = choice
+            .as_array()
+            .ok_or_else(|| client::invalid_arg("structured_outputs.choice must be an array"))?
+            .iter()
+            .map(|value| {
+                value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    client::invalid_arg("structured_outputs.choice entries must be strings")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        guides.push(pb::guided_decoding::Guide::Choice(pb::ChoiceConstraint {
+            choices,
+        }));
+    }
+    if let Some(tag) = object
+        .get("structural_tag")
+        .filter(|value| !value.is_null())
+    {
+        guides.push(pb::guided_decoding::Guide::StructuralTag(tag.to_string()));
+    }
+    if object
+        .get("json_object")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        guides.push(pb::guided_decoding::Guide::JsonObject(
+            pb::JsonObjectConstraint {},
+        ));
+    }
+    if guides.len() != 1 {
+        return Err(client::invalid_arg(
+            "engine-native structured_outputs must set exactly one supported guide",
+        ));
+    }
+    Ok(Some(pb::GuidedDecoding {
+        guide: guides.pop(),
+        backend: object
+            .get("backend")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    }))
+}
+
+fn canonical_stop_conditions(request: &PreprocessedRequest) -> Vec<pb::StopCondition> {
+    let mut conditions = Vec::new();
+    if let Some(strings) = &request.stop_conditions.stop {
+        conditions.extend(strings.iter().cloned().map(|text| pb::StopCondition {
+            condition: Some(pb::stop_condition::Condition::StopText(text)),
+        }));
+    }
+    for ids in [
+        &request.stop_conditions.stop_token_ids,
+        &request.stop_conditions.stop_token_ids_visible,
+        &request.stop_conditions.stop_token_ids_hidden,
+    ] {
+        let Some(ids) = ids else { continue };
+        conditions.extend(ids.iter().copied().map(|id| pb::StopCondition {
+            condition: Some(pb::stop_condition::Condition::StopTokenId(id)),
+        }));
+    }
+    conditions
 }
 
 fn validate_sampling_options(request: &PreprocessedRequest) -> Result<(), DynamoError> {

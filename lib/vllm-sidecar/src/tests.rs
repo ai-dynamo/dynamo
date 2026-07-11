@@ -1400,6 +1400,98 @@ fn build_generate_request_uses_canonical_nested_options() {
 }
 
 #[test]
+fn build_generate_request_uses_engine_native_worker_envelope() {
+    let mut input = request(None);
+    input.generate_request = Some(
+        serde_json::from_value(serde_json::json!({
+            "request_id": "request-native",
+            "model": "fake-model",
+            "sampling_params": {
+                "temperature": 0.25,
+                "top_p": 0.9,
+                "max_tokens": 17,
+                "min_tokens": 2,
+                "ignore_eos": true,
+                "logprobs": 1,
+                "skip_special_tokens": false,
+                "skip_reading_prefix_cache": true
+            },
+            "cache_salt": "tenant-native",
+            "priority": -4
+        }))
+        .expect("valid engine-native worker envelope"),
+    );
+    input.routing = Some(RoutingHints {
+        cache_namespace: Some("tenant-native".to_string()),
+        priority: Some(4),
+        ..Default::default()
+    });
+
+    let req = build_generate_request(&input, "request-native", false).unwrap();
+    let sampling = req.sampling.expect("sampling");
+    assert_eq!(sampling.temperature, Some(0.25));
+    assert_eq!(sampling.top_p, Some(0.9_f32 as f64));
+
+    let stopping = req.stopping.expect("stopping");
+    assert_eq!(stopping.max_tokens, Some(17));
+    assert_eq!(stopping.min_tokens, Some(2));
+    assert_eq!(stopping.ignore_eos, Some(true));
+
+    let response = req.response.expect("response");
+    assert_eq!(response.return_output_logprobs, Some(true));
+    assert!(matches!(
+        response
+            .output_candidates
+            .and_then(|selection| selection.selection),
+        Some(pb::candidate_token_selection::Selection::TopN(1))
+    ));
+
+    let kv = req.kv.expect("kv options");
+    assert_eq!(kv.cache_salt.as_deref(), Some("tenant-native"));
+    assert_eq!(kv.bypass_prefix_cache, Some(true));
+    assert_eq!(req.priority, Some(-4));
+}
+
+#[test]
+fn build_generate_request_rejects_unrepresented_native_sampling_fields() {
+    let mut input = request(None);
+    input.generate_request = Some(
+        serde_json::from_value(serde_json::json!({
+            "model": "fake-model",
+            "sampling_params": {"logit_bias": {"7": -1.0}}
+        }))
+        .expect("valid worker envelope"),
+    );
+
+    let error = build_generate_request(&input, "request-native", false).unwrap_err();
+    assert!(error.message().contains("sampling_params.logit_bias"));
+}
+
+#[test]
+fn build_generate_request_rejects_native_cache_salt_routing_mismatch() {
+    let mut input = request(None);
+    input.generate_request = Some(
+        serde_json::from_value(serde_json::json!({
+            "model": "fake-model",
+            "sampling_params": {},
+            "cache_salt": "native-salt"
+        }))
+        .expect("valid worker envelope"),
+    );
+    input.routing = Some(RoutingHints {
+        cache_namespace: Some("routed-salt".to_string()),
+        ..Default::default()
+    });
+
+    let error = build_generate_request(&input, "request-native", false).unwrap_err();
+    assert!(
+        error
+            .message()
+            .contains("does not match routing cache_salt")
+    );
+}
+
+#[test]
 fn build_generate_request_rejects_unrepresentable_output_semantics() {
     let mut input = request(Some(12));
     input.output_options.skip_special_tokens = Some(false);
