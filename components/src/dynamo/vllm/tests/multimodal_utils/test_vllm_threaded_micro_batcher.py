@@ -571,9 +571,9 @@ def test_concurrent_start_starts_one_worker():
         # Winner is parked in on_start (state still NEW, _thread published). The
         # loser must already be rejected — the window a state-only guard misses.
         assert outcome_recorded.wait(timeout=5.0), "loser did not finish start()"
-        assert outcomes == ["rejected"], (
-            f"loser not rejected while winner parked: {outcomes}"
-        )
+        assert outcomes == [
+            "rejected"
+        ], f"loser not rejected while winner parked: {outcomes}"
     finally:
         release.set()
         t1.join()
