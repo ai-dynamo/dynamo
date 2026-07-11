@@ -456,6 +456,46 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
     }
 }
 
+/// Terminal `finish_reason=Stop` chunk carrying one finish per listed choice
+/// index — the multi-choice analog of `mock_final_chunk`, so an `n > 1` stream
+/// flushes every choice's jail state.
+fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+    };
+    #[allow(deprecated)]
+    let choices = indices
+        .iter()
+        .map(|index| ChatChoiceStream {
+            index: *index,
+            delta: ChatCompletionStreamResponseDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: Some(FinishReason::Stop),
+            logprobs: None,
+        })
+        .collect();
+    NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices,
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
+        nvext: None,
+        llm_metrics: None,
+    }
+}
+
 /// Regression for DeepSeek V4 tool-continuation turns.
 ///
 /// The V4 formatter seeds `<think>` into the prompt after a merged tool result,
@@ -1618,6 +1658,88 @@ async fn tool_choice_matrix_force_reasoning_named_bare_json() {
         );
         assert_clean_tool_call(&case, &content, &tool_calls, "San Francisco");
     }
+}
+
+/// Regression (DIS-2381): with `n > 1`, each choice must decide bare-JSON vs.
+/// reasoning-first INDEPENDENTLY. Choice 0 streams bare guided JSON (bypass →
+/// tool call), choice 1 streams `reasoning</think>{json}` in the SAME chunks.
+/// The pre-fix stream made ONE global bypass decision from whichever choice
+/// emitted content first (choice 0's `[`) and applied it to every choice, so
+/// choice 1's reasoning + `</think>` leaked into `content` and its
+/// `reasoning_content` was lost. Per-choice state keeps the two isolated, and
+/// the different locations (SF vs. Boston) confirm no cross-contamination.
+#[tokio::test]
+async fn postprocessor_parsing_stream_multi_choice_isolates_guided_bypass_decision() {
+    let preprocessor = build_preprocessor(Some("deepseek_r1"), Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    // choice 0: bare guided JSON. choice 1: reasoning, then `</think>`, then JSON.
+    let json0 = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let json1 = r#"[{"name":"get_weather","parameters":{"location":"Boston"}}]"#;
+
+    let input_chunks = vec![
+        // First content chunk: choice 0 leads with `[` (decides bypass), choice 1
+        // leads with reasoning text (must decide NOT to bypass).
+        mock_multi_choice_content_chunk(&[(0, "["), (1, "Let me check.")]),
+        mock_multi_choice_content_chunk(&[(0, &json0[1..]), (1, "</think>")]),
+        mock_multi_choice_content_chunk(&[(1, json1)]),
+        mock_multi_choice_final_chunk(&[0, 1]),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    #[derive(Default)]
+    struct PerChoice {
+        reasoning: String,
+        content: String,
+        tool_calls: BTreeMap<u32, MergedToolCall>,
+    }
+    let mut by_choice: BTreeMap<u32, PerChoice> = BTreeMap::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            let entry = by_choice.entry(choice.index).or_default();
+            if let Some(r) = &choice.delta.reasoning_content {
+                entry.reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                entry.content.push_str(get_text(c));
+            }
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    entry.tool_calls.entry(tc.index).or_default().merge_from(tc);
+                }
+            }
+        }
+    }
+
+    let c0 = by_choice.get(&0).expect("choice 0 produced output");
+    assert!(
+        c0.reasoning.is_empty(),
+        "choice 0 (bare JSON) must not produce reasoning_content, got: {:?}",
+        c0.reasoning
+    );
+    let c0_calls: Vec<MergedToolCall> = c0.tool_calls.values().cloned().collect();
+    assert_clean_tool_call(
+        "choice 0 bare JSON",
+        &c0.content,
+        &c0_calls,
+        "San Francisco",
+    );
+
+    let c1 = by_choice.get(&1).expect("choice 1 produced output");
+    assert_eq!(
+        c1.reasoning, "Let me check.",
+        "choice 1 reasoning must be separated, not bypassed by choice 0's decision"
+    );
+    let c1_calls: Vec<MergedToolCall> = c1.tool_calls.values().cloned().collect();
+    assert_clean_tool_call("choice 1 reasoning-first", &c1.content, &c1_calls, "Boston");
 }
 
 /// Per-request thinking disablement must retain the old required-tool behavior
