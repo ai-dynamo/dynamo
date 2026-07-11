@@ -4,15 +4,15 @@
 
 set -euo pipefail
 
-readonly EXPECTED_BASE_COMMIT=2c17d33f4291a55b447317640c81eb61077b1b00
-readonly EXPECTED_BASE_DIGEST=sha256:5bda7078b1bb17f74d369e3ded63115a77d5ea5eeb9eab6ca9a52d108f9a262d
-readonly EXPECTED_AMD64_DIGEST=sha256:1ebb205a272a55abb60b09ecbf2adc63831ef2377910afd527478de720788cd8
+readonly EXPECTED_BASE_COMMIT=95ed0feaa5cd7fb16d72c53ce04950aaf07c4698
+readonly EXPECTED_BASE_DIGEST=sha256:a671d5fcda70fe9ac6f245f9780821de459fb4ee22c018fd07a0f10a55279bf9
+readonly EXPECTED_AMD64_DIGEST=sha256:caafca24ae94171e2ece6610c28fde9157beb3ce6ee9f411a951dbd0af64ce0e
 readonly EXPECTED_VLLM_URL=https://github.com/galletas1712/vllm.git
-readonly EXPECTED_VLLM_REF=schwinns/snapshot-gms-nightly-2c17d33f-fi0615-20260710
-readonly EXPECTED_VLLM_HEAD=ec308a7178bc77dbc90c0673309dac0eb4e2959d
-readonly EXPECTED_FLASHINFER_URL=https://github.com/galletas1712/flashinfer.git
-readonly EXPECTED_FLASHINFER_REF=schwinns/flashinfer-v0615-mnnvl-inference-fix-20260710
-readonly EXPECTED_FLASHINFER_SHA=c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b
+readonly EXPECTED_VLLM_REF=schwinns/snapshot-gms-nightly-95ed0fea-fi0615-20260710
+readonly EXPECTED_VLLM_HEAD=422ad75b99364320a6cf0d4cbad4c9a4e48b615b
+readonly EXPECTED_FLASHINFER_URL=https://github.com/flashinfer-ai/flashinfer.git
+readonly EXPECTED_FLASHINFER_REF=refs/tags/nightly-v0.6.15-20260710
+readonly EXPECTED_FLASHINFER_SHA=f2f9646ec388d9f178b2fbda6ae0ec4246d8e7dc
 readonly EXPECTED_FLASHINFER_VERSION=0.6.15
 readonly PROVENANCE_FILE=/opt/dynamo/source-provenance.txt
 readonly OVERLAY_PROVENANCE_FILE=/opt/dynamo/vllm-overlay-provenance.txt
