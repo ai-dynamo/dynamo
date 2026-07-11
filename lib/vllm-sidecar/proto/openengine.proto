@@ -215,7 +215,7 @@ message GenerateRequest {
   // available through OpenEngine.
   string lora_name = 11;
 
-  // Higher values receive higher scheduling priority.
+  // Lower values receive earlier scheduling priority (vLLM convention).
   optional int32 priority = 12;
 
   // Optional request metadata for tracing/admission/routing.
@@ -275,6 +275,9 @@ message ResponseOptions {
   optional bool return_output_logprobs = 3;
   CandidateTokenSelection output_candidates = 4;
   optional uint32 prompt_logprob_start = 5;
+  // Controls decoding of generated text and logprob token strings. When
+  // omitted, engines use their default (normally true).
+  optional bool skip_special_tokens = 6;
 }
 
 message CandidateTokenSelection {

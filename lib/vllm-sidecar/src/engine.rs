@@ -874,7 +874,12 @@ fn native_generate_options(
 
 fn validate_native_sampling(sampling: &GenerateSamplingParams) -> Result<(), DynamoError> {
     let unsupported = [
-        ("flat_logprobs", sampling.flat_logprobs.is_some()),
+        ("flat_logprobs", sampling.flat_logprobs == Some(true)),
+        ("detokenize=false", sampling.detokenize == Some(false)),
+        (
+            "spaces_between_special_tokens=false",
+            sampling.spaces_between_special_tokens == Some(false),
+        ),
         ("logit_bias", sampling.logit_bias.is_some()),
         ("allowed_token_ids", sampling.allowed_token_ids.is_some()),
         ("bad_words", sampling.bad_words.is_some()),
@@ -1057,6 +1062,14 @@ fn build_native_stopping_options(
     is_prefill: bool,
 ) -> Option<pb::StoppingOptions> {
     let max_tokens = is_prefill.then_some(1).or(sampling.max_tokens);
+    // The prefill leg emits at most one token solely to complete KV handoff.
+    // Clamp the caller's minimum to that internal cap so a request that is
+    // valid for decode does not become min_tokens > max_tokens in prefill.
+    let min_tokens = if is_prefill {
+        sampling.min_tokens.map(|value| value.min(1))
+    } else {
+        sampling.min_tokens
+    };
     let mut conditions = Vec::new();
     if let Some(stop) = sampling.stop.as_ref() {
         let strings: &[String] = match stop {
@@ -1073,13 +1086,13 @@ fn build_native_stopping_options(
         }));
     }
     let has_options = max_tokens.is_some()
-        || sampling.min_tokens.is_some()
+        || min_tokens.is_some()
         || sampling.ignore_eos.is_some()
         || sampling.include_stop_str_in_output.is_some()
         || !conditions.is_empty();
     has_options.then_some(pb::StoppingOptions {
         max_tokens,
-        min_tokens: sampling.min_tokens,
+        min_tokens,
         conditions,
         ignore_eos: sampling.ignore_eos,
         include_stop_in_output: sampling.include_stop_str_in_output,
@@ -1131,13 +1144,17 @@ fn build_native_response_options(
     let prompt_candidates = native_candidate_selection(sampling.prompt_logprobs, None)?;
     let has_output = sampling.logprobs.is_some() || sampling.logprob_token_ids.is_some();
     let has_prompt = sampling.prompt_logprobs.is_some();
-    Ok((has_output || has_prompt).then_some(pb::ResponseOptions {
-        return_prompt_logprobs: has_prompt.then_some(true),
-        prompt_candidates,
-        return_output_logprobs: has_output.then_some(true),
-        output_candidates,
-        prompt_logprob_start: None,
-    }))
+    let has_decode_options = sampling.skip_special_tokens.is_some();
+    Ok(
+        (has_output || has_prompt || has_decode_options).then_some(pb::ResponseOptions {
+            return_prompt_logprobs: has_prompt.then_some(true),
+            prompt_candidates,
+            return_output_logprobs: has_output.then_some(true),
+            output_candidates,
+            prompt_logprob_start: None,
+            skip_special_tokens: sampling.skip_special_tokens,
+        }),
+    )
 }
 
 fn build_native_guided_decoding(
@@ -1207,16 +1224,30 @@ fn build_native_guided_decoding(
         .get("structural_tag")
         .filter(|value| !value.is_null())
     {
-        guides.push(pb::guided_decoding::Guide::StructuralTag(tag.to_string()));
-    }
-    if object
-        .get("json_object")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        guides.push(pb::guided_decoding::Guide::JsonObject(
-            pb::JsonObjectConstraint {},
+        guides.push(pb::guided_decoding::Guide::StructuralTag(
+            tag.as_str()
+                .ok_or_else(|| {
+                    client::invalid_arg("structured_outputs.structural_tag must be a string")
+                })?
+                .to_string(),
         ));
+    }
+    if let Some(value) = object.get("json_object").filter(|value| !value.is_null()) {
+        match value.as_bool() {
+            Some(true) => guides.push(pb::guided_decoding::Guide::JsonObject(
+                pb::JsonObjectConstraint {},
+            )),
+            Some(false) => {
+                return Err(client::invalid_arg(
+                    "structured_outputs.json_object must be true when set",
+                ));
+            }
+            None => {
+                return Err(client::invalid_arg(
+                    "structured_outputs.json_object must be a boolean",
+                ));
+            }
+        }
     }
     if guides.len() != 1 {
         return Err(client::invalid_arg(
@@ -1274,11 +1305,6 @@ fn validate_sampling_options(request: &PreprocessedRequest) -> Result<(), Dynamo
 }
 
 fn validate_output_options(request: &PreprocessedRequest) -> Result<(), DynamoError> {
-    if request.output_options.skip_special_tokens == Some(false) {
-        return Err(client::invalid_arg(
-            "OpenEngine v1 does not represent skip_special_tokens=false",
-        ));
-    }
     if request.output_options.return_tokens_as_token_ids == Some(true) {
         return Err(client::invalid_arg(
             "OpenEngine v1 does not represent return_tokens_as_token_ids=true",
@@ -1344,13 +1370,16 @@ fn top_n_selection(count: Option<u32>) -> Option<pb::CandidateTokenSelection> {
 
 fn build_response_options(request: &PreprocessedRequest) -> Option<pb::ResponseOptions> {
     let output = &request.output_options;
-    let has_options = output.logprobs.is_some() || output.prompt_logprobs.is_some();
+    let has_options = output.logprobs.is_some()
+        || output.prompt_logprobs.is_some()
+        || output.skip_special_tokens.is_some();
     has_options.then_some(pb::ResponseOptions {
         return_prompt_logprobs: output.prompt_logprobs.map(|_| true),
         prompt_candidates: top_n_selection(output.prompt_logprobs),
         return_output_logprobs: output.logprobs.map(|_| true),
         output_candidates: top_n_selection(output.logprobs),
         prompt_logprob_start: None,
+        skip_special_tokens: output.skip_special_tokens,
     })
 }
 

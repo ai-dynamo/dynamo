@@ -186,7 +186,7 @@ pub async fn verify_prime_rl(
     Ok(())
 }
 
-const OPENENGINE_SCHEMA_REVISION: u32 = 1;
+const OPENENGINE_SCHEMA_REVISION: u32 = 2;
 
 fn validate_schema(engine: &pb::EngineInfo) -> Result<(), DynamoError> {
     if engine.schema_revision < OPENENGINE_SCHEMA_REVISION

@@ -312,9 +312,9 @@ impl OpenEngine for FakeOpenEngine {
                 data_parallel_start_rank: Some(0),
             }),
             kv_connector: None,
-            schema_revision: 1,
+            schema_revision: 2,
             minimum_client_revision: 1,
-            schema_release: "openengine-test-r1".to_string(),
+            schema_release: "openengine-test-r2".to_string(),
         }))
     }
 
@@ -1439,6 +1439,7 @@ fn build_generate_request_uses_engine_native_worker_envelope() {
 
     let response = req.response.expect("response");
     assert_eq!(response.return_output_logprobs, Some(true));
+    assert_eq!(response.skip_special_tokens, Some(false));
     assert!(matches!(
         response
             .output_candidates
@@ -1450,6 +1451,93 @@ fn build_generate_request_uses_engine_native_worker_envelope() {
     assert_eq!(kv.cache_salt.as_deref(), Some("tenant-native"));
     assert_eq!(kv.bypass_prefix_cache, Some(true));
     assert_eq!(req.priority, Some(-4));
+}
+
+#[test]
+fn build_generate_request_normalizes_native_prefill_min_tokens() {
+    let mut input = request(None);
+    input.generate_request = Some(
+        serde_json::from_value(serde_json::json!({
+            "model": "fake-model",
+            "sampling_params": {"max_tokens": 17, "min_tokens": 7}
+        }))
+        .expect("valid worker envelope"),
+    );
+
+    let req = build_generate_request(&input, "request-native", true).unwrap();
+    let stopping = req.stopping.expect("stopping");
+    assert_eq!(stopping.max_tokens, Some(1));
+    assert_eq!(stopping.min_tokens, Some(1));
+}
+
+#[test]
+fn build_generate_request_accepts_only_representable_native_output_defaults() {
+    let native_request = |sampling_params| {
+        let mut input = request(None);
+        input.generate_request = Some(
+            serde_json::from_value(serde_json::json!({
+                "model": "fake-model",
+                "sampling_params": sampling_params
+            }))
+            .expect("valid worker envelope"),
+        );
+        input
+    };
+
+    assert!(
+        build_generate_request(
+            &native_request(serde_json::json!({
+                "flat_logprobs": false,
+                "detokenize": true,
+                "spaces_between_special_tokens": true
+            })),
+            "request-native",
+            false,
+        )
+        .is_ok()
+    );
+    for sampling_params in [
+        serde_json::json!({"flat_logprobs": true}),
+        serde_json::json!({"detokenize": false}),
+        serde_json::json!({"spaces_between_special_tokens": false}),
+    ] {
+        assert!(
+            build_generate_request(&native_request(sampling_params), "request-native", false,)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn build_generate_request_preserves_native_structural_tag_string() {
+    let mut input = request(None);
+    input.generate_request = Some(
+        serde_json::from_value(serde_json::json!({
+            "model": "fake-model",
+            "sampling_params": {
+                "structured_outputs": {"structural_tag": "<tool>\"quoted\"</tool>"}
+            }
+        }))
+        .expect("valid worker envelope"),
+    );
+
+    let req = build_generate_request(&input, "request-native", false).unwrap();
+    assert!(matches!(
+        req.guided.and_then(|guided| guided.guide),
+        Some(pb::guided_decoding::Guide::StructuralTag(tag))
+            if tag == "<tool>\"quoted\"</tool>"
+    ));
+
+    input
+        .generate_request
+        .as_mut()
+        .expect("native request")
+        .sampling_params
+        .insert(
+            "structured_outputs".to_string(),
+            serde_json::json!({"structural_tag": {"type": "object"}}),
+        );
+    assert!(build_generate_request(&input, "request-native", false).is_err());
 }
 
 #[test]
@@ -1495,7 +1583,8 @@ fn build_generate_request_rejects_native_cache_salt_routing_mismatch() {
 fn build_generate_request_rejects_unrepresentable_output_semantics() {
     let mut input = request(Some(12));
     input.output_options.skip_special_tokens = Some(false);
-    assert!(build_generate_request(&input, "req-special", false).is_err());
+    let request = build_generate_request(&input, "req-special", false).unwrap();
+    assert_eq!(request.response.unwrap().skip_special_tokens, Some(false));
 
     input.output_options.skip_special_tokens = Some(true);
     input.output_options.return_tokens_as_token_ids = Some(true);

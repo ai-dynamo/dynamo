@@ -28,6 +28,22 @@ use std::sync::{
 use std::task::{Context as TaskContext, Poll};
 use tokio::sync::Notify;
 
+#[test]
+fn token_id_logprob_selection_enables_response_logprobs() {
+    let sampling = GenerateSamplingParams {
+        logprob_token_ids: Some(vec![11, 22, 33]),
+        ..Default::default()
+    };
+    assert_eq!(requested_completion_logprobs(&sampling), Some(3));
+
+    let sampling = GenerateSamplingParams {
+        logprobs: Some(-1),
+        logprob_token_ids: Some(vec![11]),
+        ..Default::default()
+    };
+    assert_eq!(requested_completion_logprobs(&sampling), Some(-1));
+}
+
 #[derive(Debug)]
 struct CapturedGenerate {
     request: GenerateRequest,

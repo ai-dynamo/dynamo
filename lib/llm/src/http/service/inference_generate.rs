@@ -35,7 +35,8 @@ use crate::protocols::common::llm_backend::{LLMEngineOutput, TopLogprob};
 use crate::protocols::inference::generate::{
     GENERATE_PATH, GENERATE_ROUTING_HINTS_CONTEXT_KEY, GenerateChoiceLogprobs, GenerateLogprob,
     GenerateProtocolError, GenerateRequest, GenerateResponse, GenerateResponseChoice,
-    GenerateStreamResponse, GenerateStreamResponseChoice, GenerateTokenLogprob, GenerateTopLogprob,
+    GenerateSamplingParams, GenerateStreamResponse, GenerateStreamResponseChoice,
+    GenerateTokenLogprob, GenerateTopLogprob,
 };
 #[cfg(test)]
 use crate::protocols::inference::routed_experts::merge_routed_expert_payloads;
@@ -78,7 +79,7 @@ async fn handle_generate(
 
     let request_id = resolve_request_id(&headers, request.request_id.as_deref());
     request.request_id = Some(request_id.clone());
-    let requested_logprobs = request.sampling_params.logprobs;
+    let requested_logprobs = requested_completion_logprobs(&request.sampling_params);
     let expected_choices = request.sampling_params.n.unwrap_or(1);
     let streaming = request.stream;
     let include_usage = request
@@ -151,6 +152,15 @@ async fn handle_generate(
     connection_handle.disarm();
     let response = response?;
     Ok(Json(response).into_response())
+}
+
+fn requested_completion_logprobs(sampling: &GenerateSamplingParams) -> Option<i32> {
+    sampling.logprobs.or_else(|| {
+        sampling
+            .logprob_token_ids
+            .as_ref()
+            .map(|ids| i32::try_from(ids.len()).unwrap_or(i32::MAX))
+    })
 }
 
 #[derive(Serialize)]
