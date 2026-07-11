@@ -16,11 +16,13 @@ from __future__ import annotations
 import base64
 import functools
 import gc
+import hashlib
 import io
 import logging
 import os
 import time
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -28,6 +30,10 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import Preprocessed
 from examples.custom_encoder.qwen_vision_encoder import QwenVisionEncoderBackend
 
@@ -86,6 +92,7 @@ class Qwen3VLImageInputs:
 
     pixel_values: torch.Tensor
     image_grid_thw: torch.Tensor
+    content_digest: bytes | None = None
 
 
 @dataclass
@@ -157,20 +164,58 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
         )
     )
 
+    def __init__(self) -> None:
+        self._cached_preprocess = None
+        self._embedding_cache = None
+        self._embedding_cache_oversize = 0
+        self._embedding_cache_peak_bytes = 0
+        self._embedding_cache_coalesced = 0
+        self._processor = None
+        self._visual = None
+        self._graphs = {}
+        self._graph_pool = None
+        self._graph_grid_keys = frozenset()
+        self.tokenizer = None
+
     def build(self, model_id: str) -> None:
         """Load the public checkpoint, retain only its vision module, and warm it."""
+        self._cached_preprocess = None
+        self._embedding_cache = None
+        self._embedding_cache_oversize = 0
+        self._embedding_cache_peak_bytes = 0
+        self._embedding_cache_coalesced = 0
+        self._processor = None
+        self._visual = None
+        self._graphs = {}
+        self._graph_pool = None
+        self._graph_grid_keys = frozenset()
+        self.tokenizer = None
+        try:
+            self._build(model_id)
+        except BaseException:
+            self.close()
+            raise
+
+    def _build(self, model_id: str) -> None:
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         cache_size = int(os.environ.get("DYN_QWEN3_VL_PREPROCESS_CACHE_SIZE", "0"))
         self._configure_preprocess_cache(cache_size)
+        embedding_cache_bytes = self._parse_embedding_cache_capacity()
+        self._embedding_cache = (
+            MultimodalEmbeddingCacheManager(embedding_cache_bytes)
+            if embedding_cache_bytes
+            else None
+        )
         self._processor = AutoProcessor.from_pretrained(model_id)
         self.tokenizer = self._processor.tokenizer
 
         logger.info(
             "[Qwen3VLVisionEncoder] loading %s vision tower on %s "
-            "(preprocess_cache_size=%d)",
+            "(preprocess_cache_size=%d embedding_cache_bytes=%d)",
             model_id,
             self._device,
             cache_size,
+            embedding_cache_bytes,
         )
         full_model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_id,
@@ -229,7 +274,10 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
 
     def _preprocess_uncached(self, raw: str) -> Preprocessed[Qwen3VLImageInputs]:
         """Compute one read-only CPU input; optionally memoized by source string."""
-        item = self._process_image(self._load_image(raw))
+        image, content_digest = self._load_image(
+            raw, compute_digest=self._embedding_cache is not None
+        )
+        item = self._process_image(image, content_digest=content_digest)
         grid_key = self._grid_key(item)
         if self._graphs and grid_key not in self._graph_grid_keys:
             raise ValueError(
@@ -238,11 +286,14 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             )
         return Preprocessed(item=item, cost=1, bucket_key=grid_key)
 
-    def _process_image(self, image: Image.Image) -> Qwen3VLImageInputs:
+    def _process_image(
+        self, image: Image.Image, *, content_digest: bytes | None = None
+    ) -> Qwen3VLImageInputs:
         inputs = self._processor.image_processor(images=[image], return_tensors="pt")
         return Qwen3VLImageInputs(
             pixel_values=inputs["pixel_values"].contiguous(),
             image_grid_thw=inputs["image_grid_thw"].to(dtype=torch.long),
+            content_digest=content_digest,
         )
 
     @staticmethod
@@ -351,14 +402,141 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             raise ValueError(
                 f"batch size {len(items)} exceeds max_batch_cost={self.max_batch_cost}"
             )
+        if target_bucket is not None and len(items) > target_bucket:
+            raise ValueError(
+                f"batch size {len(items)} exceeds target bucket {target_bucket}"
+            )
         if getattr(self, "_visual", None) is None:
             raise RuntimeError(
                 "Qwen3VLVisionEncoder.forward_batch() called before build()"
             )
 
+        cache = getattr(self, "_embedding_cache", None)
+        if cache is None:
+            return self._forward_uncached(items, target_bucket)
+
+        outputs: list[torch.Tensor | None] = [None] * len(items)
+        pending: OrderedDict[str, tuple[Qwen3VLImageInputs, list[int]]] = OrderedDict()
+        uncached: list[tuple[Qwen3VLImageInputs, list[int]]] = []
+
+        for index, item in enumerate(items):
+            key = self._embedding_cache_key(item)
+            if key is None:
+                uncached.append((item, [index]))
+                continue
+            cached = cache.get(key)
+            if cached is not None:
+                outputs[index] = cached.tensor.clone()
+                continue
+            if key in pending:
+                pending[key][1].append(index)
+                self._embedding_cache_coalesced += 1
+            else:
+                pending[key] = (item, [index])
+
+        misses = list(pending.items())
+        misses.extend(("", value) for value in uncached)
+        if misses:
+            miss_items = [value[0] for _, value in misses]
+            miss_bucket = (
+                self._bucket_for_miss_count(len(miss_items))
+                if target_bucket is not None
+                else None
+            )
+            if (
+                target_bucket is not None
+                and miss_bucket is not None
+                and miss_bucket > target_bucket
+            ):
+                raise RuntimeError(
+                    f"cache miss bucket {miss_bucket} exceeds dispatched bucket "
+                    f"{target_bucket}"
+                )
+            miss_outputs = self._forward_uncached(miss_items, miss_bucket)
+            owned_outputs = self._validate_and_copy_embeddings(miss_items, miss_outputs)
+            for (key, (_, indices)), output, owned in zip(
+                misses, miss_outputs, owned_outputs
+            ):
+                if key:
+                    if not cache.set(key, CachedEmbedding(tensor=owned)):
+                        self._embedding_cache_oversize += 1
+                    self._embedding_cache_peak_bytes = max(
+                        self._embedding_cache_peak_bytes,
+                        cache.stats["current_bytes"],
+                    )
+                for index in indices:
+                    outputs[index] = output.clone() if key else output
+
+        if any(output is None for output in outputs):
+            raise RuntimeError("embedding cache scatter left an output unresolved")
+        return [output for output in outputs if output is not None]
+
+    def _forward_uncached(
+        self,
+        items: List[Qwen3VLImageInputs],
+        target_bucket: Optional[int],
+    ) -> List[torch.Tensor]:
         if target_bucket is not None:
             return self._forward_graph(items, target_bucket)
         return self._forward_eager(items)
+
+    def _bucket_for_miss_count(self, miss_count: int) -> Optional[int]:
+        if not self.buckets:
+            return None
+        for bucket in self.buckets:
+            if miss_count <= bucket:
+                return bucket
+        raise ValueError(
+            f"embedding cache miss count {miss_count} exceeds buckets {self.buckets}"
+        )
+
+    def _embedding_cache_key(self, item: Qwen3VLImageInputs) -> str | None:
+        if item.content_digest is None:
+            return None
+        grid = self._grid_key(item)
+        return f"{item.content_digest.hex()}:{grid[0]}:{grid[1]}:{grid[2]}"
+
+    def _validate_and_copy_embeddings(
+        self,
+        items: List[Qwen3VLImageInputs],
+        outputs: List[torch.Tensor],
+    ) -> List[torch.Tensor]:
+        if len(outputs) != len(items):
+            raise RuntimeError(
+                f"vision forward returned {len(outputs)} outputs for "
+                f"{len(items)} items"
+            )
+        owned: list[torch.Tensor] = []
+        hidden_size: int | None = None
+        merge_size = self._visual.spatial_merge_size
+        for item, output in zip(items, outputs):
+            expected_tokens = int(item.image_grid_thw.prod().item() // merge_size**2)
+            if (
+                output.device.type != "cpu"
+                or output.dtype != torch.bfloat16
+                or output.dim() != 2
+                or output.shape[0] != expected_tokens
+                or output.shape[1] < 1
+            ):
+                raise RuntimeError(
+                    "vision forward returned an invalid embedding: "
+                    f"shape={tuple(output.shape)} dtype={output.dtype} "
+                    f"device={output.device}; expected "
+                    f"({expected_tokens}, hidden) CPU bf16"
+                )
+            if hidden_size is None:
+                hidden_size = output.shape[1]
+            elif output.shape[1] != hidden_size:
+                raise RuntimeError(
+                    "vision forward returned inconsistent hidden sizes: "
+                    f"{hidden_size} and {output.shape[1]}"
+                )
+            owned.append(
+                output.detach()
+                .to(device="cpu", dtype=torch.bfloat16)
+                .clone(memory_format=torch.contiguous_format)
+            )
+        return owned
 
     def _forward_eager(self, items: List[Qwen3VLImageInputs]) -> List[torch.Tensor]:
         events = self._timing_events()
@@ -498,6 +676,29 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             )
             self._cached_preprocess.cache_clear()
         self._cached_preprocess = None
+        embedding_cache = getattr(self, "_embedding_cache", None)
+        if embedding_cache is not None:
+            stats = embedding_cache.stats
+            logger.info(
+                "[Qwen3VLVisionEncoder] embedding cache: "
+                "hits=%d misses=%d entries=%d current_bytes=%d "
+                "peak_bytes=%d capacity_bytes=%d evictions=%d "
+                "oversize=%d coalesced=%d hit_rate=%.4f",
+                stats["hits"],
+                stats["misses"],
+                stats["entries"],
+                stats["current_bytes"],
+                self._embedding_cache_peak_bytes,
+                stats["capacity_bytes"],
+                stats["evictions"],
+                self._embedding_cache_oversize,
+                self._embedding_cache_coalesced,
+                stats["hit_rate"],
+            )
+        self._embedding_cache = None
+        self._embedding_cache_oversize = 0
+        self._embedding_cache_peak_bytes = 0
+        self._embedding_cache_coalesced = 0
         self._visual = None
         self._processor = None
         self._graphs = {}
@@ -509,8 +710,27 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             torch.cuda.empty_cache()
 
     @staticmethod
-    def _load_image(source: str) -> Image.Image:
-        """Load an RGB image from a data URL, HTTP(S) URL, or local path."""
+    def _parse_embedding_cache_capacity() -> int:
+        raw = os.environ.get("DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES", str(1024**3))
+        try:
+            capacity = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                "DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES must be a nonnegative integer, "
+                f"got {raw!r}"
+            ) from exc
+        if capacity < 0:
+            raise ValueError(
+                "DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES must be a nonnegative integer, "
+                f"got {raw!r}"
+            )
+        return capacity
+
+    @staticmethod
+    def _load_image(
+        source: str, *, compute_digest: bool = True
+    ) -> tuple[Image.Image, bytes | None]:
+        """Load RGB pixels and hash the encoded bytes used to decode them."""
         if source.startswith("data:"):
             try:
                 header, payload = source.split(",", 1)
@@ -519,12 +739,12 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             if ";base64" not in header:
                 raise ValueError("only base64-encoded image data URLs are supported")
             raw = base64.b64decode(payload, validate=True)
-            with Image.open(io.BytesIO(raw)) as image:
-                return image.convert("RGB")
-        if source.startswith(("http://", "https://")):
+        elif source.startswith(("http://", "https://")):
             with urllib.request.urlopen(source, timeout=15) as response:  # nosec B310
                 raw = response.read()
-            with Image.open(io.BytesIO(raw)) as image:
-                return image.convert("RGB")
-        with Image.open(source) as image:
-            return image.convert("RGB")
+        else:
+            with open(source, "rb") as image_file:
+                raw = image_file.read()
+        digest = hashlib.sha256(raw).digest() if compute_digest else None
+        with Image.open(io.BytesIO(raw)) as image:
+            return image.convert("RGB"), digest

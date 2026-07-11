@@ -109,6 +109,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         self._name = name
         self._batcher: ThreadedMicroBatcher | None = None
         self._pool: ThreadPoolExecutor | None = None
+        self._load_started = False
 
     # ---- lifecycle ---------------------------------------------------------
 
@@ -120,8 +121,9 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         Single-shot: a second ``load()`` raises rather than orphaning the first
         batcher's (non-daemon) worker thread and model.
         """
-        if self._batcher is not None:
+        if self._load_started:
             raise RuntimeError("AsyncVisionEncoder.load() called twice")
+        self._load_started = True
         # Construct INSIDE the try so a later start()/build failure reaps the pool
         # via shutdown() (None-safe on the not-yet-assigned members). The batcher
         # is built before the pool so that a config it rejects (e.g. a backend
