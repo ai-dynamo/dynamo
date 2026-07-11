@@ -104,6 +104,19 @@ def test_request_cache_salt_precedence_and_empty_fallback():
     assert request_cache_salt({}) is None
 
 
+@pytest.mark.parametrize(
+    "request",
+    [
+        {"routing": {"cache_salt": 1}},
+        {"nvext": {"cache_salt": 1}},
+        {"extra_args": {"nvext": {"cache_salt": 1}}},
+    ],
+)
+def test_request_cache_salt_rejects_non_string_values(request):
+    with pytest.raises(ValueError, match="cache_salt must be a string"):
+        request_cache_salt(request)
+
+
 def test_cache_salt_kwargs_require_supported_engine():
     class NewEngine:
         async def async_generate(self, cache_salt=None):
@@ -113,10 +126,15 @@ def test_cache_salt_kwargs_require_supported_engine():
         async def async_generate(self, input_ids=None):
             pass
 
+    class UninspectableEngine:
+        async_generate = sys.getsizeof
+
     request = {"routing": {"cache_salt": "tenant-a"}}
     assert cache_salt_kwargs(NewEngine(), request) == {"cache_salt": "tenant-a"}
-    with pytest.raises(ValueError, match="Engine.async_generate accepts cache_salt"):
+    with pytest.raises(ValueError, match="expose an inspectable signature"):
         cache_salt_kwargs(OldEngine(), request)
+    with pytest.raises(ValueError, match="expose an inspectable signature"):
+        cache_salt_kwargs(UninspectableEngine(), request)
     assert cache_salt_kwargs(OldEngine(), {}) == {}
 
 

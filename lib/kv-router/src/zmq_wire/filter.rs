@@ -16,6 +16,8 @@ pub(super) struct BlockStoredMetadata {
 #[serde(untagged)]
 pub(super) enum BlockStoredPositionSeven {
     LoraName(String),
+    // SGLang emits this metadata only in its array-like positional wire form.
+    // Named/map events use the existing top-level `cache_salt` field instead.
     Metadata(BlockStoredMetadata),
 }
 

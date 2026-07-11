@@ -56,6 +56,11 @@ struct SglangBlockStoredMetadataFixture {
     cache_salt: &'static str,
 }
 
+#[derive(Serialize)]
+struct SglangBlockStoredOptionalMetadataFixture {
+    cache_salt: Option<&'static str>,
+}
+
 #[test]
 fn test_deserialize_sglang_cache_salt_metadata_at_position_seven() {
     let raw_event = (
@@ -110,6 +115,55 @@ fn test_sglang_metadata_takes_precedence_over_extra_keys_fallback() {
         panic!("expected BlockStored");
     };
     assert_eq!(cache_namespace.as_deref(), Some("tenant-a"));
+}
+
+#[test]
+fn test_sglang_metadata_without_cache_salt_uses_extra_keys_fallback() {
+    let raw_event = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Some(std::collections::BTreeMap::<String, String>::new()),
+        Some(vec![Some(vec!["dynamo-cache-salt:tenant-b"])]),
+    );
+    let encoded = to_vec(&raw_event).unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace.as_deref(), Some("tenant-b"));
+}
+
+#[test]
+fn test_sglang_null_cache_salt_metadata_remains_unsalted() {
+    let raw_event = (
+        "BlockStored",
+        vec![BlockHashValue::Unsigned(11)],
+        Option::<BlockHashValue>::None,
+        vec![10u32, 11],
+        2usize,
+        Option::<u64>::None,
+        Option::<String>::None,
+        Some(SglangBlockStoredOptionalMetadataFixture { cache_salt: None }),
+    );
+    let encoded = to_vec(&raw_event).unwrap();
+    let event: RawKvEvent = from_slice(&encoded).unwrap();
+
+    let RawKvEvent::BlockStored {
+        cache_namespace, ..
+    } = event
+    else {
+        panic!("expected BlockStored");
+    };
+    assert_eq!(cache_namespace, None);
 }
 
 #[test]

@@ -36,7 +36,7 @@ def cache_salt_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, str]
     kwargs = filter_supported_async_generate_kwargs(engine, {"cache_salt": cache_salt})
     if "cache_salt" not in kwargs:
         raise ValueError(
-            "cache_salt requires an SGLang version whose "
-            "Engine.async_generate accepts cache_salt"
+            "cache_salt requires Engine.async_generate to accept cache_salt "
+            "and expose an inspectable signature"
         )
     return kwargs
