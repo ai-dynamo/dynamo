@@ -81,6 +81,26 @@ one fresh batch allocation. This is safe for the current assembler, which copies
 them into `prompt_embeds`; callers must not mutate them or assume disjoint base
 storage.
 
+The CustomEncoder runtime uses immediate eager-drain by default. Graph backends
+can opt into an experimental bounded coalescing delay before server startup:
+
+```bash
+DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS=1 \
+    examples/custom_encoder/launch/agg_qwen3_vl.sh
+```
+
+Collection dispatches before the deadline when one compatible `bucket_key`
+group's summed cost reaches `max_batch_cost`; incompatible shapes never count
+toward each other's fullness. The delay starts when the actor dequeues the first
+item, so it does not bound time already spent behind an in-flight forward. It is
+a latency/throughput tradeoff and must be swept for the deployment's concurrency
+and shape distribution; it is not assumed to improve throughput. Nonzero values
+are rejected for backends without CUDA graph buckets.
+
+For this workload, a matched 1,000-request H100 sweep favored the zero-delay
+default at every tested concurrency: 4.095/7.813/14.257/24.315 req/s at
+concurrency 1/2/4/8, versus 4.094/7.708/14.152/24.144 req/s with a 1 ms delay.
+
 ## Timing and saturation sweep
 
 Start the topology with stage timing enabled and retain its append-only log:

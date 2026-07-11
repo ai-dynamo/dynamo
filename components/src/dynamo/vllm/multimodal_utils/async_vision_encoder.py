@@ -29,6 +29,7 @@ first request.
 from __future__ import annotations
 
 import asyncio
+import math
 from concurrent.futures import ThreadPoolExecutor
 from typing import Generic, List
 
@@ -61,6 +62,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         backend: The author-written ``VisionEncoderBackend``.
         preprocess_concurrency: Off-loop ``preprocess`` pool size; ``None`` ⇒ use
             the backend's value (default 0 ⇒ no pool / passthrough).
+        queue_wait_ms: Maximum intentional collection delay after the actor
+            dequeues the first item. Zero preserves immediate eager-drain.
         name: Base name for the actor thread / preprocess pool.
     """
 
@@ -69,6 +72,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         backend: VisionEncoderBackend[RawT, ItemT],
         *,
         preprocess_concurrency: int | None = None,
+        queue_wait_ms: float = 0.0,
         name: str = "vision-encoder",
     ) -> None:
         # The backend declares whether it needs off-loop preprocessing; the
@@ -82,6 +86,10 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         )
         if conc < 0:
             raise ValueError("preprocess_concurrency must be >= 0")
+        if not math.isfinite(queue_wait_ms) or queue_wait_ms < 0:
+            raise ValueError("queue_wait_ms must be finite and >= 0")
+        if queue_wait_ms > 0 and not backend.buckets:
+            raise ValueError("queue_wait_ms > 0 requires CUDA graph buckets")
         # Fail fast on the silent mismatch: an overridden preprocess that the
         # effective concurrency of 0 would skip forever.
         overrides_preprocess = (
@@ -97,6 +105,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             )
         self._backend = backend
         self._preprocess_concurrency = conc
+        self._queue_wait_ms = queue_wait_ms
         self._name = name
         self._batcher: ThreadedMicroBatcher | None = None
         self._pool: ThreadPoolExecutor | None = None
@@ -126,6 +135,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
                 on_start=lambda: self._backend.build(model_id),
                 on_stop=self._backend.close,
                 name=self._name,
+                max_wait_s=self._queue_wait_ms / 1000,
             )
             # No pool when concurrency is 0 — preprocess is skipped (passthrough).
             self._pool = (

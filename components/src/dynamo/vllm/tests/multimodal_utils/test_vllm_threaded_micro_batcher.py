@@ -15,7 +15,9 @@ caller, and the shutdown lifecycle behaves.
 """
 
 import asyncio
+import math
 import threading
+import time
 
 import pytest
 
@@ -156,23 +158,120 @@ async def test_eager_drain_pulls_all_queued_when_free():
     assert ["a", "b", "c"] in batches
 
 
+async def test_timed_hold_coalesces_an_arrival_after_first_item():
+    batches: list[list] = []
+
+    def fn(items):
+        batches.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, max_batch_cost=8, max_wait_s=0.2)
+    b.start()
+    try:
+        first = asyncio.create_task(b.submit(["a"]))
+        await asyncio.sleep(0.02)
+        second = asyncio.create_task(b.submit(["b"]))
+        assert await asyncio.gather(first, second) == [["a"], ["b"]]
+        assert batches == [["a", "b"]]
+    finally:
+        b.shutdown()
+
+
+async def test_timed_hold_releases_lone_item_at_deadline():
+    b = ThreadedMicroBatcher(_echo, max_wait_s=0.05)
+    b.start()
+    started = time.monotonic()
+    try:
+        assert await b.submit(["a"]) == ["a"]
+        elapsed = time.monotonic() - started
+        assert elapsed >= 0.04
+        assert elapsed < 0.5
+    finally:
+        b.shutdown()
+
+
+async def test_full_cost_dispatches_before_hold_deadline():
+    b = ThreadedMicroBatcher(_echo, max_batch_cost=2, max_wait_s=1.0)
+    b.start()
+    started = time.monotonic()
+    try:
+        assert await b.submit(["a", "b"], costs=[1, 1]) == ["a", "b"]
+        assert time.monotonic() - started < 0.5
+    finally:
+        b.shutdown()
+
+
+async def test_incompatible_costs_do_not_declare_collection_full():
+    batches: list[list] = []
+
+    def fn(items, target_bucket):
+        batches.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, max_batch_cost=2, buckets=(1, 2), max_wait_s=0.2)
+    b.start()
+    try:
+        first = asyncio.create_task(b.submit(["a1"], costs=[1], bucket_keys=["a"]))
+        await asyncio.sleep(0.02)
+        other = asyncio.create_task(b.submit(["b1"], costs=[1], bucket_keys=["b"]))
+        await asyncio.sleep(0.02)
+        partner = asyncio.create_task(b.submit(["a2"], costs=[1], bucket_keys=["a"]))
+        await asyncio.gather(first, other, partner)
+        assert ["a1", "a2"] in batches
+        assert ["b1"] in batches
+    finally:
+        b.shutdown()
+
+
+async def test_shutdown_interrupts_timed_collection_wait():
+    called = threading.Event()
+
+    def fn(items):
+        called.set()
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, max_wait_s=10.0)
+    b.start()
+    task = asyncio.create_task(b.submit(["a"]))
+    for _ in range(200):
+        with b._lock:
+            admitted = bool(b._live)
+        if admitted and b._queue.empty() and not task.done():
+            break
+        await asyncio.sleep(0.005)
+    assert admitted and b._queue.empty() and not task.done()
+
+    started = time.monotonic()
+    await asyncio.to_thread(b.shutdown)
+    assert time.monotonic() - started < 0.5
+    with pytest.raises(RuntimeError, match="shut down"):
+        await task
+    assert not called.is_set()
+
+
+@pytest.mark.parametrize("max_wait_s", [-1.0, math.inf, math.nan])
+def test_invalid_max_wait_is_rejected(max_wait_s):
+    with pytest.raises(ValueError, match="max_wait_s"):
+        ThreadedMicroBatcher(_echo, max_wait_s=max_wait_s)
+
+
 async def test_cost_budget_caps_each_batch():
     """costs ride on submit; with budget 5, batches never exceed summed cost 5.
 
-    Park the worker so [3, 3, 1] drain in one collect, deterministically
-    exercising the cost-split (3 | 3,1)."""
+    Park the worker so [3, 1, 3] drain in one collect, deterministically
+    exercising the cost-split (3,1 | 3)."""
     g = _Gate()
     b = ThreadedMicroBatcher(g.fn, max_batch_cost=5)
     b.start()
     try:
         gate = await g.park(b)
-        real = asyncio.ensure_future(b.submit([3, 3, 1], costs=[3, 3, 1]))
+        real = asyncio.ensure_future(b.submit([3, 1, 3], costs=[3, 1, 3]))
         await asyncio.sleep(0.05)  # let all three enqueue while the worker is parked
         g.release.set()
         await asyncio.gather(gate, real)
         assert all(sum(batch) <= 5 for batch in g.batches)
         assert sum(len(batch) for batch in g.batches) == 3
-        assert [3] in g.batches and [3, 1] in g.batches  # split actually happened
+        assert [3, 1] in g.batches and [3] in g.batches  # split actually happened
     finally:
         b.shutdown()
 
