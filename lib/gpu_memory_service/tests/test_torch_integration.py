@@ -82,6 +82,39 @@ class _TinyModule(torch.nn.Module):
         return torch.relu(y)
 
 
+class _RoutedExpertsLike(torch.nn.Module):
+    def __init__(self, tensor: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("_expert_map", tensor, persistent=False)
+
+    @property
+    def expert_map(self) -> torch.Tensor:
+        return self._expert_map
+
+
+class _AliasedRuntimeTensor(torch.nn.Module):
+    def __init__(self, tensor: torch.Tensor) -> None:
+        super().__init__()
+        self.indexer = _RoutedExpertsLike(tensor)
+        self.indexer.__dict__["duplicate_buffer_alias"] = tensor
+        self.indexer.tensor_list = [tensor]
+        self.indexer.tensor_tuple = (tensor,)
+        self.indexer.indexer_op = torch.nn.Module()
+        self.indexer.indexer_op.expert_map = tensor
+        self.helper = SimpleNamespace(expert_map=tensor)
+
+    def aliases(self) -> tuple[torch.Tensor, ...]:
+        return (
+            self.indexer._expert_map,
+            self.indexer.expert_map,
+            self.indexer.duplicate_buffer_alias,
+            self.indexer.tensor_list[0],
+            self.indexer.tensor_tuple[0],
+            self.indexer.indexer_op.expert_map,
+            self.helper.expert_map,
+        )
+
+
 @pytest.fixture
 def running_gms(tmp_path):
     socket_path = str(tmp_path / "gms.sock")
@@ -340,9 +373,8 @@ def test_deferred_gms_write_preserves_runtime_tensor_aliases(running_gms, monkey
     monkeypatch.setattr(model_loader, "_pending_retained_gms_tensors", [])
     monkeypatch.setattr(model_loader, "_last_imported_weights_bytes", 0)
     monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
-    model: torch.nn.Module | None = None
+    model: _AliasedRuntimeTensor | None = None
     original: torch.Tensor | None = None
-    replacement: torch.Tensor | None = None
     retained_gms_tensors: list[torch.Tensor] = []
     writer = get_or_create_gms_client_memory_manager(
         socket_path,
@@ -352,21 +384,14 @@ def test_deferred_gms_write_preserves_runtime_tensor_aliases(running_gms, monkey
     )
 
     try:
-        model = torch.nn.Module()
         original_values = torch.arange(8, device="cuda", dtype=torch.int32)
         with gms_use_mem_pool("weights", device=0):
             original = original_values.clone()
+        gms_ptr = original.data_ptr()
         unrelated = torch.full((8,), -1, device="cuda", dtype=torch.int32)
         unrelated_helper = SimpleNamespace(tensor=unrelated)
-
-        model.indexer = torch.nn.Module()
-        model.indexer.topk_indices_buffer = original
-        model.indexer.duplicate_buffer_alias = original
-        model.indexer.indexer_op = torch.nn.Module()
-        model.indexer.indexer_op.topk_indices_buffer = original
-        model.attention = torch.nn.Module()
-        model.attention.impl = SimpleNamespace(topk_indices_buffer=original)
-        model.attention.unrelated = unrelated_helper
+        model = _AliasedRuntimeTensor(original)
+        model.unrelated = unrelated_helper
 
         stats = prepare_gms_write(writer, model)
         rebound_bytes = rebind_nonparameter_tensors(
@@ -374,13 +399,28 @@ def test_deferred_gms_write_preserves_runtime_tensor_aliases(running_gms, monkey
             model,
             retain_gms_tensors=retained_gms_tensors,
         )
-        replacement = cast(
-            torch.Tensor,
-            model.indexer.indexer_op.topk_indices_buffer,
-        )
         assert rebound_bytes == original.numel() * original.element_size()
-        assert len(retained_gms_tensors) == 1
-        assert retained_gms_tensors[0] is original
+        holder = model.__dict__["_gms_rebound_tensor_owners"]
+        assert all(alias is original for alias in model.aliases())
+        assert original.data_ptr() != gms_ptr
+        assert len(retained_gms_tensors) == len(holder.tensors) == 1
+        assert retained_gms_tensors[0] is holder.tensors[0] is not original
+        assert retained_gms_tensors[0].data_ptr() == gms_ptr
+        assert model.unrelated is unrelated_helper
+        assert model.unrelated.tensor is unrelated
+        assert list(model.state_dict()) == []
+        del holder
+
+        repeated_retained: list[torch.Tensor] = []
+        assert (
+            rebind_nonparameter_tensors(
+                writer,
+                model,
+                retain_gms_tensors=repeated_retained,
+            )
+            == 0
+        )
+        assert repeated_retained == []
 
         model_loader._store_pending_gms_write(
             writer,
@@ -390,8 +430,6 @@ def test_deferred_gms_write_preserves_runtime_tensor_aliases(running_gms, monkey
         )
         assert model_loader.publish_pending_gms_write()
         retained_gms_tensors.clear()
-        assert replacement is not original
-        original = None
 
         writer.unmap_all_vas()
         writer.abort()
@@ -400,23 +438,26 @@ def test_deferred_gms_write_preserves_runtime_tensor_aliases(running_gms, monkey
         writer.connect(RequestedLockType.RO)
         writer.remap_all_vas()
 
-        assert replacement is model.indexer.topk_indices_buffer
-        assert replacement is model.indexer.duplicate_buffer_alias
-        assert replacement is model.attention.impl.topk_indices_buffer
-        assert model.attention.unrelated is unrelated_helper
-        assert model.attention.unrelated.tensor is unrelated
+        model.indexer.tensor_list[0].fill_(17)
+        for alias in model.aliases():
+            _assert_exact_tensor_equal(torch.full_like(original, 17), alias)
 
-        replacement.fill_(17)
-        _assert_exact_tensor_equal(
-            torch.full_like(replacement, 17),
-            cast(torch.Tensor, model.attention.impl.topk_indices_buffer),
-        )
+        reader_original = torch.empty_like(original, device="meta")
+        reader = _AliasedRuntimeTensor(reader_original)
+        reader_helper = reader.helper
+
+        materialize_module_from_gms(writer, reader, device_index=0)
+
+        assert all(alias is reader_original for alias in reader.aliases())
+        assert reader.helper is reader_helper
+        assert reader_original.is_cuda
+        assert reader_original.data_ptr() != gms_ptr
+        _assert_exact_tensor_equal(original_values, reader_original)
     finally:
         primary_failure = sys.exc_info()[0] is not None
         if model is not None:
             del model
         original = None
-        replacement = None
         retained_gms_tensors.clear()
         cleanup_error: BaseException | None = None
         try:
