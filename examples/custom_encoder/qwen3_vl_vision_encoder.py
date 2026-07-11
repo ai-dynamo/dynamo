@@ -17,6 +17,8 @@ import base64
 import gc
 import io
 import logging
+import os
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import List, Optional
@@ -31,6 +33,52 @@ from examples.custom_encoder.qwen_vision_encoder import QwenVisionEncoderBackend
 logger = logging.getLogger(__name__)
 
 
+def _parse_graph_buckets() -> tuple[int, ...]:
+    raw = os.environ.get("DYN_QWEN3_VL_GRAPH_BATCH_BUCKETS", "1,2,4,8")
+    try:
+        buckets = tuple(int(value) for value in raw.split(",") if value.strip())
+    except ValueError as exc:
+        raise ValueError(
+            "DYN_QWEN3_VL_GRAPH_BATCH_BUCKETS must be comma-separated integers"
+        ) from exc
+    if not buckets or tuple(sorted(set(buckets))) != buckets or buckets[0] < 1:
+        raise ValueError(
+            "DYN_QWEN3_VL_GRAPH_BATCH_BUCKETS must be strictly increasing "
+            f"positive integers, got {raw!r}"
+        )
+    return buckets
+
+
+def _parse_graph_image_sizes() -> tuple[tuple[int, int], ...]:
+    raw = os.environ.get("DYN_QWEN3_VL_GRAPH_IMAGE_SIZES", "299x299,500x500")
+    sizes: list[tuple[int, int]] = []
+    try:
+        for value in raw.split(","):
+            width, height = value.lower().split("x", 1)
+            sizes.append((int(width), int(height)))
+    except ValueError as exc:
+        raise ValueError(
+            "DYN_QWEN3_VL_GRAPH_IMAGE_SIZES must look like 299x299,500x500"
+        ) from exc
+    if not sizes or any(width < 1 or height < 1 for width, height in sizes):
+        raise ValueError(
+            "DYN_QWEN3_VL_GRAPH_IMAGE_SIZES must contain positive dimensions"
+        )
+    return tuple(sizes)
+
+
+_GRAPH_BATCH_BUCKETS = _parse_graph_buckets()
+_GRAPH_IMAGE_SIZES = _parse_graph_image_sizes()
+_DISABLE_CUDA_GRAPHS = os.environ.get(
+    "DYN_QWEN3_VL_DISABLE_CUDA_GRAPHS", ""
+).lower() in {"1", "true", "yes"}
+_TIMING_ENABLED = os.environ.get("DYN_CUSTOM_ENCODER_TIMING", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
 @dataclass(frozen=True)
 class Qwen3VLImageInputs:
     """CPU tensors produced by the Qwen3-VL image processor for one image."""
@@ -39,12 +87,73 @@ class Qwen3VLImageInputs:
     image_grid_thw: torch.Tensor
 
 
+@dataclass
+class _CapturedVisionGraph:
+    graph: torch.cuda.CUDAGraph
+    forward: torch.nn.Module
+    static_pixel_values: torch.Tensor
+    static_output: torch.Tensor
+    tokens_per_item: int
+
+
+class _StaticQwen3VLVisionForward(torch.nn.Module):
+    """Vision forward with grid-derived metadata fixed at capture time."""
+
+    def __init__(
+        self,
+        visual: torch.nn.Module,
+        grid_key: tuple[int, int, int],
+        batch_size: int,
+        device: torch.device,
+    ) -> None:
+        super().__init__()
+        self.visual = visual
+        grid_cpu = torch.tensor([grid_key] * batch_size, dtype=torch.long, device="cpu")
+        grid_device = grid_cpu.to(device)
+        with torch.inference_mode():
+            pos_embeds = visual.fast_pos_embed_interpolate(grid_device)
+            pos_embeds = pos_embeds.to(dtype=visual.dtype)
+            rotary_pos_emb = visual.rot_pos_emb(grid_device)
+            rotary_pos_emb = rotary_pos_emb.reshape(pos_embeds.shape[0], -1)
+            rotary = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+            cos, sin = rotary.cos(), rotary.sin()
+        cu_seqlens = torch.repeat_interleave(
+            grid_cpu[:, 1] * grid_cpu[:, 2], grid_cpu[:, 0]
+        ).cumsum(dim=0, dtype=torch.int32)
+        cu_seqlens = torch.nn.functional.pad(cu_seqlens, (1, 0), value=0)
+        self.register_buffer("pos_embeds", pos_embeds, persistent=False)
+        self.register_buffer("position_cos", cos, persistent=False)
+        self.register_buffer("position_sin", sin, persistent=False)
+        # HF's SDPA path converts these fixed splits to a Python list. Keeping the
+        # tensor on CPU avoids a forbidden device sync during CUDA graph capture.
+        self.register_buffer("cu_seqlens", cu_seqlens, persistent=False)
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.visual.patch_embed(pixel_values)
+        hidden_states = hidden_states + self.pos_embeds
+        position_embeddings = (self.position_cos, self.position_sin)
+        for block in self.visual.blocks:
+            hidden_states = block(
+                hidden_states,
+                cu_seqlens=self.cu_seqlens,
+                position_embeddings=position_embeddings,
+            )
+        # DeepStack mergers are intentionally omitted: the CustomEncoder contract
+        # currently consumes only the primary merger output.
+        return self.visual.merger(hidden_states)
+
+
 class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
     """Real Qwen3-VL ViT/projector behind Dynamo's custom encoder contract."""
 
     preprocess_concurrency = 4
-    max_batch_cost = 8
-    buckets = None
+    buckets = None if _DISABLE_CUDA_GRAPHS else _GRAPH_BATCH_BUCKETS
+    max_batch_cost = int(
+        os.environ.get(
+            "DYN_QWEN3_VL_MAX_BATCH_COST",
+            str(_GRAPH_BATCH_BUCKETS[-1]),
+        )
+    )
 
     def build(self, model_id: str) -> None:
         """Load the public checkpoint, retain only its vision module, and warm it."""
@@ -61,6 +170,7 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             model_id,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
+            attn_implementation="sdpa",
         )
         self._visual = full_model.model.visual.eval().to(self._device)
 
@@ -70,20 +180,39 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
         del full_model
         gc.collect()
 
-        warmup_image = Image.new("RGB", (500, 500), color=(127, 127, 127))
-        warmup_item = self._process_image(warmup_image)
-        outputs = self.forward_batch([warmup_item] * self.max_batch_cost)
-        del outputs, warmup_item
-        if self._device.type == "cuda":
-            torch.cuda.synchronize(self._device)
+        self._graphs: dict[tuple[tuple[int, int, int], int], _CapturedVisionGraph] = {}
+        self._graph_pool = torch.cuda.graph_pool_handle()
+        if self._device.type == "cuda" and self.buckets:
+            self._capture_cuda_graphs()
+        else:
+            warmup_image = Image.new("RGB", (500, 500), color=(127, 127, 127))
+            warmup_item = self._process_image(warmup_image)
+            outputs = self.forward_batch([warmup_item] * self.max_batch_cost)
+            del outputs, warmup_item
         logger.info(
-            "[Qwen3VLVisionEncoder] warmup complete: max_batch_cost=%d",
+            "[Qwen3VLVisionEncoder] warmup complete: buckets=%s "
+            "max_batch_cost=%d graphs=%d",
+            self.buckets,
             self.max_batch_cost,
+            len(self._graphs),
         )
 
     def preprocess(self, raw: str) -> Preprocessed[Qwen3VLImageInputs]:
         """Fetch/decode one image and run the CPU Qwen3-VL image processor."""
-        return Preprocessed(item=self._process_image(self._load_image(raw)), cost=1)
+        started = time.monotonic()
+        item = self._process_image(self._load_image(raw))
+        grid_key = self._grid_key(item)
+        if self._graphs and grid_key not in self._graph_grid_keys:
+            raise ValueError(
+                f"image grid {grid_key} has no captured CUDA graph; configure "
+                "DYN_QWEN3_VL_GRAPH_IMAGE_SIZES before startup"
+            )
+        if _TIMING_ENABLED:
+            logger.info(
+                "custom_encoder_timing stage=preprocess elapsed_ms=%.3f",
+                (time.monotonic() - started) * 1000,
+            )
+        return Preprocessed(item=item, cost=1, bucket_key=grid_key)
 
     def _process_image(self, image: Image.Image) -> Qwen3VLImageInputs:
         inputs = self._processor.image_processor(images=[image], return_tensors="pt")
@@ -92,34 +221,118 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             image_grid_thw=inputs["image_grid_thw"].to(dtype=torch.long),
         )
 
+    @staticmethod
+    def _grid_key(item: Qwen3VLImageInputs) -> tuple[int, int, int]:
+        if item.image_grid_thw.shape != (1, 3):
+            raise ValueError(
+                "Qwen3VLVisionEncoder expects one image per preprocessed item; "
+                f"got image_grid_thw shape {tuple(item.image_grid_thw.shape)}"
+            )
+        return tuple(int(value) for value in item.image_grid_thw[0].tolist())
+
+    def _capture_cuda_graphs(self) -> None:
+        free_before, _ = torch.cuda.mem_get_info(self._device)
+        templates: dict[tuple[int, int, int], Qwen3VLImageInputs] = {}
+        for width, height in _GRAPH_IMAGE_SIZES:
+            image = Image.new("RGB", (width, height), color=(127, 127, 127))
+            item = self._process_image(image)
+            templates.setdefault(self._grid_key(item), item)
+        self._graph_grid_keys = frozenset(templates)
+
+        self._graph_pool = None
+        for grid_key, item in templates.items():
+            patches_per_item = int(item.pixel_values.shape[0])
+            feature_size = int(item.pixel_values.shape[1])
+            tokens_per_item = (
+                grid_key[0]
+                * grid_key[1]
+                * grid_key[2]
+                // self._visual.spatial_merge_size**2
+            )
+            for bucket in reversed(self.buckets):
+                static_pixel_values = torch.zeros(
+                    (bucket * patches_per_item, feature_size),
+                    dtype=self._visual.dtype,
+                    device=self._device,
+                )
+                forward = _StaticQwen3VLVisionForward(
+                    self._visual, grid_key, bucket, self._device
+                ).eval()
+
+                warmup_stream = torch.cuda.Stream(device=self._device)
+                warmup_stream.wait_stream(torch.cuda.current_stream(self._device))
+                with torch.cuda.stream(warmup_stream), torch.inference_mode():
+                    for _ in range(2):
+                        warmup_output = forward(static_pixel_values)
+                torch.cuda.current_stream(self._device).wait_stream(warmup_stream)
+                torch.cuda.synchronize(self._device)
+                static_output = torch.empty_like(warmup_output)
+
+                graph = torch.cuda.CUDAGraph()
+                with (
+                    torch.inference_mode(),
+                    torch.cuda.graph(graph, pool=self._graph_pool),
+                ):
+                    graph_output = forward(static_pixel_values)
+                    static_output.copy_(graph_output)
+                self._graphs[(grid_key, bucket)] = _CapturedVisionGraph(
+                    graph=graph,
+                    forward=forward,
+                    static_pixel_values=static_pixel_values,
+                    static_output=static_output,
+                    tokens_per_item=tokens_per_item,
+                )
+                logger.info(
+                    "[Qwen3VLVisionEncoder] captured CUDA graph: "
+                    "grid=%s bucket=%d input_patches=%d output_tokens=%d",
+                    grid_key,
+                    bucket,
+                    bucket * patches_per_item,
+                    bucket * tokens_per_item,
+                )
+        torch.cuda.synchronize(self._device)
+        free_after, _ = torch.cuda.mem_get_info(self._device)
+        logger.info(
+            "[Qwen3VLVisionEncoder] CUDA graph capture complete: "
+            "grids=%s buckets=%s graphs=%d device_memory_delta_gib=%.3f",
+            sorted(templates),
+            self.buckets,
+            len(self._graphs),
+            (free_before - free_after) / (1024**3),
+        )
+
     def forward_batch(
         self,
         items: List[Qwen3VLImageInputs],
         target_bucket: Optional[int] = None,
     ) -> List[torch.Tensor]:
-        """Pack variable-resolution patches and run one eager vision forward."""
+        """Run one eager batch or replay a same-grid padded CUDA graph."""
         if not items:
             raise ValueError("forward_batch requires at least one image")
         if len(items) > self.max_batch_cost:
             raise ValueError(
                 f"batch size {len(items)} exceeds max_batch_cost={self.max_batch_cost}"
             )
-        if target_bucket is not None:
-            raise ValueError(
-                "Qwen3VLVisionEncoder is eager; target_bucket must be None"
-            )
         if getattr(self, "_visual", None) is None:
             raise RuntimeError(
                 "Qwen3VLVisionEncoder.forward_batch() called before build()"
             )
 
+        if target_bucket is not None:
+            return self._forward_graph(items, target_bucket)
+        return self._forward_eager(items)
+
+    def _forward_eager(self, items: List[Qwen3VLImageInputs]) -> List[torch.Tensor]:
+        events = self._timing_events()
+        if events:
+            events[0].record()
         pixel_values = torch.cat([item.pixel_values for item in items], dim=0).to(
-            device=self._device,
-            dtype=self._visual.dtype,
-            non_blocking=True,
+            device=self._device, dtype=self._visual.dtype, non_blocking=True
         )
         image_grid_thw_cpu = torch.cat([item.image_grid_thw for item in items], dim=0)
         image_grid_thw = image_grid_thw_cpu.to(self._device, non_blocking=True)
+        if events:
+            events[1].record()
         split_sizes = (
             image_grid_thw_cpu.prod(dim=-1) // self._visual.spatial_merge_size**2
         ).tolist()
@@ -134,11 +347,13 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
             if hasattr(visual_output, "pooler_output")
             else visual_output[0]
         )
-
+        if events:
+            events[2].record()
         outputs = [
             embed.to(dtype=torch.bfloat16).cpu().clone()
             for embed in torch.split(image_embeds, split_sizes)
         ]
+        self._log_cuda_timings(events, len(items), None, len(items))
         logger.debug(
             "[Qwen3VLVisionEncoder] forward_batch n=%d tokens=%s",
             len(items),
@@ -146,10 +361,92 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
         )
         return outputs
 
+    def _forward_graph(
+        self, items: List[Qwen3VLImageInputs], target_bucket: int
+    ) -> List[torch.Tensor]:
+        grid_keys = {self._grid_key(item) for item in items}
+        if len(grid_keys) != 1:
+            raise ValueError(
+                f"graph batch mixed incompatible image grids: {sorted(grid_keys)!r}"
+            )
+        grid_key = next(iter(grid_keys))
+        entry = getattr(self, "_graphs", {}).get((grid_key, target_bucket))
+        if entry is None:
+            raise ValueError(
+                "target_bucket has no captured Qwen3-VL CUDA graph for "
+                f"grid={grid_key}, bucket={target_bucket}; configure "
+                "DYN_QWEN3_VL_GRAPH_IMAGE_SIZES before startup"
+            )
+        if len(items) > target_bucket:
+            raise ValueError(
+                f"batch size {len(items)} exceeds target bucket {target_bucket}"
+            )
+
+        events = self._timing_events()
+        if events:
+            events[0].record()
+        pixel_values = torch.cat([item.pixel_values for item in items], dim=0)
+        entry.static_pixel_values[: pixel_values.shape[0]].copy_(
+            pixel_values, non_blocking=False
+        )
+        if events:
+            events[1].record()
+        entry.graph.replay()
+        if events:
+            events[2].record()
+        real_output = entry.static_output[: len(items) * entry.tokens_per_item]
+        outputs = [
+            embed.to(dtype=torch.bfloat16).cpu().clone()
+            for embed in torch.split(real_output, entry.tokens_per_item)
+        ]
+        self._log_cuda_timings(events, len(items), target_bucket, len(items))
+        logger.info(
+            "[Qwen3VLVisionEncoder] replayed CUDA graph: "
+            "grid=%s actual_batch=%d bucket=%d",
+            grid_key,
+            len(items),
+            target_bucket,
+        )
+        return outputs
+
+    def _timing_events(self) -> Optional[list[torch.cuda.Event]]:
+        if not _TIMING_ENABLED or self._device.type != "cuda":
+            return None
+        return [torch.cuda.Event(enable_timing=True) for _ in range(4)]
+
+    @staticmethod
+    def _log_cuda_timings(
+        events: Optional[list[torch.cuda.Event]],
+        batch_size: int,
+        bucket: Optional[int],
+        cost: int,
+    ) -> None:
+        if not events:
+            return
+        events[3].record()
+        events[3].synchronize()
+        for stage, start, end in (
+            ("h2d", events[0], events[1]),
+            ("vit_forward", events[1], events[2]),
+            ("d2h", events[2], events[3]),
+        ):
+            logger.info(
+                "custom_encoder_timing stage=%s elapsed_ms=%.3f "
+                "batch_size=%d bucket=%s cost=%d",
+                stage,
+                start.elapsed_time(end),
+                batch_size,
+                bucket,
+                cost,
+            )
+
     def close(self) -> None:
         """Release model and processor references on the actor thread."""
         self._visual = None
         self._processor = None
+        self._graphs = {}
+        self._graph_pool = None
+        self._graph_grid_keys = frozenset()
         self.tokenizer = None
         gc.collect()
         if torch.cuda.is_available():

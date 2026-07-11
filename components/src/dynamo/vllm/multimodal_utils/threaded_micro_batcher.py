@@ -15,10 +15,11 @@ thread, coalescing items from concurrent async ``submit()`` calls into batches.
   queued and runs it as one ``fn`` call, then repeats (no timer) — a lone item
   runs the next loop, and batch size auto-scales with load. Pass ``max_batch_cost``
   to **micro-batch** instead: the drained items are split into batches whose
-  summed per-item ``cost`` stays within that budget (one-dimensional packing by
-  ``cost`` alone; item shape is never inspected).
+  summed per-item ``cost`` stays within that budget. Optional opaque
+  ``bucket_key`` values partition incompatible items before cost packing.
 
-The caller speaks in opaque items plus an optional per-item scalar ``cost``
+The caller speaks in opaque items plus optional per-item scalar ``cost`` and
+hashable ``bucket_key``
 (computed off-thread, see ``Preprocessed``), so all model knowledge stays in the
 caller. A request is finalised exactly once — its ``completion`` future resolves
 only after *all* its items are delivered or failed — with every request-state
@@ -33,15 +34,25 @@ through ``fn``) and applies no admission backpressure (it always accepts).
 from __future__ import annotations
 
 import asyncio
+import bisect
 import concurrent.futures
 import logging
+import os
 import queue
 import threading
+import time
+from collections import deque
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Generic, List, Optional, TypeVar
 
 logger = logging.getLogger(__name__)
+_TIMING_ENABLED = os.environ.get("DYN_CUSTOM_ENCODER_TIMING", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -79,6 +90,8 @@ class _Work(Generic[T]):
 
     item: T
     cost: int
+    bucket_key: Optional[Hashable]
+    enqueued_at: float
     request: _Request
     index: int
 
@@ -89,9 +102,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
 
     Args:
         fn: Batched work; one result per item, in order. Runs on the worker thread.
+            Called as ``fn(items)`` in eager mode and
+            ``fn(items, target_bucket)`` when graph buckets are configured.
         max_batch_cost: Max summed ``cost`` of a single ``fn`` batch (>= 1).
             ``None`` (default) ⇒ **pass-through**: no cap — the whole drained set
             runs as one ``fn`` call (``cost`` ignored).
+        buckets: Optional strictly-increasing captured cost rungs. The largest
+            rung must equal ``max_batch_cost``.
         on_start: Optional callable run once on the worker thread before serving
             (model build / warmup); its failure surfaces from ``start()``.
         on_stop: Optional callable run once on the worker thread at teardown (after
@@ -103,9 +120,10 @@ class ThreadedMicroBatcher(Generic[T, R]):
 
     def __init__(
         self,
-        fn: Callable[[List[T]], List[R]],
+        fn: Callable[..., List[R]],
         *,
         max_batch_cost: Optional[int] = None,
+        buckets: Optional[Sequence[int]] = None,
         on_start: Optional[Callable[[], None]] = None,
         on_stop: Optional[Callable[[], None]] = None,
         name: str = "micro-batcher",
@@ -113,8 +131,29 @@ class ThreadedMicroBatcher(Generic[T, R]):
     ) -> None:
         if max_batch_cost is not None and max_batch_cost < 1:
             raise ValueError("max_batch_cost must be >= 1 (or None for pass-through)")
+        graph_buckets = tuple(buckets or ())
+        if graph_buckets:
+            if max_batch_cost is None:
+                raise ValueError("buckets require max_batch_cost")
+            if any(
+                not isinstance(bucket, int) or isinstance(bucket, bool) or bucket < 1
+                for bucket in graph_buckets
+            ):
+                raise ValueError(
+                    f"buckets must be positive ints, got {graph_buckets!r}"
+                )
+            if tuple(sorted(set(graph_buckets))) != graph_buckets:
+                raise ValueError(
+                    f"buckets must be strictly increasing, got {graph_buckets!r}"
+                )
+            if graph_buckets[-1] != max_batch_cost:
+                raise ValueError(
+                    "largest bucket must equal max_batch_cost; "
+                    f"got buckets={graph_buckets!r}, max_batch_cost={max_batch_cost}"
+                )
         self._fn = fn
         self._max_batch_cost = max_batch_cost
+        self._buckets = graph_buckets
         self._on_start = on_start
         self._on_stop = on_stop
         self._name = name
@@ -181,13 +220,14 @@ class ThreadedMicroBatcher(Generic[T, R]):
         self,
         items: List[T],
         costs: Optional[List[int]] = None,
+        bucket_keys: Optional[List[Optional[Hashable]]] = None,
     ) -> List[R]:
         """Submit a group of items; await one result per item, in order.
 
         ``costs`` is computed off-thread by the caller (see ``Preprocessed``);
         when omitted it defaults to ``1`` per item (plain count-based batching).
-        Batching is one-dimensional — the batcher packs by ``cost`` alone and
-        never inspects item shape.
+        Within each opaque ``bucket_key``, batching is one-dimensional — the
+        batcher packs by ``cost`` and never inspects item shape.
 
         TODO: not cancel-aware. Cancelling the await abandons the result, but the
         items still run through ``fn`` and admission frees only when they finish.
@@ -208,13 +248,26 @@ class ThreadedMicroBatcher(Generic[T, R]):
                     f"item cost {c} exceeds max_batch_cost {self._max_batch_cost}; "
                     "it has no batch it can fit"
                 )
+        if bucket_keys is None:
+            bucket_keys = [None] * len(items)
+        elif len(bucket_keys) != len(items):
+            raise ValueError(
+                f"bucket_keys has {len(bucket_keys)} entries for {len(items)} items"
+            )
+        for key in bucket_keys:
+            try:
+                hash(key)
+            except TypeError as exc:
+                raise ValueError(f"bucket_key must be hashable, got {key!r}") from exc
         request: _Request = _Request(
             completion=concurrent.futures.Future(),
             results=[None] * len(items),
             remaining=len(items),
         )
+        enqueued_at = time.monotonic()
         works = [
-            _Work(item, c, request, i) for i, (item, c) in enumerate(zip(items, costs))
+            _Work(item, cost, key, enqueued_at, request, index)
+            for index, (item, cost, key) in enumerate(zip(items, costs, bucket_keys))
         ]
         # State check + admission + queue-commit under one lock so a concurrent
         # shutdown() cannot strand the request and capacity cannot leak.
@@ -326,7 +379,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
         return works
 
     def _dispatch(self, works: List[_Work]) -> None:
-        """Split live items by cost budget, run ``fn`` (one-dimensional packing).
+        """Partition by opaque key, split by cost, then run ``fn``.
 
         Tombstoned (failed / done) items are dropped before batching —
         an already-failed request never reaches ``fn``."""
@@ -338,20 +391,35 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 live.append(work)
         if not live:
             return
+        groups: dict[Optional[Hashable], deque[_Work]] = {}
+        for work in live:
+            groups.setdefault(work.bucket_key, deque()).append(work)
+        # One batch per key per round bounds cross-key overtaking. The first-seen
+        # key starts each round, but cannot run all of its batches before a rare
+        # compatible key gets service.
+        while groups:
+            for key in list(groups):
+                group = groups[key]
+                self._dispatch_group(group)
+                if not group:
+                    del groups[key]
+
+    def _dispatch_group(self, works: deque[_Work]) -> None:
+        """Cost-pack and run at most one batch from a compatible group."""
         if self._max_batch_cost is None:
-            # Pass-through: no cost cap — the whole drained set is one batch.
-            self._run_batch(live)
+            # Pass-through: no cost cap — the whole compatible group is one batch.
+            self._run_batch(list(works))
+            works.clear()
             return
         batch: List[_Work] = []
         batch_cost = 0
-        for work in live:
+        while works:
+            work = works[0]
             if batch and batch_cost + work.cost > self._max_batch_cost:
-                self._run_batch(batch)
-                batch, batch_cost = [], 0
-            batch.append(work)
+                break
+            batch.append(works.popleft())
             batch_cost += work.cost
-        # `batch` always holds at least the final work here (live is non-empty and
-        # every work is appended after any mid-loop flush), so flush unconditionally.
+        # Every item is individually <= max_batch_cost, so batch is non-empty.
         self._run_batch(batch)
 
     def _run_batch(self, batch: List[_Work]) -> None:
@@ -379,11 +447,38 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 )
             return
         items = [w.item for w in runnable]
+        actual_cost = sum(w.cost for w in runnable)
+        target_bucket = None
+        if self._buckets:
+            bucket_index = bisect.bisect_left(self._buckets, actual_cost)
+            if bucket_index == len(self._buckets):
+                raise RuntimeError(
+                    f"no graph bucket fits batch cost {actual_cost}: {self._buckets!r}"
+                )
+            target_bucket = self._buckets[bucket_index]
+            logger.info(
+                "custom_encoder_graph selected_bucket=%d actual_cost=%d batch_size=%d",
+                target_bucket,
+                actual_cost,
+                len(items),
+            )
+        if _TIMING_ENABLED:
+            now = time.monotonic()
+            for work in runnable:
+                logger.info(
+                    "custom_encoder_timing stage=queue_wait elapsed_ms=%.3f "
+                    "batch_size=%d bucket=%s cost=%d",
+                    (now - work.enqueued_at) * 1000,
+                    len(items),
+                    target_bucket,
+                    actual_cost,
+                )
         try:
-            results = self._fn(items)
-        except (
-            BaseException
-        ) as exc:  # noqa: BLE001 — a bad batch must not hang awaiters
+            if target_bucket is None:
+                results = self._fn(items)
+            else:
+                results = self._fn(items, target_bucket)
+        except BaseException as exc:  # noqa: BLE001 — a bad batch must not hang awaiters
             for work in runnable:
                 self._consume(work, error=exc)
             return

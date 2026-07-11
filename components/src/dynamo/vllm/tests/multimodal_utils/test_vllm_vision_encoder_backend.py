@@ -3,8 +3,8 @@
 
 """Unit tests for dynamo.vllm.multimodal_utils.vision_encoder_backend.
 
-Pin the author-facing contract surface: the ``Preprocessed`` carrier (item +
-scalar cost, no bucket_key), the hardcoded ``image_token_id`` attribute, the
+Pin the author-facing contract surface: the ``Preprocessed`` carrier (item,
+scalar cost, and optional graph-compatibility key), the hardcoded ``image_token_id`` attribute, the
 no-device ``build`` signature, and that the ABC cannot be instantiated without
 the required methods.
 """
@@ -31,8 +31,7 @@ class _MinimalBackend(VisionEncoderBackend):
 
     image_token_id = 151655
 
-    def build(self, model_id):
-        ...
+    def build(self, model_id): ...
 
     def preprocess(self, raw):
         return Preprocessed(item=raw, cost=1)
@@ -47,8 +46,7 @@ class _PassthroughBackend(VisionEncoderBackend):
 
     image_token_id = 151655
 
-    def build(self, model_id):
-        ...
+    def build(self, model_id): ...
 
     def forward_batch(self, items, target_bucket=None):
         return [torch.zeros(1, 1) for _ in items]
@@ -66,9 +64,14 @@ def test_preprocessed_cost_defaults_to_1():
     assert Preprocessed(item="x").cost == 1
 
 
-def test_preprocessed_has_no_bucket_key():
-    # Batching is one-dimensional (scalar cost only) — there is no bucket_key.
-    assert not hasattr(Preprocessed(item="x"), "bucket_key")
+def test_preprocessed_bucket_key_is_optional_and_hashable():
+    assert Preprocessed(item="x").bucket_key is None
+    assert Preprocessed(item="x", bucket_key=("image", 1, 18, 18)).bucket_key == (
+        "image",
+        1,
+        18,
+        18,
+    )
 
 
 def test_abc_cannot_be_instantiated():

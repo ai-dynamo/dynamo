@@ -122,6 +122,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             self._batcher = ThreadedMicroBatcher(
                 self._backend.forward_batch,
                 max_batch_cost=self._backend.max_batch_cost,
+                buckets=self._backend.buckets,
                 on_start=lambda: self._backend.build(model_id),
                 on_stop=self._backend.close,
                 name=self._name,
@@ -195,7 +196,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         preprocessed: List[Preprocessed] = settled  # type: ignore[assignment]
         items = [p.item for p in preprocessed]
         costs = [p.cost for p in preprocessed]
-        return await self._batcher.submit(items, costs)
+        bucket_keys = [p.bucket_key for p in preprocessed]
+        return await self._batcher.submit(items, costs, bucket_keys)
 
     def shutdown(self) -> None:
         """Stop the actor thread (running ``backend.close`` on it) and the

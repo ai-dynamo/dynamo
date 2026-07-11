@@ -9,8 +9,9 @@ coalesce into cost-bounded batches up to max_batch_cost (or pass-through when
 None), eager-drain pulls all queued work when free, errors reach every awaiting
 caller, and the shutdown lifecycle behaves.
 
-``fn`` is ``fn(items)``; ``cost`` is a precomputed scalar that rides on
-``submit(items, costs)`` (one-dimensional packing — no bucket_key, no ladder).
+``fn`` is ``fn(items)`` in eager mode and
+``fn(items, target_bucket)`` in graph mode. ``cost`` and optional opaque
+``bucket_key`` values ride on ``submit``.
 """
 
 import asyncio
@@ -174,6 +175,125 @@ async def test_cost_budget_caps_each_batch():
         assert [3] in g.batches and [3, 1] in g.batches  # split actually happened
     finally:
         b.shutdown()
+
+
+async def test_graph_mode_rounds_cost_to_smallest_bucket():
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[tuple[list, int]] = []
+
+    def fn(items, target_bucket):
+        if items == ["gate"]:
+            entered.set()
+            release.wait(timeout=5.0)
+        else:
+            calls.append((list(items), target_bucket))
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, max_batch_cost=8, buckets=(1, 2, 4, 8))
+    b.start()
+    try:
+        gate = asyncio.ensure_future(b.submit(["gate"]))
+        for _ in range(200):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set()
+        real = asyncio.ensure_future(b.submit(["a", "b", "c"]))
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.gather(gate, real)
+        assert calls == [(["a", "b", "c"], 4)]
+    finally:
+        b.shutdown()
+
+
+async def test_bucket_keys_partition_graph_batches_and_preserve_results():
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[tuple[list, int]] = []
+
+    def fn(items, target_bucket):
+        if items == ["gate"]:
+            entered.set()
+            release.wait(timeout=5.0)
+        else:
+            calls.append((list(items), target_bucket))
+        return [f"result:{item}" for item in items]
+
+    b = ThreadedMicroBatcher(fn, max_batch_cost=8, buckets=(1, 2, 4, 8))
+    b.start()
+    try:
+        gate = asyncio.ensure_future(b.submit(["gate"]))
+        for _ in range(200):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set()
+        real = asyncio.ensure_future(
+            b.submit(
+                ["a1", "b1", "a2"],
+                bucket_keys=["grid-a", "grid-b", "grid-a"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        release.set()
+        _, results = await asyncio.gather(gate, real)
+        assert calls == [(["a1", "a2"], 2), (["b1"], 1)]
+        assert results == ["result:a1", "result:b1", "result:a2"]
+    finally:
+        b.shutdown()
+
+
+async def test_bucket_key_round_robin_bounds_cross_key_overtaking():
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[list] = []
+
+    def fn(items, target_bucket):
+        if items == ["gate"]:
+            entered.set()
+            release.wait(timeout=5.0)
+            return list(items)
+        calls.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, max_batch_cost=1, buckets=(1,))
+    b.start()
+    try:
+        gate = asyncio.ensure_future(b.submit(["gate"]))
+        for _ in range(200):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert entered.is_set()
+        real = asyncio.ensure_future(
+            b.submit(
+                ["a1", "b1", "a2", "a3"],
+                bucket_keys=["grid-a", "grid-b", "grid-a", "grid-a"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        release.set()
+        _, result = await asyncio.gather(gate, real)
+        assert result == ["a1", "b1", "a2", "a3"]
+        assert calls == [["a1"], ["b1"], ["a2"], ["a3"]]
+    finally:
+        b.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("max_batch_cost", "buckets", "message"),
+    [
+        (None, (1,), "require max_batch_cost"),
+        (8, (1, 4, 2, 8), "strictly increasing"),
+        (8, (1, 2, 4), "largest bucket"),
+        (8, (0, 8), "positive ints"),
+    ],
+)
+def test_graph_bucket_configuration_validation(max_batch_cost, buckets, message):
+    with pytest.raises(ValueError, match=message):
+        ThreadedMicroBatcher(_echo, max_batch_cost=max_batch_cost, buckets=buckets)
 
 
 async def test_max_batch_cost_none_is_passthrough():
@@ -451,9 +571,9 @@ def test_concurrent_start_starts_one_worker():
         # Winner is parked in on_start (state still NEW, _thread published). The
         # loser must already be rejected — the window a state-only guard misses.
         assert outcome_recorded.wait(timeout=5.0), "loser did not finish start()"
-        assert outcomes == [
-            "rejected"
-        ], f"loser not rejected while winner parked: {outcomes}"
+        assert outcomes == ["rejected"], (
+            f"loser not rejected while winner parked: {outcomes}"
+        )
     finally:
         release.set()
         t1.join()

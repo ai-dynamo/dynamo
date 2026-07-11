@@ -11,6 +11,7 @@ MODEL_NAME="${MODEL_NAME:-Qwen/Qwen3-VL-2B-Instruct}"
 SERVER_URL="${SERVER_URL:-http://localhost:8000}"
 CONCURRENCY="${CONCURRENCY:-8}"
 REQUEST_COUNT="${REQUEST_COUNT:-100}"
+WARMUP_REQUEST_COUNT="${WARMUP_REQUEST_COUNT:-2}"
 OSL="${OSL:-70}"
 INPUT_FILE="${INPUT_FILE:-$SCRIPT_DIR/.data/qwen3_vl_9image_100req.jsonl}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$REPO_ROOT/logs/qwen3_vl_custom_encoder/conc${CONCURRENCY}}"
@@ -28,7 +29,7 @@ aiperf profile \
     --url "$SERVER_URL" \
     --endpoint-type chat \
     --request-count "$REQUEST_COUNT" \
-    --warmup-request-count 2 \
+    --warmup-request-count "$WARMUP_REQUEST_COUNT" \
     --concurrency "$CONCURRENCY" \
     --osl "$OSL" \
     --extra-inputs ignore_eos:true \
