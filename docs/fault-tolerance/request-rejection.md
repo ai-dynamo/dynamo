@@ -68,9 +68,11 @@ python -m dynamo.frontend \
 ### Dynamic Configuration via API
 
 Set thresholds for a discovered model at runtime through the `/busy_threshold` endpoint. A numeric
-value immediately enables its corresponding rejection check. The endpoint does not enable
-`--router-mode kv` or `--router-track-output-blocks`; set those options when the frontend starts if
-your decode-block monitoring path requires them.
+value enables its corresponding rejection check. The update changes the stored threshold
+configuration only; the router re-evaluates which workers are busy when the next worker load or
+runtime-config update arrives, so a new threshold may take a short time to affect rejection
+decisions. The endpoint does not enable `--router-mode kv` or `--router-track-output-blocks`; set
+those options when the frontend starts if your decode-block monitoring path requires them.
 
 #### Set Thresholds
 
