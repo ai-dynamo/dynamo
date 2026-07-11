@@ -155,7 +155,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             resume_timeout_seconds = config.resume_timeout_seconds,
             session_retention_seconds = config.session_retention_seconds,
             scheduler_interval_seconds = config.scheduler_interval_seconds,
-            acting_token_weight = config.acting_token_weight,
             buffer_per_program = config.buffer_per_program,
             "ThunderAgent admission strategy configured"
         );
@@ -516,15 +515,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         expired.len()
     }
 
-    fn program_tokens(&self, program: &Program) -> usize {
-        let tokens = program.footprint();
-        if program.is_idle_resident() {
-            scale_tokens(tokens, self.config.acting_token_weight)
-        } else {
-            tokens
-        }
-    }
-
     fn worker_usage(&self) -> HashMap<WorkerWithDpRank, WorkerUsage> {
         let mut usage = HashMap::<WorkerWithDpRank, WorkerUsage>::new();
         for program in self.programs.values() {
@@ -532,8 +522,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 && let Some(worker) = program.assigned_worker
             {
                 let worker_usage = usage.entry(worker).or_default();
-                worker_usage
-                    .add_program(self.program_tokens(program), self.config.buffer_per_program);
+                worker_usage.add_program(program.footprint(), self.config.buffer_per_program);
             }
         }
         usage
@@ -631,7 +620,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             resumed += 1;
             let program = &self.programs[&session_id];
             let worker_usage = usage.entry(worker).or_default();
-            worker_usage.add_program(self.program_tokens(program), self.config.buffer_per_program);
+            worker_usage.add_program(program.footprint(), self.config.buffer_per_program);
             let updated = remaining - required;
             if updated > self.config.buffer_per_program {
                 backend_caps[position] = (worker, updated);
@@ -725,7 +714,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     let Some(program) = self.programs.get(session_id) else {
                         continue;
                     };
-                    let used = self.program_tokens(program);
+                    let used = program.footprint();
                     self.suspend_idle(session_id);
                     paused += 1;
                     let worker_usage = usage.entry(capacity.worker).or_default();

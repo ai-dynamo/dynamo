@@ -55,7 +55,7 @@ Only Running or IdleResident programs with an assigned worker contribute usage:
 normal usage = program tokens + buffer_per_program
 ```
 
-Running programs read their full logical context directly from the retained `RequestProgress` handle. The response path updates that handle with one relaxed atomic operation and sends no per-output actor event. Completion remains authoritative. IdleResident programs apply `acting_token_weight` during normal pressure and resume calculations.
+Running programs read their full logical context directly from the retained `RequestProgress` handle. The response path updates that handle with one relaxed atomic operation and sends no per-output actor event. Completion remains authoritative.
 
 This is a logical projection, not live engine or indexer residency.
 

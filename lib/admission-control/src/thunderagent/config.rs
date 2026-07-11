@@ -24,7 +24,6 @@ pub struct ThunderAgentConfig {
     pub resume_timeout_seconds: f64,
     pub session_retention_seconds: f64,
     pub scheduler_interval_seconds: f64,
-    pub acting_token_weight: f64,
     pub buffer_per_program: usize,
 }
 
@@ -37,7 +36,6 @@ impl Default for ThunderAgentConfig {
             resume_timeout_seconds: 1_800.0,
             session_retention_seconds: 1_800.0,
             scheduler_interval_seconds: 5.0,
-            acting_token_weight: 1.0,
             buffer_per_program: 100,
         }
     }
@@ -81,11 +79,6 @@ impl ThunderAgentConfig {
             self.scheduler_interval_seconds,
             "scheduler_interval_seconds must be a positive duration",
         )?;
-        if !self.acting_token_weight.is_finite() || self.acting_token_weight <= 0.0 {
-            return Err(ConfigError::Invalid(
-                "acting_token_weight must be finite and positive",
-            ));
-        }
         Ok(())
     }
 }
@@ -142,10 +135,6 @@ mod tests {
             },
             ThunderAgentConfig {
                 session_retention_seconds: 0.0,
-                ..Default::default()
-            },
-            ThunderAgentConfig {
-                acting_token_weight: 0.0,
                 ..Default::default()
             },
             ThunderAgentConfig {
