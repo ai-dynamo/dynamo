@@ -155,12 +155,11 @@ async fn handle_generate(
 }
 
 fn requested_completion_logprobs(sampling: &GenerateSamplingParams) -> Option<i32> {
-    sampling.logprobs.or_else(|| {
-        sampling
-            .logprob_token_ids
-            .as_ref()
-            .map(|ids| i32::try_from(ids.len()).unwrap_or(i32::MAX))
-    })
+    sampling
+        .logprob_token_ids
+        .as_ref()
+        .map(|ids| i32::try_from(ids.len().saturating_add(1)).unwrap_or(i32::MAX))
+        .or(sampling.logprobs)
 }
 
 #[derive(Serialize)]
@@ -972,9 +971,14 @@ fn build_token_logprob(
         };
     };
     let logprob = clamp_vllm_logprob(selected_candidate.logprob);
+    let candidate_limit = if requested_logprobs == -1 {
+        top.len()
+    } else {
+        usize::try_from(requested_logprobs.max(1)).expect("positive i32 fits usize")
+    };
     let top_logprobs = top
         .iter()
-        .take(usize::try_from(requested_logprobs.max(1)).expect("positive i32 fits usize"))
+        .take(candidate_limit)
         .map(|candidate| GenerateTopLogprob {
             bytes: None,
             token: format!("token_id:{}", candidate.token_id),

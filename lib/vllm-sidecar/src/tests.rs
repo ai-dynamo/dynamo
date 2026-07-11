@@ -1471,6 +1471,17 @@ fn build_generate_request_normalizes_native_prefill_min_tokens() {
 }
 
 #[test]
+fn build_generate_request_normalizes_canonical_prefill_min_tokens() {
+    let mut input = request(Some(17));
+    input.stop_conditions.min_tokens = Some(7);
+
+    let req = build_generate_request(&input, "request-canonical", true).unwrap();
+    let stopping = req.stopping.expect("stopping");
+    assert_eq!(stopping.max_tokens, Some(1));
+    assert_eq!(stopping.min_tokens, Some(1));
+}
+
+#[test]
 fn build_generate_request_accepts_only_representable_native_output_defaults() {
     let native_request = |sampling_params| {
         let mut input = request(None);

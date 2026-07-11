@@ -945,10 +945,11 @@ pub(crate) fn build_generate_request(
             seed,
             num_sequences: sampling.n.map(u32::from),
         };
-        let stopping = build_stopping_options(request, max_tokens)?.map(|mut stopping| {
-            stopping.conditions = canonical_stop_conditions(request);
-            stopping
-        });
+        let stopping =
+            build_stopping_options(request, max_tokens, is_prefill)?.map(|mut stopping| {
+                stopping.conditions = canonical_stop_conditions(request);
+                stopping
+            });
         (
             proto_sampling,
             stopping,
@@ -1316,6 +1317,7 @@ fn validate_output_options(request: &PreprocessedRequest) -> Result<(), DynamoEr
 fn build_stopping_options(
     request: &PreprocessedRequest,
     max_tokens: Option<u32>,
+    is_prefill: bool,
 ) -> Result<Option<pb::StoppingOptions>, DynamoError> {
     let stop = &request.stop_conditions;
     let has_visible_ids = stop
@@ -1347,15 +1349,20 @@ fn build_stopping_options(
     } else {
         request.sampling_options.include_stop_str_in_output
     };
+    let min_tokens = if is_prefill {
+        stop.min_tokens.map(|value| value.min(1))
+    } else {
+        stop.min_tokens
+    };
     let has_options = max_tokens.is_some()
-        || stop.min_tokens.is_some()
+        || min_tokens.is_some()
         || stop.ignore_eos.is_some()
         || include_stop_in_output.is_some()
         || has_visible_ids
         || has_hidden_conditions;
     Ok(has_options.then_some(pb::StoppingOptions {
         max_tokens,
-        min_tokens: stop.min_tokens,
+        min_tokens,
         conditions: Vec::new(),
         ignore_eos: stop.ignore_eos,
         include_stop_in_output,

@@ -34,14 +34,48 @@ fn token_id_logprob_selection_enables_response_logprobs() {
         logprob_token_ids: Some(vec![11, 22, 33]),
         ..Default::default()
     };
-    assert_eq!(requested_completion_logprobs(&sampling), Some(3));
+    assert_eq!(requested_completion_logprobs(&sampling), Some(4));
 
     let sampling = GenerateSamplingParams {
-        logprobs: Some(-1),
+        logprobs: Some(1),
         logprob_token_ids: Some(vec![11]),
         ..Default::default()
     };
-    assert_eq!(requested_completion_logprobs(&sampling), Some(-1));
+    assert_eq!(requested_completion_logprobs(&sampling), Some(2));
+}
+
+#[test]
+fn token_id_and_all_candidate_modes_do_not_truncate_logprobs() {
+    let candidates = [
+        TopLogprob {
+            rank: 1,
+            token_id: 42,
+            token: None,
+            logprob: -0.1,
+            bytes: None,
+        },
+        TopLogprob {
+            rank: 2,
+            token_id: 11,
+            token: None,
+            logprob: -0.2,
+            bytes: None,
+        },
+        TopLogprob {
+            rank: 3,
+            token_id: 22,
+            token: None,
+            logprob: -0.3,
+            bytes: None,
+        },
+    ];
+
+    let token_ids = build_token_logprob(42, &candidates, 3);
+    assert_eq!(token_ids.top_logprobs.len(), 3);
+    assert_eq!(token_ids.top_logprobs[2].token, "token_id:22");
+
+    let all = build_token_logprob(42, &candidates, -1);
+    assert_eq!(all.top_logprobs.len(), 3);
 }
 
 #[derive(Debug)]
