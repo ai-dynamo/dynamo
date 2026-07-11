@@ -13,6 +13,7 @@ import pytest
 import torch
 from PIL import Image
 
+from dynamo.vllm.multimodal_utils.vision_encoder_backend import Preprocessed
 from examples.custom_encoder.qwen3_vl_vision_encoder import (
     Qwen3VLImageInputs,
     Qwen3VLVisionEncoder,
@@ -117,3 +118,37 @@ def test_load_image_accepts_local_and_base64_sources(tmp_path) -> None:
 def test_load_image_rejects_malformed_data_url() -> None:
     with pytest.raises(ValueError, match="missing comma"):
         Qwen3VLVisionEncoder._load_image("data:image/png;base64")
+
+
+def test_preprocess_cache_disabled_hit_and_lru_eviction():
+    encoder = Qwen3VLVisionEncoder()
+    calls: list[str] = []
+
+    def preprocess(raw: str):
+        calls.append(raw)
+        return Preprocessed(item=raw)
+
+    encoder._preprocess_uncached = preprocess  # type: ignore[method-assign]
+    encoder._configure_preprocess_cache(0)
+    assert encoder._cached_preprocess is None
+
+    encoder._configure_preprocess_cache(2)
+    cache = encoder._cached_preprocess
+    assert cache is not None
+    first = cache("image-a")
+    assert cache("image-a") is first
+    cache("image-b")
+    cache("image-a")  # make image-b the least-recently-used entry
+    cache("image-c")  # evicts least-recently-used image-b
+    cache("image-b")
+
+    assert calls == ["image-a", "image-b", "image-c", "image-b"]
+    assert cache.cache_info().hits == 2
+    assert cache.cache_info().misses == 4
+    assert cache.cache_info().currsize == 2
+
+
+def test_preprocess_cache_rejects_negative_capacity():
+    encoder = Qwen3VLVisionEncoder()
+    with pytest.raises(ValueError, match="must be >= 0"):
+        encoder._configure_preprocess_cache(-1)

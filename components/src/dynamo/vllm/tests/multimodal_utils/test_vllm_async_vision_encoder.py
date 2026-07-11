@@ -9,7 +9,9 @@ returns one tensor per raw; the preprocess barrier fails a request atomically
 a missing/invalid hardcoded image_token_id and reaps its thread.
 """
 
+import asyncio
 import threading
+from contextlib import suppress
 
 import pytest
 import torch
@@ -158,6 +160,54 @@ def test_shutdown_is_idempotent():
     assert enc._pool is None
 
 
+async def test_shutdown_waits_for_preprocess_before_backend_close():
+    class _BlockingPreprocess(_FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.preprocess_entered = threading.Event()
+            self.preprocess_release = threading.Event()
+            self.preprocess_active = False
+            self.close_overlapped_preprocess = False
+
+        def preprocess(self, raw):
+            self.preprocess_active = True
+            self.preprocess_entered.set()
+            self.preprocess_release.wait(timeout=5)
+            self.preprocess_active = False
+            return Preprocessed(item=raw, cost=1)
+
+        def close(self):
+            self.close_overlapped_preprocess = self.preprocess_active
+            super().close()
+
+    be = _BlockingPreprocess()
+    enc = AsyncVisionEncoder(be)
+    enc.load("m")
+    encode_task = asyncio.create_task(enc.encode(["image"]))
+    try:
+        for _ in range(200):
+            if be.preprocess_entered.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert be.preprocess_entered.is_set()
+
+        shutdown_task = asyncio.create_task(asyncio.to_thread(enc.shutdown))
+        await asyncio.sleep(0.05)
+        assert be.closed is False
+
+        be.preprocess_release.set()
+        await shutdown_task
+        with suppress(RuntimeError):
+            await encode_task
+        assert be.closed is True
+        assert be.close_overlapped_preprocess is False
+    finally:
+        be.preprocess_release.set()
+        if not encode_task.done():
+            encode_task.cancel()
+        enc.shutdown()
+
+
 def test_load_fails_fast_on_build_error_and_reaps_threads():
     class _BadBuild(_FakeBackend):
         def build(self, model_id):
@@ -172,7 +222,7 @@ def test_load_fails_fast_on_build_error_and_reaps_threads():
 
 def test_load_fails_fast_on_missing_image_token_id():
     class _NoTokenId(_FakeBackend):
-        image_token_id = None  # author forgot to hardcode it
+        image_token_id = None  # type: ignore[assignment]  # forgot to hardcode it
 
     enc = AsyncVisionEncoder(_NoTokenId())
     with pytest.raises(ValueError, match="image_token_id"):

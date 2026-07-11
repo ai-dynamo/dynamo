@@ -54,6 +54,33 @@ batch; dense 1-through-8 capture did not improve throughput enough to justify
 its additional graph memory. Re-benchmark if the workload or concurrency
 changes.
 
+H2D inputs use reusable pinned staging buffers, and each batch returns through
+one D2H copy before it is split into per-image CPU views. These are always
+enabled. If image sources are stable and repeat exactly, preprocessing can also
+be cached by source string:
+
+```bash
+DYN_QWEN3_VL_PREPROCESS_CACHE_SIZE=16 \
+    examples/custom_encoder/launch/agg_qwen3_vl.sh
+```
+
+The bounded cache stores decoded/patchified CPU tensors, not image embeddings.
+It is disabled by default because the same HTTP URL or local path can later
+refer to different bytes; enable it only when source-string identity is a valid
+freshness policy. Data URLs and immutable content-addressed URLs are natural
+candidates. Set the capacity at least as high as the expected working set (nine
+for this benchmark). Capacity bounds entries, not bytes: processed tensors and
+large source strings still consume host memory. Raw keys remain resident until
+eviction or shutdown, so do not use credential-bearing URLs as cache keys.
+Cached tensors are shared read-only values; concurrent misses may compute the
+same key more than once before one result is retained. Shutdown waits for active
+preprocessing before clearing the cache and logs final hit/miss counts.
+
+The per-image CPU tensors returned by `forward_batch` are read-only views into
+one fresh batch allocation. This is safe for the current assembler, which copies
+them into `prompt_embeds`; callers must not mutate them or assume disjoint base
+storage.
+
 ## Timing and saturation sweep
 
 Start the topology with stage timing enabled and retain its append-only log:

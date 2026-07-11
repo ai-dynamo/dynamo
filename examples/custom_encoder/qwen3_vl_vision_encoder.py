@@ -14,6 +14,7 @@ testing but does not claim numerical parity with native Qwen3-VL inference.
 from __future__ import annotations
 
 import base64
+import functools
 import gc
 import io
 import logging
@@ -91,6 +92,7 @@ class Qwen3VLImageInputs:
 class _CapturedVisionGraph:
     graph: torch.cuda.CUDAGraph
     forward: torch.nn.Module
+    host_pixel_values: torch.Tensor
     static_pixel_values: torch.Tensor
     static_output: torch.Tensor
     tokens_per_item: int
@@ -158,13 +160,17 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
     def build(self, model_id: str) -> None:
         """Load the public checkpoint, retain only its vision module, and warm it."""
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        cache_size = int(os.environ.get("DYN_QWEN3_VL_PREPROCESS_CACHE_SIZE", "0"))
+        self._configure_preprocess_cache(cache_size)
         self._processor = AutoProcessor.from_pretrained(model_id)
         self.tokenizer = self._processor.tokenizer
 
         logger.info(
-            "[Qwen3VLVisionEncoder] loading %s vision tower on %s",
+            "[Qwen3VLVisionEncoder] loading %s vision tower on %s "
+            "(preprocess_cache_size=%d)",
             model_id,
             self._device,
+            cache_size,
         )
         full_model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_id,
@@ -200,17 +206,35 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
     def preprocess(self, raw: str) -> Preprocessed[Qwen3VLImageInputs]:
         """Fetch/decode one image and run the CPU Qwen3-VL image processor."""
         started = time.monotonic()
+        result = (
+            self._cached_preprocess(raw)
+            if self._cached_preprocess is not None
+            else self._preprocess_uncached(raw)
+        )
+        if _TIMING_ENABLED:
+            logger.info(
+                "custom_encoder_timing stage=preprocess elapsed_ms=%.3f",
+                (time.monotonic() - started) * 1000,
+            )
+        return result
+
+    def _configure_preprocess_cache(self, cache_size: int) -> None:
+        if cache_size < 0:
+            raise ValueError("DYN_QWEN3_VL_PREPROCESS_CACHE_SIZE must be >= 0")
+        self._cached_preprocess = (
+            functools.lru_cache(maxsize=cache_size)(self._preprocess_uncached)
+            if cache_size
+            else None
+        )
+
+    def _preprocess_uncached(self, raw: str) -> Preprocessed[Qwen3VLImageInputs]:
+        """Compute one read-only CPU input; optionally memoized by source string."""
         item = self._process_image(self._load_image(raw))
         grid_key = self._grid_key(item)
         if self._graphs and grid_key not in self._graph_grid_keys:
             raise ValueError(
                 f"image grid {grid_key} has no captured CUDA graph; configure "
                 "DYN_QWEN3_VL_GRAPH_IMAGE_SIZES before startup"
-            )
-        if _TIMING_ENABLED:
-            logger.info(
-                "custom_encoder_timing stage=preprocess elapsed_ms=%.3f",
-                (time.monotonic() - started) * 1000,
             )
         return Preprocessed(item=item, cost=1, bucket_key=grid_key)
 
@@ -228,9 +252,13 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
                 "Qwen3VLVisionEncoder expects one image per preprocessed item; "
                 f"got image_grid_thw shape {tuple(item.image_grid_thw.shape)}"
             )
-        return tuple(int(value) for value in item.image_grid_thw[0].tolist())
+        temporal, height, width = item.image_grid_thw[0].tolist()
+        return int(temporal), int(height), int(width)
 
     def _capture_cuda_graphs(self) -> None:
+        if not self.buckets:
+            raise RuntimeError("CUDA graph capture requires non-empty buckets")
+        buckets = self.buckets
         free_before, _ = torch.cuda.mem_get_info(self._device)
         templates: dict[tuple[int, int, int], Qwen3VLImageInputs] = {}
         for width, height in _GRAPH_IMAGE_SIZES:
@@ -249,11 +277,20 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
                 * grid_key[2]
                 // self._visual.spatial_merge_size**2
             )
-            for bucket in reversed(self.buckets):
+            for bucket in reversed(buckets):
                 static_pixel_values = torch.zeros(
                     (bucket * patches_per_item, feature_size),
                     dtype=self._visual.dtype,
                     device=self._device,
+                )
+                # Reused pinned staging makes the following H2D copy genuinely
+                # asynchronous. ``torch.cat`` otherwise allocates pageable host
+                # memory, for which ``non_blocking=True`` cannot overlap the CPU.
+                host_pixel_values = torch.empty(
+                    (bucket * patches_per_item, feature_size),
+                    dtype=item.pixel_values.dtype,
+                    device="cpu",
+                    pin_memory=True,
                 )
                 forward = _StaticQwen3VLVisionForward(
                     self._visual, grid_key, bucket, self._device
@@ -278,6 +315,7 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
                 self._graphs[(grid_key, bucket)] = _CapturedVisionGraph(
                     graph=graph,
                     forward=forward,
+                    host_pixel_values=host_pixel_values,
                     static_pixel_values=static_pixel_values,
                     static_output=static_output,
                     tokens_per_item=tokens_per_item,
@@ -349,10 +387,12 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
         )
         if events:
             events[2].record()
-        outputs = [
-            embed.to(dtype=torch.bfloat16).cpu().clone()
-            for embed in torch.split(image_embeds, split_sizes)
-        ]
+        # One batched D2H copy avoids a synchronization and allocation per image.
+        # The returned splits are CPU views whose shared base owns independent
+        # storage, so a later encoder call cannot overwrite them. Treat the views
+        # as read-only: siblings intentionally alias that fresh base allocation.
+        host_embeds = image_embeds.to(dtype=torch.bfloat16).cpu()
+        outputs = list(torch.split(host_embeds, split_sizes))
         self._log_cuda_timings(events, len(items), None, len(items))
         logger.debug(
             "[Qwen3VLVisionEncoder] forward_batch n=%d tokens=%s",
@@ -385,9 +425,15 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
         events = self._timing_events()
         if events:
             events[0].record()
-        pixel_values = torch.cat([item.pixel_values for item in items], dim=0)
-        entry.static_pixel_values[: pixel_values.shape[0]].copy_(
-            pixel_values, non_blocking=False
+        input_rows = sum(item.pixel_values.shape[0] for item in items)
+        host_pixel_values = entry.host_pixel_values[:input_rows]
+        torch.cat(
+            [item.pixel_values for item in items],
+            dim=0,
+            out=host_pixel_values,
+        )
+        entry.static_pixel_values[:input_rows].copy_(
+            host_pixel_values, non_blocking=True
         )
         if events:
             events[1].record()
@@ -395,10 +441,8 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
         if events:
             events[2].record()
         real_output = entry.static_output[: len(items) * entry.tokens_per_item]
-        outputs = [
-            embed.to(dtype=torch.bfloat16).cpu().clone()
-            for embed in torch.split(real_output, entry.tokens_per_item)
-        ]
+        host_output = real_output.to(dtype=torch.bfloat16).cpu()
+        outputs = list(torch.split(host_output, entry.tokens_per_item))
         self._log_cuda_timings(events, len(items), target_bucket, len(items))
         logger.info(
             "[Qwen3VLVisionEncoder] replayed CUDA graph: "
@@ -442,6 +486,18 @@ class Qwen3VLVisionEncoder(QwenVisionEncoderBackend):
 
     def close(self) -> None:
         """Release model and processor references on the actor thread."""
+        if self._cached_preprocess is not None:
+            cache_info = self._cached_preprocess.cache_info()
+            logger.info(
+                "[Qwen3VLVisionEncoder] preprocess cache: "
+                "hits=%d misses=%d size=%d capacity=%d",
+                cache_info.hits,
+                cache_info.misses,
+                cache_info.currsize,
+                cache_info.maxsize,
+            )
+            self._cached_preprocess.cache_clear()
+        self._cached_preprocess = None
         self._visual = None
         self._processor = None
         self._graphs = {}
