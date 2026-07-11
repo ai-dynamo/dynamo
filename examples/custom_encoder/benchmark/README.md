@@ -201,16 +201,17 @@ request latency, process RSS, and GPU memory. This repeated-input workload
 intentionally measures a warm prefix-cache regime; it does not establish
 performance for unique prompts or cache misses.
 
-The five-repeat H100 reference run completed 40,000 measured requests with no
-errors and exact server-reported ISL 600 / OSL 70. Mean paired deltas for
-`sync-inproc` relative to `async-mp` were:
+The five-repeat local RTX 6000 Ada reference run completed 40,000 measured
+requests with no errors and exact server-reported ISL 600 / OSL 70. It used
+PR #11565 base commit `0d8d773e9a` and benchmark source commit `f12ff7106d`.
+Mean paired deltas for `sync-inproc` relative to `async-mp` were:
 
 | Concurrency | Request throughput | p99 latency | p99 TTFT | p99 ITL | Peak GPU memory |
 |---:|---:|---:|---:|---:|---:|
-| 1 | +0.25% | +0.23% | +0.70% | +0.15% | -7.34% |
-| 2 | +2.17% | -1.66% | -2.34% | -2.30% | -7.68% |
-| 4 | +1.64% | -2.81% | -25.56% | -2.56% | -7.51% |
-| 8 | -0.06% | -2.67% | +1.10% | -3.73% | -7.87% |
+| 1 | +0.25% | -0.33% | +0.45% | -0.37% | -7.68% |
+| 2 | +2.25% | -1.71% | +2.75% | -2.27% | -7.18% |
+| 4 | +1.37% | -2.18% | -29.61% | -2.27% | -7.51% |
+| 8 | -0.11% | -2.31% | +1.44% | -3.51% | -7.68% |
 
 Negative latency deltas are improvements. No throughput result approached the
 10% materiality threshold, so `async-mp` remains the supported default. The
