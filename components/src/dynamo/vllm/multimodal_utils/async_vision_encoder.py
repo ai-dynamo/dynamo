@@ -168,22 +168,27 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         Raises if any image's preprocess fails (submitting nothing) or if the
         batched forward fails.
         """
-        if self._batcher is None:
+        # Snapshot both resources once. Shutdown detaches the public references
+        # before waiting for this pool to quiesce; an encode racing teardown then
+        # either uses these live snapshots or fails while scheduling/submitting,
+        # but never dereferences a half-detached pair.
+        batcher = self._batcher
+        pool = self._pool
+        if batcher is None:
             raise RuntimeError("AsyncVisionEncoder.encode() called before load()")
         if not raws:
             return []
-        if self._pool is None:
+        if pool is None:
             # No preprocess phase: raw IS the item (cost defaults to 1). No
             # barrier needed — the batched forward is all-or-nothing per request.
-            return await self._batcher.submit(list(raws))  # type: ignore[arg-type]
+            return await batcher.submit(list(raws))  # type: ignore[arg-type]
         loop = asyncio.get_running_loop()
         # Request-atomicity barrier: preprocess all images concurrently, wait for
         # EVERY one to settle, and submit only if all succeeded. return_exceptions=True makes
         # the gather a true barrier (it never short-circuits), so a failed sibling
         # cannot leave a half-submitted request — we submit nothing on any error.
         tasks = [
-            loop.run_in_executor(self._pool, self._backend.preprocess, raw)
-            for raw in raws
+            loop.run_in_executor(pool, self._backend.preprocess, raw) for raw in raws
         ]
         settled = await asyncio.gather(*tasks, return_exceptions=True)
         for result in settled:
@@ -197,11 +202,13 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         items = [p.item for p in preprocessed]
         costs = [p.cost for p in preprocessed]
         bucket_keys = [p.bucket_key for p in preprocessed]
-        return await self._batcher.submit(items, costs, bucket_keys)
+        return await batcher.submit(items, costs, bucket_keys)
 
     def shutdown(self) -> None:
-        """Stop the actor thread (running ``backend.close`` on it) and the
-        preprocess pool. Safe before ``load`` and idempotent."""
+        """Quiesce preprocessing, then stop the actor (running backend.close).
+
+        Safe before ``load`` and idempotent.
+        """
         # Detach both resources before teardown so repeated cleanup is a no-op,
         # including if teardown itself raises.
         batcher = self._batcher
@@ -209,7 +216,13 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         self._batcher = None
         self._pool = None
 
+        # Backend.close() may release processor/cache state read by preprocess.
+        # Quiesce the pool first so close can never overlap an active call. New
+        # preprocess scheduling already fails because the pool was detached and
+        # is now shutting down. A completed encode that races the later batcher
+        # shutdown either submits before admission closes or receives its normal
+        # post-shutdown error.
+        if pool is not None:
+            pool.shutdown(wait=True)
         if batcher is not None:
             batcher.shutdown()  # runs backend.close() on the actor thread
-        if pool is not None:
-            pool.shutdown(wait=False)

@@ -12,8 +12,8 @@ import torch
 from PIL import Image
 
 from examples.custom_encoder.qwen3_vl_vision_encoder import (
-    Qwen3VLVisionEncoder,
     _GRAPH_IMAGE_SIZES,
+    Qwen3VLVisionEncoder,
     _StaticQwen3VLVisionForward,
 )
 
@@ -22,6 +22,8 @@ def verify(model: str, replay_iterations: int) -> None:
     encoder = Qwen3VLVisionEncoder()
     encoder.build(model)
     try:
+        buckets = encoder.buckets
+        assert buckets is not None
         templates = []
         for index, size in enumerate(_GRAPH_IMAGE_SIZES):
             for variant in range(2):
@@ -53,7 +55,7 @@ def verify(model: str, replay_iterations: int) -> None:
                 adapter_output, native_output, rtol=1e-2, atol=1e-2
             )
             print(f"adapter_parity_ok grid={grid}")
-            for bucket in encoder.buckets:
+            for bucket in buckets:
                 for real_count in range(1, bucket + 1):
                     items = [item] * real_count
                     eager = encoder._forward_eager(items)
@@ -64,7 +66,11 @@ def verify(model: str, replay_iterations: int) -> None:
                             actual, expected, rtol=1e-2, atol=1e-2
                         )
                     if retained is None:
-                        retained = [tensor.clone() for tensor in graphed]
+                        # Retain the actual returned split views. The later replay
+                        # loop must prove their shared CPU base is independent of
+                        # the static graph output; cloning here would make that
+                        # lifetime check a false positive.
+                        retained = list(graphed)
                     print(
                         f"parity_ok grid={grid} real_count={real_count} bucket={bucket}"
                     )
@@ -73,10 +79,11 @@ def verify(model: str, replay_iterations: int) -> None:
         retained_snapshot = [tensor.clone() for tensor in retained]
         torch.cuda.synchronize()
         reserved_before = torch.cuda.memory_reserved()
-        largest = encoder.buckets[-1]
         for iteration in range(replay_iterations):
             item = templates[iteration % len(templates)]
-            encoder._forward_graph([item] * largest, largest)
+            bucket = buckets[iteration % len(buckets)]
+            real_count = iteration % bucket + 1
+            encoder._forward_graph([item] * real_count, bucket)
         torch.cuda.synchronize()
         reserved_after = torch.cuda.memory_reserved()
         for expected, actual in zip(retained_snapshot, retained):
@@ -85,9 +92,14 @@ def verify(model: str, replay_iterations: int) -> None:
             "CUDA allocator grew during steady graph replay: "
             f"before={reserved_before} after={reserved_after}"
         )
+        pinned_staging_bytes = sum(
+            entry.host_pixel_values.numel() * entry.host_pixel_values.element_size()
+            for entry in encoder._graphs.values()
+        )
         print(
             "memory_plateau_ok "
-            f"iterations={replay_iterations} reserved_bytes={reserved_after}"
+            f"iterations={replay_iterations} reserved_bytes={reserved_after} "
+            f"pinned_staging_bytes={pinned_staging_bytes}"
         )
     finally:
         encoder.close()
