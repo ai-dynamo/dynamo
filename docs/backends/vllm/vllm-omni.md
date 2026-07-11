@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: vLLM-Omni
+subtitle: vLLM-Omni serves text-to-image, text-to-video, image-to-video, and text-to-speech models through OpenAI-compatible endpoints.
 ---
 
 Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-image, text-to-video, image-to-video, and text-to-audio (TTS) capabilities via OpenAI-compatible API endpoints.
@@ -31,9 +32,6 @@ pip install git+https://github.com/vllm-project/vllm-omni.git@<version>
 
 The `--output-modalities` flag determines which endpoint(s) the worker registers. When set to `image`, both `/v1/chat/completions` (returns inline base64 images) and `/v1/images/generations` are available. When set to `video`, the worker serves `/v1/videos`. When set to `audio`, the worker serves `/v1/audio/speech`.
 
-> [!NOTE]
-> The `bash examples/backends/vllm/launch/agg_omni_*.sh` commands below are local quickstart scripts. On Kubernetes, deploy the equivalent DGD: a `dynamo.vllm.omni` worker with the model and `--output-modalities` flag (see [CLI Reference](#cli-reference) for the worker skeleton) plus a Frontend, then `kubectl port-forward` the Frontend Service before sending the requests shown here.
-
 ## Tested Models
 
 | Modality | Models |
@@ -58,33 +56,10 @@ Launch using the provided script with `Qwen/Qwen-Image`:
 bash examples/backends/vllm/launch/agg_omni_image.sh
 ```
 
-### Via `/v1/chat/completions`
+Image generation is available on two endpoints: `/v1/chat/completions` returns base64-encoded images inline in `choices[].delta.content[].image_url`, while `/v1/images/generations` returns a URL or base64 depending on `response_format`.
 
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen-Image",
-    "messages": [{"role": "user", "content": "A cat sitting on a windowsill"}],
-    "stream": false
-  }'
-```
-
-The response includes base64-encoded images inline:
-
-```json
-{
-  "choices": [{
-    "delta": {
-      "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
-      ]
-    }
-  }]
-}
-```
-
-### Via `/v1/images/generations`
+<Tabs>
+<Tab title="/v1/images/generations">
 
 ```bash
 curl -s http://localhost:8000/v1/images/generations \
@@ -96,6 +71,22 @@ curl -s http://localhost:8000/v1/images/generations \
     "response_format": "url"
   }'
 ```
+
+</Tab>
+<Tab title="/v1/chat/completions">
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen-Image",
+    "messages": [{"role": "user", "content": "A cat sitting on a windowsill"}],
+    "stream": false
+  }'
+```
+
+</Tab>
+</Tabs>
 
 ## Text-to-Video
 
@@ -119,17 +110,7 @@ curl -s http://localhost:8000/v1/videos \
   }'
 ```
 
-The response returns a video URL or base64 data depending on `response_format`:
-
-```json
-{
-  "id": "...",
-  "object": "video",
-  "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
-  "status": "completed",
-  "data": [{"url": "file:///tmp/dynamo_media/videos/req-abc123.mp4"}]
-}
-```
+The response returns a video URL or base64 data depending on `response_format` (e.g. `{"object": "video", "status": "completed", "data": [{"url": "file:///tmp/dynamo_media/videos/req-abc123.mp4"}]}`).
 
 The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field for fine-grained control:
 
@@ -191,7 +172,8 @@ Launch using the provided script with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`:
 bash examples/backends/vllm/launch/agg_omni_audio.sh
 ```
 
-### CustomVoice (predefined speakers)
+<Tabs>
+<Tab title="CustomVoice (predefined speaker)">
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/speech \
@@ -203,7 +185,8 @@ curl -X POST http://localhost:8000/v1/audio/speech \
   }' --output output.wav
 ```
 
-### CustomVoice with style instructions
+</Tab>
+<Tab title="CustomVoice + style">
 
 ```bash
 curl -X POST http://localhost:8000/v1/audio/speech \
@@ -215,7 +198,8 @@ curl -X POST http://localhost:8000/v1/audio/speech \
   }' --output excited.wav
 ```
 
-### VoiceDesign (describe a voice)
+</Tab>
+<Tab title="VoiceDesign (describe a voice)">
 
 ```bash
 bash examples/backends/vllm/launch/agg_omni_audio.sh --model Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign
@@ -228,6 +212,9 @@ curl -X POST http://localhost:8000/v1/audio/speech \
     "instructions": "A warm, friendly female voice with a gentle tone"
   }' --output voicedesign.wav
 ```
+
+</Tab>
+</Tabs>
 
 ### Parameters
 
@@ -251,36 +238,7 @@ Available voices and languages are loaded dynamically from the model's `config.j
 
 ## CLI Reference
 
-The omni backend uses a dedicated entrypoint: `python3 -m dynamo.vllm.omni`. In a DGD, set it as the worker `command` and pass the omni flags below as `args:`:
-
-```yaml
-  - name: OmniWorker
-    type: worker
-    replicas: 1
-    podTemplate:
-      spec:
-        containers:
-        - name: main
-          image: ${RUNTIME_IMAGE}
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
-          command:
-          - python3
-          - -m
-          - dynamo.vllm.omni
-          args:
-          - --model
-          - Qwen/Qwen-Image
-          - --omni
-          - --output-modalities
-          - image
-          resources:
-            limits:
-              nvidia.com/gpu: "1"
-```
-
-Pair it with a standard `type: frontend` component. The flags:
+The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 
 | Flag | Description |
 |---|---|
@@ -309,24 +267,17 @@ Pair it with a standard `type: frontend` component. The flags:
 
 Generated images, videos, and audio files are stored via [fsspec](https://filesystem-spec.readthedocs.io/), which supports local filesystems, S3, GCS, and Azure Blob.
 
-By default, media is written to the local filesystem at `file:///tmp/dynamo_media` (ephemeral per pod). To use cloud storage, set the URLs on the worker `args:`:
+By default, media is written to the local filesystem at `file:///tmp/dynamo_media`. To use cloud storage:
 
-```yaml
-          args:
-          - --model
-          - Qwen/Qwen-Image
-          - --omni
-          - --output-modalities
-          - image
-          - --media-output-fs-url
-          - s3://my-bucket/media
-          - --media-output-http-url
-          - https://cdn.example.com/media
+```bash
+bash examples/backends/vllm/launch/agg_omni_video.sh \
+  --media-output-fs-url s3://my-bucket/media \
+  --media-output-http-url https://cdn.example.com/media
 ```
 
 When `--media-output-http-url` is set, response URLs are rewritten as `{base-url}/{storage-path}` (e.g., `https://cdn.example.com/media/videos/req-id.mp4`). When unset, the raw filesystem path is returned.
 
-For S3 credential configuration, provide the standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) to the worker — in a DGD, set them in the worker `env:` (secret values via `valueFrom.secretKeyRef`) — or use IAM roles. See the [fsspec S3 docs](https://s3fs.readthedocs.io/en/latest/#credentials) for details.
+For S3 credential configuration, set the standard AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) or use IAM roles. See the [fsspec S3 docs](https://s3fs.readthedocs.io/en/latest/#credentials) for details.
 
 ## Stage Configuration
 
@@ -334,11 +285,11 @@ Omni pipelines are configured via YAML stage configs. By default vLLM-Omni ships
 
 ## Disaggregated Multi-Stage Serving
 
-For models with multiple pipeline stages (e.g., AR + Diffusion), Dynamo supports disaggregated serving where each stage runs as an independent process on its own GPU. This enables independent scaling, GPU isolation, and multi-worker replicas per stage.
+Disaggregated serving is an advanced deployment mode of the same vLLM-Omni backend (`dynamo.vllm.omni`), used for models whose pipeline has multiple stages (e.g., AR + Diffusion). Each stage runs as an independent process on its own GPU, enabling independent scaling, GPU isolation, and multi-worker replicas per stage. It uses the omni entrypoint with the `--stage-id` and `--omni-router` flags described below.
 
 ### Architecture
 
-Each stage runs as an independent process on its own GPU. A lightweight router coordinates them, acting as a **pure message broker** — it never inspects or transforms inter-stage data.
+A lightweight router coordinates the stages, acting as a **pure message broker** — it never inspects or transforms inter-stage data.
 
 ```mermaid
 flowchart LR
@@ -356,31 +307,10 @@ flowchart LR
 **How it works:**
 
 - The router sends the initial request to Stage 0 and receives back a lightweight connector reference (pointer to the output in shared memory).
-- The router forwards that reference — unchanged — to Stage 1. It never reads the bulk data.
+- The router forwards that reference — unchanged — to the next stage. It never reads the bulk data.
 - Each stage fetches its inputs from the connector, runs any model-specific processor (e.g., `ar2diffusion`, `thinker2talker`), then runs its engine.
-- The final stage's result goes back to the router for formatting and response.
 - Connector references accumulate as the pipeline progresses, so any stage can access outputs from all previous stages.
-
-### Data Flow
-
-```mermaid
-sequenceDiagram
-  participant C as Client
-  participant R as Router
-  participant S0 as Stage 0 (AR)
-  participant SHM as Connector
-  participant S1 as Stage 1 (DiT)
-
-  C->>R: POST /v1/images/generations
-  R->>S0: request + prompt
-  S0->>SHM: store output
-  S0-->>R: connector ref
-  R->>S1: connector ref (opaque)
-  S1->>SHM: fetch output
-  S1->>S1: processor → engine
-  S1-->>R: result
-  R-->>C: {"data": [...]}
-```
+- The final stage's result goes back to the router for formatting and response.
 
 ### Quick Start: GLM-Image (2-Stage, 2 GPUs)
 

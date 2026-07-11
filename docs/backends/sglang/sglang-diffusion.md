@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Diffusion
+subtitle: SGLang supports LLM diffusion, image diffusion, and text-to-video generation through dedicated worker flags.
 ---
 
 Dynamo SGLang supports three types of diffusion-based generation: **LLM diffusion** (text generation via iterative refinement), **image diffusion** (text-to-image), and **video generation** (text-to-video). Each uses a different worker flag and handler, but all integrate with SGLang's `DiffGenerator`.
@@ -110,5 +111,4 @@ curl http://localhost:8000/v1/videos \
 ## See Also
 
 - **[Examples](sglang-examples.md)**: Launch scripts for all deployment patterns
-- **[Reference Guide](sglang-reference-guide.md)**: Worker types and argument reference
 - **[SGLang Diffusion LMs (upstream)](https://github.com/sgl-project/sglang/blob/main/docs/supported_models/text_generation/diffusion_language_models.md)**: SGLang diffusion documentation

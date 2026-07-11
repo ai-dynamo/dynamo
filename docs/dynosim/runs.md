@@ -225,41 +225,12 @@ into `block_size` before simulation starts.
 
 ### `python -m dynamo.replay`
 
-The dedicated DynoSim CLI exposes:
-
-- either a positional `trace_file`, or all of `--input-tokens`, `--output-tokens`, and `--request-count`
-- `--replay-mode offline|online`
-- `--router-mode round_robin|kv_router`
-- `--num-workers`
-- `--num-prefill-workers`
-- `--num-decode-workers`
-- `--replay-concurrency`
-- `--arrival-interval-ms`
-- `--arrival-speedup-ratio`
-- `--trace-format mooncake|mooncake-delta|agentic_mooncake|applied_compute_agentic`
-- `--trace-block-size`
-- `--turns-per-session`
-- `--shared-prefix-ratio`
-- `--num-prefix-groups`
-- `--inter-turn-delay-ms`
-- `--extra-engine-args` (JSON string)
-- `--prefill-engine-args` (JSON string)
-- `--decode-engine-args` (JSON string)
-- `--router-config` (JSON string)
-- `--aic-backend`
-- `--aic-system`
-- `--aic-backend-version`
-- `--aic-tp-size`
-- `--aic-model-path`
-- `--aic-moe-tp-size`
-- `--aic-moe-ep-size`
-- `--aic-attention-dp-size`
-- `--report-json`
-
-Defaults:
-
-- `--replay-mode offline`
-- `--router-mode round_robin`
+The dedicated DynoSim CLI takes either a positional `trace_file` or the synthetic-workload flags
+(`--input-tokens`, `--output-tokens`, `--request-count`), plus execution flags (`--replay-mode`,
+`--router-mode`, worker counts, `--replay-concurrency`, `--arrival-speedup-ratio`) and the
+engine/router JSON flags. `--replay-mode` defaults to `offline` and `--router-mode` to
+`round_robin`. For the full flag list, engine-args JSON fields, constraints, and report schema, see
+the [DynoSim Replay CLI Reference](../components/mocker/replay-cli-reference.mdx).
 
 Example:
 
@@ -493,45 +464,18 @@ example:
 
 ## Output
 
-The report contains:
-
-- request counts
-- input and output token totals
-- virtual duration and wall-clock runtime
-- request and token throughput
-- prefix cache reuse ratio
-- TTFT, TTST, TPOT, ITL, and end-to-end latency summaries
-- output-token-throughput-per-user summaries
-
-The dedicated DynoSim CLI returns the same report schema as the Python APIs
-`dynamo.replay.run_trace_replay(...)` and `dynamo.replay.run_synthetic_trace_replay(...)`.
-
+Each run prints an AIPerf-style summary table to stdout and writes a JSON report (request counts,
+token totals, throughput, prefix-cache reuse, and TTFT/TTST/TPOT/ITL/end-to-end latency summaries).
 If `--report-json` is not provided, `python -m dynamo.replay` writes a timestamped
-`dynamo_replay_report_*.json` file in the current working directory.
+`dynamo_replay_report_*.json` in the current working directory. For the full report schema, see the
+[DynoSim Replay CLI Reference](../components/mocker/replay-cli-reference.mdx#report-schema).
 
 ## Constraints
 
-Shared constraints:
-
-- `extra_engine_args.engine_type` must be `vllm`, `sglang`, or `trtllm`
-- aggregated simulation requires the existing aggregated args path
-- disaggregated simulation requires both `prefill_engine_args` and `decode_engine_args`
-- disaggregated simulation requires `router_mode=kv_router`
-- `dp_size` must be `1`
-- disaggregated simulation requires matching `block_size` in `prefill_engine_args` and `decode_engine_args`
-
-Additional offline constraints:
-
-- offline `kv_router` requires `num_workers > 1`
-- single-worker offline mode is a dedicated fast path for `vllm`, `sglang`, and `trtllm`;
-  it supports flat request runs and workload-driven multi-turn runs
-- offline disaggregated simulation is a separate two-stage runtime with prefill and decode worker pools
-
-Additional online constraints:
-
-- the current live simulation path is also limited to aggregated workers
-
-If you violate those constraints, DynoSim fails immediately with a validation error.
+DynoSim validates engine type, aggregated/disaggregated args, router mode, `dp_size`, and
+worker-count rules before running, and fails immediately on any violation. For the complete list of
+shared, offline, and online constraints, see the
+[DynoSim Replay CLI Reference](../components/mocker/replay-cli-reference.mdx#constraints).
 
 ## Practical Notes
 

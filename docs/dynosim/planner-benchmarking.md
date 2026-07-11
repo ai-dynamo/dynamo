@@ -26,37 +26,27 @@ The `--release` flag is strongly recommended. DynoSim execution is largely singl
 
 ### Key Planner Config Knobs
 
-Passed as JSON via `--planner-config`. Uses the same schema as the live planner. The fields most relevant to benchmarking:
+Passed as JSON via `--planner-config`, using the same schema as the live planner. For every field,
+type, and default, see the [Planner Configuration reference](../components/planner/planner-config-reference.mdx).
+The fields you set most often when benchmarking are `mode`, `optimization_target`, `ttft_ms` /
+`itl_ms`, `enable_throughput_scaling`, `enable_load_scaling`, the two `*_adjustment_interval_seconds`,
+`pre_deployment_sweeping_mode`, `speculative_nextn`, and `report_filename`.
 
-| Field | Purpose |
-|---|---|
-| `mode` | `"agg"` or `"disagg"` — picks scaling strategy and required engine args. |
-| `optimization_target` | `"sla"` uses TTFT/ITL targets; `"throughput"` uses static queue/KV thresholds. |
-| `ttft_ms` / `itl_ms` | SLA targets in ms. Drives load-scaling decisions. |
-| `enable_throughput_scaling` | Periodic scaling based on predicted steady-state load. |
-| `enable_load_scaling` | Reactive scaling to short-term traffic spikes. |
-| `throughput_adjustment_interval_seconds` | Seconds between throughput-scaling decisions. |
-| `load_adjustment_interval_seconds` | Seconds between load-scaling decisions. Short intervals mean faster reaction but more flapping. |
-| `pre_deployment_sweeping_mode` | `"rapid"` uses AIC for optional bootstrap data and native perf-model identity; `"none"` lets planner warm from native AIC or live FPMs. |
-| `prefill_engine_num_gpu` / `decode_engine_num_gpu` | GPUs per engine replica. **Must be set explicitly** — both default to `None`, and the simulation adapter silently treats `None` as `0`, which collapses the cumulative-GPU-hours metric in the report to zero. |
-| `speculative_nextn` | Manual speculative-decode depth fallback. Replay normally supplies this from engine args, but the planner config fallback is useful when engine metadata is absent. |
-| `report_filename` | Output HTML filename under `./planner_reports/`. |
+> [!IMPORTANT]
+> One default differs in simulation. The reference lists `prefill_engine_num_gpu` and
+> `decode_engine_num_gpu` as auto-detected from the deployment, but the simulation adapter has no
+> deployment to detect from: it silently treats the `None` default as `0`, which collapses the
+> cumulative-GPU-hours metric in the report to zero. **Set both explicitly** for every benchmarking
+> run.
 
 ### Key Engine Arg Knobs
 
-Passed as JSON via `--extra-engine-args` (agg) or `--prefill-engine-args` / `--decode-engine-args` (disagg). DynoSim uses the mocker engine, so "engine args" means the analytical perf model inputs:
-
-| Field | Purpose |
-|---|---|
-| `aic_backend` | Backend the analytical model should emulate, e.g. `"vllm"`, `"trtllm"`, `"sglang"`. |
-| `aic_system` | GPU SKU for the perf model, e.g. `"h200_sxm"`, `"h100_sxm"`, `"b200"`. |
-| `aic_model_path` | HF model identifier used by the perf model. |
-| `aic_tp_size` | Tensor-parallel size of each engine replica. |
-| `aic_nextn` | Speculative-decode depth for AIC-backed MTP runs. In disagg, put this on the decode engine args. |
-| `aic_nextn_accept_rates` | Conditional draft-token accept rates used by the mocker burst sampler, for example `"1,1"` with `aic_nextn=2` accepts up to three visible tokens per decode forward. |
-| `startup_time` | Simulated seconds between a planner scale-up decision and the new worker becoming active. Unset or `0` means workers activate instantly. |
-
-Other fields follow the standard mocker engine protocol (see [DynoSim Runs](runs.md)).
+Passed as JSON via `--extra-engine-args` (agg) or `--prefill-engine-args` / `--decode-engine-args`
+(disagg). DynoSim uses the mocker engine, so "engine args" means the analytical perf-model inputs —
+`aic_backend`, `aic_system`, `aic_model_path`, `aic_tp_size`, and the MTP fields `aic_nextn` /
+`aic_nextn_accept_rates`, plus `startup_time`. For the full field list and semantics, see the
+engine-timing AIC fields in the
+[DynoSim Replay CLI Reference](../components/mocker/replay-cli-reference.mdx#engine-timing-aic-fields-engine-args-json).
 
 ### Planner Traffic Metrics From Replay
 

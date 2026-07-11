@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: FastVideo
+subtitle: Deploys FastVideo text-to-video generation on Dynamo through a custom worker that serves the /v1/videos endpoint.
 sidebar-title: FastVideo
 ---
 
 This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo) text-to-video generation on Dynamo using a custom worker (`worker.py`) exposed through the `/v1/videos` endpoint.
 
-> [!NOTE]
-> Dynamo also supports diffusion through built-in backends: [SGLang Diffusion](../../backends/sglang/sglang-diffusion.md) (LLM diffusion, image, video), [vLLM-Omni](../../backends/vllm/vllm-omni.md) (text-to-image, text-to-video), and [TRT-LLM Diffusion](../../backends/trtllm/trtllm-diffusion.md) (text-to-image, text-to-video). See the [Diffusion Overview](README.md) for the full support matrix.
+<Note>
+Dynamo also supports diffusion through built-in backends: [SGLang Diffusion](../../backends/sglang/sglang-diffusion.md) (LLM diffusion, image, video), [vLLM-Omni](../../backends/vllm/vllm-omni.md) (text-to-image, text-to-video), and [TRT-LLM Diffusion](../../backends/trtllm/trtllm-diffusion.md) (text-to-image, text-to-video). See the [Diffusion Overview](README.md) for the full support matrix.
+</Note>
 
 ## Overview
 
@@ -18,116 +20,15 @@ This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo)
 - **Response format:** Returns one complete MP4 payload per request as `data[0].b64_json` (non-streaming).
 - **Concurrency:** One request at a time per worker (VideoGenerator is not re-entrant). Scale throughput by running multiple workers.
 
-> [!IMPORTANT]
-> `worker.py` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, enable FP4/compile with `--enable-optimizations` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
-
-## Docker Image Build
-
-The local Docker workflow builds a runtime image from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile):
-
-- Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
-- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from GitHub
-- Installs Dynamo from the `release/1.0.0` branch (for `/v1/videos` support)
-- Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
-
-The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a` for Blackwell). Pass `--build-arg` to target a different architecture:
-
-```bash
-# Blackwell (default)
-docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a"
-
-# Hopper
-docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a"
-```
-
-`MAX_JOBS` (default: `4`) controls parallel compilation jobs for flash-attention. Lower it if the build runs out of memory:
-
-```bash
-docker build examples/diffusers/ --build-arg MAX_JOBS=2
-```
-
-When using Docker Compose, set these as environment variables before running `docker compose up --build`:
-
-```bash
-# Hopper on a memory-constrained builder
-TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up --build
-```
-
-> [!WARNING]
-> The first Docker image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS` in the Dockerfile to reduce parallel compile memory usage. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
-
-## Warmup Time
-
-On first start, workers download model weights. When `--enable-optimizations` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
-
-> [!TIP]
-> When using Kubernetes, mount a shared Hugging Face cache PVC (see [Kubernetes Deployment](#kubernetes-deployment)) so model weights are downloaded once and reused across pod restarts.
-
-## Local Deployment
-
-### Prerequisites
-
-**For Docker Compose:**
-
-- Docker Engine 26.0+
-- Docker Compose v2
-- NVIDIA Container Toolkit
-
-**For host-local script:**
-
-- Python environment with Dynamo + FastVideo dependencies installed
-- CUDA-compatible GPU runtime available on host
-
-### Option 1: Docker Compose
-
-```bash
-cd <dynamo-root>/examples/diffusers/local
-
-# Start 4 workers on GPUs 0..3
-COMPOSE_PROFILES=4 docker compose up --build
-```
-
-The Compose file builds from the Dockerfile and exposes the API on `http://localhost:8000`. See the [Docker Image Build](#docker-image-build) section for build time expectations.
-
-### Option 2: Host-Local Script
-
-```bash
-cd <dynamo-root>/examples/diffusers/local
-./run_local.sh
-```
-
-Environment variables:
-
-| Variable | Default | Description |
-|---|---|---|
-| `PYTHON_BIN` | `python3` | Python interpreter |
-| `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
-| `NUM_GPUS` | `1` | Number of GPUs |
-| `HTTP_PORT` | `8000` | Frontend HTTP port |
-| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--enable-optimizations --attention-backend FLASH_ATTN`) |
-| `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
-
-Example:
-
-```bash
-MODEL=FastVideo/LTX2-Distilled-Diffusers \
-NUM_GPUS=1 \
-HTTP_PORT=8000 \
-WORKER_EXTRA_ARGS="--enable-optimizations --attention-backend FLASH_ATTN" \
-./run_local.sh
-```
-
-> [!NOTE]
-> `--enable-optimizations` and `--attention-backend` are `worker.py` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default worker configuration.
-
-The script writes logs to:
-
-- `.runtime/logs/worker.log`
-- `.runtime/logs/frontend.log`
+<Warning>
+`worker.py` defaults to `--attention-backend TORCH_SDPA` for broader compatibility across GPUs, including systems such as H100. For the B200/B300-oriented path, enable FP4/compile with `--enable-optimizations` and, if desired, opt into flash-attention explicitly with `--attention-backend FLASH_ATTN`.
+</Warning>
 
 ## Kubernetes Deployment
 
-### Files
+Kubernetes is the recommended path for running FastVideo on Dynamo. The steps below build and push the runtime image, deploy the aggregated worker, and send a first request. For a single-node development workflow, see [Local Deployment](#local-deployment) at the bottom of this page.
+
+### Deployment Files
 
 | File | Description |
 |---|---|
@@ -138,12 +39,46 @@ The script writes logs to:
 
 ### Prerequisites
 
-1. Dynamo Kubernetes Platform installed
-2. GPU-enabled Kubernetes cluster
-3. FastVideo runtime image pushed to your registry
-4. Optional HF token secret (for gated models)
+- Dynamo Kubernetes Platform installed
+- GPU-enabled Kubernetes cluster
+- A container registry you can push the FastVideo runtime image to
+- Optional HF token secret (for gated models)
 
-Create a Hugging Face token secret if needed:
+<Steps>
+
+<Step title="Build and push the FastVideo runtime image">
+
+The runtime image is built from the [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile):
+
+- Base image: `nvidia/cuda:13.1.1-devel-ubuntu24.04`
+- Installs [FastVideo](https://github.com/hao-ai-lab/FastVideo) from GitHub
+- Installs Dynamo from the `release/1.0.0` branch (for `/v1/videos` support)
+- Compiles a [flash-attention](https://github.com/RandNMR73/flash-attention) fork from source
+
+The Dockerfile exposes `TORCH_CUDA_ARCH_LIST` as a build argument (default: `10.0 10.0a` for Blackwell). Pass `--build-arg` to target a different architecture, and use `MAX_JOBS` (default: `4`) to bound the parallel flash-attention compile jobs:
+
+```bash
+# Blackwell (default)
+docker build examples/diffusers/ --build-arg TORCH_CUDA_ARCH_LIST="10.0 10.0a" -t <my-registry/fastvideo-runtime:my-tag>
+
+# Hopper, on a memory-constrained builder
+docker build examples/diffusers/ \
+  --build-arg TORCH_CUDA_ARCH_LIST="9.0 9.0a" \
+  --build-arg MAX_JOBS=2 \
+  -t <my-registry/fastvideo-runtime:my-tag>
+
+docker push <my-registry/fastvideo-runtime:my-tag>
+```
+
+<Warning>
+The first image build can take **20–40+ minutes** because FastVideo and CUDA-dependent components are compiled during the build. Subsequent builds are much faster if Docker layer cache is preserved. Compiling `flash-attention` can use significant RAM — low-memory builders may hit out-of-memory failures. If that happens, lower `MAX_JOBS`. The [flash-attn install notes](https://pypi.org/project/flash-attn/) specifically recommend this on machines with less than 96 GB RAM and many CPU cores.
+</Warning>
+
+</Step>
+
+<Step title="Create the Hugging Face token secret (optional)">
+
+Only required for gated models:
 
 ```bash
 export NAMESPACE=<your-namespace>
@@ -153,7 +88,11 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-### Deploy
+</Step>
+
+<Step title="Apply the cache PVC and deployment">
+
+Mounting a shared Hugging Face cache PVC means model weights are downloaded once and reused across pod restarts.
 
 ```bash
 cd <dynamo-root>/examples/diffusers/deploy
@@ -163,17 +102,14 @@ kubectl apply -f huggingface-cache-pvc.yaml -n ${NAMESPACE}
 kubectl apply -f agg.yaml -n ${NAMESPACE}
 ```
 
-For clusters with tainted `user-workload` nodes and private registry pulls:
-
-1. Set your pull secret name and image in `agg_user_workload.yaml`.
-2. Apply:
+For clusters with tainted `user-workload` nodes and private registry pulls, set your pull secret name and image in `agg_user_workload.yaml`, then apply that variant instead:
 
 ```bash
 kubectl apply -f huggingface-cache-pvc.yaml -n ${NAMESPACE}
 kubectl apply -f agg_user_workload.yaml -n ${NAMESPACE}
 ```
 
-### Update Image Quickly
+To swap the image on an existing deployment quickly:
 
 ```bash
 export DEPLOYMENT_FILE=agg.yaml
@@ -185,7 +121,9 @@ yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FASTVIDEO_IMAGE)' \
 kubectl apply -f ${DEPLOYMENT_FILE}.generated -n ${NAMESPACE}
 ```
 
-### Verify and Access
+</Step>
+
+<Step title="Verify and access the deployment">
 
 ```bash
 kubectl get dgd -n ${NAMESPACE}
@@ -193,16 +131,19 @@ kubectl get pods -n ${NAMESPACE}
 kubectl logs -n ${NAMESPACE} -l nvidia.com/dynamo-component=FastVideoWorker
 ```
 
+Port-forward the Frontend Service:
+
 ```bash
 kubectl port-forward -n ${NAMESPACE} svc/fastvideo-agg-frontend 8000:8000
 ```
 
-## Test Request
+</Step>
 
-> [!NOTE]
-> If this is the first request after startup, expect it to take longer while warmup completes. See [Warmup Time](#warmup-time) for details.
+<Step title="Send a test request">
 
-Send a request and decode the response:
+<Note>
+If this is the first request after startup, expect it to take longer while warmup completes. See [Warmup Time](#warmup-time) for details.
+</Note>
 
 ```bash
 curl -s -X POST http://localhost:8000/v1/videos \
@@ -227,6 +168,18 @@ jq -r '.data[0].b64_json' response.json | base64 --decode > output.mp4
 # macOS
 jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 ```
+
+</Step>
+
+</Steps>
+
+## Warmup Time
+
+On first start, workers download model weights. When `--enable-optimizations` is enabled, compile/warmup steps can push the first ready time to roughly **10–20 minutes** (hardware-dependent). After the first successful optimized response, the second request can still take around **35 seconds** while runtime caches finish warming up; steady-state performance is typically reached from the third request onward.
+
+<Tip>
+The shared Hugging Face cache PVC applied in the [Kubernetes Deployment](#kubernetes-deployment) steps means weights are downloaded once and reused across pod restarts, so warmup is only paid in full on the very first start.
+</Tip>
 
 ## Worker Configuration Reference
 
@@ -270,6 +223,74 @@ jq -r '.data[0].b64_json' response.json | base64 -D > output.mp4
 | ~35 s second request | Runtime caches still warming | Steady-state performance from third request onward |
 | Lower throughput than expected on B200/B300 | FP4/compile and flash-attention are configured separately | Pass `--enable-optimizations` and, if desired, `--attention-backend FLASH_ATTN` |
 | Startup or import failure after enabling optimizations or changing the attention backend | FP4 and some attention backends depend on specific hardware/software support | Re-run `worker.py` without `--enable-optimizations`, or use `--attention-backend TORCH_SDPA` |
+
+## Local Deployment
+
+For single-node development you can run FastVideo directly with Docker Compose or a host-local script instead of Kubernetes.
+
+### Prerequisites
+
+**For Docker Compose:**
+
+- Docker Engine 26.0+
+- Docker Compose v2
+- NVIDIA Container Toolkit
+
+**For host-local script:**
+
+- Python environment with Dynamo + FastVideo dependencies installed
+- CUDA-compatible GPU runtime available on host
+
+### Option 1: Docker Compose
+
+The Compose file builds from the same [`Dockerfile`](https://github.com/ai-dynamo/dynamo/tree/main/examples/diffusers/Dockerfile) used for the Kubernetes runtime image and exposes the API on `http://localhost:8000`. Set `TORCH_CUDA_ARCH_LIST` and `MAX_JOBS` as environment variables to control the build (see the build notes in the [Kubernetes Deployment](#kubernetes-deployment) steps for time and memory expectations).
+
+```bash
+cd <dynamo-root>/examples/diffusers/local
+
+# Start 4 workers on GPUs 0..3
+COMPOSE_PROFILES=4 docker compose up --build
+
+# Hopper on a memory-constrained builder
+TORCH_CUDA_ARCH_LIST="9.0 9.0a" MAX_JOBS=2 COMPOSE_PROFILES=4 docker compose up --build
+```
+
+### Option 2: Host-Local Script
+
+```bash
+cd <dynamo-root>/examples/diffusers/local
+./run_local.sh
+```
+
+Environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `PYTHON_BIN` | `python3` | Python interpreter |
+| `MODEL` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
+| `NUM_GPUS` | `1` | Number of GPUs |
+| `HTTP_PORT` | `8000` | Frontend HTTP port |
+| `WORKER_EXTRA_ARGS` | — | Extra flags for `worker.py` (for example, `--enable-optimizations --attention-backend FLASH_ATTN`) |
+| `FRONTEND_EXTRA_ARGS` | — | Extra flags for `dynamo.frontend` |
+
+Example:
+
+```bash
+MODEL=FastVideo/LTX2-Distilled-Diffusers \
+NUM_GPUS=1 \
+HTTP_PORT=8000 \
+WORKER_EXTRA_ARGS="--enable-optimizations --attention-backend FLASH_ATTN" \
+./run_local.sh
+```
+
+<Note>
+`--enable-optimizations` and `--attention-backend` are `worker.py` flags, not `dynamo.frontend` flags, so pass them through `WORKER_EXTRA_ARGS` when you want a non-default worker configuration.
+</Note>
+
+The script writes logs to:
+
+- `.runtime/logs/worker.log`
+- `.runtime/logs/frontend.log`
 
 ## Source Code
 

@@ -165,6 +165,20 @@ navigation:
                 path: tools/aic.md
               - page: Benchmarking with AIPerf
                 path: tools/aiperf.md
+          - section: Inference Simulation (DynoSim)
+            slug: dynosim
+            collapsed: true
+            contents:
+              - page: Overview
+                path: dynosim/README.md
+              - page: Live Simulation with Mocker
+                path: dynosim/mocker.md
+              - page: Simulation Runs
+                path: dynosim/runs.md
+              - page: Simulation Sweeps
+                path: dynosim/sweeps.md
+              - page: Planner Simulation Benchmarking
+                path: dynosim/planner-benchmarking.md
 
       - section: Local Deployment
         icon: rectangle-terminal
@@ -242,19 +256,6 @@ navigation:
                 path: fault-tolerance/request-rejection.md
               - page: Graceful Shutdown
                 path: fault-tolerance/graceful-shutdown.md
-          - section: Inference Simulation (DynoSim)
-            slug: dynosim
-            contents:
-              - page: Overview
-                path: dynosim/README.md
-              - page: Live Simulation with Mocker
-                path: dynosim/mocker.md
-              - page: Simulation Runs
-                path: dynosim/runs.md
-              - page: Simulation Sweeps
-                path: dynosim/sweeps.md
-              - page: Planner Simulation Benchmarking
-                path: dynosim/planner-benchmarking.md
           - section: Agents
             slug: agents
             contents:
@@ -670,6 +671,8 @@ navigation:
             path: components/planner/planner-config-reference.mdx
           - page: Mocker CLI Reference
             path: components/mocker/mocker-cli-reference.mdx
+          - page: DynoSim Replay CLI Reference
+            path: components/mocker/replay-cli-reference.mdx
           - page: Global Router Configuration
             path: components/router/global-router-config-reference.mdx
           - page: vLLM Configuration
