@@ -605,6 +605,7 @@ def test_stack_has_scalable_clients_network_isolation_and_no_embedded_secret() -
         dockerfile_text
     )
     assert "pylock.aiperf.toml" in dockerfile_text
+    assert "\n        curl " in dockerfile_text
     assert "cargo install --locked --version 1.9.4 maturin" in dockerfile_text
     assert dockerfile_text.count("@sha256:") >= 3
     assert "rustup.rs" not in dockerfile_text

@@ -54,6 +54,7 @@ RUN apt-get -o Acquire::Check-Valid-Until=false update \
         ca-certificates \
         clang \
         cmake \
+        curl \
         git \
         libclang-dev \
         libssl-dev \
