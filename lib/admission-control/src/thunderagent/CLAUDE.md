@@ -52,7 +52,7 @@ Capacity is `total_kv_blocks * block_size + native_offloading_capacity_tokens` f
 Only Running or IdleResident programs with an assigned worker contribute usage:
 
 ```text
-normal usage = program tokens + buffer_per_program
+normal usage = program tokens
 ```
 
 Running programs read their full logical context directly from the retained `RequestProgress` handle. The response path updates that handle with one relaxed atomic operation and sends no per-output actor event. Completion remains authoritative.
