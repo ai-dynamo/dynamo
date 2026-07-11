@@ -109,9 +109,9 @@ IMAGE="nvcr.io/nvidian/dynamo-dev/biswa:valkey-router-${REVISION:0:12}-arm64"
 Build in the existing DinD pod from an authenticated Git bundle plus a tarred
 checkout of the same clean commit. The Dockerfile clones the bundle, requires
 its HEAD to equal `GIT_REVISION`, runs `git fsck --strict`, and builds Dynamo
-and `dynkv.so` only from that verified object graph. The checkout in the tar
-supplies only the Dockerfile and bundle; no source outside the verified clone
-is used by a build stage:
+and `dynkv.so` only from that verified object graph. The checkout tar supplies
+the Dockerfile and bundle, but the Dockerfile copies only the bundle into build
+stages; no source outside the verified clone is used by a build stage:
 
 ```bash
 kubectl exec -n bis-rl-3 biswa-dind -- env \
@@ -121,10 +121,10 @@ kubectl exec -n bis-rl-3 biswa-dind -- env \
     test -z "$(git status --porcelain)"
     context=$(mktemp -d)
     trap "rm -rf \"$context\"" EXIT
-    git bundle create "$context/source.bundle" HEAD
-    git archive --format=tar HEAD >"$context/context.tar"
-    tar --append --file="$context/context.tar" \
-      --directory="$context" --owner=0 --group=0 source.bundle
+    mkdir "$context/root"
+    git archive --format=tar HEAD | tar -x -C "$context/root"
+    git bundle create "$context/root/source.bundle" HEAD
+    tar -C "$context/root" -cf "$context/context.tar" .
     docker buildx build --load \
       --platform linux/arm64 \
       --file benchmarks/router/kubernetes/valkey_sweep/Dockerfile \
