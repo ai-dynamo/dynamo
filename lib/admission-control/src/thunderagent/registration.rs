@@ -64,8 +64,7 @@ where
             });
         }
         let config = ThunderAgentConfig::from_options(&admission.options)?;
-        let capacity =
-            WatchWorkerCapacity::new(workers.clone(), block_size, config.capacity_control);
+        let capacity = WatchWorkerCapacity::new(workers.clone(), block_size);
         strategies.insert(
             class.name.clone(),
             Box::new(ThunderAgent::new(capacity, config)?),
