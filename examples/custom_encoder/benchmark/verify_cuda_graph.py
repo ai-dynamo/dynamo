@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
+from dataclasses import replace
 
 import torch
 from PIL import Image
@@ -100,6 +102,22 @@ def verify(model: str, replay_iterations: int) -> None:
             "memory_plateau_ok "
             f"iterations={replay_iterations} reserved_bytes={reserved_after} "
             f"pinned_staging_bytes={pinned_staging_bytes}"
+        )
+
+        cached_item = replace(
+            templates[0], content_digest=hashlib.sha256(b"cache-parity").digest()
+        )
+        first = encoder.forward_batch([cached_item], target_bucket=1)[0]
+        expected = first.clone()
+        first.zero_()
+        second = encoder.forward_batch([cached_item], target_bucket=1)[0]
+        torch.testing.assert_close(second, expected, rtol=0, atol=0)
+        assert encoder._embedding_cache is not None
+        stats = encoder._embedding_cache.stats
+        assert stats["hits"] == stats["misses"] == 1
+        print(
+            "embedding_cache_hit_ok "
+            f"entries={stats['entries']} current_bytes={stats['current_bytes']}"
         )
     finally:
         encoder.close()

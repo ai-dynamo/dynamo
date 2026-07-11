@@ -76,10 +76,43 @@ Cached tensors are shared read-only values; concurrent misses may compute the
 same key more than once before one result is retained. Shutdown waits for active
 preprocessing before clearing the cache and logs final hit/miss counts.
 
-The per-image CPU tensors returned by `forward_batch` are read-only views into
-one fresh batch allocation. This is safe for the current assembler, which copies
-them into `prompt_embeds`; callers must not mutate them or assume disjoint base
-storage.
+Post-ViT embeddings are cached separately in a byte-bounded CPU LRU. The Qwen3-VL
+backend hashes the encoded image bytes that it decodes, so repeated content skips
+H2D, the vision tower, and D2H even when it arrives through a different source
+string. The default logical tensor budget is 1 GiB per encoder instance:
+
+```bash
+DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES=1073741824 \
+    examples/custom_encoder/launch/agg_qwen3_vl.sh
+```
+
+Set the value to ``0`` to disable content hashing and embedding retention. The
+capacity accounts for retained tensor payloads, not Python objects, transient
+copies, the preprocess cache, allocator retention, or process RSS. Mutable URLs
+and files are fetched and content-hashed on every request unless the source-string
+preprocess cache above is also enabled. Cache entries live only for one loaded
+encoder instance and are cleared during teardown.
+
+The per-image CPU tensors returned by `forward_batch` have independent storage.
+Cache hits are cloned before return, so caller mutation cannot corrupt retained
+entries or sibling results.
+
+On one H100 PCIe, the 1,000-request OSL=70 workload above produced the following
+matched throughput. Each aiperf run used 20 warmup requests, and all runs
+completed with zero errors:
+
+| Concurrency | Cache disabled | 1 GiB cache | Gain |
+| ---: | ---: | ---: | ---: |
+| 1 | 3.424 req/s | 3.461 req/s | 1.1% |
+| 2 | 5.777 req/s | 6.233 req/s | 7.9% |
+| 4 | 10.662 req/s | 11.943 req/s | 12.0% |
+| 8 | 18.519 req/s | 21.940 req/s | 18.5% |
+
+The cached server executed exactly nine vision-tower graph replays across the
+four runs (4,080 warmup plus measured images), matching the nine-image working
+set. After those cold misses, repeated requests skipped H2D, ViT, and D2H. The
+remaining latency is language-model prefill and generation; prefix-cache hits do
+not make the 70-token decode instantaneous.
 
 The CustomEncoder runtime uses immediate eager-drain by default. Graph backends
 can opt into an experimental bounded coalescing delay before server startup:

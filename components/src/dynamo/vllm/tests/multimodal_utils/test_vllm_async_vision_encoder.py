@@ -161,6 +161,15 @@ def test_shutdown_is_idempotent():
     assert enc._pool is None
 
 
+def test_shutdown_does_not_make_encoder_reloadable():
+    enc = AsyncVisionEncoder(_FakeBackend())
+    enc.load("m")
+    enc.shutdown()
+
+    with pytest.raises(RuntimeError, match="called twice"):
+        enc.load("m")
+
+
 async def test_shutdown_waits_for_preprocess_before_backend_close():
     class _BlockingPreprocess(_FakeBackend):
         def __init__(self):
