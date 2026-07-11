@@ -4,14 +4,12 @@
 use std::collections::HashMap;
 use std::env::var;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
@@ -45,9 +43,7 @@ use std::net::SocketAddr;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tower_http::classify::{ClassifiedResponse, ClassifyResponse, ServerErrorsAsFailures};
-use tower_http::trace::{DefaultOnEos, DefaultOnFailure, OnEos, OnFailure, TraceLayer};
-use tracing::Instrument;
+use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 
@@ -64,56 +60,12 @@ async fn echo_request_id_header(
     response
 }
 
-#[derive(Clone)]
-struct InferenceRequestSpan(tracing::Span);
-
-/// Create the inference request span around handler execution without wrapping
-/// the response body. Streaming owners retain the span explicitly so body-time
-/// telemetry can use it without entering/exiting the span on every frame poll.
-async fn trace_inference_request(
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    let span = make_inference_request_span(&request);
-    let start = Instant::now();
-    let mut response = next.run(request).instrument(span.clone()).await;
-    let status = response.status();
-    let latency_ms = start.elapsed().as_millis();
-
-    if status.is_server_error() || status.is_client_error() {
-        tracing::error!(
-            parent: &span,
-            status = %status.as_u16(),
-            latency_ms = %latency_ms,
-            "http response sent"
-        );
-    } else {
-        tracing::info!(
-            parent: &span,
-            status = %status.as_u16(),
-            latency_ms = %latency_ms,
-            "http response sent"
-        );
-    }
-
-    if let ClassifiedResponse::Ready(Err(failure_class)) =
-        ServerErrorsAsFailures::default().classify_response(&response)
-    {
-        let mut on_failure = DefaultOnFailure::default();
-        span.in_scope(|| on_failure.on_failure(failure_class, start.elapsed(), &span));
-    }
-
-    response.extensions_mut().insert(InferenceRequestSpan(span));
-
-    response
-}
-
 async fn track_inflight_inference(
     axum::extract::State(state): axum::extract::State<Arc<State>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use futures::Stream;
+    use futures::StreamExt;
 
     // Requests rejected during draining should not extend the drain window.
     if !state.is_ready() {
@@ -130,24 +82,10 @@ async fn track_inflight_inference(
 
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
-    let request_span = parts
-        .extensions
-        .get::<InferenceRequestSpan>()
-        .map(|request_span| request_span.0.clone());
-    let mut body = body.into_data_stream();
-    let mut on_eos = request_span.map(|span| (DefaultOnEos::default(), Instant::now(), span));
     // Keep the permit alive until the full response body, including streams,
     // finishes or is dropped.
-    let stream = futures::stream::poll_fn(move |cx| {
+    let stream = body.into_data_stream().map(move |result| {
         let _permit = &permit;
-        let result = Pin::new(&mut body).poll_next(cx);
-        if matches!(result, Poll::Ready(None))
-            && let Some((on_eos, stream_start, request_span)) = on_eos.take()
-        {
-            request_span.in_scope(|| {
-                on_eos.on_eos(None, stream_start.elapsed(), &request_span);
-            });
-        }
         result
     });
     Response::from_parts(parts, Body::from_stream(stream))
@@ -1111,8 +1049,11 @@ impl HttpServiceConfigBuilder {
             inference_router = inference_router.merge(route);
             all_docs.extend(route_docs);
         }
-        inference_router =
-            inference_router.layer(axum::middleware::from_fn(trace_inference_request));
+        inference_router = inference_router.layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_inference_request_span)
+                .on_response(on_response),
+        );
         inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             track_inflight_inference,

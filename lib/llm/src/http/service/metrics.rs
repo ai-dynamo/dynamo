@@ -520,7 +520,6 @@ pub enum ErrorType {
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     model: String,
-    span: tracing::Span,
     // Per-model metric handles resolved once at construction. The collector lives for a
     // single request and `model` is fixed, so caching these avoids re-hashing the `model`
     // label via `with_label_values` on every chunk (and, for ITL, on every output token —
@@ -1388,9 +1387,6 @@ impl InflightGuard {
     pub fn error_type(&self) -> &ErrorType {
         &self.error_type
     }
-    pub(crate) fn span(&self) -> &tracing::Span {
-        &self.span
-    }
     pub fn elapsed_ms(&self) -> u128 {
         self.timer.elapsed().as_millis()
     }
@@ -1563,7 +1559,6 @@ impl ResponseMetricCollector {
         ResponseMetricCollector {
             metrics,
             model,
-            span: tracing::Span::current(),
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency,
@@ -1632,24 +1627,25 @@ impl ResponseMetricCollector {
     }
 
     fn set_worker_info_from_metrics(&mut self, metrics: &LLMMetricAnnotation) {
-        if self.prefill_worker_id.is_none() {
-            self.prefill_worker_id = metrics.prefill_worker_id;
-        }
-        if self.prefill_dp_rank.is_none() {
-            self.prefill_dp_rank = metrics.prefill_dp_rank;
-        }
-        if self.prefill_worker_type.is_none() {
-            self.prefill_worker_type = metrics.prefill_worker_type.clone();
-        }
-        if self.decode_worker_id.is_none() {
-            self.decode_worker_id = metrics.decode_worker_id;
-        }
-        if self.decode_dp_rank.is_none() {
-            self.decode_dp_rank = metrics.decode_dp_rank;
-        }
-        if self.decode_worker_type.is_none() {
-            self.decode_worker_type = metrics.decode_worker_type.clone();
-        }
+        let prefill_worker_type = self
+            .prefill_worker_type
+            .is_none()
+            .then(|| metrics.prefill_worker_type.clone())
+            .flatten();
+        let decode_worker_type = self
+            .decode_worker_type
+            .is_none()
+            .then(|| metrics.decode_worker_type.clone())
+            .flatten();
+
+        self.set_worker_info(
+            metrics.prefill_worker_id,
+            metrics.prefill_dp_rank,
+            prefill_worker_type,
+            metrics.decode_worker_id,
+            metrics.decode_dp_rank,
+            decode_worker_type,
+        );
     }
 
     /// Observe the current output sequence length
@@ -1848,9 +1844,9 @@ impl Drop for ResponseMetricCollector {
                 .observe(self.osl as f64);
         }
 
-        // Record the request summary on the span retained when the collector was
-        // created. Streaming response bodies are not ambiently instrumented.
-        let span = &self.span;
+        // Record request summary on the enclosing span.
+        // InflightGuard::Drop and on_response logs will inherit these.
+        let span = tracing::Span::current();
         span.record("input_tokens", self.isl as u32);
         span.record("output_tokens", self.osl as u32);
         // Only record once observed, so requests that never carried a metrics
@@ -2496,22 +2492,6 @@ mod tests {
             collector.decode_worker_type.as_deref(),
             Some("decode-first")
         );
-    }
-
-    #[test]
-    fn test_response_collector_retains_creation_span() {
-        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
-            let metrics = Arc::new(Metrics::new());
-            let span = tracing::info_span!("response-collector-test-span");
-            let expected_id = span.id();
-            let collector = {
-                let _entered = span.enter();
-                metrics.create_response_collector("span-model")
-            };
-
-            assert_eq!(collector.span.id(), expected_id);
-            assert_ne!(tracing::Span::current().id(), expected_id);
-        });
     }
 
     #[test]
