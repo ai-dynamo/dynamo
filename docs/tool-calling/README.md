@@ -20,7 +20,7 @@ parameters.
 This page covers parser names for the default Dynamo-native path, where the
 `dynamo` [chat processor](chat-processors.mdx) parses tool calls on the worker.
 If Dynamo does not list a parser for your model, use
-[engine fallback](chat-processors.mdx#engine-fallback) instead.
+[engine fallback](chat-processors.mdx) instead.
 
 ## Enable tool calling
 
@@ -57,7 +57,7 @@ spec:
 The Frontend needs no extra flags — the default `dynamo` chat processor parses tool calls for every backend.
 
 > [!IMPORTANT]
-> `--dyn-tool-call-parser` pairs with the default `dynamo` chat processor and goes on the **worker**. The bare `--tool-call-parser` (no `--dyn-` prefix) is a different flag — it drives [engine fallback](chat-processors.mdx#engine-fallback) and goes on the Frontend. Don't use the bare flag with the default processor, and don't put `--dyn-tool-call-parser` on a `vllm`/`sglang` chat processor.
+> `--dyn-tool-call-parser` pairs with the default `dynamo` chat processor and goes on the **worker**. The bare `--tool-call-parser` (no `--dyn-` prefix) is a different flag — it drives [engine fallback](chat-processors.mdx) and goes on the Frontend. Don't use the bare flag with the default processor, and don't put `--dyn-tool-call-parser` on a `vllm`/`sglang` chat processor.
 
 The flag works on any worker — `dynamo.vllm`, `dynamo.sglang`, or `dynamo.trtllm`. For the full list of worker flags, see the backend guides ([vLLM](../backends/vllm/README.md), [SGLang](../backends/sglang/README.md), [TensorRT-LLM](../backends/trtllm/README.md)) or run the worker with `--help`. New to authoring a DGD? Start with [Deploy with DGD](../kubernetes/dgd-guide.md).
 
@@ -73,7 +73,7 @@ Set `--dyn-tool-call-parser` to the **Parser Name** (first column) that matches 
 
 The **Upstream name** column shows where the vLLM or SGLang parser name differs
 from Dynamo's -- relevant when using `--dyn-chat-processor vllm` or `sglang`
-(see [engine fallback](chat-processors.mdx#engine-fallback)). A blank upstream
+(see [engine fallback](chat-processors.mdx)). A blank upstream
 column means the same name works everywhere. `Dynamo-only` means no upstream
 parser exists for this format.
 
