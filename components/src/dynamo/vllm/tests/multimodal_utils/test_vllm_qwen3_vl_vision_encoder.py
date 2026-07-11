@@ -15,6 +15,7 @@ import torch
 from PIL import Image
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import Preprocessed
@@ -245,6 +246,65 @@ def test_embedding_cache_rejects_invalid_batch_transactionally() -> None:
     assert encoder._embedding_cache.stats["entries"] == 0
 
 
+def test_embedding_cache_key_includes_processed_grid() -> None:
+    encoder = Qwen3VLVisionEncoder()
+    encoder._device = torch.device("cpu")
+    encoder._visual = _FakeVisual()
+    encoder._embedding_cache = MultimodalEmbeddingCacheManager(4096)
+    digest = b"a" * 32
+    items = [_item((1, 4, 4), digest), _item((1, 8, 8), digest)]
+
+    first = encoder.forward_batch(items)
+    second = encoder.forward_batch(items)
+
+    assert [output.shape for output in first] == [(4, 4), (16, 4)]
+    assert all(torch.equal(before, after) for before, after in zip(first, second))
+    assert len(encoder._visual.calls) == 1
+    assert encoder._embedding_cache.stats["entries"] == 2
+    assert encoder._embedding_cache.stats["hits"] == 2
+
+
+def test_embedding_cache_oversize_output_bypasses_retention() -> None:
+    encoder = Qwen3VLVisionEncoder()
+    encoder._device = torch.device("cpu")
+    encoder._visual = _FakeVisual()
+    encoder._embedding_cache = MultimodalEmbeddingCacheManager(1)
+    item = _item((1, 4, 4), b"a" * 32)
+
+    encoder.forward_batch([item])
+    encoder.forward_batch([item])
+
+    assert len(encoder._visual.calls) == 2
+    assert encoder._embedding_cache.stats["entries"] == 0
+    assert encoder._embedding_cache_oversize == 2
+
+
+def test_build_failure_clears_partial_embedding_cache(monkeypatch) -> None:
+    encoder = Qwen3VLVisionEncoder()
+
+    def fail_after_cache_setup(model_id: str) -> None:
+        del model_id
+        encoder._device = torch.device("cpu")
+        encoder._embedding_cache = MultimodalEmbeddingCacheManager(1024)
+        encoder._embedding_cache.set(
+            "key", CachedEmbedding(torch.ones((4, 4), dtype=torch.bfloat16))
+        )
+        encoder._processor = object()
+        encoder._visual = _FakeVisual()
+        encoder.tokenizer = object()
+        raise RuntimeError("partial build failed")
+
+    monkeypatch.setattr(encoder, "_build", fail_after_cache_setup)
+
+    with pytest.raises(RuntimeError, match="partial build failed"):
+        encoder.build("model")
+
+    assert encoder._embedding_cache is None
+    assert encoder._processor is None
+    assert encoder._visual is None
+    assert encoder.tokenizer is None
+
+
 def test_disabled_embedding_cache_skips_content_digest(tmp_path) -> None:
     path = tmp_path / "source.png"
     Image.new("RGB", (5, 5), color="red").save(path)
@@ -262,5 +322,9 @@ def test_embedding_cache_capacity_configuration(monkeypatch) -> None:
     assert Qwen3VLVisionEncoder._parse_embedding_cache_capacity() == 0
 
     monkeypatch.setenv("DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES", "-1")
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        Qwen3VLVisionEncoder._parse_embedding_cache_capacity()
+
+    monkeypatch.setenv("DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES", "invalid")
     with pytest.raises(ValueError, match="nonnegative integer"):
         Qwen3VLVisionEncoder._parse_embedding_cache_capacity()
