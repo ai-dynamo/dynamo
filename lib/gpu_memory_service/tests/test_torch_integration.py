@@ -10,9 +10,12 @@ materialization from committed GMS-backed weights.
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
+import sys
 import threading
 import time
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -34,12 +37,20 @@ if not HAS_CUDA:
 
 import torch
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.client.torch.allocator import (
+    get_gms_client_memory_manager,
+    get_or_create_gms_client_memory_manager,
+    gms_use_mem_pool,
+)
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
+    rebind_nonparameter_tensors,
     register_module_tensors,
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.integrations.common.utils import prepare_gms_write
+from gpu_memory_service.integrations.vllm import model_loader
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
@@ -316,6 +327,119 @@ def test_finalize_gms_write_rebinds_nonparameter_tensors(running_gms):
     finally:
         del gms_model
         writer.close()
+
+
+@pytest.mark.timeout(60)
+def test_deferred_gms_write_preserves_runtime_tensor_aliases(running_gms, monkeypatch):
+    socket_path = running_gms
+    monkeypatch.setattr(
+        "gpu_memory_service.common.utils.get_socket_path",
+        lambda _device, _tag: socket_path,
+    )
+    monkeypatch.setattr(model_loader, "_pending_gms_client", None)
+    monkeypatch.setattr(model_loader, "_pending_retained_gms_tensors", [])
+    monkeypatch.setattr(model_loader, "_last_imported_weights_bytes", 0)
+    monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
+    model: torch.nn.Module | None = None
+    original: torch.Tensor | None = None
+    replacement: torch.Tensor | None = None
+    retained_gms_tensors: list[torch.Tensor] = []
+    writer = get_or_create_gms_client_memory_manager(
+        socket_path,
+        device=0,
+        mode=RequestedLockType.RW,
+        tag="weights",
+    )
+
+    try:
+        model = torch.nn.Module()
+        original_values = torch.arange(8, device="cuda", dtype=torch.int32)
+        with gms_use_mem_pool("weights", device=0):
+            original = original_values.clone()
+        unrelated = torch.full((8,), -1, device="cuda", dtype=torch.int32)
+        unrelated_helper = SimpleNamespace(tensor=unrelated)
+
+        model.indexer = torch.nn.Module()
+        model.indexer.topk_indices_buffer = original
+        model.indexer.duplicate_buffer_alias = original
+        model.indexer.indexer_op = torch.nn.Module()
+        model.indexer.indexer_op.topk_indices_buffer = original
+        model.attention = torch.nn.Module()
+        model.attention.impl = SimpleNamespace(topk_indices_buffer=original)
+        model.attention.unrelated = unrelated_helper
+
+        stats = prepare_gms_write(writer, model)
+        rebound_bytes = rebind_nonparameter_tensors(
+            writer,
+            model,
+            retain_gms_tensors=retained_gms_tensors,
+        )
+        replacement = cast(
+            torch.Tensor,
+            model.indexer.indexer_op.topk_indices_buffer,
+        )
+        assert rebound_bytes == original.numel() * original.element_size()
+        assert len(retained_gms_tensors) == 1
+        assert retained_gms_tensors[0] is original
+
+        model_loader._store_pending_gms_write(
+            writer,
+            stats,
+            rebound_bytes,
+            retained_gms_tensors,
+        )
+        assert model_loader.publish_pending_gms_write()
+        retained_gms_tensors.clear()
+        assert replacement is not original
+        original = None
+
+        writer.unmap_all_vas()
+        writer.abort()
+        gc.collect()
+        torch.cuda.empty_cache()
+        writer.connect(RequestedLockType.RO)
+        writer.remap_all_vas()
+
+        assert replacement is model.indexer.topk_indices_buffer
+        assert replacement is model.indexer.duplicate_buffer_alias
+        assert replacement is model.attention.impl.topk_indices_buffer
+        assert model.attention.unrelated is unrelated_helper
+        assert model.attention.unrelated.tensor is unrelated
+
+        replacement.fill_(17)
+        _assert_exact_tensor_equal(
+            torch.full_like(replacement, 17),
+            cast(torch.Tensor, model.attention.impl.topk_indices_buffer),
+        )
+    finally:
+        primary_failure = sys.exc_info()[0] is not None
+        if model is not None:
+            del model
+        original = None
+        replacement = None
+        retained_gms_tensors.clear()
+        cleanup_error: BaseException | None = None
+        try:
+            gc.collect()
+            torch.cuda.empty_cache()
+        except BaseException as exc:
+            cleanup_error = exc
+        if model_loader.has_pending_gms_write():
+            try:
+                model_loader.abort_pending_gms_write()
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
+        if get_gms_client_memory_manager("weights") is writer:
+            try:
+                writer.close()
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
+                try:
+                    writer.close(best_effort=True)
+                except BaseException:
+                    pass
+        if cleanup_error is not None and not primary_failure:
+            raise cleanup_error
 
 
 def test_live_gms_tensor_survives_unmap_and_remap(running_gms):

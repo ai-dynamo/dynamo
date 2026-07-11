@@ -12,7 +12,8 @@ This module provides module-level tensor operations:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Iterator, Tuple
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Iterator, Tuple
 
 import torch
 from gpu_memory_service.client.torch.tensor import GMSTensorSpec, TensorMetadata
@@ -21,6 +22,52 @@ if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
+
+_TensorAliasMap = dict[int, tuple[torch.Tensor, torch.Tensor]]
+_REBOUND_TENSOR_OWNERS_ATTR = "_gms_rebound_tensor_owners"
+
+
+class _ReboundTensorOwners:
+    """Model-scoped owners for GMS tensors replaced by private clones."""
+
+    def __init__(self) -> None:
+        self.tensors: list[torch.Tensor] = []
+
+    def add(self, tensor: torch.Tensor) -> None:
+        if not any(owner is tensor for owner in self.tensors):
+            self.tensors.append(tensor)
+
+
+def _get_or_create_rebound_tensor_owners(
+    model: torch.nn.Module,
+) -> _ReboundTensorOwners:
+    for namespace_name in ("_parameters", "_buffers", "_modules"):
+        if _REBOUND_TENSOR_OWNERS_ATTR in model.__dict__[namespace_name]:
+            raise RuntimeError(
+                f"Reserved GMS attribute {_REBOUND_TENSOR_OWNERS_ATTR!r} "
+                f"collides with model.{namespace_name}"
+            )
+
+    for cls in type(model).__mro__:
+        if _REBOUND_TENSOR_OWNERS_ATTR in cls.__dict__:
+            raise RuntimeError(
+                f"Reserved GMS attribute {_REBOUND_TENSOR_OWNERS_ATTR!r} "
+                f"collides with class attribute {cls.__name__}."
+                f"{_REBOUND_TENSOR_OWNERS_ATTR}"
+            )
+
+    if _REBOUND_TENSOR_OWNERS_ATTR in model.__dict__:
+        owners = model.__dict__[_REBOUND_TENSOR_OWNERS_ATTR]
+        if isinstance(owners, _ReboundTensorOwners):
+            return owners
+        raise RuntimeError(
+            f"Reserved GMS attribute {_REBOUND_TENSOR_OWNERS_ATTR!r} "
+            f"collides with model attribute of type {type(owners).__name__}"
+        )
+
+    owners = _ReboundTensorOwners()
+    model.__dict__[_REBOUND_TENSOR_OWNERS_ATTR] = owners
+    return owners
 
 
 # =============================================================================
@@ -110,6 +157,100 @@ def _resolve_module_attr(
         else:
             raise AttributeError(f"Cannot resolve {p!r} in {qualified_name!r}")
     return mod, parts[-1]
+
+
+def _tensor_alias_replacement(
+    tensor: torch.Tensor,
+    aliases: _TensorAliasMap,
+) -> torch.Tensor | None:
+    entry = aliases.get(id(tensor))
+    if entry is None or entry[0] is not tensor:
+        return None
+    return entry[1]
+
+
+def _replace_tensor_aliases_in_value(
+    value: Any,
+    aliases: _TensorAliasMap,
+    *,
+    seen: dict[int, tuple[Any, int]],
+    depth: int,
+) -> Any:
+    if torch.is_tensor(value):
+        replacement = _tensor_alias_replacement(value, aliases)
+        return value if replacement is None else replacement
+
+    if (
+        depth <= 0
+        or isinstance(
+            value,
+            (
+                torch.nn.Module,
+                ModuleType,
+                list,
+                tuple,
+                dict,
+                set,
+                frozenset,
+            ),
+        )
+        or callable(value)
+    ):
+        return value
+
+    value_id = id(value)
+    previous = seen.get(value_id)
+    if previous is not None and previous[0] is value and previous[1] >= depth:
+        return value
+    seen[value_id] = (value, depth)
+    try:
+        attrs = vars(value)
+    except TypeError:
+        return value
+
+    for attr_name, attr_value in list(attrs.items()):
+        if attr_name.startswith("_"):
+            continue
+        replacement = _replace_tensor_aliases_in_value(
+            attr_value,
+            aliases,
+            seen=seen,
+            depth=depth - 1,
+        )
+        if replacement is not attr_value:
+            attrs[attr_name] = replacement
+    return value
+
+
+def _refresh_cached_tensor_aliases(
+    model: torch.nn.Module,
+    aliases: _TensorAliasMap,
+    *,
+    max_depth: int = 8,
+) -> None:
+    """Refresh exact aliases in public fields of mutable helper objects.
+
+    This immediate fix intentionally does not traverse or rebuild containers,
+    including custom list, tuple, dict, or set subclasses. Modules are visited
+    separately, while ordinary helper objects are mutated in place.
+    """
+    if not aliases:
+        return
+
+    seen: dict[int, tuple[Any, int]] = {}
+    for module in model.modules():
+        for attr_name, attr_value in list(module.__dict__.items()):
+            if attr_name.startswith("_"):
+                continue
+            replacement = _replace_tensor_aliases_in_value(
+                attr_value,
+                aliases,
+                seen=seen,
+                depth=max_depth,
+            )
+            if replacement is not attr_value:
+                # Avoid nn.Module.__setattr__ registering cached tensor aliases.
+                module.__dict__[attr_name] = replacement
 
 
 # =============================================================================
@@ -244,18 +385,46 @@ def rebind_nonparameter_tensors(
 
     Must run before CUDA graph capture: the clones live at new addresses.
 
+    Exact aliases of one tensor share one clone, including references cached
+    in ordinary helper objects owned by the model. Distinct tensor objects
+    that share storage (for example, views) are cloned independently.
+
     Returns the number of bytes rebound, i.e. how much memory is duplicated
     between the read-only GMS copies and the private clones.
 
-    If ``retain_gms_tensors`` is provided, the original GMS-backed tensors
-    are appended to it. A deferred writer that rebinds before commit must
-    keep those references alive so the underlying GMS pool allocations are
-    not freed before the layout is published.
+    Original GMS-backed tensors remain owned by a private model holder for the
+    model's lifetime. If ``retain_gms_tensors`` is provided, each original is
+    also appended for compatibility with deferred publication.
     """
     mappings = gms_client_memory_manager.mappings
     rebound_bytes = 0
-    for name, tensor, tensor_type in list(_iter_module_tensors(model)):
-        if tensor_type == "parameter":
+    owners = _get_or_create_rebound_tensor_owners(model)
+    module_tensors = list(_iter_module_tensors(model))
+    parameter_ids = {
+        id(tensor)
+        for _, tensor, tensor_type in module_tensors
+        if tensor_type == "parameter"
+    }
+    aliases: _TensorAliasMap = {}
+
+    def private_clone(tensor: torch.Tensor) -> torch.Tensor:
+        nonlocal rebound_bytes
+
+        replacement = _tensor_alias_replacement(tensor, aliases)
+        if replacement is not None:
+            return replacement
+
+        replacement = tensor.detach().clone()
+        owners.add(tensor)
+        # Tensor identity, rather than data_ptr, is the alias invariant here.
+        aliases[id(tensor)] = (tensor, replacement)
+        if retain_gms_tensors is not None:
+            retain_gms_tensors.append(tensor)
+        rebound_bytes += tensor.numel() * tensor.element_size()
+        return replacement
+
+    for name, tensor, tensor_type in module_tensors:
+        if tensor_type == "parameter" or id(tensor) in parameter_ids:
             continue
         ptr = int(tensor.data_ptr())
         if not any(
@@ -270,11 +439,11 @@ def rebind_nonparameter_tensors(
             and hasattr(mod, "_buffers")
             and attr in mod._buffers
         ):
-            mod._buffers[attr] = tensor.detach().clone()
+            mod._buffers[attr] = private_clone(tensor)
         elif attr.isdigit() and not isinstance(mod, torch.nn.Module):
             # Element of a tensor list/tuple attribute.
             if isinstance(mod, list):
-                mod[int(attr)] = tensor.detach().clone()
+                mod[int(attr)] = private_clone(tensor)
             elif isinstance(mod, tuple):
                 # Tuples are immutable: rebuild the tuple on its owner.
                 container_name, _ = name.rsplit(".", 1)
@@ -285,7 +454,7 @@ def rebind_nonparameter_tensors(
                     logger.debug("[GMS] Skipping property attribute %r", name)
                     continue
                 elements = list(mod)
-                elements[int(attr)] = tensor.detach().clone()
+                elements[int(attr)] = private_clone(tensor)
                 setattr(owner, container_attr, tuple(elements))
             else:
                 logger.debug("[GMS] Cannot rebind container element %r", name)
@@ -296,9 +465,8 @@ def rebind_nonparameter_tensors(
                 # iterated (and rebound) separately.
                 logger.debug("[GMS] Skipping property attribute %r", name)
                 continue
-            setattr(mod, attr, tensor.detach().clone())
-        if retain_gms_tensors is not None:
-            retain_gms_tensors.append(tensor)
-        rebound_bytes += tensor.numel() * tensor.element_size()
+            setattr(mod, attr, private_clone(tensor))
+
+    _refresh_cached_tensor_aliases(model, aliases)
 
     return rebound_bytes
