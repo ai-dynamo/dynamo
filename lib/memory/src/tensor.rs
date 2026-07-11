@@ -102,6 +102,14 @@ pub trait TensorDescriptorExt: TensorDescriptor {
             _ => None,
         }
     }
+
+    /// Returns the device ID if the tensor is on a device.
+    ///
+    /// This is the backend-agnostic equivalent of `cuda_device_id()`.
+    /// Works for CUDA, SYCL, and any future device backend.
+    fn device_id(&self) -> Option<u32> {
+        self.storage_kind().device_id()
+    }
 }
 
 // Blanket impl for all TensorDescriptor types

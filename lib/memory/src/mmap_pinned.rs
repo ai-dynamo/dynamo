@@ -1,15 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-
-//! `mmap` + `cuMemHostRegister` host pinned storage with NUMA `mbind` and
+//! `mmap` + device host-register pinned storage with NUMA `mbind` and
 //! best-effort hugepages.
 //!
-//! Companion to [`crate::pinned::PinnedStorage`] (which uses `cuMemHostAlloc`,
-//! no hugepage / mbind control). This path exists because hugepage-backed
-//! pinned memory is unreachable through `cuMemHostAlloc` — the kernel only
-//! honors `MAP_HUGETLB` on caller-owned `mmap` regions. Use this for the
-//! kvbm-service host-memory pool; use [`crate::PinnedStorage`] for legacy
-//! per-GPU allocations.
+//! Companion to [`crate::pinned::PinnedStorage`] (which uses backend-specific
+//! pinned allocation, no hugepage / mbind control). This path exists because
+//! hugepage-backed pinned memory is unreachable through driver-managed
+//! allocators — the kernel only honors `MAP_HUGETLB` on caller-owned `mmap`
+//! regions. Use this for the kvbm-service host-memory pool.
 //!
 //! Pipeline per allocation (caller's thread should already be pinned to a
 //! CPU in the target node's cpulist for correct first-touch):
@@ -20,21 +18,40 @@
 //!    — belt-and-suspenders against the kernel migrating away from the
 //!    target node, even after first-touch lands the page locally.
 //! 3. First-touch one byte per (huge)page from the calling thread.
-//! 4. `cuMemHostRegister(ptr, len, DEVICEMAP)` to pin + map to CUDA.
+//! 4. Host-register via [`HostRegistrar`] (CUDA: `cuMemHostRegister`;
+//!    SYCL: `zexDriverImportExternalPointer`).
 //!
 //! Drop ordering inside [`MmappedPinnedStorage`] guarantees
-//! `cuMemHostUnregister` runs before `munmap`, and the [`Arc<CudaContext>`]
-//! outlives both so the unregister has a context to bind.
+//! host-unregister runs before `munmap`.
 
 use std::any::Any;
 use std::sync::Arc;
 
-use cudarc::driver::CudaContext;
 use nix::libc;
 use serde::{Deserialize, Serialize};
+use std::ffi::c_void;
 
 use crate::numa::NumaNode;
-use crate::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
+use crate::{actions, nixl::NixlDescriptor, MemoryDescriptor, Result, StorageError, StorageKind};
+
+/// Device-agnostic host pointer registration interface.
+///
+/// Implemented by each backend (CUDA: `cuMemHostRegister`; SYCL:
+/// `zexDriverImportExternalPointer`) and injected into
+/// [`MmappedPinnedOptions`] so this module stays backend-neutral.
+pub trait HostRegistrar: Send + Sync + std::fmt::Debug {
+    /// Register `[ptr, ptr+len)` with the device driver for DMA access.
+    ///
+    /// # Safety
+    /// `ptr` must be a valid allocation of at least `len` bytes.
+    unsafe fn register(&self, ptr: *mut c_void, len: usize) -> Result<()>;
+
+    /// Unregister a previously-registered pointer.
+    ///
+    /// # Safety
+    /// `ptr` must have been previously registered via [`register`].
+    unsafe fn unregister(&self, ptr: *mut c_void) -> Result<()>;
+}
 
 /// Hugepage allocation policy for one allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -82,16 +99,16 @@ pub struct MmappedPinnedOptions {
     /// Page size to request from the explicit hugetlb pool. `None` => use
     /// the system default (`/proc/meminfo Hugepagesize:`).
     pub hugepage_size: Option<usize>,
-    /// CUDA device ordinal whose context is used for `cuMemHostRegister`.
-    /// Any visible GPU works — the registration is device-portable.
-    pub ctx_device_id: u32,
+    /// Backend-specific host registrar that pins the mapping for DMA.
+    /// Injected by the caller (e.g. CUDA or SYCL backend).
+    pub registrar: Arc<dyn HostRegistrar>,
 }
 
-/// `mmap`-backed host pinned memory registered with CUDA via
-/// `cuMemHostRegister`, with NUMA placement enforced by `mbind`.
+/// `mmap`-backed host pinned memory registered with the device driver
+/// for DMA access, with NUMA placement enforced by `mbind`.
 #[derive(Debug)]
 pub struct MmappedPinnedStorage {
-    // RAII guard — only used for its Drop impl (cuMemHostUnregister).
+    // RAII guard — only used for its Drop impl (host_unregister).
     // Field order is load-bearing: `register_guard` is declared before
     // `mmap_guard` so the unregister runs before munmap.
     #[allow(dead_code)]
@@ -99,7 +116,6 @@ pub struct MmappedPinnedStorage {
     mmap_guard: MmapGuard,
     hugepage_tier: HugepageTier,
     numa_node: NumaNode,
-    ctx: Arc<CudaContext>,
 }
 
 unsafe impl Send for MmappedPinnedStorage {}
@@ -121,7 +137,7 @@ impl MmappedPinnedStorage {
             numa_node,
             hugepage_mode,
             hugepage_size,
-            ctx_device_id,
+            registrar,
         } = opt;
 
         let page_size = hugepage_size.unwrap_or_else(default_hugepage_size);
@@ -136,17 +152,13 @@ impl MmappedPinnedStorage {
 
         first_touch(mmap_guard.ptr, mmap_guard.len, hugepage_tier);
 
-        let ctx = crate::device::cuda_context(ctx_device_id)?;
-        ctx.bind_to_thread().map_err(StorageError::Cuda)?;
-
-        let register_guard = HostRegisterGuard::new(mmap_guard.ptr, mmap_guard.len, ctx.clone())?;
+        let register_guard = HostRegisterGuard::new(mmap_guard.ptr, mmap_guard.len, registrar)?;
 
         Ok(Self {
             register_guard,
             mmap_guard,
             hugepage_tier,
             numa_node,
-            ctx,
         })
     }
 
@@ -173,11 +185,6 @@ impl MmappedPinnedStorage {
     /// NUMA node the pages were bound to via `mbind(MPOL_BIND)`.
     pub fn numa_node(&self) -> NumaNode {
         self.numa_node
-    }
-
-    /// CUDA context used for registration.
-    pub fn ctx(&self) -> &Arc<CudaContext> {
-        &self.ctx
     }
 
     /// Pointer to the start of the mapping.
@@ -276,38 +283,27 @@ impl Drop for MmapGuard {
 #[derive(Debug)]
 struct HostRegisterGuard {
     ptr: usize,
-    ctx: Arc<CudaContext>,
+    registrar: Arc<dyn HostRegistrar>,
 }
 
 impl HostRegisterGuard {
-    fn new(ptr: usize, len: usize, ctx: Arc<CudaContext>) -> Result<Self> {
+    fn new(ptr: usize, len: usize, registrar: Arc<dyn HostRegistrar>) -> Result<Self> {
         // SAFETY: the mapping is live for the duration of this Self
-        // (declared after MmapGuard in MmappedPinnedStorage, drops first).
-        let cu = unsafe {
-            cudarc::driver::sys::cuMemHostRegister_v2(
-                ptr as *mut std::ffi::c_void,
-                len,
-                cudarc::driver::sys::CU_MEMHOSTREGISTER_DEVICEMAP,
-            )
-        };
-        cu.result().map_err(StorageError::Cuda)?;
-        Ok(Self { ptr, ctx })
+        // (declared before MmapGuard in MmappedPinnedStorage, drops first).
+        unsafe {
+            registrar.register(ptr as *mut c_void, len)?;
+        }
+        Ok(Self { ptr, registrar })
     }
 }
 
 impl Drop for HostRegisterGuard {
     fn drop(&mut self) {
-        if let Err(e) = self.ctx.bind_to_thread() {
-            tracing::warn!("bind CUDA context for cuMemHostUnregister: {:?}", e);
-        }
-        let cu =
-            unsafe { cudarc::driver::sys::cuMemHostUnregister(self.ptr as *mut std::ffi::c_void) };
-        if let Err(e) = cu.result() {
-            tracing::warn!("cuMemHostUnregister({:#x}): {:?}", self.ptr, e);
+        if let Err(e) = unsafe { self.registrar.unregister(self.ptr as *mut c_void) } {
+            tracing::warn!("host_unregister({:#x}): {:?}", self.ptr, e);
         }
     }
 }
-
 fn mmap_with_tier(
     size: usize,
     page_size: usize,

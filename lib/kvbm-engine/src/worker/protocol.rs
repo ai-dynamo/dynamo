@@ -13,6 +13,7 @@ pub use crate::worker::{ImportMetadataResponseAwaiter, SerializedResponseAwaiter
 pub use crate::{BlockId, SequenceHash};
 pub use kvbm_common::LogicalLayoutHandle;
 pub use kvbm_physical::manager::{LayoutHandle, SerializedLayout};
+pub use kvbm_physical::device::DeviceBackend;
 
 pub struct SerializedLayoutResponse {
     awaiter: Either<Ready<Result<SerializedLayout>>, SerializedResponseAwaiter>,
@@ -183,6 +184,14 @@ pub struct LeaderLayoutConfig {
     /// since only rank 0 has host/disk storage in replicated mode.
     #[serde(default)]
     pub parallelism: kvbm_config::ParallelismMode,
+
+    /// Device backend for this worker (CUDA or SYCL/XPU).
+    ///
+    /// Specifies which backend the worker should use for device operations.
+    /// The leader sets this based on the cluster configuration and available
+    /// hardware. Workers must use this backend when creating device contexts.
+    #[serde(default)]
+    pub backend: kvbm_physical::device::DeviceBackend,
 }
 
 /// Worker's response after configuring additional layouts (G2, G3).

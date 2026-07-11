@@ -55,13 +55,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use cudarc::driver::sys::CUstream;
-use cudarc::driver::{CudaContext, CudaEvent, CudaStream};
+use cudarc::driver::{CudaContext, CudaStream};
 use cudarc::nccl::sys::{
     ncclBcast, ncclComm_t, ncclCommDestroy, ncclDataType_t, ncclGroupEnd, ncclGroupStart,
 };
 use velo::EventManager;
 
 use crate::BlockId;
+use dynamo_device::DeviceEvent;
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_physical::layout::PhysicalLayout;
 use kvbm_physical::transfer::TransferCompleteNotification;
@@ -69,42 +70,29 @@ use kvbm_physical::transfer::TransferCompleteNotification;
 use super::CollectiveOps;
 use super::bootstrap::{NcclBootstrap, check_nccl_result};
 
-/// Trait for resolving logical layout handles to physical layouts.
-///
-/// This trait decouples [`NcclCollectives`] from [`PhysicalWorker`], allowing
-/// the collective operations to work with any layout resolution strategy.
-pub trait LayoutResolver: Send + Sync {
-    /// Resolve a logical layout handle to a physical layout.
-    ///
-    /// # Arguments
-    /// * `logical` - The logical layout handle (G1, G2, G3)
-    ///
-    /// # Returns
-    /// The physical layout for the given logical handle, or an error if not found.
-    fn resolve_layout(&self, logical: LogicalLayoutHandle) -> Result<PhysicalLayout>;
-}
+use super::LayoutResolver;
 
-/// Trait for registering CUDA events for completion notification.
+/// Trait for registering device events for completion notification.
 ///
-/// This trait abstracts the CUDA event registration mechanism, allowing
+/// This trait abstracts the device event registration mechanism, allowing
 /// [`NcclCollectives`] to integrate with different event polling systems.
 /// Implementations should use efficient background polling rather than
 /// spawning individual tasks per event.
 ///
-/// The primary implementation wraps `TransferContext::register_cuda_event`,
+/// The primary implementation wraps `TransferContext::register_device_event`,
 /// which uses a shared background task for polling multiple events.
-pub trait CudaEventRegistrar: Send + Sync {
-    /// Register a CUDA event for completion notification.
+pub trait DeviceEventRegistrar: Send + Sync {
+    /// Register a device event for completion notification.
     ///
-    /// The returned notification will complete when the CUDA event has been
+    /// The returned notification will complete when the device event has been
     /// signaled (i.e., all operations recorded before the event have completed).
     ///
     /// # Arguments
-    /// * `event` - The CUDA event to monitor
+    /// * `event` - The device event to monitor
     ///
     /// # Returns
     /// A notification that completes when the event is signaled.
-    fn register_cuda_event(&self, event: CudaEvent) -> TransferCompleteNotification;
+    fn register_device_event(&self, event: DeviceEvent) -> TransferCompleteNotification;
 }
 
 /// Ownership mode for the NCCL communicator.
@@ -176,8 +164,8 @@ pub struct NcclCollectives {
     /// Event system for completion notifications (used for borrowed stream fallback)
     event_system: EventManager,
 
-    /// CUDA event registrar for efficient completion notification
-    event_registrar: Arc<dyn CudaEventRegistrar>,
+    /// Device event registrar for efficient completion notification
+    event_registrar: Arc<dyn DeviceEventRegistrar>,
 
     /// Layout resolver for mapping logical handles to physical layouts
     layout_resolver: Arc<dyn LayoutResolver>,
@@ -198,7 +186,7 @@ impl NcclCollectives {
     /// * `rank` - The rank of this worker (0 to world_size-1)
     /// * `cuda_context` - CUDA context for stream management
     /// * `event_system` - Event system for fallback completion notifications
-    /// * `event_registrar` - Registrar for efficient CUDA event completion polling
+    /// * `event_registrar` - Registrar for efficient device event completion polling
     /// * `layout_resolver` - Resolver for mapping logical handles to physical layouts
     ///
     /// # Returns
@@ -211,7 +199,7 @@ impl NcclCollectives {
         rank: usize,
         cuda_context: Arc<CudaContext>,
         event_system: EventManager,
-        event_registrar: Arc<dyn CudaEventRegistrar>,
+        event_registrar: Arc<dyn DeviceEventRegistrar>,
         layout_resolver: Arc<dyn LayoutResolver>,
     ) -> Result<Self> {
         let nccl_stream = cuda_context
@@ -251,7 +239,7 @@ impl NcclCollectives {
     /// * `world_size` - Total number of workers in the collective group
     /// * `cuda_context` - CUDA context for event management
     /// * `event_system` - Event system for fallback completion notifications
-    /// * `event_registrar` - Registrar for efficient CUDA event completion polling
+    /// * `event_registrar` - Registrar for efficient device event completion polling
     /// * `layout_resolver` - Resolver for mapping logical handles to physical layouts
     ///
     /// # Safety
@@ -294,7 +282,7 @@ impl NcclCollectives {
         world_size: usize,
         cuda_context: Arc<CudaContext>,
         event_system: EventManager,
-        event_registrar: Arc<dyn CudaEventRegistrar>,
+        event_registrar: Arc<dyn DeviceEventRegistrar>,
         layout_resolver: Arc<dyn LayoutResolver>,
     ) -> Self {
         Self {
@@ -398,7 +386,9 @@ impl NcclCollectives {
                 .context("Failed to record CUDA event")?;
 
             // Use the event registrar for efficient background polling
-            Ok(self.event_registrar.register_cuda_event(cuda_event))
+            Ok(self
+                .event_registrar
+                .register_device_event(DeviceEvent::from_cuda_event(cuda_event)))
         } else {
             // For borrowed streams, we can't easily record events since we don't
             // have ownership. Return an immediate completion notification.

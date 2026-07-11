@@ -7,16 +7,23 @@
 //! using a local [`TransferManager`]. It serves as the foundation for both standalone
 //! worker scenarios and as a building block for parallel worker implementations.
 
-#[cfg(feature = "collectives")]
+// `ReplicatedDataWorker` rides on the collectives stack — NCCL on CUDA,
+// oneCCL on SYCL/XPU. Either feature is sufficient to compile the module
+// because both paths satisfy the `CollectiveOps` trait it depends on.
+#[cfg(any(feature = "nccl", feature = "oneccl"))]
 mod replicated;
-#[cfg(feature = "collectives")]
+#[cfg(any(feature = "nccl", feature = "oneccl"))]
 #[allow(unused_imports)]
 pub use replicated::ReplicatedDataWorker;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use cudarc::driver::CudaEvent;
+// Multi-backend `DeviceEvent` matches the connector worker's storage,
+// which is now backend-agnostic (`Arc<DeviceEvent>`). CUDA and SYCL
+// share the same code path; mutual exclusion is enforced at the
+// build-feature layer.
+use kvbm_physical::device::DeviceEvent;
 use derive_builder::Builder;
 use futures::future::BoxFuture;
 
@@ -352,16 +359,16 @@ impl PhysicalWorker {
     ///
     /// This method transfers blocks from the host cache (G2) to the GPU cache (G1)
     /// one layer at a time, recording an event after each layer's transfer completes.
-    /// All transfers execute on the same CUDA stream to ensure proper ordering.
+    /// All transfers execute on the same device stream to ensure proper ordering.
     ///
     /// The caller provides pre-allocated events that are reused across iterations.
-    /// After calling this method, the caller can use `cudaStreamWaitEvent` on the
-    /// torch stream to synchronize each layer's load before attention computation.
+    /// After calling this method, the caller can use `DeviceStream::wait_event` on
+    /// the torch stream to synchronize each layer's load before attention computation.
     ///
     /// # Arguments
     /// * `src_block_ids` - Source block IDs in G2 (host cache)
     /// * `dst_block_ids` - Destination block IDs in G1 (GPU cache)
-    /// * `layer_events` - Pre-allocated CUDA events, one per layer. Must have length == num_layers.
+    /// * `layer_events` - Pre-allocated device events, one per layer. Must have length == num_layers.
     ///
     /// # Returns
     /// `Ok(())` on success. The caller owns synchronization via the recorded events.
@@ -376,7 +383,7 @@ impl PhysicalWorker {
         &self,
         src_block_ids: &[BlockId],
         dst_block_ids: &[BlockId],
-        layer_events: &[Arc<CudaEvent>],
+        layer_events: &[Arc<DeviceEvent>],
     ) -> Result<()> {
         let started_at = std::time::Instant::now();
         // Validate block ID lengths match
@@ -409,7 +416,9 @@ impl PhysicalWorker {
             ));
         }
 
-        // Acquire a dedicated stream for all layer transfers
+        // Acquire a dedicated multi-backend stream for all layer transfers.
+        // Both CUDA and SYCL share this code path; backend selection happens
+        // inside the device-pool implementation behind the `Arc<DeviceStream>`.
         let stream = self.manager.context().acquire_h2d_stream();
 
         // info!-level so smokes can assert on the trigger without enabling
@@ -428,7 +437,7 @@ impl PhysicalWorker {
             // Execute single-layer transfer on our dedicated stream
             let options = TransferOptions::builder()
                 .layer_range(layer..layer + 1)
-                .cuda_stream(stream.clone())
+                .device_stream(stream.clone())
                 .build()?;
 
             self.manager.execute_transfer(
@@ -440,7 +449,7 @@ impl PhysicalWorker {
             )?;
 
             // Record event on the stream for this layer
-            event.record(stream.as_ref())?;
+            event.record_on(&stream)?;
         }
 
         tracing::info!(
@@ -851,7 +860,7 @@ impl WorkerTransfers for PhysicalWorker {
             .collect();
 
         // Project WirePullOptions onto TransferOptions. The wire subset
-        // intentionally omits bounce_buffer / cuda_stream / kv_layout
+        // intentionally omits bounce_buffer / device_stream / kv_layout
         // overrides / use_planner / layer_range; execute_transfer_selection
         // forces use_planner=true internally, and layer_range is the PP
         // story.

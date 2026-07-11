@@ -12,6 +12,7 @@ description = "gRPC service shell hosting kvbm-engine over a unix domain socket"
 
 [dependencies]
 # Internal
+dynamo-device = { workspace = true }
 dynamo-memory = { workspace = true }
 
 # gRPC
@@ -68,7 +69,10 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 default = []
 # Opt-in tests that need a working CUDA driver + NIXL backends (pool
 # allocation, /v1/pool integration).
-testing-cuda = []
+cuda = ["dynamo-device/cuda"]
+testing-cuda = ["cuda"]
+xpu-sycl = ["dynamo-device/xpu-sycl"]
+testing-xpu-sycl = ["xpu-sycl"]
 
 [[bin]]
 name = "kvbm_service"

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_memory::{
-    HugepageInfo, MmappedPinnedOptions, NumaNode, NumaNodeView, Resources,
+    HostRegistrar, HugepageInfo, MmappedPinnedOptions, NumaNode, NumaNodeView, Resources,
     nixl::{NixlAgent, NixlBackendConfig, NixlRegisterExt, is_stub as nixl_is_stub},
     numa::worker_pool::NumaWorkerPool,
     resources::CgroupInfo,
@@ -92,10 +92,14 @@ impl HostMemoryPool {
     /// The `instance_id` is incorporated into each slab's NIXL agent name
     /// (`"kvbm-svc:{instance_id}:n{node_id}"`) so multiple service
     /// processes on the same host produce non-colliding agent identities.
-    pub fn new(config: &PoolConfig, instance_id: &str) -> ServiceResult<Arc<Self>> {
+    pub fn new(
+        config: &PoolConfig,
+        instance_id: &str,
+        registrar: Arc<dyn HostRegistrar>,
+    ) -> ServiceResult<Arc<Self>> {
         let resources = Resources::discover();
         let hugepage_info = HugepageInfo::discover();
-        Self::new_with_resources(config, instance_id, resources, hugepage_info)
+        Self::new_with_resources(config, instance_id, resources, hugepage_info, registrar)
     }
 
     /// Same as [`Self::new`] but with caller-supplied snapshots — used by
@@ -106,6 +110,7 @@ impl HostMemoryPool {
         instance_id: &str,
         resources: Resources,
         hugepage_info: HugepageInfo,
+        registrar: Arc<dyn HostRegistrar>,
     ) -> ServiceResult<Arc<Self>> {
         let all_host_nodes: Vec<&NumaNodeView> = resources.host_memory_nodes().collect();
         if all_host_nodes.is_empty() {
@@ -249,6 +254,7 @@ impl HostMemoryPool {
                 node.node,
                 size,
                 build_agents,
+                registrar.clone(),
             )?;
             slabs.push(Arc::new(slab));
         }
@@ -360,13 +366,14 @@ fn allocate_slab(
     node: NumaNode,
     size: usize,
     build_agent: bool,
+    registrar: Arc<dyn HostRegistrar>,
 ) -> ServiceResult<NodeSlab> {
     let opt = MmappedPinnedOptions {
         size,
         numa_node: node,
         hugepage_mode: config.hugepage_mode,
         hugepage_size: config.hugepage_size_bytes,
-        ctx_device_id: config.ctx_device_id,
+        registrar,
     };
     let storage = NumaWorkerPool::global()
         .allocate_mmap_pinned_on_node(opt)

@@ -7,6 +7,18 @@
 //! external serving frameworks like vLLM, allowing pure Rust code to
 //! remain independent of framework-specific types.
 
+// Backend selection is mutually exclusive: a single build targets either
+// CUDA or SYCL/XPU, never both. The kvbm-engine / kvbm-physical feature
+// graph is laid out the same way, but a workspace build that flips one
+// feature in isolation can still reach an inconsistent combination here
+// — fail loud at compile time so the mistake never reaches runtime.
+#[cfg(all(feature = "cuda", feature = "xpu-sycl"))]
+compile_error!(
+    "kvbm-connector: features `cuda` and `xpu-sycl` are mutually exclusive. \
+     Disable default features and pick exactly one backend, e.g. \
+     `--no-default-features --features xpu-sycl,testing`."
+);
+
 pub mod common;
 pub mod config;
 pub mod connector;

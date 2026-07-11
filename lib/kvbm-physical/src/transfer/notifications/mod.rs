@@ -4,7 +4,7 @@
 //! Transfer completion notification system.
 //!
 //! This module provides abstractions for waiting on transfer completions using different
-//! mechanisms: polling-based (NIXL status, CUDA events) and event-based (NIXL notifications).
+//! mechanisms: polling-based (NIXL status, device events) and event-based (NIXL notifications).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,18 +17,18 @@ use tracing::{error, warn};
 use uuid::Uuid;
 use velo::{EventHandle, EventManager};
 
-pub mod cuda_event;
+pub mod device_event;
 pub mod nixl_events;
 pub mod nixl_status;
 pub mod notification;
 
-pub use cuda_event::CudaEventChecker;
+pub use device_event::DeviceEventChecker;
 pub use nixl_events::{RegisterNixlNotification, process_nixl_notification_events};
 pub use nixl_status::NixlStatusChecker;
 pub use notification::TransferCompleteNotification;
 
 /// Trait for checking if a transfer operation has completed.
-/// Supports polling-based completion checks (NIXL status, CUDA events).
+/// Supports polling-based completion checks (NIXL status, device events).
 pub trait CompletionChecker: Send {
     /// Returns true if the transfer is complete, false if still pending.
     fn is_complete(&self) -> Result<bool>;
@@ -134,7 +134,7 @@ fn check_and_warn_slow_transfer(
 }
 
 /// Generic polling-based transfer completion handler.
-/// Works with any CompletionChecker implementation (NIXL status, CUDA events, etc.)
+/// Works with any CompletionChecker implementation (NIXL status, device events, etc.)
 pub async fn process_polling_notifications<C: CompletionChecker>(
     mut rx: mpsc::Receiver<RegisterPollingNotification<C>>,
     system: Arc<EventManager>,

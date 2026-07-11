@@ -35,6 +35,9 @@ use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_memory::TensorDescriptor;
 
+use dynamo_memory::DeviceAllocator;
+use kvbm_physical::device::DeviceBackend;
+use kvbm_physical::device::DeviceContext;
 use kvbm_physical::transfer::context::TokioRuntime;
 
 /// Pick G2's `KvBlockLayout` from `(g1, mode)` per the c3 rule.
@@ -102,8 +105,11 @@ impl PendingLayoutMode {
 #[derive(Debug, Builder)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct PendingWorkerState {
-    /// CUDA device ID where tensors are allocated.
-    pub cuda_device_id: usize,
+    /// Device ID where tensors are allocated.
+    pub device_id: usize,
+
+    /// Device backend type (CUDA or SYCL/XPU).
+    pub backend: DeviceBackend,
 
     /// KV cache tensors. For [`PendingLayoutMode::LayerSeparate`] this is one
     /// tensor per layer; for [`PendingLayoutMode::FullyContiguous`] this is a
@@ -130,7 +136,7 @@ pub struct PendingWorkerState {
 impl PendingWorkerStateBuilder {
     /// Create a new PendingWorkerState from register_kv_caches arguments.
     ///
-    /// Validates that all tensors are on the same CUDA device.
+    /// Validates that all tensors are on the same device.
     ///
     /// # Arguments
     /// * `tensors` - KV cache tensors, one per layer
@@ -142,13 +148,13 @@ impl PendingWorkerStateBuilder {
     ///
     /// # Errors
     /// - If tensors is empty
-    /// - If tensors are on different CUDA devices
-    /// - If first tensor is not on a CUDA device
+    /// - If tensors are on different devices
+    /// - If first tensor is not on a device
     pub fn build(mut self) -> Result<PendingWorkerState> {
         use anyhow::{bail, ensure};
         use dynamo_memory::TensorDescriptorExt;
 
-        // Validate tensors first (before build_internal which requires cuda_device_id)
+        // Validate tensors first (before build_internal which requires device_id)
         let tensors = self
             .tensors
             .as_ref()
@@ -158,21 +164,23 @@ impl PendingWorkerStateBuilder {
             bail!("no tensors to register");
         }
 
-        // Extract and validate CUDA device ID from tensors
-        let cuda_device_id = tensors[0]
-            .cuda_device_id()
-            .ok_or_else(|| anyhow::anyhow!("first tensor not on CUDA device"))?;
+        // Extract and validate device ID from tensors
+        let device_id = tensors[0]
+            .device_id()
+            .ok_or_else(|| anyhow::anyhow!("first tensor not on a device"))?
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("device ID conversion failed: {}", e))?;
 
         for (i, tensor) in tensors[1..].iter().enumerate() {
             ensure!(
-                tensor.cuda_device_id() == Some(cuda_device_id),
-                "tensor {} on different CUDA device than tensor 0",
+                tensor.device_id() == Some(device_id as u32),
+                "tensor {} on different device than tensor 0",
                 i + 1
             );
         }
 
-        // Set cuda_device_id on builder before calling build_internal
-        self.cuda_device_id = Some(cuda_device_id);
+        // Set device_id on builder before calling build_internal
+        self.device_id = Some(device_id);
 
         self.build_internal()
             .map_err(|e| anyhow::anyhow!("failed to build PendingWorkerState: {}", e))
@@ -238,7 +246,8 @@ impl PendingWorkerState {
         );
         let transfer_manager = TransferManager::builder()
             .event_system(runtime.event_system())
-            .cuda_device_id(self.cuda_device_id)
+            .device_id(self.device_id)
+            .device_backend(self.backend)
             .tokio_runtime(TokioRuntime::Handle(runtime.tokio()))
             .observability(runtime.observability().clone())
             .capabilities(capabilities)
@@ -374,11 +383,17 @@ impl PendingWorkerState {
                     "Allocating pinned host memory for G2 layout"
                 );
 
+                // Post-merge `allocate_pinned` takes `Arc<dyn DeviceAllocator>`
+                // (XPU multi-backend API) — wrap the worker's device id.
+                let pin_ctx: Arc<dyn DeviceAllocator> = Arc::new(DeviceContext::new(
+                    config.backend,
+                    self.device_id as u32,
+                )?);
                 let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
                     .with_config(host_layout)
                     .fully_contiguous()
                     .with_block_layout(g2_block_layout)
-                    .allocate_pinned(Some(self.cuda_device_id as u32))
+                    .allocate_pinned(pin_ctx)
                     .build()
                     .map_err(|e| {
                         tracing::error!(

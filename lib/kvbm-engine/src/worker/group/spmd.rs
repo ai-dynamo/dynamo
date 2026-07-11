@@ -680,7 +680,7 @@ impl SpmdParallelWorkers {
 
         // Project to the wire-restricted option subset. Local-only
         // toggles (use_planner, layer_range, bounce_buffer,
-        // cuda_stream, *_kv_layout) intentionally don't propagate —
+        // device_stream, *_kv_layout) intentionally don't propagate —
         // see WirePullOptions docs.
         let wire_opts = WirePullOptions {
             nixl_write_notification: options.nixl_write_notification,

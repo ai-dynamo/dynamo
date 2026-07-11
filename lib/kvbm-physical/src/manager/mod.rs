@@ -62,7 +62,7 @@ impl TransferManager {
     /// let manager = TransferManager::builder()
     ///     .worker_id(0)  // NIXL agent name defaults to "worker-0"
     ///     .nixl_backend("ucx")  // Optional: defaults to UCX from env
-    ///     .cuda_device_id(0)
+    ///     .device_id(0)
     ///     .build()?;
     ///
     /// // Or with custom agent name:
@@ -328,13 +328,14 @@ impl TransferManager {
             (src, dst)
         };
 
+        // Dissolve tuple shape mirrors `TransferOptions` field order.
         let (
             layer_range,
             nixl_write_notification,
             bounce_buffer,
-            cuda_stream,
             src_kv_layout,
             dst_kv_layout,
+            device_stream,
             metric_route,
             use_planner,
         ) = options.dissolve();
@@ -357,8 +358,8 @@ impl TransferManager {
             let bounce_buffer = self.create_bounce_buffer(handle, block_ids)?;
             builder = builder.bounce_buffer(bounce_buffer);
         }
-        if let Some(stream) = cuda_stream {
-            builder = builder.cuda_stream(stream);
+        if let Some(stream) = device_stream {
+            builder = builder.device_stream(stream);
         }
         if let Some(layout) = src_kv_layout {
             builder = builder.src_kv_layout(layout);
@@ -612,42 +613,20 @@ impl TransferManager {
         &self.registry
     }
 
-    /// Get the H2D stream (for testing only).
+
+
+    /// Get the device context (for testing only).
     #[cfg(test)]
     #[allow(dead_code)]
-    pub(crate) fn h2d_stream(&self) -> &std::sync::Arc<cudarc::driver::CudaStream> {
-        self.context.h2d_stream()
+    pub(crate) fn device_context(&self) -> &std::sync::Arc<crate::device::DeviceContext> {
+        self.context.device_context()
     }
 
-    /// Get the D2H stream (for testing only).
+    /// Get the device memory pool (for testing only).
     #[cfg(test)]
     #[allow(dead_code)]
-    pub(crate) fn d2h_stream(&self) -> &std::sync::Arc<cudarc::driver::CudaStream> {
-        self.context.d2h_stream()
-    }
-
-    /// Get the CUDA context (for testing only).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn cuda_context(&self) -> &std::sync::Arc<cudarc::driver::CudaContext> {
-        self.context.cuda_context()
-    }
-
-    /// Register a CUDA event for completion (for testing only).
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn register_cuda_event(
-        &self,
-        event: cudarc::driver::CudaEvent,
-    ) -> TransferCompleteNotification {
-        self.context.register_cuda_event(event)
-    }
-
-    /// Get the CUDA memory pool (for testing only).
-    #[cfg(test)]
-    #[expect(dead_code)]
-    pub(crate) fn cuda_pool(&self) -> &std::sync::Arc<dynamo_memory::CudaMemPool> {
-        self.context.cuda_pool()
+    pub(crate) fn device_pool(&self) -> &std::sync::Arc<crate::device::DeviceMemPool> {
+        self.context.device_pool()
     }
 }
 

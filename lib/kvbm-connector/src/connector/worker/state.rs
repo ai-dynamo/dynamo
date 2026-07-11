@@ -15,7 +15,6 @@
 //! - `FinishedState` encapsulates finished tracking with its own internal lock
 
 use anyhow::{Result, bail};
-use cudarc::driver::CudaEvent;
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
@@ -25,10 +24,11 @@ use super::{FinishedRequests, init::PendingWorkerState};
 use kvbm_engine::worker::{LeaderLayoutConfig, VeloWorkerService, WorkerLayoutResponse};
 
 use crate::KvbmRuntime;
+use kvbm_physical::device::DeviceEvent;
 use kvbm_physical::layout::LayoutConfig;
 
 /// Velo event handle for forward pass completion notification.
-/// Stored separately from CUDA events since we now use pre-allocated per-layer events.
+/// Stored separately from device events since we now use pre-allocated per-layer events.
 pub(crate) type ForwardPassVeloEvent = velo::EventHandle;
 
 /// Worker details set during KV cache registration.
@@ -142,24 +142,24 @@ pub struct WorkerState {
     /// Set in `bind_connector_metadata`, consumed in `save_kv_layer` on last layer.
     pub(crate) forward_pass_velo_event: Mutex<Option<ForwardPassVeloEvent>>,
 
-    // --- Pre-allocated CUDA events for layer-wise operations ---
-    /// CUDA events for intra-pass G2→G1 onboarding, one per layer.
+    // --- Pre-allocated device events for layer-wise operations ---
+    /// Device events for intra-pass G2→G1 onboarding, one per layer.
     /// Created during initialization and reused every iteration.
     /// Recorded on the transfer stream during start_load_kv,
-    /// then consumed via cudaStreamWaitEvent in wait_for_layer_load.
-    pub(crate) onboard_layer_events: OnceLock<Vec<Arc<CudaEvent>>>,
+    /// then consumed via DeviceStream::wait_event in wait_for_layer_load.
+    pub(crate) onboard_layer_events: OnceLock<Vec<Arc<DeviceEvent>>>,
 
-    /// CUDA events for layer-wise offloading, one per layer.
+    /// Device events for layer-wise offloading, one per layer.
     /// Created during initialization and reused every iteration.
     /// Recorded on the torch stream during save_kv_layer,
     /// and represents the moment in time when the layer has been computed
     /// and is ready to be offloaded.
     /// The last layer event triggers Velo forward pass completion notification.
-    pub(crate) compute_layer_events: OnceLock<Vec<Arc<CudaEvent>>>,
+    pub(crate) compute_layer_events: OnceLock<Vec<Arc<DeviceEvent>>>,
 
     /// Recorded on the offload stream when the last layer is complete.
     /// This event is then synchronously awaited by the workers in wait_for_save.
-    pub(crate) offload_complete_event: OnceLock<Arc<CudaEvent>>,
+    pub(crate) offload_complete_event: OnceLock<Arc<DeviceEvent>>,
 
     // --- Finished tracking (encapsulated with own lock) ---
     /// Tracks finished onboarding/offloading requests and failed blocks.
@@ -211,7 +211,7 @@ impl WorkerState {
             })?;
 
         tracing::info!(
-            cuda_device = pending.cuda_device_id,
+            device_id = pending.device_id,
             host_block_count = config.host_block_count,
             disk_block_count = ?config.disk_block_count,
             "Completing deferred NIXL initialization"
@@ -229,7 +229,7 @@ impl WorkerState {
                 e
             })?;
 
-        // Pre-allocate CUDA events for layer-wise operations (onboarding and offloading)
+        // Pre-allocate device events for layer-wise operations (onboarding and offloading)
         let num_layers = self
             .details
             .get()
@@ -238,11 +238,11 @@ impl WorkerState {
 
         let transfer_manager = worker.transfer_manager();
 
-        // Pre-allocate onboard events (H2D stream)
+        // Pre-allocate onboard events (H2D stream).
         let h2d_stream = transfer_manager.context().acquire_h2d_stream();
         let mut onboard_events = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
-            let event = h2d_stream.record_event(None)?;
+            let event = h2d_stream.record_event()?;
             onboard_events.push(Arc::new(event));
         }
 
@@ -250,11 +250,11 @@ impl WorkerState {
             .set(onboard_events)
             .map_err(|_| anyhow::anyhow!("onboard_layer_events already set (race condition)"))?;
 
-        // Pre-allocate save/offload events (D2H stream for consistency)
+        // Pre-allocate save/offload events (D2H stream for consistency).
         let d2h_stream = transfer_manager.context().acquire_d2h_stream();
         let mut save_events = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
-            let event = d2h_stream.record_event(None)?;
+            let event = d2h_stream.record_event()?;
             save_events.push(Arc::new(event));
         }
 
@@ -264,7 +264,7 @@ impl WorkerState {
 
         // Create the offload complete event to be awaited by the workers in wait_for_save.
         self.offload_complete_event
-            .set(Arc::new(d2h_stream.record_event(None)?))
+            .set(Arc::new(d2h_stream.record_event()?))
             .map_err(|_| anyhow::anyhow!("offload_complete_event already set (race condition)"))?;
 
         tracing::debug!(
@@ -324,7 +324,7 @@ impl WorkerState {
     ///
     /// Returns a reference to the events if they have been allocated (during initialize),
     /// or an error if initialization hasn't completed yet.
-    pub(crate) fn onboard_layer_events(&self) -> Result<&[Arc<CudaEvent>]> {
+    pub(crate) fn onboard_layer_events(&self) -> Result<&[Arc<DeviceEvent>]> {
         self.onboard_layer_events
             .get()
             .map(|v| v.as_slice())
@@ -335,7 +335,7 @@ impl WorkerState {
     ///
     /// Returns a reference to the events if they have been allocated (during initialize),
     /// or an error if initialization hasn't completed yet.
-    pub(crate) fn compute_layer_events(&self) -> Result<&[Arc<CudaEvent>]> {
+    pub(crate) fn compute_layer_events(&self) -> Result<&[Arc<DeviceEvent>]> {
         self.compute_layer_events
             .get()
             .map(|v| v.as_slice())

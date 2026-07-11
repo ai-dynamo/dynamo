@@ -39,7 +39,7 @@ fn build_fc_device(
         .with_config(config)
         .with_block_layout(block_layout)
         .fully_contiguous()
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }
@@ -56,7 +56,7 @@ fn build_lw_device(
         .with_config(config)
         .with_block_layout(block_layout)
         .layer_separate(BlockDimension::BlockIsFirstDim)
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }
@@ -69,7 +69,7 @@ fn build_universal_pinned(agent: NixlAgent, num_blocks: usize) -> PhysicalLayout
         .with_config(config)
         .with_block_layout(KvBlockLayout::Universal)
         .fully_contiguous()
-        .allocate_pinned(None)
+        .allocate_pinned(test_allocator(0))
         .build()
         .unwrap()
 }
@@ -90,6 +90,7 @@ async fn g1_g2_repeated_transfers_reuse_prepared_plan() -> Result<()> {
     let manager = TransferManager::builder()
         .nixl_agent(agent.clone())
         .cuda_device_id(0)
+        .device_backend(test_device_backend())
         .build()?;
 
     let g1 = build_fc_device(agent.clone(), KvBlockLayout::OperationalNHD, 8);
@@ -232,6 +233,7 @@ async fn assert_operational_universal_with_cache(
     let manager = TransferManager::builder()
         .nixl_agent(agent.clone())
         .cuda_device_id(0)
+        .device_backend(test_device_backend())
         .build()?;
 
     let src = match op_kind {
@@ -309,6 +311,7 @@ async fn transform_scratch_pool_reuses_capacity_after_warmup() -> Result<()> {
     let manager = TransferManager::builder()
         .nixl_agent(agent.clone())
         .cuda_device_id(0)
+        .device_backend(test_device_backend())
         .build()?;
 
     let g1 = build_fc_device(agent.clone(), KvBlockLayout::OperationalNHD, 8);
@@ -359,6 +362,7 @@ async fn prewarm_local_pair_populates_cache() -> Result<()> {
     let manager = TransferManager::builder()
         .nixl_agent(agent.clone())
         .cuda_device_id(0)
+        .device_backend(test_device_backend())
         .build()?;
 
     let g1 = build_fc_device(agent.clone(), KvBlockLayout::OperationalNHD, 4);

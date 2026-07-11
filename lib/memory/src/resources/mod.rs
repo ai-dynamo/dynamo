@@ -69,7 +69,7 @@ pub enum SlicingMode {
     /// node's CPUs across all host GPUs on that node. Safe default for
     /// shared hosts and multi-tenant containers.
     AssumeAllBusy,
-    /// Only the CUDA-visible GPUs count as siblings — divide each NUMA
+    /// Only the device-visible GPUs count as siblings — divide each NUMA
     /// node's CPUs across the visible GPUs on that node. Use when the
     /// caller knows it owns every active GPU on the host.
     VisibleOnly,
@@ -138,10 +138,10 @@ pub struct NumaNodeView {
 pub struct GpuView {
     /// Normalized PCI bus address, e.g. `"0000:3b:00.0"`.
     pub pci_address: String,
-    /// CUDA ordinal for this process, if the device is visible. `None`
-    /// indicates the GPU exists on the host but is hidden from this process
-    /// (typically by `CUDA_VISIBLE_DEVICES` or container GPU allotment).
-    pub cuda_ordinal: Option<u32>,
+    /// Backend device ordinal for this process, if the device is visible.
+    /// Populated from CUDA driver enumeration or SYCL enumeration.
+    /// `None` indicates the GPU exists on the host but is not addressable.
+    pub device_ordinal: Option<u32>,
     /// NUMA node from `/sys/bus/pci/devices/<pci>/numa_node`. `None` means
     /// `-1` (no affinity info available).
     pub numa_node: Option<NumaNode>,
@@ -282,16 +282,54 @@ impl Resources {
 
         let all_gpus = numa::enumerate_all_gpus();
 
-        // Best-effort CUDA init so a fresh process (e.g. the inspection
-        // binary) can still see ordinals. Errors are ignored: a CUDA-less
-        // host should still produce a useful sysfs-derived snapshot.
-        let _ = cudarc::driver::result::init();
+        // Device ordinals by PCI address. Always initialize as empty,
+        // then populate based on available backends.
+        let mut device_ordinals_by_pci: HashMap<String, u32> = HashMap::new();
 
-        let mut cuda_ordinals_by_pci: HashMap<String, u32> = HashMap::new();
-        if let Ok(count) = cudarc::driver::result::device::get_count() {
-            for i in 0..count as u32 {
-                if let Some(pci) = get_pci_bus_address_from_cuda(i) {
-                    cuda_ordinals_by_pci.insert(pci, i);
+        // Best-effort CUDA init so a fresh process (e.g. the inspection
+        // binary) can still see ordinals. Wrapped in catch_unwind because
+        // cudarc panics (rather than returning Err) when libcuda.so is
+        // absent. A CUDA-less host still produces a useful sysfs snapshot.
+        #[cfg(feature = "cuda")]
+        {
+            #[allow(unused_mut)]
+            let mut device_ordinals_by_pci: HashMap<String, u32> = std::panic::catch_unwind(|| {
+                let _ = cudarc::driver::result::init();
+                let mut map = HashMap::new();
+                if let Ok(count) = cudarc::driver::result::device::get_count() {
+                    for i in 0..count as u32 {
+                        if let Some(pci) = get_pci_bus_address_from_cuda(i) {
+                            map.insert(pci, i);
+                        }
+                    }
+                }
+                map
+            })
+            .unwrap_or_default();
+        }
+
+        // Try SYCL device enumeration.
+        // This populates device_ordinal for Intel GPUs on CUDA-less hosts.
+        #[cfg(feature = "xpu-sycl")]
+        if device_ordinals_by_pci.is_empty() {
+            use oneapi_rs::sycl::safe::{SyclDevice, SyclDeviceType};
+            const SYCL_BACKEND_LEVEL_ZERO: &str = "level_zero";
+            if let Ok(count) = SyclDevice::count() {
+                let mut sycl_ord: u32 = 0;
+                for i in 0..count {
+                    let Ok(dev) = SyclDevice::by_ordinal(i) else { continue };
+                    let Ok(info) = dev.info() else { continue };
+                    // Only discrete SYCL GPUs get an ordinal.
+                    if info.backend != SYCL_BACKEND_LEVEL_ZERO
+                        || info.device_type != SyclDeviceType::Gpu
+                        || info.is_integrated
+                    {
+                        continue;
+                    }
+                    if let Some(pci) = info.pci_address {
+                        device_ordinals_by_pci.insert(pci, sycl_ord);
+                    }
+                    sycl_ord += 1;
                 }
             }
         }
@@ -305,7 +343,7 @@ impl Resources {
         compute_resources_from_inputs(
             topology,
             all_gpus,
-            cuda_ordinals_by_pci,
+            device_ordinals_by_pci,
             numa_enabled,
             host_cpus_fallback,
             process_allowed_cpus,
@@ -321,9 +359,9 @@ impl Resources {
         self.gpus.iter().find(|g| g.pci_address == pci)
     }
 
-    /// Find a GPU by CUDA ordinal (as seen by the current process).
-    pub fn by_cuda_ordinal(&self, ordinal: u32) -> Option<&GpuView> {
-        self.gpus.iter().find(|g| g.cuda_ordinal == Some(ordinal))
+    /// Find a GPU by device ordinal (as seen by the current process).
+    pub fn by_device_ordinal(&self, ordinal: u32) -> Option<&GpuView> {
+        self.gpus.iter().find(|g| g.device_ordinal == Some(ordinal))
     }
 
     /// Iterate GPUs attached to the given NUMA node.
@@ -358,7 +396,7 @@ impl Resources {
 fn compute_resources_from_inputs(
     topology: Option<&'static NumaTopology>,
     all_gpus: Vec<GpuInfo>,
-    cuda_ordinals_by_pci: HashMap<String, u32>,
+    device_ordinals_by_pci: HashMap<String, u32>,
     numa_enabled: bool,
     host_cpus_fallback: Vec<usize>,
     process_allowed_cpus: Vec<usize>,
@@ -367,25 +405,25 @@ fn compute_resources_from_inputs(
     hugepage: crate::hugepage::HugepageInfo,
     mode: SlicingMode,
 ) -> Resources {
-    let visible_pcis: HashSet<&String> = cuda_ordinals_by_pci.keys().collect();
+    let visible_pcis: HashSet<&String> = device_ordinals_by_pci.keys().collect();
 
     // Seed GpuView rows from the canonical host GPU list.
     let mut gpus: Vec<GpuView> = all_gpus
         .iter()
         .map(|g| GpuView {
             pci_address: g.pci_address.clone(),
-            cuda_ordinal: cuda_ordinals_by_pci.get(&g.pci_address).copied(),
+            device_ordinal: device_ordinals_by_pci.get(&g.pci_address).copied(),
             numa_node: g.numa_node.map(NumaNode),
             cpu_slice: Vec::new(),
             slice_source: SliceSource::NoTopology,
         })
         .collect();
 
-    // CUDA-visible PCIs not in sysfs (only possible if /sys is missing or
-    // we fell back to CUDA-driver enumeration that disagrees) — append as
+    // Device-visible PCIs not in sysfs (only possible if /sys is missing or
+    // we fell back to driver enumeration that disagrees) — append as
     // synthetic entries so the visibility view is faithful.
     let known: HashSet<&String> = gpus.iter().map(|g| &g.pci_address).collect();
-    let extras: Vec<(String, u32)> = cuda_ordinals_by_pci
+    let extras: Vec<(String, u32)> = device_ordinals_by_pci
         .iter()
         .filter(|(pci, _)| !known.contains(pci))
         .map(|(pci, ord)| (pci.clone(), *ord))
@@ -394,7 +432,7 @@ fn compute_resources_from_inputs(
     for (pci, ord) in extras {
         gpus.push(GpuView {
             pci_address: pci,
-            cuda_ordinal: Some(ord),
+            device_ordinal: Some(ord),
             numa_node: None,
             cpu_slice: Vec::new(),
             slice_source: SliceSource::NoTopology,
@@ -911,7 +949,7 @@ impl std::fmt::Display for Resources {
         let visible_count = self
             .gpus
             .iter()
-            .filter(|g| g.cuda_ordinal.is_some())
+            .filter(|g| g.device_ordinal.is_some())
             .count();
         writeln!(f, "Dynamo Resources Inspection")?;
         writeln!(f, "===========================")?;
@@ -919,7 +957,7 @@ impl std::fmt::Display for Resources {
         writeln!(f, "NUMA nodes:             {}", self.nodes.len())?;
         writeln!(
             f,
-            "Host GPUs:              {} ({} cuda-visible)",
+            "Host GPUs:              {} ({} device-visible)",
             self.gpus.len(),
             visible_count
         )?;
@@ -995,9 +1033,9 @@ impl std::fmt::Display for Resources {
                 let g = &self.gpus[*idx];
                 writeln!(
                     f,
-                    "  pci={}  cuda={}  cpus=[{}]  source={}",
+                    "  pci={}  dev={}  cpus=[{}]  source={}",
                     g.pci_address,
-                    match g.cuda_ordinal {
+                    match g.device_ordinal {
                         Some(o) => o.to_string(),
                         None => "-".to_string(),
                     },
@@ -1014,9 +1052,9 @@ impl std::fmt::Display for Resources {
             for g in orphans {
                 writeln!(
                     f,
-                    "  pci={}  cuda={}  cpus=[{}]  source={}",
+                    "  pci={}  dev={}  cpus=[{}]  source={}",
                     g.pci_address,
-                    match g.cuda_ordinal {
+                    match g.device_ordinal {
                         Some(o) => o.to_string(),
                         None => "-".to_string(),
                     },

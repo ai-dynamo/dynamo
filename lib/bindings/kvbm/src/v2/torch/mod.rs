@@ -53,14 +53,22 @@ impl Tensor {
             let device = py_tensor.getattr(py, "device")?;
             let device_type = device.getattr(py, "type")?.extract::<String>(py)?;
 
-            let storage_kind = if device_type == "cuda" {
-                let index = device.getattr(py, "index")?.extract::<u32>(py)?;
-                StorageKind::Device(index)
-            } else {
-                anyhow::bail!(
-                    "Only CUDA tensors are supported, got device type: {}",
-                    device_type
-                );
+            let storage_kind = match device_type.as_str() {
+                "cuda" | "xpu" => {
+                    // For XPU tensors, device.index may be None if not explicitly set.
+                    // Default to 0 (primary device) when index is not available.
+                    let index: u32 = match device.getattr(py, "index")?.extract::<Option<u32>>(py)? {
+                        Some(i) => i,
+                        None => 0,
+                    };
+                    StorageKind::Device(index)
+                }
+                _ => {
+                    anyhow::bail!(
+                        "Only CUDA and XPU tensors are supported, got device type: {}",
+                        device_type
+                    );
+                }
             };
 
             let data_ptr = py_tensor.call_method0(py, "data_ptr")?.extract::<u64>(py)?;

@@ -1,11 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Planner-driven CUDA / NIXL executor (`use_planner = true` path).
+//! Planner-driven device / NIXL executor (`use_planner = true` path).
+//!
+//! Backend-agnostic: a single `execute_outcome_device` entry point
+//! handles all `PlanOutcome` arms across CUDA and SYCL via the
+//! device-agnostic `DeviceStream` API (`batch_copy`,
+//! `vectorized_copy`, `clone_htod`, `with_device_ptr`). Only the
+//! `DeviceGraphReplay` arm still branches per-backend internally —
+//! CUDA drives `cuStreamBeginCapture` / `cuGraphLaunch`; SYCL uses
+//! SYCL graph capture/replay via `dispatch_sycl_graph_replay_planner`.
 //!
 //! Wires `transfer::plan::plan_copy` into the existing transfer
 //! infrastructure for two strategy families:
-//! - [`TransferStrategy::CudaAsync{H2D, D2H, D2D}`] — dispatched via
+//! - [`TransferStrategy::Async{H2D, D2H, D2D}`] — dispatched via
 //!   `kvbm_kernels::memcpy_batch` (PR-5).
 //! - [`TransferStrategy::Nixl{Read, Write, ReadFlipped, WriteFlipped}`]
 //!   — dispatched via NIXL `create_xfer_req` / `post_xfer_req` (PR-5.6).
@@ -32,23 +40,30 @@
 //!    with distinct sizes get distinct calls; identical-size groups
 //!    coalesce into one batch.
 
+#[cfg(any(feature = "cuda", feature = "xpu-sycl"))]
 use std::ffi::c_void;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
+#[cfg(feature = "cuda")]
 use cudarc::driver::CudaStream;
+#[cfg(feature = "cuda")]
 use cudarc::driver::sys as cu_sys;
+#[cfg(feature = "cuda")]
 use cudarc::runtime::sys::cudaStream_t;
 use dynamo_memory::nixl::{XferDescList, XferOp};
+#[cfg(feature = "cuda")]
 use kvbm_kernels::MemcpyBatchMode;
 
 use super::TransferContext;
 use super::{PhysicalLayout, TransferStrategy};
 use crate::BlockId;
+use crate::device::DeviceStream;
 use crate::layout::KvBlockLayout;
 use crate::manager::LayoutHandle;
 use crate::transfer::benchmark::{BenchmarkKey, BenchmarkOutcome};
 use crate::transfer::context::TransferCompleteNotification;
+#[cfg(feature = "cuda")]
 use crate::transfer::graph_cache::{GraphCache, ManagedExecHandle};
 use crate::transfer::lower::{
     Candidate, GraphCacheKey, SelectionContext, lower_to_candidates, physical_to_layout_view,
@@ -59,33 +74,33 @@ use crate::transfer::plan::{
 };
 use crate::transfer::prepared::{PreparedPlanKey, PreparedTransferPlan};
 
-/// RAII guard that drains any work queued on a CUDA stream before
+/// RAII guard that drains any work queued on a device stream before
 /// `Drop` returns. Used by [`with_transform_scratch_upload`] to
 /// guarantee that async H2D copies feeding the kernel from a
 /// prepared-plan scratch lease have fully drained before the lease is
 /// returned to its pool — closes the race where a concurrent
 /// transfer could re-acquire the leased `Vec` from the pool and
-/// overwrite bytes still being read by an in-flight `cudaMemcpyAsync`.
+/// overwrite bytes still being read by an in-flight async memcpy.
 ///
 /// The guard records a stream event and host-synchronizes on it. If
 /// event recording fails (rare; e.g. driver OOM), we fall back to a
 /// full-stream `synchronize()` so the drain is best-effort guaranteed
 /// even on error paths. Both record failures and synchronize failures
 /// are swallowed: this runs from `Drop` and the only sane recovery is
-/// to block long enough for CUDA to settle.
+/// to block long enough for the device to settle.
 struct DrainOnDrop<'a> {
-    stream: &'a Arc<CudaStream>,
+    stream: &'a Arc<DeviceStream>,
 }
 
 impl<'a> DrainOnDrop<'a> {
-    fn new(stream: &'a Arc<CudaStream>) -> Self {
+    fn new(stream: &'a Arc<DeviceStream>) -> Self {
         Self { stream }
     }
 }
 
 impl Drop for DrainOnDrop<'_> {
     fn drop(&mut self) {
-        match self.stream.record_event(None) {
+        match self.stream.record_event() {
             Ok(event) => {
                 let _ = event.synchronize();
             }
@@ -106,7 +121,8 @@ impl Drop for DrainOnDrop<'_> {
 /// 2. Hand the two scratch `Vec<usize>` slots to the caller's `fill`
 ///    closure — caller populates them via the appropriate emit method
 ///    on the [`PreparedTransferPlan`].
-/// 3. `clone_htod` each slot to device memory.
+/// 3. `clone_htod` each slot to device memory via the backend-agnostic
+///    [`DeviceStream::clone_htod`] surface.
 /// 4. Record + host-synchronize on a stream event (via `DrainOnDrop`)
 ///    so the H2D copies drain before the lease returns to the pool.
 /// 5. Drop the lease; the kernel launch continues async on the stream.
@@ -116,12 +132,12 @@ impl Drop for DrainOnDrop<'_> {
 /// concurrent transfer can never re-acquire the leased `Vec` while
 /// an H2D against it is still in flight.
 fn with_transform_scratch_upload<F>(
-    stream: &Arc<CudaStream>,
+    stream: &Arc<DeviceStream>,
     prepared: &PreparedTransferPlan,
     fill: F,
 ) -> Result<(
-    cudarc::driver::CudaSlice<usize>,
-    cudarc::driver::CudaSlice<usize>,
+    crate::device::DeviceSlice<usize>,
+    crate::device::DeviceSlice<usize>,
 )>
 where
     F: FnOnce(&mut Vec<usize>, &mut Vec<usize>) -> Result<()>,
@@ -141,38 +157,45 @@ where
     Ok((a_dev, b_dev))
 }
 
-/// Dispatch a CudaAsync transfer through the stride-aware planner.
+/// Dispatch an Async transfer through the stride-aware planner.
 ///
-/// Returns the same kind of [`TransferCompleteNotification`] the
-/// legacy `execute_cuda_transfer` returns, or an `Err` when the
-/// transfer cannot be safely handled by the PR-5 planner path.
+/// Backend-agnostic entry point: validates, plans, resolves the
+/// stream, then lowers the [`PlanOutcome`] through the unified
+/// [`execute_outcome_device`]. Returns the same kind of
+/// [`TransferCompleteNotification`] the legacy `execute_cuda_transfer`
+/// returns, or an `Err` when the transfer cannot be safely handled by
+/// the planner path.
+///
+/// The `Direct`, `SmallStridedCopy`, and `Transform` arms run on both
+/// CUDA and SYCL through device-agnostic helpers
+/// (`dispatch_ops_grouped_by_size`, `dispatch_small_strided_copy`,
+/// `dispatch_transform_kernel`). The `DeviceGraphReplay` arm branches per-backend: CUDA uses
+/// `cuStreamBeginCapture` / `cuGraphLaunch`; SYCL uses sycl_ext_oneapi_graph
+/// capture/replay via `dispatch_sycl_graph_replay_planner`.
 ///
 /// Bails (no fallback) when:
-/// - the strategy is not one of `CudaAsync{H2D, D2H, D2D}` —
-///   enforced by [`validate_cuda_planner_entry`];
+/// - the strategy is not one of `Async{H2D, D2H, D2D}` —
+///   enforced by [`validate_device_planner_entry`];
 /// - the src/dst block-id lists have unequal length —
 ///   enforced by [`validate_planner_block_ids`];
 /// - `src.block_layout()` and `dst.block_layout()` would require a
-///   semantic transformation (NHD↔HND, ↔Universal, etc.). The
-///   planner-side projection collapses the per-token NHD/HND
-///   substructure into a single trailing `Payload` axis, so a
-///   raw-copy without going through the kernel catalog would silently
-///   transpose-corrupt the data. PR-6.1 wires the kernel catalog
-///   and removes this gate from the Cuda* entrypoint.
+///   semantic transformation (NHD↔HND, ↔Universal, etc.) and the
+///   kernel catalog has no matching entry — surfaced from
+///   `build_transform_invocation` at lower time.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_planner_cuda_transfer(
+pub(crate) fn execute_planner_device_transfer(
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     src_block_ids: &[BlockId],
     dst_block_ids: &[BlockId],
     strategy: TransferStrategy,
-    cuda_stream: Option<Arc<CudaStream>>,
+    device_stream: Option<Arc<DeviceStream>>,
     layer_range: Option<std::ops::Range<usize>>,
     axis_slices: Vec<kvbm_common::AxisIntersection>,
     plan_handles: Option<(LayoutHandle, LayoutHandle)>,
     ctx: &TransferContext,
 ) -> Result<TransferCompleteNotification> {
-    validate_cuda_planner_entry(
+    validate_device_planner_entry(
         strategy,
         src.layout().block_layout(),
         dst.layout().block_layout(),
@@ -190,25 +213,20 @@ pub(crate) fn execute_planner_cuda_transfer(
         layer_range,
         axis_slices,
         plan_handles,
-        "execute_planner_cuda_transfer",
+        "execute_planner_device_transfer",
         ctx,
     )?;
 
-    // Acquire a stream (caller-provided or pool-acquired). Direction
-    // determines which stream pool we draw from.
-    let caller_manages_sync = cuda_stream.is_some();
-    let stream = match &outcome {
+    let caller_manages_sync = device_stream.is_some();
+    let device_stream_resolved: Arc<DeviceStream> = match &outcome {
         PlanOutcome::Empty => return Ok(TransferCompleteNotification::completed()),
-        _ => {
-            if let Some(s) = cuda_stream {
-                s
-            } else {
-                match strategy {
-                    TransferStrategy::CudaAsyncD2H => ctx.next_d2h_streams(),
-                    _ => ctx.next_h2d_streams(),
-                }
-            }
-        }
+        _ => match device_stream {
+            Some(s) => s,
+            None => match strategy {
+                TransferStrategy::AsyncD2H => ctx.next_d2h_stream(),
+                _ => ctx.next_h2d_stream(),
+            },
+        },
     };
 
     // PR-7.6: capture telemetry fields from the outcome before dispatch
@@ -223,45 +241,19 @@ pub(crate) fn execute_planner_cuda_transfer(
     // time — just the planner-dispatch submit path itself.
     let tel_t0 = std::time::Instant::now();
 
-    match outcome {
-        PlanOutcome::Empty => unreachable!("handled above"),
-        PlanOutcome::Direct(ops) => {
-            // Group by `size` so each `memcpy_batch` call has a
-            // uniform `size_per_copy`. Common case is one group;
-            // heterogeneous sizes get one batch per size.
-            dispatch_ops_grouped_by_size(&ops, stream.as_ref())?;
-        }
-        PlanOutcome::Transform {
-            invocation,
-            block_pairs,
-            prepared,
-            layer_range,
-        } => {
-            dispatch_transform_kernel(
-                &invocation,
-                src,
-                dst,
-                &block_pairs,
-                layer_range,
-                &stream,
-                &prepared,
-            )?;
-        }
-        PlanOutcome::SmallStridedCopy(ops) => {
-            dispatch_small_strided_copy(&ops, &stream)?;
-        }
-        PlanOutcome::CudaGraphReplay { cache_key, ops } => {
-            dispatch_cuda_graph_replay_planner(&ops, &cache_key, ctx.graph_cache(), &stream)?;
-        }
-    }
+    let tel_route: &'static str = match device_stream_resolved.backend() {
+        crate::device::DeviceBackend::Cuda => "cuda",
+        crate::device::DeviceBackend::Sycl => "sycl",
+    };
+    execute_outcome_device(outcome, src, dst, &device_stream_resolved, ctx)?;
 
     let tel_latency_us = tel_t0.elapsed().as_micros() as u64;
 
     // PR-7.6: structured telemetry event — emitted at DEBUG level.
     //
-    // `route` is "cuda" for fast log filtering; `strategy` carries the
-    // full `TransferStrategy` Debug repr for callers who need the exact
-    // direction (H2D / D2H / D2D).
+    // `route` is the backend tag for fast log filtering; `strategy`
+    // carries the full `TransferStrategy` Debug repr for callers who
+    // need the exact direction (H2D / D2H / D2D).
     //
     // `src_layout_signature` / `dst_layout_signature` are only
     // computed when a DEBUG subscriber has the "kvbm_physical::planner"
@@ -282,7 +274,7 @@ pub(crate) fn execute_planner_cuda_transfer(
             dst_layout_signature = %dst_sig,
             descriptor_count = tel_descriptors,
             coalesced_bytes = tel_bytes,
-            route = "cuda",
+            route = tel_route,
             strategy = ?strategy,
             submit_latency_us = tel_latency_us,
             candidate_class = tel_class,
@@ -293,13 +285,96 @@ pub(crate) fn execute_planner_cuda_transfer(
     if caller_manages_sync {
         return Ok(TransferCompleteNotification::completed());
     }
-    let event = stream.record_event(None)?;
-    Ok(ctx.register_cuda_event(event))
+    let event = device_stream_resolved.record_event()?;
+    Ok(ctx.register_device_event(event))
+}
+
+/// Device-agnostic lowering of a [`PlanOutcome`].
+///
+/// `Direct` and `SmallStridedCopy` go through the device-agnostic
+/// [`dispatch_ops_grouped_by_size`] / [`dispatch_small_strided_copy`]
+/// helpers, which call `DeviceStream::batch_copy` /
+/// `DeviceStream::vectorized_copy`. The `Transform` arm goes through
+/// [`dispatch_transform_kernel`].
+///
+/// `DeviceGraphReplay` branches per-backend: under `cuda` it dispatches via
+/// `dispatch_cuda_graph_replay_planner` (which uses
+/// `cuStreamBeginCapture` / `cuGraphLaunch`); under SYCL it dispatches
+/// via `dispatch_sycl_graph_replay_planner` (SYCL graph capture/replay).
+fn execute_outcome_device(
+    outcome: PlanOutcome,
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    device_stream: &Arc<DeviceStream>,
+    _ctx: &TransferContext,
+) -> Result<()> {
+    match outcome {
+        PlanOutcome::Empty => unreachable!("handled by execute_planner_device_transfer"),
+        PlanOutcome::Direct(ops) => {
+            // Group by `size` so each `batch_copy` call has a uniform
+            // `size_per_copy`. Common case is one group; heterogeneous
+            // sizes get one batch per size.
+            dispatch_ops_grouped_by_size(&ops, device_stream)?;
+        }
+        PlanOutcome::Transform {
+            invocation,
+            block_pairs,
+            prepared,
+            layer_range,
+        } => {
+            dispatch_transform_kernel(
+                &invocation,
+                src,
+                dst,
+                &block_pairs,
+                layer_range,
+                device_stream,
+                &prepared,
+            )?;
+        }
+        PlanOutcome::SmallStridedCopy(ops) => {
+            dispatch_small_strided_copy(&ops, device_stream)?;
+        }
+        PlanOutcome::DeviceGraphReplay {
+            #[cfg(feature = "cuda")]
+            cache_key,
+            ops,
+            ..
+        } => match device_stream.backend() {
+            #[cfg(feature = "cuda")]
+            crate::device::DeviceBackend::Cuda => {
+                let cuda_stream: Arc<CudaStream> =
+                    device_stream.cuda_stream_arc().ok_or_else(|| {
+                        anyhow!(
+                            "execute_outcome_device: stream backend tagged Cuda but \
+                             cuda_stream_arc() returned None"
+                        )
+                    })?;
+                dispatch_cuda_graph_replay_planner(
+                    &ops,
+                    &cache_key,
+                    _ctx.graph_cache(),
+                    &cuda_stream,
+                )?;
+            }
+            #[cfg(not(feature = "cuda"))]
+            crate::device::DeviceBackend::Cuda => {
+                bail!(
+                    "execute_outcome_device: stream backend is Cuda but the \
+                     `cuda` feature is not compiled in"
+                );
+            }
+            crate::device::DeviceBackend::Sycl => {
+                dispatch_sycl_graph_replay_planner(&ops, device_stream, _ctx)?;
+            }
+        },
+    }
+    Ok(())
 }
 
 /// Dispatch a NIXL transfer through the stride-aware planner.
 ///
-/// Behaves like [`execute_planner_cuda_transfer`] for the validation,
+/// Behaves like [`execute_planner_device_transfer`] for the validation,
 /// planning, and lowering stages, then maps the lowered
 /// [`Vec<CopyOp>`] onto a NIXL `XferDescList` pair instead of
 /// `cudaMemcpyAsync`.
@@ -348,9 +423,10 @@ pub(crate) fn execute_planner_nixl_transfer(
 
     // NIXL path: min_inner_bytes = 0. NIXL descriptors are coalesced
     // by plan_copy already, and the SmallStridedCopy (vectorized_copy)
-    // path is Cuda-only. Staged NIXL legs also call plan_and_lower
-    // with min_inner_bytes = 0 (same same-layout-always-Direct
-    // requirement).
+    // arm is not valid on the NIXL leg either way (NIXL ops are
+    // coalesced ranges, not strided per-chunk). Staged NIXL legs also
+    // call plan_and_lower with min_inner_bytes = 0 (same
+    // same-layout-always-Direct requirement).
     let nixl_policy = CopyPolicy {
         min_inner_bytes: 0,
         coalesce: true,
@@ -405,9 +481,9 @@ pub(crate) fn execute_planner_nixl_transfer(
              NIXL paths use min_inner_bytes = 0 and must always produce Direct. \
              This is an internal routing bug."
         ),
-        PlanOutcome::CudaGraphReplay { .. } => bail!(
-            "execute_planner_nixl_transfer: unexpected CudaGraphReplay outcome — \
-             graph replay is only valid on Cuda-family routes, not NIXL. \
+        PlanOutcome::DeviceGraphReplay { .. } => bail!(
+            "execute_planner_nixl_transfer: unexpected DeviceGraphReplay outcome — \
+             graph replay is only valid on device-async routes, not NIXL. \
              This is an internal routing bug."
         ),
     };
@@ -584,9 +660,9 @@ enum PlanOutcome {
     /// `size` (inner_bytes at the cut point). Dispatched via
     /// `kvbm_kernels::vectorized_copy` on the Cuda path.
     SmallStridedCopy(Vec<CopyOp>),
-    /// PR-7.4.1: CUDA graph capture/replay. `ops` are the copy
+    /// PR-7.4.1: Device graph capture/replay. `ops` are the copy
     /// descriptors whose addresses are rebound on each replay.
-    CudaGraphReplay {
+    DeviceGraphReplay {
         cache_key: GraphCacheKey,
         ops: Vec<CopyOp>,
     },
@@ -606,7 +682,7 @@ impl PlanOutcome {
             PlanOutcome::Direct(_) => "DirectDma",
             PlanOutcome::Transform { .. } => "TransformKernel",
             PlanOutcome::SmallStridedCopy(_) => "SmallStridedCopy",
-            PlanOutcome::CudaGraphReplay { .. } => "CudaGraphReplay",
+            PlanOutcome::DeviceGraphReplay { .. } => "DeviceGraphReplay",
         }
     }
 
@@ -624,13 +700,13 @@ impl PlanOutcome {
             PlanOutcome::Direct(ops) => ops.iter().map(|o| o.size).sum(),
             PlanOutcome::Transform { block_pairs, .. } => block_pairs.len() * src_bytes_per_block,
             PlanOutcome::SmallStridedCopy(ops) => ops.iter().map(|o| o.size).sum(),
-            PlanOutcome::CudaGraphReplay { ops, .. } => ops.iter().map(|o| o.size).sum(),
+            PlanOutcome::DeviceGraphReplay { ops, .. } => ops.iter().map(|o| o.size).sum(),
         }
     }
 
     /// Number of descriptors / ops in the outcome.
     ///
-    /// For `Direct` / `SmallStridedCopy` / `CudaGraphReplay`: op count.
+    /// For `Direct` / `SmallStridedCopy` / `DeviceGraphReplay`: op count.
     /// For `Transform`: block-pair count (one kernel call per pair group).
     fn descriptor_count(&self) -> usize {
         match self {
@@ -638,7 +714,7 @@ impl PlanOutcome {
             PlanOutcome::Direct(ops) => ops.len(),
             PlanOutcome::Transform { block_pairs, .. } => block_pairs.len(),
             PlanOutcome::SmallStridedCopy(ops) => ops.len(),
-            PlanOutcome::CudaGraphReplay { ops, .. } => ops.len(),
+            PlanOutcome::DeviceGraphReplay { ops, .. } => ops.len(),
         }
     }
 }
@@ -649,7 +725,7 @@ impl PlanOutcome {
 ///
 /// Strategy and layout-compatibility checks are NOT done here — each
 /// entrypoint enforces its own per-family contract via
-/// [`validate_cuda_planner_entry`] / [`validate_nixl_planner_entry`]
+/// [`validate_device_planner_entry`] / [`validate_nixl_planner_entry`]
 /// before calling this. The two entrypoints differ only by:
 /// - the `policy` they pass in (Cuda uses default with
 ///   `min_inner_bytes = 4096`; NIXL uses `{ 0, coalesce: true }`);
@@ -900,19 +976,19 @@ fn plan_and_lower(
                 [Candidate::DirectDma { ops }] => ops.iter().map(|o| o.size).sum(),
                 _ => 0,
             };
-            // PR-7.4.1: emit a CudaGraphReplay candidate alongside DirectDma on
-            // Cuda-family routes when cuda_graph_replay is enabled. The scorer
-            // gives CudaGraphReplay a higher score (1050) than DirectDma (1000),
+            // PR-7.4.1: emit a DeviceGraphReplay candidate alongside DirectDma on
+            // device-async routes when device_graph_replay is enabled. The scorer
+            // gives DeviceGraphReplay a higher score (1050) than DirectDma (1000),
             // so select_candidate picks it when the cap is on. The ops are shared
             // with the DirectDma candidate; rebinding happens per-launch.
-            if capabilities.cuda_graph_replay
-                && strategy.is_cuda_family()
+            if capabilities.device_graph_replay
+                && strategy.is_device_family()
                 && let [Candidate::DirectDma { ops }] = &candidates[..]
             {
                 let route_family = match strategy {
-                    TransferStrategy::CudaAsyncH2D => 0u8,
-                    TransferStrategy::CudaAsyncD2H => 1u8,
-                    TransferStrategy::CudaAsyncD2D => 2u8,
+                    TransferStrategy::AsyncH2D => 0u8,
+                    TransferStrategy::AsyncD2H => 1u8,
+                    TransferStrategy::AsyncD2D => 2u8,
                     _ => 3u8,
                 };
                 // `dtype_width_bytes` from LayoutConfig is always set
@@ -928,7 +1004,7 @@ fn plan_and_lower(
                     candidate_class: 0, // DirectDma-shaped
                 };
                 let replay_ops = ops.clone();
-                candidates.push(Candidate::CudaGraphReplay {
+                candidates.push(Candidate::DeviceGraphReplay {
                     cache_key,
                     ops: replay_ops,
                 });
@@ -944,8 +1020,8 @@ fn plan_and_lower(
             let chosen = select_candidate(&candidates, &sel_ctx)?;
             match chosen {
                 Candidate::DirectDma { ops } => Ok(PlanOutcome::Direct(ops.clone())),
-                // PR-7.4.1: CudaGraphReplay selected — emit with ops for capture/rebind.
-                Candidate::CudaGraphReplay { cache_key, ops } => Ok(PlanOutcome::CudaGraphReplay {
+                // PR-7.4.1: DeviceGraphReplay selected — emit with ops for capture/rebind.
+                Candidate::DeviceGraphReplay { cache_key, ops } => Ok(PlanOutcome::DeviceGraphReplay {
                     cache_key: cache_key.clone(),
                     ops: ops.clone(),
                 }),
@@ -1206,28 +1282,29 @@ pub(crate) fn validate_planner_block_ids(
     Ok(PlannerInputs::Proceed)
 }
 
-/// Per-entrypoint guard for [`execute_planner_cuda_transfer`].
+/// Per-entrypoint guard for [`execute_planner_device_transfer`].
 ///
-/// Rejects strategies outside the `CudaAsync{H2D,D2H,D2D}` family.
-/// Layout-pair compatibility is enforced downstream by the kernel
+/// Rejects strategies outside the `Async{H2D,D2H,D2D}` family. The
+/// guard is backend-agnostic — both CUDA and SYCL planner paths share
+/// it. Layout-pair compatibility is enforced downstream by the kernel
 /// catalog (`build_transform_invocation`): identical layouts go
 /// through the Direct path, registered transform pairs through the
 /// Transform path, unregistered transform pairs surface a precise
 /// no-matching-kernel error.
-pub(crate) fn validate_cuda_planner_entry(
+pub(crate) fn validate_device_planner_entry(
     strategy: TransferStrategy,
     _src_block_layout: KvBlockLayout,
     _dst_block_layout: KvBlockLayout,
 ) -> Result<()> {
     if !matches!(
         strategy,
-        TransferStrategy::CudaAsyncH2D
-            | TransferStrategy::CudaAsyncD2H
-            | TransferStrategy::CudaAsyncD2D
+        TransferStrategy::AsyncH2D
+            | TransferStrategy::AsyncD2H
+            | TransferStrategy::AsyncD2D
     ) {
         bail!(
-            "validate_cuda_planner_entry: strategy {strategy:?} is not a CudaAsync \
-             variant — caller routed a non-Cuda strategy into the Cuda planner \
+            "validate_device_planner_entry: strategy {strategy:?} is not an Async \
+             variant — caller routed a non-device strategy into the device planner \
              entrypoint"
         );
     }
@@ -1284,21 +1361,18 @@ pub(crate) fn validate_nixl_planner_entry(
 ///
 /// The shared scratch + upload + drain path is owned by
 /// [`with_transform_scratch_upload`]; this function only picks the
-/// per-kind emit method and FFI entrypoint.
+/// per-kind emit method and per-backend FFI entrypoint.
 pub(crate) fn dispatch_transform_kernel(
     invocation: &crate::transfer::kernel_catalog::KernelInvocation,
     src: &PhysicalLayout,
     dst: &PhysicalLayout,
     block_pairs: &[(BlockId, BlockId)],
     layer_range: Option<std::ops::Range<usize>>,
-    stream: &Arc<CudaStream>,
+    stream: &Arc<DeviceStream>,
     prepared: &PreparedTransferPlan,
 ) -> Result<()> {
-    use cudarc::driver::DevicePtr;
-
     use crate::transfer::kernel_catalog::KernelKind;
 
-    let stream_raw = stream.cu_stream() as cudaStream_t;
     let nl_full = invocation.num_layers;
     if let Some(ref r) = layer_range {
         if r.end > nl_full || r.start > r.end {
@@ -1373,9 +1447,6 @@ pub(crate) fn dispatch_transform_kernel(
         }
     })?;
 
-    let (a_ptr_raw, _a_guard) = a_dev.device_ptr(stream.as_ref());
-    let (b_ptr_raw, _b_guard) = b_dev.device_ptr(stream.as_ref());
-
     tracing::debug!(
         target: "kvbm_physical::planner",
         kind = ?invocation.kind,
@@ -1387,26 +1458,106 @@ pub(crate) fn dispatch_transform_kernel(
         hd = hd,
         dtype = ?invocation.dtype,
         block_layout = ?invocation.block_layout,
+        backend = ?stream.backend(),
         "fused permute kernel dispatch"
     );
+
+    // Hold cudarc's `SyncOnDrop` guard live across the kernel launch by
+    // dispatching inside the `with_device_ptr` closure. On SYCL this is
+    // a no-op; on CUDA it ensures the buffer's owning stream is fenced
+    // against the kernel-dispatch stream before the slice can be freed.
+    a_dev.with_device_ptr(|a_ptr_raw| {
+        b_dev.with_device_ptr(|b_ptr_raw| {
+            match stream.backend() {
+                crate::device::DeviceBackend::Cuda => {
+                    #[cfg(feature = "cuda")]
+                    {
+                        dispatch_transform_kernel_cuda_ffi(
+                            invocation,
+                            block_pairs.len(),
+                            nh, nl, no, nt, hd, nl_full, nl_offset,
+                            a_ptr_raw, b_ptr_raw,
+                            stream,
+                        )
+                    }
+                    #[cfg(not(feature = "cuda"))]
+                    {
+                        let _ = (a_ptr_raw, b_ptr_raw, nl_full, nl_offset);
+                        bail!(
+                            "dispatch_transform_kernel: stream backend is Cuda but the \
+                             `cuda` feature is not compiled in"
+                        )
+                    }
+                }
+                crate::device::DeviceBackend::Sycl => {
+                    #[cfg(feature = "xpu-sycl")]
+                    {
+                        dispatch_transform_kernel_sycl_ffi(
+                            invocation,
+                            block_pairs.len(),
+                            nh, nl, no, nt, hd,
+                            nl_full, nl_offset,
+                            a_ptr_raw, b_ptr_raw,
+                            stream,
+                        )
+                    }
+                    #[cfg(not(feature = "xpu-sycl"))]
+                    {
+                        let _ = (a_ptr_raw, b_ptr_raw);
+                        bail!(
+                            "dispatch_transform_kernel: stream backend is Sycl but the \
+                             `xpu-sycl` feature is not compiled in"
+                        )
+                    }
+                }
+            }
+        })
+    })?;
+
+    // The DeviceSlice<usize> drops here; on CUDA the free is stream-ordered
+    // through cudarc, on SYCL the Drop synchronizes the queue first. The
+    // kernel launched above will have completed-or-be-in-flight on the
+    // stream, ensuring the pointer-table memory is not freed under it.
+    drop(a_dev);
+    drop(b_dev);
+    Ok(())
+}
+
+/// CUDA FFI launch path. The pointer-table memory is owned by
+/// [`crate::device::DeviceSlice`]; the caller passes its raw `u64`
+/// device address and keeps the slice alive across the kernel launch.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_transform_kernel_cuda_ffi(
+    invocation: &crate::transfer::kernel_catalog::KernelInvocation,
+    num_blocks: usize,
+    nh: usize, nl: usize, no: usize, nt: usize, hd: usize,
+    nl_full: usize, nl_offset: usize,
+    a_ptr: u64, b_ptr: u64,
+    stream: &Arc<DeviceStream>,
+) -> Result<()> {
+    use crate::transfer::kernel_catalog::KernelKind;
+
+    let cuda_stream = stream.cuda_stream_arc().ok_or_else(|| {
+        anyhow!(
+            "dispatch_transform_kernel_cuda_ffi: stream backend tagged Cuda but \
+             cuda_stream_arc() returned None"
+        )
+    })?;
+    let stream_raw = cuda_stream.cu_stream() as cudaStream_t;
 
     let status = match invocation.kind {
         KernelKind::UniversalFromBlock => {
             // a = operational (src, IN), b = universal (dst, OUT).
-            let universal_ptrs = b_ptr_raw as usize as *const *mut c_void;
-            let block_ptrs = a_ptr_raw as usize as *const *const c_void;
+            let universal_ptrs = b_ptr as usize as *const *mut c_void;
+            let block_ptrs = a_ptr as usize as *const *const c_void;
             unsafe {
                 kvbm_kernels::universal_from_block(
                     universal_ptrs,
                     block_ptrs,
-                    block_pairs.len(),
-                    nh,
-                    nl,
-                    no,
-                    nt,
-                    hd,
-                    nl_full,
-                    nl_offset,
+                    num_blocks,
+                    nh, nl, no, nt, hd,
+                    nl_full, nl_offset,
                     invocation.dtype,
                     invocation.block_layout,
                     stream_raw,
@@ -1415,20 +1566,15 @@ pub(crate) fn dispatch_transform_kernel(
         }
         KernelKind::BlockFromUniversal => {
             // a = operational (dst, OUT), b = universal (src, IN).
-            let universal_ptrs = b_ptr_raw as usize as *const *const c_void;
-            let block_ptrs = a_ptr_raw as usize as *const *mut c_void;
+            let universal_ptrs = b_ptr as usize as *const *const c_void;
+            let block_ptrs = a_ptr as usize as *const *mut c_void;
             unsafe {
                 kvbm_kernels::block_from_universal(
                     universal_ptrs,
                     block_ptrs,
-                    block_pairs.len(),
-                    nh,
-                    nl,
-                    no,
-                    nt,
-                    hd,
-                    nl_full,
-                    nl_offset,
+                    num_blocks,
+                    nh, nl, no, nt, hd,
+                    nl_full, nl_offset,
                     invocation.dtype,
                     invocation.block_layout,
                     stream_raw,
@@ -1442,14 +1588,10 @@ pub(crate) fn dispatch_transform_kernel(
             // and `nl` here is the slice length.
             unsafe {
                 kvbm_kernels::nhd_hnd_transpose(
-                    a_ptr_raw as usize as *const *const c_void,
-                    b_ptr_raw as usize as *const *mut c_void,
-                    block_pairs.len(),
-                    nl,
-                    no,
-                    nt,
-                    nh,
-                    hd,
+                    a_ptr as usize as *const *const c_void,
+                    b_ptr as usize as *const *mut c_void,
+                    num_blocks,
+                    nl, no, nt, nh, hd,
                     invocation.dtype,
                     invocation.block_layout,
                     stream_raw,
@@ -1459,10 +1601,103 @@ pub(crate) fn dispatch_transform_kernel(
     };
     if status != cudarc::runtime::sys::cudaError::cudaSuccess {
         bail!(
-            "dispatch_transform_kernel: kernel launch failed with status={status:?} \
+            "dispatch_transform_kernel_cuda_ffi: kernel launch failed with status={status:?} \
              for kind={:?}, num_blocks_to_transfer={}",
             invocation.kind,
-            block_pairs.len(),
+            num_blocks,
+        );
+    }
+    Ok(())
+}
+
+/// SYCL FFI launch path. The SYCL kernels take `elem_size` (bytes per
+/// element) instead of a dtype enum and operate on a raw `sycl::queue*`
+/// recovered from the stream's underlying `SyclDeviceStream`.
+#[cfg(feature = "xpu-sycl")]
+#[allow(clippy::too_many_arguments)]
+fn dispatch_transform_kernel_sycl_ffi(
+    invocation: &crate::transfer::kernel_catalog::KernelInvocation,
+    num_blocks: usize,
+    nh: usize, nl: usize, no: usize, nt: usize, hd: usize,
+    nl_full: usize, nl_offset: usize,
+    a_ptr: u64, b_ptr: u64,
+    stream: &Arc<DeviceStream>,
+) -> Result<()> {
+    use crate::transfer::kernel_catalog::KernelKind;
+    use kvbm_kernels::TensorDataType;
+
+    let sycl_stream = stream.sycl_stream().ok_or_else(|| {
+        anyhow!(
+            "dispatch_transform_kernel_sycl_ffi: stream backend tagged Sycl but \
+             sycl_stream() returned None"
+        )
+    })?;
+    let queue_raw = sycl_stream.queue().raw_queue_ptr();
+
+    // SYCL kernels accept byte-size dispatch; map dtype → bytes per element.
+    let elem_size: usize = match invocation.dtype {
+        TensorDataType::F16 | TensorDataType::BF16 => 2,
+        TensorDataType::F32 => 4,
+        TensorDataType::F64 => 8,
+        TensorDataType::FP8 => 1,
+    };
+
+    let status = match invocation.kind {
+        KernelKind::UniversalFromBlock => {
+            let universal_ptrs = b_ptr as usize as *const *mut c_void;
+            let block_ptrs = a_ptr as usize as *const *const c_void;
+            unsafe {
+                kvbm_kernels::sycl_universal_from_block(
+                    universal_ptrs,
+                    block_ptrs,
+                    num_blocks,
+                    nh, nl, no, nt, hd,
+                    nl_full, nl_offset,
+                    elem_size,
+                    invocation.block_layout,
+                    queue_raw,
+                )
+            }
+        }
+        KernelKind::BlockFromUniversal => {
+            let universal_ptrs = b_ptr as usize as *const *const c_void;
+            let block_ptrs = a_ptr as usize as *const *mut c_void;
+            unsafe {
+                kvbm_kernels::sycl_block_from_universal(
+                    universal_ptrs,
+                    block_ptrs,
+                    num_blocks,
+                    nh, nl, no, nt, hd,
+                    nl_full, nl_offset,
+                    elem_size,
+                    invocation.block_layout,
+                    queue_raw,
+                )
+            }
+        }
+        KernelKind::NhdHndTranspose => {
+            // a = src op, b = dst op. Both sides are operational so the chunk-
+            // pointer table already encodes the layer slice; `nl` here is the
+            // slice length. Mirrors the CUDA arm above.
+            unsafe {
+                kvbm_kernels::sycl_nhd_hnd_transpose(
+                    a_ptr as usize as *const *const c_void,
+                    b_ptr as usize as *const *mut c_void,
+                    num_blocks,
+                    nl, no, nt, nh, hd,
+                    elem_size,
+                    invocation.block_layout,
+                    queue_raw,
+                )
+            }
+        }
+    };
+    if status != 0 {
+        bail!(
+            "dispatch_transform_kernel_sycl_ffi: kernel launch failed with status={status} \
+             for kind={:?}, num_blocks_to_transfer={}",
+            invocation.kind,
+            num_blocks,
         );
     }
     Ok(())
@@ -1476,19 +1711,19 @@ pub(crate) fn dispatch_transform_kernel(
 /// it needs to `await` stage 1's notification. Tasks cannot hold
 /// `&TransferContext` across an `.await` (not `'static`). This struct
 /// clones the small set of bits the two stages need and bundles
-/// `register_cuda_event` / `register_nixl_status` /
+/// `register_device_event` / `register_nixl_status` /
 /// `build_and_post_nixl_leg` methods so both stages call identical
 /// code without an `_owned` suffix variant.
 ///
 /// All methods return `Result<TransferCompleteNotification>` — unlike
-/// `TransferContext::register_cuda_event` (which panics on alloc
+/// `TransferContext::register_device_event` (which panics on alloc
 /// failure), these are hot-path helpers that surface errors to their
 /// caller for graceful handling.
 struct OwnedStagedContext {
     event_system: Arc<velo::EventManager>,
-    tx_cuda_event: tokio::sync::mpsc::Sender<
+    tx_device_event: tokio::sync::mpsc::Sender<
         crate::transfer::notifications::RegisterPollingNotification<
-            crate::transfer::notifications::CudaEventChecker,
+            crate::transfer::notifications::DeviceEventChecker,
         >,
     >,
     tx_nixl_status: tokio::sync::mpsc::Sender<
@@ -1498,7 +1733,7 @@ struct OwnedStagedContext {
     >,
     raw_agent: dynamo_memory::nixl::Agent,
     nixl_agent: super::super::NixlAgent,
-    stream: Arc<CudaStream>,
+    stream: Arc<DeviceStream>,
     /// Copied from `TransferContext` so the staged task can build a
     /// `SelectionContext` for the NIXL leg's `plan_and_lower` call.
     /// `TransferCapabilities` is `Copy` so this is cheap.
@@ -1513,32 +1748,32 @@ impl OwnedStagedContext {
         let nixl_agent = ctx.nixl_agent().clone();
         Self {
             event_system: ctx.event_system().clone(),
-            tx_cuda_event: ctx.tx_cuda_event_clone(),
+            tx_device_event: ctx.tx_device_event_clone(),
             tx_nixl_status: ctx.tx_nixl_status_clone(),
             raw_agent: nixl_agent.raw_agent().clone(),
             nixl_agent,
-            stream: ctx.next_h2d_streams(),
+            stream: ctx.next_h2d_stream(),
             capabilities: *ctx.capabilities(),
         }
     }
 
-    /// Register a CUDA event for polling completion.
-    fn register_cuda_event(
+    /// Register a device event for polling completion.
+    fn register_device_event(
         &self,
-        cuda_event: cudarc::driver::CudaEvent,
+        event: crate::device::DeviceEvent,
     ) -> Result<TransferCompleteNotification> {
         let new_event = self.event_system.new_event()?;
         let handle = new_event.into_handle();
         let awaiter = self.event_system.awaiter(handle)?;
         let notification = crate::transfer::notifications::RegisterPollingNotification {
             uuid: uuid::Uuid::new_v4(),
-            checker: crate::transfer::notifications::CudaEventChecker::new(cuda_event),
+            checker: crate::transfer::notifications::DeviceEventChecker::new(event),
             event_handle: handle,
             telemetry: None,
         };
-        self.tx_cuda_event
+        self.tx_device_event
             .try_send(notification)
-            .map_err(|e| anyhow!("staged: failed to enqueue CUDA event notification: {e}"))?;
+            .map_err(|e| anyhow!("staged: failed to enqueue device event notification: {e}"))?;
         Ok(TransferCompleteNotification::from_awaiter(awaiter))
     }
 
@@ -1620,9 +1855,9 @@ impl OwnedStagedContext {
                  outcome — staged NIXL leg uses min_inner_bytes = 0 and must go Direct. \
                  This is an internal routing bug."
             ),
-            PlanOutcome::CudaGraphReplay { .. } => bail!(
-                "OwnedStagedContext::build_and_post_nixl_leg: unexpected CudaGraphReplay \
-                 outcome — staged NIXL legs use min_inner_bytes = 0 and cuda_graph_replay \
+            PlanOutcome::DeviceGraphReplay { .. } => bail!(
+                "OwnedStagedContext::build_and_post_nixl_leg: unexpected DeviceGraphReplay \
+                 outcome — staged NIXL legs use min_inner_bytes = 0 and device_graph_replay \
                  is disabled on NIXL routes. This is an internal routing bug."
             ),
         };
@@ -1662,7 +1897,7 @@ impl OwnedStagedContext {
 ///
 /// Cross-agent transforms cannot be done by NIXL alone — NIXL moves
 /// raw bytes between agents, but the operational↔universal permute
-/// is a CUDA kernel that runs only locally. The Staged executor
+/// is a device kernel that runs only locally. The Staged executor
 /// stitches the two stages together:
 ///
 /// - **NIXL Read (pull)**: NIXL-leg pulls `src → bounce` (raw, same
@@ -1678,9 +1913,10 @@ impl OwnedStagedContext {
 /// Stage 1 is built synchronously and its notification captured.
 /// The chain spawns a tokio task that awaits stage 1, then performs
 /// stage 2 using an [`OwnedStagedContext`] that holds cloned
-/// `NixlAgent`, polling-channel senders, event manager, and CUDA
-/// stream. The returned [`TransferCompleteNotification`] resolves
-/// when stage 2 completes.
+/// `NixlAgent`, polling-channel senders, event manager, and a
+/// `DeviceStream` (CUDA or SYCL, transparent to this code path). The
+/// returned [`TransferCompleteNotification`] resolves when stage 2
+/// completes.
 ///
 /// **Lifecycle.** The spawned chain is fire-and-forget at spawn
 /// time — the caller's only handle is the returned notification. If
@@ -1721,7 +1957,7 @@ fn dispatch_staged_nixl_transform(
     if !matches!(bounce_layout.location(), StorageKind::Device(_)) {
         bail!(
             "dispatch_staged_nixl_transform: bounce storage must be Device(_); got {:?} \
-             (cross-agent transforms run a CUDA kernel locally)",
+             (cross-agent transforms run a device kernel locally)",
             bounce_layout.location()
         );
     }
@@ -1836,8 +2072,8 @@ fn dispatch_staged_nixl_transform(
                 &staged.stream,
                 &stage1_prepared,
             )?;
-            let cuda_event = staged.stream.record_event(None)?;
-            staged.register_cuda_event(cuda_event)?
+            let device_event = staged.stream.record_event()?;
+            staged.register_device_event(device_event)?
         }
     };
 
@@ -1879,8 +2115,8 @@ fn dispatch_staged_nixl_transform(
                         &staged.stream,
                         &stage2_prepared,
                     )?;
-                    let cuda_event = staged.stream.record_event(None)?;
-                    staged.register_cuda_event(cuda_event)
+                    let device_event = staged.stream.record_event()?;
+                    staged.register_device_event(device_event)
                 })();
                 match prep {
                     Ok(notif) => notif.await,
@@ -1949,23 +2185,26 @@ fn dispatch_staged_nixl_transform(
     Ok(TransferCompleteNotification::from_awaiter(outer_awaiter))
 }
 
-/// PR-7.3: dispatch threshold-fallback ops via `kvbm_kernels::vectorized_copy`.
+/// Dispatch threshold-fallback ops via `DeviceStream::vectorized_copy`.
 ///
 /// All ops must share the same `size` — `plan_copy` guarantees this when it
 /// emits `CopyPlan::Transform { reason: ThresholdFallback }` because the
 /// outer-iteration loop uses a single `inner_bytes` for every descriptor
 /// (and does NOT coalesce, which could mix sizes).
 ///
-/// The pointer arrays must be device-accessible. We stage host-side arrays
-/// then push them to device via `clone_htod`, mirroring `dispatch_transform_kernel`.
-fn dispatch_small_strided_copy(ops: &[CopyOp], stream: &Arc<CudaStream>) -> Result<()> {
-    use cudarc::driver::DevicePtr;
-
+/// Stages host-side `usize` pointer tables, pushes them to the device
+/// via `DeviceStream::clone_htod`, then launches the backend
+/// `vectorized_copy` kernel through the device-agnostic surface (CUDA:
+/// `kvbm_kernels::vectorized_copy`; SYCL:
+/// `kvbm_kernels::sycl_vectorized_copy`).
+fn dispatch_small_strided_copy(
+    ops: &[CopyOp],
+    stream: &Arc<DeviceStream>,
+) -> Result<()> {
     if ops.is_empty() {
         return Ok(());
     }
 
-    // All ops must have the same size — assert in debug builds.
     let copy_size = ops[0].size;
     debug_assert!(
         ops.iter().all(|o| o.size == copy_size),
@@ -1976,9 +2215,6 @@ fn dispatch_small_strided_copy(ops: &[CopyOp], stream: &Arc<CudaStream>) -> Resu
         return Ok(());
     }
 
-    let stream_raw = stream.cu_stream() as cudaStream_t;
-
-    // Build host-side pointer tables then push to device.
     let mut src_ptrs: Vec<usize> = Vec::with_capacity(ops.len());
     let mut dst_ptrs: Vec<usize> = Vec::with_capacity(ops.len());
     for op in ops {
@@ -1988,34 +2224,29 @@ fn dispatch_small_strided_copy(ops: &[CopyOp], stream: &Arc<CudaStream>) -> Resu
 
     let src_dev = stream.clone_htod(&src_ptrs)?;
     let dst_dev = stream.clone_htod(&dst_ptrs)?;
-    let (src_raw, _src_guard) = src_dev.device_ptr(stream.as_ref());
-    let (dst_raw, _dst_guard) = dst_dev.device_ptr(stream.as_ref());
-
-    let status = unsafe {
-        kvbm_kernels::vectorized_copy(
-            src_raw as usize as *mut *mut c_void,
-            dst_raw as usize as *mut *mut c_void,
-            copy_size,
-            ops.len() as i32,
-            stream_raw,
-        )
-    };
-    if status != cudarc::runtime::sys::cudaError::cudaSuccess {
-        bail!(
-            "dispatch_small_strided_copy: vectorized_copy failed with status={status:?}, \
-             copy_size={copy_size}, num_ops={}",
-            ops.len()
-        );
-    }
-    Ok(())
+    src_dev.with_device_ptr(|src_raw| {
+        dst_dev.with_device_ptr(|dst_raw| {
+            stream.vectorized_copy(src_raw, dst_raw, copy_size, ops.len())
+        })
+    })
+    .map_err(|e| anyhow!(
+        "dispatch_small_strided_copy: vectorized_copy failed: {e}, \
+         copy_size={copy_size}, num_ops={}",
+        ops.len()
+    ))
 }
 
 /// Group `ops` by `size` and dispatch each group via
-/// `kvbm_kernels::memcpy_batch` in `BatchedWithFallback` mode (try
-/// `cudaMemcpyBatchAsync` when the runtime supports it, fall back to
-/// individual `cudaMemcpyAsync` otherwise).
-fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &CudaStream) -> Result<()> {
+/// [`DeviceStream::batch_copy`]. On CUDA this drives
+/// `kvbm_kernels::memcpy_batch` (`cudaMemcpyBatchAsync` when supported,
+/// per-copy `cudaMemcpyAsync` fallback otherwise); on SYCL this is a
+/// host loop over `queue.memcpy_raw_async`.
+fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &Arc<DeviceStream>) -> Result<()> {
     use std::collections::BTreeMap;
+
+    if ops.is_empty() {
+        return Ok(());
+    }
 
     // Stable grouping: map size -> indices into `ops`, in insertion
     // order. BTreeMap keeps deterministic ordering for testability.
@@ -2024,34 +2255,23 @@ fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &CudaStream) -> Result<(
         by_size.entry(op.size).or_default().push(i);
     }
 
-    let stream_raw = stream.cu_stream() as cudaStream_t;
     for (size, indices) in by_size {
         if size == 0 {
             continue;
         }
-        let mut src_ptrs: Vec<*const c_void> = Vec::with_capacity(indices.len());
-        let mut dst_ptrs: Vec<*mut c_void> = Vec::with_capacity(indices.len());
+        let mut src_ptrs: Vec<u64> = Vec::with_capacity(indices.len());
+        let mut dst_ptrs: Vec<u64> = Vec::with_capacity(indices.len());
         for &i in &indices {
-            src_ptrs.push(ops[i].src_addr as *const c_void);
-            dst_ptrs.push(ops[i].dst_addr as *mut c_void);
+            src_ptrs.push(ops[i].src_addr as u64);
+            dst_ptrs.push(ops[i].dst_addr as u64);
         }
-        let status = unsafe {
-            kvbm_kernels::memcpy_batch(
-                src_ptrs.as_ptr(),
-                dst_ptrs.as_ptr(),
-                size,
-                indices.len(),
-                MemcpyBatchMode::BatchedWithFallback,
-                stream_raw,
-            )
-        };
-        if status != cudarc::runtime::sys::cudaError::cudaSuccess {
-            return Err(anyhow!(
-                "execute_planner_cuda_transfer: memcpy_batch failed with size={size}, \
-                 num_copies={}, status={status:?}",
+        stream.batch_copy(&src_ptrs, &dst_ptrs, size).map_err(|e| {
+            anyhow!(
+                "dispatch_ops_grouped_by_size: batch_copy failed with size={size}, \
+                 num_copies={}, error={e}",
                 indices.len()
-            ));
-        }
+            )
+        })?;
     }
     Ok(())
 }
@@ -2098,6 +2318,7 @@ fn dispatch_ops_grouped_by_size(ops: &[CopyOp], stream: &CudaStream) -> Result<(
 /// (which is a CUDA-level constraint as well).  In kvbm-physical the planner
 /// is called synchronously per-transfer, so concurrent replay of the same
 /// exec is not possible today.
+#[cfg(feature = "cuda")]
 fn dispatch_cuda_graph_replay_planner(
     ops: &[CopyOp],
     cache_key: &GraphCacheKey,
@@ -2235,11 +2456,11 @@ fn dispatch_cuda_graph_replay_planner(
         let mut src_ptrs: Vec<*const c_void> = Vec::with_capacity(ops.len());
         let mut dst_ptrs: Vec<*mut c_void> = Vec::with_capacity(ops.len());
         // All ops must share the same size for the batch dispatch.
-        // The DirectDma path groups by size upstream; CudaGraphReplay
+        // The DirectDma path groups by size upstream; DeviceGraphReplay
         // is only emitted for same-size groups (descriptor_count encodes
         // the count, total_bytes = count * size_per_op for uniform ops).
         // We dispatch all ops in one memcpy_batch call using the first op's
-        // size — mixed sizes within a CudaGraphReplay batch are currently
+        // size — mixed sizes within a DeviceGraphReplay batch are currently
         // not supported and would be caught by the cache-key collision check.
         let first_size = ops[0].size;
         for op in ops {
@@ -2426,6 +2647,66 @@ fn dispatch_cuda_graph_replay_planner(
     Ok(())
 }
 
+/// SYCL graph replay dispatcher: record a SYCL graph, launch once.
+///
+/// Unlike the CUDA path which captures once and rebinds addresses on each
+/// replay, the SYCL/UR path records fresh each time because UR does not yet
+/// support per-node USM memcpy address rebinding. The performance benefit
+/// comes from the single O(1) graph enqueue vs O(N) individual
+/// `queue.memcpy()` submissions, plus L0 driver-level batching of the
+/// finalized command list.
+///
+/// Future: when UR stabilizes graph-node address update, add a
+/// SYCL-side graph cache with shape-based lookup + address rebinding,
+/// matching the CUDA path's cache-hit fast path.
+#[cfg(feature = "xpu-sycl")]
+fn dispatch_sycl_graph_replay_planner(
+    ops: &[CopyOp],
+    device_stream: &Arc<DeviceStream>,
+    ctx: &TransferContext,
+) -> Result<()> {
+    use crate::device::{DeviceGraphExec, DeviceGraphOps};
+
+    if ops.is_empty() {
+        return Ok(());
+    }
+
+    let device_ctx = ctx.device_context();
+    let graph_ops = device_ctx.graph_ops().ok_or_else(|| {
+        anyhow!(
+            "dispatch_sycl_graph_replay_planner: device context does not implement \
+             DeviceGraphOps (SYCL graph capture not available)"
+        )
+    })?;
+
+    let src_ptrs: Vec<u64> = ops.iter().map(|op| op.src_addr as u64).collect();
+    let dst_ptrs: Vec<u64> = ops.iter().map(|op| op.dst_addr as u64).collect();
+    let size = ops[0].size;
+
+    let exec = graph_ops.record_memcpy_graph(
+        &src_ptrs,
+        &dst_ptrs,
+        size,
+        device_stream.stream_ops(),
+    )?;
+
+    exec.launch(device_stream.stream_ops())?;
+
+    Ok(())
+}
+
+/// Stub for when xpu-sycl feature is not compiled.
+#[cfg(not(feature = "xpu-sycl"))]
+fn dispatch_sycl_graph_replay_planner(
+    _ops: &[CopyOp],
+    _device_stream: &Arc<DeviceStream>,
+    _ctx: &TransferContext,
+) -> Result<()> {
+    bail!(
+        "dispatch_sycl_graph_replay_planner: xpu-sycl feature not compiled"
+    )
+}
+
 #[cfg(all(test, feature = "testing-kvbm"))]
 mod tests {
     use super::*;
@@ -2456,17 +2737,17 @@ mod tests {
         assert!(r.is_err());
     }
 
-    // ──────────── validate_cuda_planner_entry ────────────
+    // ──────────── validate_device_planner_entry ────────────
 
-    /// Same operational layout + CudaAsync strategy passes.
+    /// Same operational layout + Async strategy passes.
     #[test]
-    fn cuda_entry_passes_same_operational_layout() {
+    fn device_entry_passes_same_operational_layout() {
         for s in [
-            TransferStrategy::CudaAsyncH2D,
-            TransferStrategy::CudaAsyncD2H,
-            TransferStrategy::CudaAsyncD2D,
+            TransferStrategy::AsyncH2D,
+            TransferStrategy::AsyncD2H,
+            TransferStrategy::AsyncD2D,
         ] {
-            let r = validate_cuda_planner_entry(
+            let r = validate_device_planner_entry(
                 s,
                 KvBlockLayout::OperationalNHD,
                 KvBlockLayout::OperationalNHD,
@@ -2476,17 +2757,17 @@ mod tests {
     }
 
     /// PR-6.1: layout-pair compatibility is no longer enforced at the
-    /// Cuda entry guard — the kernel catalog dispatches transforms for
+    /// device entry guard — the kernel catalog dispatches transforms for
     /// pairs it knows about, and surfaces a precise no-matching-kernel
     /// error from `build_transform_invocation` for pairs it doesn't
     /// (e.g. NHD↔HND, which lands in PR-6.3). The entry guard now only
     /// rejects on strategy mismatch.
     #[test]
-    fn cuda_entry_accepts_transform_pairs_now_handled_by_catalog() {
+    fn device_entry_accepts_transform_pairs_now_handled_by_catalog() {
         // Operational ↔ Universal — PR-6.1 catalog has both directions.
         assert!(
-            validate_cuda_planner_entry(
-                TransferStrategy::CudaAsyncD2D,
+            validate_device_planner_entry(
+                TransferStrategy::AsyncD2D,
                 KvBlockLayout::OperationalNHD,
                 KvBlockLayout::Universal,
             )
@@ -2496,8 +2777,8 @@ mod tests {
         // accepts; the precise error comes from the catalog at lower
         // time.
         assert!(
-            validate_cuda_planner_entry(
-                TransferStrategy::CudaAsyncD2D,
+            validate_device_planner_entry(
+                TransferStrategy::AsyncD2D,
                 KvBlockLayout::OperationalNHD,
                 KvBlockLayout::OperationalHND,
             )
@@ -2505,10 +2786,10 @@ mod tests {
         );
     }
 
-    /// Non-CudaAsync strategies routed into the Cuda entrypoint
+    /// Non-Async strategies routed into the device entrypoint
     /// are an internal-routing bug; reject explicitly.
     #[test]
-    fn cuda_entry_rejects_non_cuda_strategies() {
+    fn device_entry_rejects_non_async_strategies() {
         for s in [
             TransferStrategy::NixlRead,
             TransferStrategy::NixlWrite,
@@ -2517,7 +2798,7 @@ mod tests {
             TransferStrategy::Memcpy,
             TransferStrategy::Invalid,
         ] {
-            let r = validate_cuda_planner_entry(
+            let r = validate_device_planner_entry(
                 s,
                 KvBlockLayout::OperationalNHD,
                 KvBlockLayout::OperationalNHD,
@@ -2581,9 +2862,9 @@ mod tests {
     #[test]
     fn nixl_entry_rejects_non_nixl_strategies() {
         for s in [
-            TransferStrategy::CudaAsyncH2D,
-            TransferStrategy::CudaAsyncD2H,
-            TransferStrategy::CudaAsyncD2D,
+            TransferStrategy::AsyncH2D,
+            TransferStrategy::AsyncD2H,
+            TransferStrategy::AsyncD2D,
             TransferStrategy::Memcpy,
             TransferStrategy::Invalid,
         ] {

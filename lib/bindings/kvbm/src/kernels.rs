@@ -6,7 +6,7 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, DevicePtr};
+use dynamo_device::{DeviceBackend, DeviceContext};
 use once_cell::sync::OnceCell;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -17,19 +17,31 @@ use kvbm_kernels::{
     block_from_universal, operational_copy, universal_from_block,
 };
 
+#[cfg(feature = "xpu-sycl")]
+use kvbm_kernels::{sycl_block_from_universal, sycl_universal_from_block};
+
+#[cfg(feature = "cuda")]
 use cudarc::runtime::sys as cuda_runtime;
 
-static CUDA_CONTEXT: OnceCell<Arc<CudaContext>> = OnceCell::new();
+static DEVICE_CONTEXT: OnceCell<Arc<DeviceContext>> = OnceCell::new();
 
-// TODO: determine the right way to get the CUDA context for the python bindings
-// this is currently disabled, but we'll migrate this to the bindings crate
-fn get_context() -> PyResult<Arc<CudaContext>> {
-    let ctx = CUDA_CONTEXT.get_or_try_init(|| {
-        CudaContext::new(0).map_err(|err| {
-            PyRuntimeError::new_err(format!("Failed to create CUDA context: {:?}", err))
-        })
+fn get_context() -> PyResult<Arc<DeviceContext>> {
+    let ctx = DEVICE_CONTEXT.get_or_try_init(|| {
+        let backend = DeviceBackend::detect_backend().map_err(|err| {
+            PyRuntimeError::new_err(format!("Failed to detect device backend: {:?}", err))
+        })?;
+        DeviceContext::new(backend, 0)
+            .map(Arc::new)
+            .map_err(|err| PyRuntimeError::new_err(format!("Failed to create device context: {:?}", err)))
     })?;
     Ok(ctx.clone())
+}
+
+fn expected_torch_device_type(backend: DeviceBackend) -> &'static str {
+    match backend {
+        DeviceBackend::Cuda => "cuda",
+        DeviceBackend::Sycl => "xpu",
+    }
 }
 
 fn map_dtype(dtype_str: &str) -> PyResult<(TensorDataType, usize)> {
@@ -59,23 +71,11 @@ struct TensorInfo {
     shape: Vec<usize>,
     dtype: TensorDataType,
     elem_size: usize,
+    device_type: String,
     device_index: i64,
 }
 
 fn tensor_info(_py: Python<'_>, tensor: &Bound<'_, PyAny>) -> PyResult<TensorInfo> {
-    if !tensor.hasattr("is_cuda")? {
-        return Err(PyTypeError::new_err(
-            "Expected a torch.Tensor with CUDA storage",
-        ));
-    }
-
-    let is_cuda: bool = tensor.getattr("is_cuda")?.extract()?;
-    if !is_cuda {
-        return Err(PyValueError::new_err(
-            "Tensor must reside on CUDA device (device.type == 'cuda')",
-        ));
-    }
-
     let contiguous: bool = tensor.call_method0("is_contiguous")?.extract()?;
     if !contiguous {
         return Err(PyValueError::new_err(
@@ -85,9 +85,9 @@ fn tensor_info(_py: Python<'_>, tensor: &Bound<'_, PyAny>) -> PyResult<TensorInf
 
     let device_obj = tensor.getattr("device")?;
     let device_type: String = device_obj.getattr("type")?.extract()?;
-    if device_type != "cuda" {
+    if device_type != "cuda" && device_type != "xpu" {
         return Err(PyValueError::new_err(format!(
-            "Tensor must reside on CUDA device, found device type '{device_type}'"
+            "Tensor must reside on CUDA or XPU device, found device type '{device_type}'"
         )));
     }
     let device_index: Option<i64> = device_obj.getattr("index")?.extract()?;
@@ -108,6 +108,7 @@ fn tensor_info(_py: Python<'_>, tensor: &Bound<'_, PyAny>) -> PyResult<TensorInf
         shape,
         dtype,
         elem_size,
+        device_type,
         device_index: device_index.unwrap_or(0),
     })
 }
@@ -118,6 +119,7 @@ fn collect_block_pointers(
     blocks: &Bound<'_, PyAny>,
     expected_len: usize,
     expected_dtype: TensorDataType,
+    expected_device_type: &str,
     expected_device: i64,
     expected_shape: Option<&[usize]>,
     expected_numel: Option<usize>,
@@ -145,9 +147,15 @@ fn collect_block_pointers(
                 expected_dtype, info.dtype
             )));
         }
+        if info.device_type != expected_device_type {
+            return Err(PyValueError::new_err(format!(
+                "Block tensor at index {idx} is on '{}' device, but expected '{}'",
+                info.device_type, expected_device_type
+            )));
+        }
         if info.device_index != expected_device {
             return Err(PyValueError::new_err(format!(
-                "Block tensor at index {idx} is on CUDA device {}, but expected device {}",
+                "Block tensor at index {idx} is on device index {}, but expected device {}",
                 info.device_index, expected_device
             )));
         }
@@ -206,8 +214,13 @@ fn parse_backend(label: Option<&str>) -> PyResult<OperationalCopyBackend> {
     Ok(backend)
 }
 
+#[cfg(feature = "cuda")]
 fn to_cuda_error(err: cuda_runtime::cudaError_t) -> PyErr {
     PyRuntimeError::new_err(format!("CUDA error: {:?}", err))
+}
+
+fn to_sycl_error(rc: i32) -> PyErr {
+    PyRuntimeError::new_err(format!("SYCL kernel launch failed (rc={rc})"))
 }
 
 /// Copy one or more NHD/HND block stacks into universal tensors.
@@ -230,9 +243,14 @@ unsafe fn block_to_universal(
     layout: &str,
 ) -> PyResult<()> {
     let ctx = get_context()?;
-    ctx.bind_to_thread()
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to bind context: {:?}", e)))?;
-    let stream = ctx.default_stream();
+    let backend = ctx.backend();
+    let expected_device_type = expected_torch_device_type(backend);
+    let stream = ctx
+        .create_stream()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create stream: {:?}", e)))?;
+    stream
+        .bind_to_thread()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to bind stream: {:?}", e)))?;
     let layout_enum = parse_layout(layout)?;
 
     let universal_items = if universals.hasattr("data_ptr")? {
@@ -271,12 +289,25 @@ unsafe fn block_to_universal(
                 idx, info.dtype, base_info.dtype
             )));
         }
+        if info.device_type != base_info.device_type {
+            return Err(PyValueError::new_err(format!(
+                "Universal tensor {} is on '{}' device type; expected '{}'",
+                idx, info.device_type, base_info.device_type
+            )));
+        }
         if info.device_index != base_info.device_index {
             return Err(PyValueError::new_err(format!(
-                "Universal tensor {} is on CUDA device {}; expected device {}",
+                "Universal tensor {} is on device index {}; expected device {}",
                 idx, info.device_index, base_info.device_index
             )));
         }
+    }
+
+    if base_info.device_type != expected_device_type {
+        return Err(PyValueError::new_err(format!(
+            "Detected backend '{}' expects torch device type '{}', but got '{}'.",
+            backend.name(), expected_device_type, base_info.device_type
+        )));
     }
 
     let nh = base_info.shape[0];
@@ -307,6 +338,7 @@ unsafe fn block_to_universal(
             group,
             chunk_count,
             universal_infos[block_idx].dtype,
+            expected_device_type,
             universal_infos[block_idx].device_index,
             Some(&expected_block_shape),
             None,
@@ -316,44 +348,90 @@ unsafe fn block_to_universal(
 
     let block_ptrs_device = stream
         .clone_htod(block_ptr_values.as_slice())
-        .map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to upload pointer buffer: {:?}", e))
-        })?;
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to upload pointer buffer: {:?}", e)))?;
 
     let universal_ptr_values: Vec<usize> = universal_infos.iter().map(|info| info.ptr).collect();
-    let universal_ptrs_device =
-        stream
-            .clone_htod(universal_ptr_values.as_slice())
-            .map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "Failed to upload universal pointer buffer: {:?}",
-                    e
-                ))
-            })?;
+    let universal_ptrs_device = stream
+        .clone_htod(universal_ptr_values.as_slice())
+        .map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "Failed to upload universal pointer buffer: {:?}",
+                e
+            ))
+        })?;
 
-    let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-    let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *const c_void;
-    let (universal_ptrs_device_raw, _univ_guard) = universal_ptrs_device.device_ptr(&stream);
-    let universal_ptrs_device_ptr = universal_ptrs_device_raw as usize as *const *mut c_void;
+    let block_ptrs_device_ptr = block_ptrs_device.device_ptr_u64() as *const *const c_void;
+    let universal_ptrs_device_ptr = universal_ptrs_device.device_ptr_u64() as *const *mut c_void;
 
-    let status = unsafe {
-        universal_from_block(
-            universal_ptrs_device_ptr,
-            block_ptrs_device_ptr,
-            universal_infos.len(),
-            nh,
-            nl,
-            no,
-            nt,
-            hd,
-            base_info.dtype,
-            layout_enum,
-            stream.cu_stream() as cuda_runtime::cudaStream_t,
-        )
-    };
-
-    if status != cuda_runtime::cudaError::cudaSuccess {
-        return Err(to_cuda_error(status));
+    match backend {
+        DeviceBackend::Cuda => {
+            #[cfg(feature = "cuda")]
+            {
+                let cu_stream = stream.cuda_stream_arc().ok_or_else(|| {
+                    PyRuntimeError::new_err("CUDA backend selected but CUDA stream is unavailable")
+                })?;
+                let status = unsafe {
+                    universal_from_block(
+                        universal_ptrs_device_ptr,
+                        block_ptrs_device_ptr,
+                        universal_infos.len(),
+                        nh,
+                        nl,
+                        no,
+                        nt,
+                        hd,
+                        nl,
+                        0,
+                        base_info.dtype,
+                        layout_enum,
+                        cu_stream.cu_stream() as cuda_runtime::cudaStream_t,
+                    )
+                };
+                if status != cuda_runtime::cudaError::cudaSuccess {
+                    return Err(to_cuda_error(status));
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                return Err(PyRuntimeError::new_err(
+                    "CUDA backend detected but kvbm bindings are not built with 'cuda'",
+                ));
+            }
+        }
+        DeviceBackend::Sycl => {
+            #[cfg(feature = "xpu-sycl")]
+            {
+                let sycl_stream = stream.sycl_stream().ok_or_else(|| {
+                    PyRuntimeError::new_err("SYCL backend selected but SYCL stream is unavailable")
+                })?;
+                let status = unsafe {
+                    sycl_universal_from_block(
+                        universal_ptrs_device_ptr,
+                        block_ptrs_device_ptr,
+                        universal_infos.len(),
+                        nh,
+                        nl,
+                        no,
+                        nt,
+                        hd,
+                        nl,
+                        0,
+                        base_info.elem_size,
+                        layout_enum,
+                        sycl_stream.queue().raw_queue_ptr(),
+                    )
+                };
+                if status != 0 {
+                    return Err(to_sycl_error(status));
+                }
+            }
+            #[cfg(not(feature = "xpu-sycl"))]
+            {
+                return Err(PyRuntimeError::new_err(
+                    "SYCL backend detected but kvbm bindings are not built with 'xpu-sycl'",
+                ));
+            }
+        }
     }
 
     stream
@@ -361,6 +439,7 @@ unsafe fn block_to_universal(
         .map_err(|e| PyRuntimeError::new_err(format!("Stream sync failed: {:?}", e)))?;
     Ok(())
 }
+
 
 /// Scatter universal tensors back into their per-layer block stacks.
 ///
@@ -374,9 +453,14 @@ unsafe fn universal_to_block(
     layout: &str,
 ) -> PyResult<()> {
     let ctx = get_context()?;
-    ctx.bind_to_thread()
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to bind context: {:?}", e)))?;
-    let stream = ctx.default_stream();
+    let backend = ctx.backend();
+    let expected_device_type = expected_torch_device_type(backend);
+    let stream = ctx
+        .create_stream()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create stream: {:?}", e)))?;
+    stream
+        .bind_to_thread()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to bind stream: {:?}", e)))?;
     let layout_enum = parse_layout(layout)?;
 
     let universal_items = if universals.hasattr("data_ptr")? {
@@ -415,12 +499,25 @@ unsafe fn universal_to_block(
                 idx, info.dtype, base_info.dtype
             )));
         }
+        if info.device_type != base_info.device_type {
+            return Err(PyValueError::new_err(format!(
+                "Universal tensor {} is on '{}' device type; expected '{}'",
+                idx, info.device_type, base_info.device_type
+            )));
+        }
         if info.device_index != base_info.device_index {
             return Err(PyValueError::new_err(format!(
-                "Universal tensor {} is on CUDA device {}; expected device {}",
+                "Universal tensor {} is on device index {}; expected device {}",
                 idx, info.device_index, base_info.device_index
             )));
         }
+    }
+
+    if base_info.device_type != expected_device_type {
+        return Err(PyValueError::new_err(format!(
+            "Detected backend '{}' expects torch device type '{}', but got '{}'.",
+            backend.name(), expected_device_type, base_info.device_type
+        )));
     }
 
     let nh = base_info.shape[0];
@@ -451,6 +548,7 @@ unsafe fn universal_to_block(
             group,
             chunk_count,
             universal_infos[block_idx].dtype,
+            expected_device_type,
             universal_infos[block_idx].device_index,
             Some(&expected_block_shape),
             None,
@@ -460,44 +558,90 @@ unsafe fn universal_to_block(
 
     let block_ptrs_device = stream
         .clone_htod(block_ptr_values.as_slice())
-        .map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to upload pointer buffer: {:?}", e))
-        })?;
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to upload pointer buffer: {:?}", e)))?;
 
     let universal_ptr_values: Vec<usize> = universal_infos.iter().map(|info| info.ptr).collect();
-    let universal_ptrs_device =
-        stream
-            .clone_htod(universal_ptr_values.as_slice())
-            .map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "Failed to upload universal pointer buffer: {:?}",
-                    e
-                ))
-            })?;
+    let universal_ptrs_device = stream
+        .clone_htod(universal_ptr_values.as_slice())
+        .map_err(|e| {
+            PyRuntimeError::new_err(format!(
+                "Failed to upload universal pointer buffer: {:?}",
+                e
+            ))
+        })?;
 
-    let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-    let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *mut c_void;
-    let (universal_ptrs_device_raw, _univ_guard) = universal_ptrs_device.device_ptr(&stream);
-    let universal_ptrs_device_ptr = universal_ptrs_device_raw as usize as *const *const c_void;
+    let block_ptrs_device_ptr = block_ptrs_device.device_ptr_u64() as *const *mut c_void;
+    let universal_ptrs_device_ptr = universal_ptrs_device.device_ptr_u64() as *const *const c_void;
 
-    let status = unsafe {
-        block_from_universal(
-            universal_ptrs_device_ptr,
-            block_ptrs_device_ptr,
-            universal_infos.len(),
-            nh,
-            nl,
-            no,
-            nt,
-            hd,
-            base_info.dtype,
-            layout_enum,
-            stream.cu_stream() as cuda_runtime::cudaStream_t,
-        )
-    };
-
-    if status != cuda_runtime::cudaError::cudaSuccess {
-        return Err(to_cuda_error(status));
+    match backend {
+        DeviceBackend::Cuda => {
+            #[cfg(feature = "cuda")]
+            {
+                let cu_stream = stream.cuda_stream_arc().ok_or_else(|| {
+                    PyRuntimeError::new_err("CUDA backend selected but CUDA stream is unavailable")
+                })?;
+                let status = unsafe {
+                    block_from_universal(
+                        universal_ptrs_device_ptr,
+                        block_ptrs_device_ptr,
+                        universal_infos.len(),
+                        nh,
+                        nl,
+                        no,
+                        nt,
+                        hd,
+                        nl,
+                        0,
+                        base_info.dtype,
+                        layout_enum,
+                        cu_stream.cu_stream() as cuda_runtime::cudaStream_t,
+                    )
+                };
+                if status != cuda_runtime::cudaError::cudaSuccess {
+                    return Err(to_cuda_error(status));
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                return Err(PyRuntimeError::new_err(
+                    "CUDA backend detected but kvbm bindings are not built with 'cuda'",
+                ));
+            }
+        }
+        DeviceBackend::Sycl => {
+            #[cfg(feature = "xpu-sycl")]
+            {
+                let sycl_stream = stream.sycl_stream().ok_or_else(|| {
+                    PyRuntimeError::new_err("SYCL backend selected but SYCL stream is unavailable")
+                })?;
+                let status = unsafe {
+                    sycl_block_from_universal(
+                        universal_ptrs_device_ptr,
+                        block_ptrs_device_ptr,
+                        universal_infos.len(),
+                        nh,
+                        nl,
+                        no,
+                        nt,
+                        hd,
+                        nl,
+                        0,
+                        base_info.elem_size,
+                        layout_enum,
+                        sycl_stream.queue().raw_queue_ptr(),
+                    )
+                };
+                if status != 0 {
+                    return Err(to_sycl_error(status));
+                }
+            }
+            #[cfg(not(feature = "xpu-sycl"))]
+            {
+                return Err(PyRuntimeError::new_err(
+                    "SYCL backend detected but kvbm bindings are not built with 'xpu-sycl'",
+                ));
+            }
+        }
     }
 
     stream
@@ -506,6 +650,7 @@ unsafe fn universal_to_block(
     Ok(())
 }
 
+
 /// Flatten block stacks into operational buffers (`[nl, no, inner]`).
 ///
 /// Parameters
@@ -513,6 +658,11 @@ unsafe fn universal_to_block(
 /// backend: Optional[str]
 ///     "auto" (default) tries the fused kernel → cudaMemcpyBatchAsync → cudaMemcpyAsync.
 ///     "kernel", "async", "batch" force the respective backend.
+///
+/// Note
+/// ----
+/// This API currently uses `operational_copy`, which is CUDA-only in `kvbm-kernels`.
+/// On XPU/SYCL backends, this function returns a backend-specific runtime error.
 #[pyfunction]
 #[pyo3(signature = (blocks, operationals, backend=None))]
 unsafe fn block_to_operational(
@@ -522,11 +672,20 @@ unsafe fn block_to_operational(
     backend: Option<&str>,
 ) -> PyResult<()> {
     let ctx = get_context()?;
-    ctx.bind_to_thread()
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to bind context: {:?}", e)))?;
-    let stream = ctx.default_stream();
+    let device_backend = ctx.backend();
+    if device_backend != DeviceBackend::Cuda {
+        return Err(PyRuntimeError::new_err(
+            "block_to_operational uses kvbm_kernels::operational_copy (CUDA-only today). Detected backend is not CUDA; use block_to_universal/universal_to_block on XPU, or run with CUDA backend.",
+        ));
+    }
+    let stream = ctx
+        .create_stream()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create stream: {:?}", e)))?;
+    stream
+        .bind_to_thread()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to bind stream: {:?}", e)))?;
 
-    let backend = parse_backend(backend)?;
+    let copy_backend = parse_backend(backend)?;
 
     let operational_items = if operationals.hasattr("data_ptr")? {
         vec![operationals.clone()]
@@ -566,7 +725,7 @@ unsafe fn block_to_operational(
         }
         if info.device_index != base_info.device_index {
             return Err(PyValueError::new_err(format!(
-                "Operational tensor {} is on CUDA device {}; expected device {}",
+                "Operational tensor {} is on device index {}; expected device {}",
                 idx, info.device_index, base_info.device_index
             )));
         }
@@ -594,6 +753,7 @@ unsafe fn block_to_operational(
             group,
             chunk_count,
             operational_infos[block_idx].dtype,
+            "cuda",
             operational_infos[block_idx].device_index,
             None,
             Some(inner),
@@ -628,10 +788,20 @@ unsafe fn block_to_operational(
             ))
         })?;
 
-    let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-    let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *const c_void;
-    let (operational_ptrs_device_raw, _op_guard) = operational_ptrs_device.device_ptr(&stream);
-    let operational_ptrs_device_ptr = operational_ptrs_device_raw as usize as *const *const c_void;
+    let block_ptrs_device_ptr = block_ptrs_device.device_ptr_u64() as *const *const c_void;
+    let operational_ptrs_device_ptr = operational_ptrs_device.device_ptr_u64() as *const *const c_void;
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        return Err(PyRuntimeError::new_err(
+            "CUDA backend selected but kvbm bindings are not built with 'cuda'",
+        ));
+    }
+
+    #[cfg(feature = "cuda")]
+    let cu_stream = stream.cuda_stream_arc().ok_or_else(|| {
+        PyRuntimeError::new_err("CUDA backend selected but CUDA stream is unavailable")
+    })?;
 
     let status = unsafe {
         operational_copy(
@@ -646,8 +816,8 @@ unsafe fn block_to_operational(
             base_info.elem_size,
             base_info.dtype,
             OperationalCopyDirection::BlockToOperational,
-            backend,
-            stream.cu_stream() as cuda_runtime::cudaStream_t,
+            copy_backend,
+            cu_stream.cu_stream() as cuda_runtime::cudaStream_t,
         )
     };
 
@@ -661,12 +831,18 @@ unsafe fn block_to_operational(
     Ok(())
 }
 
+
 /// Restore block stacks from operational buffers.
 ///
 /// Parameters
 /// ----------
 /// backend: Optional[str]
 ///     Same semantics as `block_to_operational`.
+///
+/// Note
+/// ----
+/// This API currently uses `operational_copy`, which is CUDA-only in `kvbm-kernels`.
+/// On XPU/SYCL backends, this function returns a backend-specific runtime error.
 #[pyfunction]
 #[pyo3(signature = (operationals, blocks, backend=None))]
 unsafe fn operational_to_block(
@@ -676,11 +852,20 @@ unsafe fn operational_to_block(
     backend: Option<&str>,
 ) -> PyResult<()> {
     let ctx = get_context()?;
-    ctx.bind_to_thread()
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to bind context: {:?}", e)))?;
-    let stream = ctx.default_stream();
+    let device_backend = ctx.backend();
+    if device_backend != DeviceBackend::Cuda {
+        return Err(PyRuntimeError::new_err(
+            "operational_to_block uses kvbm_kernels::operational_copy (CUDA-only today). Detected backend is not CUDA; use block_to_universal/universal_to_block on XPU, or run with CUDA backend.",
+        ));
+    }
+    let stream = ctx
+        .create_stream()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create stream: {:?}", e)))?;
+    stream
+        .bind_to_thread()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to bind stream: {:?}", e)))?;
 
-    let backend = parse_backend(backend)?;
+    let copy_backend = parse_backend(backend)?;
 
     let operational_items = if operationals.hasattr("data_ptr")? {
         vec![operationals.clone()]
@@ -720,7 +905,7 @@ unsafe fn operational_to_block(
         }
         if info.device_index != base_info.device_index {
             return Err(PyValueError::new_err(format!(
-                "Operational tensor {} is on CUDA device {}; expected device {}",
+                "Operational tensor {} is on device index {}; expected device {}",
                 idx, info.device_index, base_info.device_index
             )));
         }
@@ -748,6 +933,7 @@ unsafe fn operational_to_block(
             group,
             chunk_count,
             operational_infos[block_idx].dtype,
+            "cuda",
             operational_infos[block_idx].device_index,
             None,
             Some(inner),
@@ -782,10 +968,20 @@ unsafe fn operational_to_block(
             ))
         })?;
 
-    let (block_ptrs_device_raw, _block_guard) = block_ptrs_device.device_ptr(&stream);
-    let block_ptrs_device_ptr = block_ptrs_device_raw as usize as *const *const c_void;
-    let (operational_ptrs_device_raw, _op_guard) = operational_ptrs_device.device_ptr(&stream);
-    let operational_ptrs_device_ptr = operational_ptrs_device_raw as usize as *const *const c_void;
+    let block_ptrs_device_ptr = block_ptrs_device.device_ptr_u64() as *const *const c_void;
+    let operational_ptrs_device_ptr = operational_ptrs_device.device_ptr_u64() as *const *const c_void;
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        return Err(PyRuntimeError::new_err(
+            "CUDA backend selected but kvbm bindings are not built with 'cuda'",
+        ));
+    }
+
+    #[cfg(feature = "cuda")]
+    let cu_stream = stream.cuda_stream_arc().ok_or_else(|| {
+        PyRuntimeError::new_err("CUDA backend selected but CUDA stream is unavailable")
+    })?;
 
     let status = unsafe {
         operational_copy(
@@ -800,8 +996,8 @@ unsafe fn operational_to_block(
             base_info.elem_size,
             base_info.dtype,
             OperationalCopyDirection::OperationalToBlock,
-            backend,
-            stream.cu_stream() as cuda_runtime::cudaStream_t,
+            copy_backend,
+            cu_stream.cu_stream() as cuda_runtime::cudaStream_t,
         )
     };
 
@@ -814,6 +1010,7 @@ unsafe fn operational_to_block(
         .map_err(|e| PyRuntimeError::new_err(format!("Stream sync failed: {:?}", e)))?;
     Ok(())
 }
+
 
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(block_to_universal, m)?)?;

@@ -19,7 +19,7 @@
 //! The planner is pure addressing math — no GPU, no NIXL, no
 //! allocations beyond the output `Vec<CopyOp>`. Wiring lives in
 //! [`crate::transfer::lower`] (lowering [`CopyPlan`] to executor
-//! candidates) and [`crate::transfer::executor::planner`] (CudaAsync
+//! candidates) and [`crate::transfer::executor::planner`] (Async
 //! dispatch behind `TransferOptions::use_planner`); the legacy
 //! `select_transform_kernel(KvBlockLayout, KvBlockLayout)` path
 //! continues to handle every transfer where `use_planner = false`.

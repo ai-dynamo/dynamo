@@ -16,6 +16,15 @@ kvbm-config = { workspace = true }
 kvbm-consolidator = { workspace = true }
 kvbm-logical = { workspace = true }
 kvbm-observability = { workspace = true }
+# kvbm-physical's own `default = ["cuda"]` is suppressed at the workspace
+# level (`default-features = false` on the workspace dep). Each consumer
+# selects the backend explicitly via their own `cuda` / `xpu-sycl`
+# features, which forward to `kvbm-physical/cuda` or
+# `kvbm-physical/xpu-sycl`. Without this, a workspace build with
+# `--no-default-features --features xpu-sycl` on kvbm-engine would still
+# pull `kvbm-physical/cuda` via feature unification, mixing the
+# `#[cfg(feature = "cuda")] cuda_stream` field on `TransferOptions`
+# with engine call sites that don't initialize it.
 kvbm-physical = { workspace = true }
 # `client` enables LeaderControlClient, used by the remote-search driver to
 # open/close transfer sessions on remote holders.
@@ -26,6 +35,7 @@ velo = { workspace = true }
 
 # Workspace deps
 dynamo-memory = { workspace = true }
+dynamo-device = { workspace = true }
 anyhow = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
@@ -46,12 +56,13 @@ bytes = "1.10"
 crossbeam-queue = "0.3"
 oneshot = "0.1.11"
 
-# Required for pure-CUDA event/stream primitives used by the intra-pass
-# onboard path (worker/physical.rs). The `nccl` feature below gates the
-# higher-level collectives code that uses `cudarc::nccl::*`.
-cudarc = { workspace = true }
-
 # Optional
+# Worker-side event/stream primitives now live in `dynamo-device`, so the
+# engine no longer needs cudarc unconditionally. The remaining users are
+# the NCCL collectives shims (`collectives/{bootstrap,nccl}.rs`), which
+# already cfg-gate on `feature = "nccl"`. Mirrors the oneCCL gating below.
+cudarc = { workspace = true, optional = true, features = ["nccl"] }
+oneapi-rs = { workspace = true, optional = true }
 aws-sdk-s3 = { version = "1.120.0", optional = true }
 aws-config = { version = "1.8.11", optional = true }
 rayon = { version = "1", optional = true }
@@ -75,13 +86,29 @@ tmq = { workspace = true }
 portpicker = "0.1"
 
 [features]
-default = ["s3", "testing"]
+default = ["cuda", "s3", "testing"]
+# Forwards to kvbm-physical's `cuda` feature so cfg-gated CUDA-only
+# call sites in this crate (e.g. `TransferOptions { cuda_stream }`) line up
+# with the merged kvbm-physical surface. Mirrors kvbm-physical's default.
+cuda = ["kvbm-physical/cuda"]
+# Forwards to dependencies' xpu-sycl features. Mutually exclusive with
+# `cuda` at the connector layer (compile_error in kvbm-connector::lib).
+# kvbm-engine `src/` itself contains no cudarc-typed code outside
+# `collectives/`, which is gated on `nccl` / `oneccl` independently.
+xpu-sycl = [
+    "kvbm-physical/xpu-sycl",
+    "dynamo-device/xpu-sycl",
+    "dynamo-memory/xpu-sycl",
+]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:chrono"]
 collectives = ["nccl"]
-nccl = []
+nccl = ["dep:cudarc"]
+oneccl = ["dep:oneapi-rs"]
 testing-nccl = ["collectives"]
+testing-oneccl = ["oneccl"]
 nats = ["dep:async-nats", "dep:flume"]
 testing = ["kvbm-logical/testing", "kvbm-physical/testing"]
+testing-xpu-sycl = ["testing", "xpu-sycl", "kvbm-physical/testing-xpu-sycl"]
 testing-s3 = ["s3", "testing"]
 nvtx = ["kvbm-config/nvtx", "dep:nvtx"]
 bench = [
@@ -97,6 +124,11 @@ static-kernels = ["kvbm-physical/static-kernels"]
 [[bin]]
 name = "bench_engine"
 path = "bin/bench_engine.rs"
+required-features = ["bench"]
+
+[[bin]]
+name = "bench_collectives"
+path = "bin/bench_collectives.rs"
 required-features = ["bench"]
 
 [package.metadata.cargo-machete]

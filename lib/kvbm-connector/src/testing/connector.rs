@@ -28,6 +28,8 @@ use crate::connector::leader::ConnectorLeader;
 use crate::connector::worker::{ConnectorWorker, ConnectorWorkerInterface};
 use crate::{InstanceId, KvbmRuntime};
 use kvbm_engine::leader::InstanceLeader;
+use dynamo_memory::DeviceAllocator;
+use kvbm_physical::device::{DeviceBackend, DeviceContext}; // Can also use: use kvbm_physical::device::DeviceBackend;
 use kvbm_physical::layout::LayoutConfig;
 use kvbm_physical::layout::{BlockDimension, PhysicalLayout};
 use kvbm_physical::transfer::{BlockChecksum, FillPattern};
@@ -120,6 +122,16 @@ impl ConnectorTestConfig {
         self
     }
 
+    /// Set leader's device backend (CUDA or SYCL/XPU).
+    ///
+    /// This controls which device backend the leader configures for workers.
+    /// Defaults to CUDA if not specified.
+    #[must_use]
+    pub fn leader_device_backend(mut self, backend: DeviceBackend) -> Self {
+        self.leader = self.leader.merge(("backend", serde_json::to_value(&backend).expect("DeviceBackend serializes")));
+        self
+    }
+
     /// Set leader's tokio worker threads.
     #[must_use]
     pub fn leader_tokio_threads(mut self, n: usize) -> Self {
@@ -133,6 +145,16 @@ impl ConnectorTestConfig {
     #[must_use]
     pub fn worker_tokio_threads(mut self, n: usize) -> Self {
         self.worker = self.worker.merge(("tokio.worker_threads", n as u64));
+        self
+    }
+
+    /// Set worker's device backend (CUDA or SYCL/XPU).
+    ///
+    /// This controls which device backend the worker uses.
+    /// Defaults to CUDA if not specified.
+    #[must_use]
+    pub fn worker_device_backend(mut self, backend: DeviceBackend) -> Self {
+        self.worker = self.worker.merge(("backend", serde_json::to_value(&backend).expect("DeviceBackend serializes")));
         self
     }
 
@@ -1202,7 +1224,18 @@ impl TestConnectorInstanceBuilder {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // 3. Build WORKER runtimes FIRST (so they can respond to leader RPCs)
-        let worker_config = self.test_config.build_worker_config()?;
+        let mut worker_config = self.test_config.build_worker_config()?;
+
+        // Auto-configure backend based on compiled feature flags.
+        // When xpu-sycl is the only available backend (cuda not compiled), default to SYCL
+        // so the leader sends the correct backend to workers via LeaderLayout Config.
+        // so tests run on actual XPU hardware instead of failing on CUDA allocation.
+        #[cfg(feature = "xpu-sycl")]
+        #[cfg(not(feature = "cuda"))]
+        {
+            worker_config.backend = DeviceBackend::Sycl;
+        }
+
         let mut workers = Vec::with_capacity(self.num_workers);
         let block_size = self.layout_config.page_size;
 
@@ -1227,12 +1260,15 @@ impl TestConnectorInstanceBuilder {
             // Get nixl_agent before moving worker_runtime
             let nixl_agent = worker_runtime.nixl_agent().unwrap().clone();
 
-            // Create PhysicalLayout with real GPU memory allocation
+            // Create PhysicalLayout with real GPU memory allocation.
+            // Use the backend from worker_config to support both CUDA and XPU-SYCL.
+            let dev_ctx: Arc<dyn DeviceAllocator> =
+                Arc::new(DeviceContext::new(worker_config.backend, 0)?);
             let layout = Arc::new(
                 PhysicalLayout::builder(nixl_agent)
                     .with_config(self.layout_config.clone())
                     .layer_separate(BlockDimension::BlockIsFirstDim)
-                    .allocate_device(0)
+                    .allocate_device(dev_ctx)
                     .build()?,
             );
 
@@ -1298,7 +1334,18 @@ impl TestConnectorInstanceBuilder {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         // 4. Build LEADER runtime AFTER workers
-        let leader_config = self.test_config.build_leader_config()?;
+        let mut leader_config = self.test_config.build_leader_config()?;
+
+        // Auto-configure backend based on compiled feature flags.
+        // When xpu-sycl is the only available backend (cuda not compiled),
+        // default to SYCL so the leader sends the correct backend to workers
+        // via LeaderLayoutConfig.
+        #[cfg(feature = "xpu-sycl")]
+        #[cfg(not(feature = "cuda"))]
+        {
+            leader_config.backend = DeviceBackend::Sycl;
+        }
+
         let leader_runtime = {
             // See worker_runtime above: borrow the ambient runtime via Handle.
             let builder = KvbmRuntime::builder(leader_config)
@@ -1467,7 +1514,7 @@ mod tests {
 
     use super::*;
 
-    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    // Builds a real instance (NIXL/UCX + device backend); gated off the CPU pre-merge job.
     #[cfg(feature = "testing-nixl")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_single_worker_initialization() {
@@ -1524,7 +1571,7 @@ mod tests {
             .expect("Cleanup should succeed");
     }
 
-    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    // Builds a real instance (NIXL/UCX + device backend); gated off the CPU pre-merge job.
     #[cfg(feature = "testing-nixl")]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_multi_worker_initialization() {
@@ -1757,7 +1804,7 @@ mod tests {
     // Sync factory tests - regular #[test], not #[tokio::test]
     // =========================================================================
 
-    // Builds a real instance (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    // Builds a real instance (NIXL/UCX + device backend); gated off the CPU pre-merge job.
     #[cfg(feature = "testing-nixl")]
     #[test]
     fn test_sync_single_worker_creation() {
@@ -1782,7 +1829,7 @@ mod tests {
         );
     }
 
-    // Builds a real cluster (NIXL/UCX + CUDA); gated off the CPU pre-merge job.
+    // Builds a real cluster (NIXL/UCX + device backend); gated off the CPU pre-merge job.
     #[cfg(feature = "testing-nixl")]
     #[test]
     fn test_sync_cluster_creation() {
@@ -1808,5 +1855,144 @@ mod tests {
                 i
             );
         }
+    }
+
+    // =========================================================================
+    // SYCL/XPU Backend Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_device_backend_defaults_to_cuda() {
+        let config = ConnectorTestConfig::new();
+        let leader = config.build_leader().expect("Should build leader config");
+
+        // Default backend should be CUDA
+        assert_eq!(leader.backend, DeviceBackend::Cuda);
+    }
+
+    #[test]
+    fn test_device_backend_sycl_can_be_configured() {
+        let config = ConnectorTestConfig::new()
+            .leader_device_backend(DeviceBackend::Sycl);
+        let leader = config.build_leader().expect("Should build leader config");
+
+        // SYCL backend should be configurable
+        assert_eq!(leader.backend, DeviceBackend::Sycl);
+    }
+
+    #[test]
+    fn test_worker_device_backend_sycl_via_builder() {
+        let config = ConnectorTestConfig::new()
+            .worker_device_backend(DeviceBackend::Sycl);
+        let worker = config.build_worker().expect("Should build worker config");
+
+        // Worker backend should be configurable
+        assert_eq!(worker.backend, DeviceBackend::Sycl);
+    }
+
+    #[test]
+    fn test_device_backend_direct_usage() {
+        // Test direct DeviceBackend usage (no conversion needed)
+        let cuda_backend = DeviceBackend::Cuda;
+        assert_eq!(cuda_backend, DeviceBackend::Cuda);
+
+        let sycl_backend = DeviceBackend::Sycl;
+        assert_eq!(sycl_backend, DeviceBackend::Sycl);
+    }
+
+    #[test]
+    fn test_leaderlayoutconfig_accepts_sycl_device_backend() {
+        use kvbm_engine::worker::LeaderLayoutConfig;
+
+        // Create config with SYCL backend
+        let config = LeaderLayoutConfig {
+            rank: 0,
+            host_block_count: 128,
+            disk_block_count: None,
+            object: None,
+            parallelism: kvbm_config::ParallelismMode::TensorParallel,
+            backend: DeviceBackend::Sycl,
+        };
+
+        // Verify SYCL backend is set
+        assert_eq!(config.backend, DeviceBackend::Sycl);
+    }
+
+    #[test]
+    fn test_json_device_backend_configuration() {
+        // Test JSON API for backend configuration
+        let config = ConnectorTestConfig::from_json(r#"{
+            "leader": { "backend": "Sycl" },
+            "worker": { "backend": "Cuda" }
+        }"#).expect("Should parse JSON with backend");
+
+        let leader = config.build_leader().expect("Should build leader config");
+        let worker = config.build_worker().expect("Should build worker config");
+
+        assert_eq!(leader.backend, DeviceBackend::Sycl);
+        assert_eq!(worker.backend, DeviceBackend::Cuda);
+    }
+
+    #[test]
+    fn test_device_backend_path_via_generic_api() {
+        // Test generic path API for backend
+        let config = ConnectorTestConfig::new()
+            .leader_path("backend", DeviceBackend::Sycl)
+            .worker_path("backend", DeviceBackend::Cuda);
+
+        let leader = config.build_leader().expect("Should build leader config");
+        let worker = config.build_worker().expect("Should build worker config");
+
+        assert_eq!(leader.backend, DeviceBackend::Sycl);
+        assert_eq!(worker.backend, DeviceBackend::Cuda);
+    }
+
+    #[cfg(feature = "xpu-sycl")]
+    #[test]
+    fn test_sycl_backend_device_context_creation() {
+        use kvbm_physical::device::DeviceContext;
+
+        // This test only runs when xpu-sycl feature is enabled
+        let config = ConnectorTestConfig::new()
+            .leader_device_backend(DeviceBackend::Sycl);
+
+        let leader_config = config.build_leader().expect("Should build leader config");
+
+        // Verify the backend is set to SYCL
+        assert_eq!(leader_config.backend, DeviceBackend::Sycl);
+
+        // Create a SYCL device context (device_id = 0 for SYCL)
+        // Note: This will fail at runtime without XPU hardware, but compiles
+        let ctx = DeviceContext::new(
+            leader_config.backend,
+            0, // device_id
+        );
+
+        // Context creation should succeed with valid XPU
+        assert!(ctx.is_ok(), "SYCL device context creation should succeed with XPU hardware");
+    }
+
+    #[cfg(not(feature = "xpu-sycl"))]
+    #[test]
+    fn test_cuda_backend_device_context_creation() {
+        use kvbm_physical::device::DeviceContext;
+
+        // This test runs when xpu-sycl feature is NOT enabled (CUDA only)
+        let config = ConnectorTestConfig::new()
+            .leader_device_backend(DeviceBackend::Cuda);
+
+        let leader_config = config.build_leader().expect("Should build leader config");
+
+        // Verify the backend is set to CUDA
+        assert_eq!(leader_config.backend, DeviceBackend::Cuda);
+
+        // Create a CUDA device context (device_id = 0)
+        let ctx = DeviceContext::new(
+            leader_config.backend,
+            0, // device_id
+        );
+
+        // Context creation should succeed with CUDA hardware
+        assert!(ctx.is_ok(), "CUDA device context creation should succeed with CUDA hardware");
     }
 }

@@ -55,9 +55,9 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Result, bail};
-use cudarc::driver::CudaStream;
 use kvbm_common::LayoutSignature;
 
+use crate::device::DeviceStream;
 use crate::transfer::strategy::TransferStrategy;
 
 /// Maximum number of benchmark outcomes retained in the cache.
@@ -95,7 +95,7 @@ pub struct BenchmarkKey {
     /// integer so the type stays hashable without a custom impl.
     ///
     /// Mapping:
-    ///   0 = CudaAsyncH2D, 1 = CudaAsyncD2H, 2 = CudaAsyncD2D,
+    ///   0 = AsyncH2D, 1 = AsyncD2H, 2 = AsyncD2D,
     ///   10 = NixlRead, 11 = NixlWrite, 12 = NixlReadFlipped,
     ///   13 = NixlWriteFlipped, 255 = Other.
     pub route_discriminant: u8,
@@ -125,9 +125,9 @@ impl BenchmarkKey {
 /// numbers, never reassign existing ones.
 fn strategy_discriminant(s: TransferStrategy) -> u8 {
     match s {
-        TransferStrategy::CudaAsyncH2D => 0,
-        TransferStrategy::CudaAsyncD2H => 1,
-        TransferStrategy::CudaAsyncD2D => 2,
+        TransferStrategy::AsyncH2D => 0,
+        TransferStrategy::AsyncD2H => 1,
+        TransferStrategy::AsyncD2D => 2,
         TransferStrategy::NixlRead => 10,
         TransferStrategy::NixlWrite => 11,
         TransferStrategy::NixlReadFlipped => 12,
@@ -278,9 +278,11 @@ impl BenchmarkCache {
     ///
     /// # Stream ownership
     ///
-    /// For CUDA routes the caller provides an `Arc<CudaStream>`.  Each trial
-    /// ends with `stream.synchronize()`, so successive trials are isolated
-    /// end-to-end. For NIXL routes the stream is not used.
+    /// The caller provides an `Arc<DeviceStream>`. Under the CUDA backend
+    /// this is downcast to `Arc<CudaStream>` at the dispatch site for the
+    /// `DirectDma` and `TransformKernel` routes; under the SYCL backend
+    /// those routes bail with a TODO error. NIXL routes do not use the
+    /// stream.
     ///
     /// # Locality invariants (NIXL)
     ///
@@ -300,7 +302,7 @@ impl BenchmarkCache {
         self: &Arc<Self>,
         key: BenchmarkKey,
         candidates: Vec<BenchmarkCandidate>,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<DeviceStream>,
     ) -> Result<BenchmarkOutcome> {
         if candidates.is_empty() {
             bail!("benchmark_pair: candidates list is empty");
@@ -433,7 +435,7 @@ impl From<&crate::transfer::plan::CopyOp> for CopyOp {
 /// to after the device/network confirms completion.
 fn dispatch_benchmark_candidate(
     bc: &BenchmarkCandidate,
-    stream: &Arc<CudaStream>,
+    stream: &Arc<DeviceStream>,
 ) -> Result<(&'static str, u64)> {
     match bc {
         BenchmarkCandidate::DirectDma { ops } => {
@@ -443,6 +445,10 @@ fn dispatch_benchmark_candidate(
             Ok(("DirectDma", t0.elapsed().as_micros() as u64))
         }
 
+        // TransformKernel uses the unified backend-dispatching kernel
+        // path. CUDA supports all transform kinds; SYCL supports
+        // `UniversalFromBlock` and `BlockFromUniversal`, while
+        // `NhdHndTranspose` bails until the SYCL kernel is added.
         BenchmarkCandidate::TransformKernel {
             invocation,
             src,
@@ -510,44 +516,86 @@ fn dispatch_benchmark_candidate(
 /// is intentionally a private copy here so `benchmark.rs` stays
 /// self-contained and doesn't pull in the full planner module.  A future
 /// refactor may merge them via a shared helper in `executor::memcpy`.
+///
+/// Takes a backend-agnostic `&Arc<DeviceStream>`. Under `cuda` the body
+/// downcasts and calls `kvbm_kernels::memcpy_batch`; under `xpu-sycl` it
+/// currently uses per-copy sequential memcpy as a workaround (TODO: wire up
+/// a true batched SYCL `memcpy_batch` analogue for performance parity).
 #[allow(dead_code)]
-fn dispatch_direct_dma_ops(ops: &[CopyOp], stream: &Arc<CudaStream>) -> Result<()> {
-    use kvbm_kernels::MemcpyBatchMode;
-    use std::collections::BTreeMap;
-    use std::ffi::c_void;
+fn dispatch_direct_dma_ops(ops: &[CopyOp], stream: &Arc<DeviceStream>) -> Result<()> {
+    #[cfg(feature = "xpu-sycl")]
+    {
+        use std::collections::BTreeMap;
 
-    let stream_raw = stream.cu_stream() as cudarc::runtime::sys::cudaStream_t;
-
-    let mut by_size: BTreeMap<usize, (Vec<*const c_void>, Vec<*mut c_void>)> = BTreeMap::new();
-    for op in ops {
-        let e = by_size.entry(op.size).or_default();
-        e.0.push(op.src_addr as *const c_void);
-        e.1.push(op.dst_addr as *mut c_void);
-    }
-
-    for (size, (src_ptrs, dst_ptrs)) in by_size {
-        if size == 0 {
-            continue;
+        // Group by size and use the trait-level batch_copy which dispatches
+        // to SYCL queue.memcpy for each pair.
+        let mut by_size: BTreeMap<usize, (Vec<u64>, Vec<u64>)> = BTreeMap::new();
+        for op in ops {
+            let e = by_size.entry(op.size).or_default();
+            e.0.push(op.src_addr as u64);
+            e.1.push(op.dst_addr as u64);
         }
-        let status = unsafe {
-            kvbm_kernels::memcpy_batch(
-                src_ptrs.as_ptr(),
-                dst_ptrs.as_ptr(),
-                size,
-                src_ptrs.len(),
-                MemcpyBatchMode::BatchedWithFallback,
-                stream_raw,
+
+        for (size, (src_ptrs, dst_ptrs)) in by_size {
+            if size == 0 {
+                continue;
+            }
+            stream.batch_copy(&src_ptrs, &dst_ptrs, size)?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(any(feature = "cuda", feature = "xpu-sycl")))]
+    {
+        let _ = (ops, stream);
+        bail!(
+            "dispatch_direct_dma_ops requires the cuda or xpu-sycl feature"
+        );
+    }
+    #[cfg(feature = "cuda")]
+    {
+        use kvbm_kernels::MemcpyBatchMode;
+        use std::collections::BTreeMap;
+        use std::ffi::c_void;
+
+        let cuda_stream = stream.cuda_stream_arc().ok_or_else(|| {
+            anyhow::anyhow!(
+                "dispatch_direct_dma_ops: caller-provided stream is not a CUDA stream"
             )
-        };
-        if status != cudarc::runtime::sys::cudaError::cudaSuccess {
-            bail!(
-                "benchmark_pair: dispatch_direct_dma_ops failed: size={size}, \
-                 num_copies={}, status={status:?}",
-                src_ptrs.len()
-            );
+        })?;
+        let stream_raw = cuda_stream.cu_stream() as cudarc::runtime::sys::cudaStream_t;
+
+        let mut by_size: BTreeMap<usize, (Vec<*const c_void>, Vec<*mut c_void>)> =
+            BTreeMap::new();
+        for op in ops {
+            let e = by_size.entry(op.size).or_default();
+            e.0.push(op.src_addr as *const c_void);
+            e.1.push(op.dst_addr as *mut c_void);
         }
+
+        for (size, (src_ptrs, dst_ptrs)) in by_size {
+            if size == 0 {
+                continue;
+            }
+            let status = unsafe {
+                kvbm_kernels::memcpy_batch(
+                    src_ptrs.as_ptr(),
+                    dst_ptrs.as_ptr(),
+                    size,
+                    src_ptrs.len(),
+                    MemcpyBatchMode::BatchedWithFallback,
+                    stream_raw,
+                )
+            };
+            if status != cudarc::runtime::sys::cudaError::cudaSuccess {
+                bail!(
+                    "benchmark_pair: dispatch_direct_dma_ops failed: size={size}, \
+                     num_copies={}, status={status:?}",
+                    src_ptrs.len()
+                );
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Dispatch a `NixlDirectDma` trial end-to-end and return `(class_name, duration_us)`.
@@ -681,7 +729,7 @@ mod tests {
     #[test]
     fn benchmark_cache_lookup_miss_returns_none() {
         let cache = BenchmarkCache::new();
-        let key = make_key(TransferStrategy::CudaAsyncD2D);
+        let key = make_key(TransferStrategy::AsyncD2D);
         assert!(
             cache.lookup(&key).is_none(),
             "empty cache must return None on lookup"
@@ -693,7 +741,7 @@ mod tests {
     #[test]
     fn benchmark_cache_insert_then_lookup() {
         let cache = BenchmarkCache::new();
-        let key = make_key(TransferStrategy::CudaAsyncD2D);
+        let key = make_key(TransferStrategy::AsyncD2D);
         let outcome = make_outcome("DirectDma");
 
         cache.insert(key.clone(), outcome);
@@ -722,7 +770,7 @@ mod tests {
                 None,
             );
             let dst_sig = make_sig();
-            let key = BenchmarkKey::new(src_sig, dst_sig, Some(2), TransferStrategy::CudaAsyncD2D);
+            let key = BenchmarkKey::new(src_sig, dst_sig, Some(2), TransferStrategy::AsyncD2D);
             cache.insert(key, make_outcome("DirectDma"));
         }
 
@@ -739,9 +787,9 @@ mod tests {
     /// Route discriminants must be stable across PR revisions.
     #[test]
     fn strategy_discriminants_are_stable() {
-        assert_eq!(strategy_discriminant(TransferStrategy::CudaAsyncH2D), 0);
-        assert_eq!(strategy_discriminant(TransferStrategy::CudaAsyncD2H), 1);
-        assert_eq!(strategy_discriminant(TransferStrategy::CudaAsyncD2D), 2);
+        assert_eq!(strategy_discriminant(TransferStrategy::AsyncH2D), 0);
+        assert_eq!(strategy_discriminant(TransferStrategy::AsyncD2H), 1);
+        assert_eq!(strategy_discriminant(TransferStrategy::AsyncD2D), 2);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlRead), 10);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlWrite), 11);
         assert_eq!(strategy_discriminant(TransferStrategy::NixlReadFlipped), 12);

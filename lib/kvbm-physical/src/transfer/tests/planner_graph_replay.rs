@@ -8,18 +8,18 @@
 //!
 //! Test matrix:
 //!
-//! 1. `cuda_graph_replay_round_trips_d2d_fc_fc` — fill src, dispatch once
+//! 1. `device_graph_replay_round_trips_d2d_fc_fc` — fill src, dispatch once
 //!    via graph replay, verify dst checksums match src.
 //!
-//! 2. `cuda_graph_replay_byte_equiv_to_direct_dma` — same input data
-//!    transferred via DirectDma and CudaGraphReplay independently; both
+//! 2. `device_graph_replay_byte_equiv_to_direct_dma` — same input data
+//!    transferred via DirectDma and DeviceGraphReplay independently; both
 //!    destinations must checksum-match.
 //!
-//! 3. `cuda_graph_replay_cache_reuse` — two transfers with the same
+//! 3. `device_graph_replay_cache_reuse` — two transfers with the same
 //!    shape; the second must reuse the cached exec (cache.len() stays at 1,
 //!    not 2), and both results must be correct.
 //!
-//! 4. `cuda_graph_replay_address_rebind_works` — two transfers with the
+//! 4. `device_graph_replay_address_rebind_works` — two transfers with the
 //!    SAME shape but DIFFERENT block IDs; the second result must reflect
 //!    the new block addresses (different src data), proving that the
 //!    `cuGraphExecMemcpyNodeSetParams` rebind path is live and not a no-op.
@@ -43,20 +43,20 @@ fn device_fc(agent: NixlAgent, num_blocks: usize) -> PhysicalLayout {
         .with_config(config)
         .with_block_layout(KvBlockLayout::OperationalNHD)
         .fully_contiguous()
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }
 
-/// Create a `TransferContext` with `cuda_graph_replay = true`.
+/// Create a `TransferContext` with `device_graph_replay = true`.
 fn ctx_with_graph_replay(agent: NixlAgent) -> crate::manager::TransferManager {
-    let caps = TransferCapabilities::default().with_cuda_graph_replay(true);
+    let caps = TransferCapabilities::default().with_device_graph_replay(true);
     create_transfer_context(agent, Some(caps)).unwrap()
 }
 
-/// Run a planner-path CudaAsync D2D transfer via `execute_transfer` with
+/// Run a planner-path Async D2D transfer via `execute_transfer` with
 /// `use_planner = true`.  This routes through the full planner dispatcher
-/// (including `CudaGraphReplay` candidate selection when the capability is
+/// (including `DeviceGraphReplay` candidate selection when the capability is
 /// enabled) without calling any private planner internals directly.
 async fn transfer_direct_planner(
     src: &PhysicalLayout,
@@ -81,7 +81,7 @@ async fn transfer_direct_planner(
 /// that the captured graph + address rebind produces the same bytes as the
 /// source.
 #[tokio::test]
-async fn cuda_graph_replay_round_trips_d2d_fc_fc() -> Result<()> {
+async fn device_graph_replay_round_trips_d2d_fc_fc() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
 
@@ -100,12 +100,12 @@ async fn cuda_graph_replay_round_trips_d2d_fc_fc() -> Result<()> {
     Ok(())
 }
 
-/// Byte equivalence: DirectDma and CudaGraphReplay must produce identical output.
+/// Byte equivalence: DirectDma and DeviceGraphReplay must produce identical output.
 ///
 /// Both runs use the same source data. The two destination layouts are
 /// distinct allocations; both are compared to src checksums AND to each other.
 #[tokio::test]
-async fn cuda_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
+async fn device_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
 
@@ -114,11 +114,11 @@ async fn cuda_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
     let dst_direct = device_fc(agent.clone(), 4);
     let dst_replay = device_fc(agent.clone(), 4);
 
-    // ctx with cuda_graph_replay = true for the replay run.
+    // ctx with device_graph_replay = true for the replay run.
     let manager_replay = ctx_with_graph_replay(agent.clone());
     let ctx_replay = manager_replay.context();
 
-    // ctx with cuda_graph_replay = false for the direct run.
+    // ctx with device_graph_replay = false for the direct run.
     let manager_direct = create_transfer_context(agent, None).unwrap();
     let ctx_direct = manager_direct.context();
 
@@ -130,14 +130,14 @@ async fn cuda_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
     // DirectDma run.
     transfer_direct_planner(&src, &dst_direct, &src_blocks, &dst_blocks, ctx_direct).await?;
 
-    // CudaGraphReplay run — same data, separate destination.
+    // DeviceGraphReplay run — same data, separate destination.
     transfer_direct_planner(&src, &dst_replay, &src_blocks, &dst_blocks, ctx_replay).await?;
 
     // Both must reproduce src checksums.
     verify_checksums_by_position(&src_checksums, &src_blocks, &dst_direct, &dst_blocks)?;
     verify_checksums_by_position(&src_checksums, &src_blocks, &dst_replay, &dst_blocks)?;
 
-    // Pairwise equality: DirectDma == CudaGraphReplay.
+    // Pairwise equality: DirectDma == DeviceGraphReplay.
     let direct_sums = compute_block_checksums(&dst_direct, &dst_blocks)?;
     let replay_sums = compute_block_checksums(&dst_replay, &dst_blocks)?;
     for (&did, &rid) in dst_blocks.iter().zip(dst_blocks.iter()) {
@@ -145,7 +145,7 @@ async fn cuda_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
         let r = replay_sums.get(&rid).expect("replay checksum");
         assert_eq!(
             d, r,
-            "DirectDma vs CudaGraphReplay checksum mismatch at dst block {did}"
+            "DirectDma vs DeviceGraphReplay checksum mismatch at dst block {did}"
         );
     }
     Ok(())
@@ -154,7 +154,7 @@ async fn cuda_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
 /// Cache reuse: the second transfer with the same shape must hit the cache
 /// (cache size stays at 1) and produce correct output.
 #[tokio::test]
-async fn cuda_graph_replay_cache_reuse() -> Result<()> {
+async fn device_graph_replay_cache_reuse() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
 
@@ -202,7 +202,7 @@ async fn cuda_graph_replay_cache_reuse() -> Result<()> {
 /// (different block IDs). The second result must reflect the NEW addresses, not
 /// the captured ones, proving `cuGraphExecMemcpyNodeSetParams` is live.
 #[tokio::test]
-async fn cuda_graph_replay_address_rebind_works() -> Result<()> {
+async fn device_graph_replay_address_rebind_works() -> Result<()> {
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
 

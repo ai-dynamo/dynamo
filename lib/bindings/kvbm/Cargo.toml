@@ -20,13 +20,26 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["v2", "hub"]
+# `default = ["v2", "cuda"]` keeps the historical default — a CUDA build of
+# the v2 connector — without surprising existing CI / wheel pipelines.
+# A SYCL/XPU build is opt-in via:
+#   --no-default-features --features v2,xpu-sycl
+# `v2` carries the connector dep; `cuda` and `xpu-sycl` only forward the
+# backend selection. Mutual exclusion is enforced one level down by
+# kvbm-connector/src/lib.rs (compile_error! on cfg(all(cuda, xpu-sycl))).
+default = ["v2", "cuda", "hub"]
 v2 = [
     "dep:kvbm-connector",
     "kvbm-connector/static-kernels",
     "dep:kvbm-common",
 ]
-kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell"]
+cuda = ["kvbm-connector/cuda", "dynamo-device/cuda"]
+xpu-sycl = [
+    "kvbm-connector/xpu-sycl",
+    "dynamo-device/xpu-sycl",
+    "kvbm-kernels?/xpu-sycl-permute",
+]
+kernels = ["dep:kvbm-kernels", "dep:cudarc", "dep:once_cell", "dep:dynamo-device"]
 # Hub-facing pyclasses: `PrefillRouterHandler` + `CompletionEvent`. Pulls
 # kvbm-hub + velo. Independent of the v2 connector, so a slim hub-only
 # wheel is possible by disabling the v2 default feature.
@@ -41,12 +54,17 @@ hub = [
 ]
 
 [dependencies]
-# v2 deps (optional)
+# v2 deps (optional). `default-features = false` prevents kvbm-connector's
+# own `default = ["cuda", "testing"]` from forcibly turning on CUDA — the
+# backend is selected explicitly by py3's `cuda` / `xpu-sycl` features
+# above. `testing` is not on the bindings hot path (no test harness), so
+# it's intentionally NOT re-added here.
 kvbm-common = { path = "../../kvbm-common", optional = true }
-kvbm-connector = { path = "../../kvbm-connector", optional = true }
+kvbm-connector = { path = "../../kvbm-connector", optional = true, default-features = false }
 
 # kernels deps (optional)
 kvbm-kernels = { path = "../../kvbm-kernels", optional = true }
+dynamo-device = { path = "../../device", optional = true, default-features = false }
 
 # hub deps (optional)
 kvbm-hub = { path = "../../kvbm-hub", optional = true }

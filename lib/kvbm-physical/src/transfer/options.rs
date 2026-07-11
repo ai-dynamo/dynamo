@@ -4,8 +4,8 @@
 //! Transfer options for configuring block and layer transfers.
 
 use super::BounceBuffer;
+use crate::device::DeviceStream;
 use crate::layout::KvBlockLayout;
-use cudarc::driver::CudaStream;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use kvbm_common::KvbmTransferRoute;
@@ -16,6 +16,11 @@ use std::sync::Arc;
 ///
 /// This structure provides configuration for block and layer transfers,
 /// including layer ranges, NIXL write notifications, and bounce buffers.
+///
+/// Caller-provided streams flow through `device_stream` — a unified
+/// multi-backend `Arc<DeviceStream>` consumed by both the XPU/CUDA
+/// device executor and the CUDA planner path. The planner downcasts
+/// to a concrete `Arc<CudaStream>` internally.
 ///
 /// # Examples
 ///
@@ -51,17 +56,6 @@ pub struct TransferOptions {
     #[builder(default, setter(strip_option, into))]
     pub bounce_buffer: Option<BounceBuffer>,
 
-    /// Optional caller-provided CUDA stream for the transfer.
-    ///
-    /// When provided, the transfer executor will use this stream instead of
-    /// acquiring one from the pool. The caller is responsible for synchronization -
-    /// no event is recorded by the executor.
-    ///
-    /// This is useful for layer-wise transfers where all layers must execute
-    /// on the same stream to allow proper event sequencing.
-    #[builder(default, setter(strip_option))]
-    pub cuda_stream: Option<Arc<CudaStream>>,
-
     /// Override source block layout interpretation.
     ///
     /// When set, the transfer executor will treat source blocks as having
@@ -80,6 +74,15 @@ pub struct TransferOptions {
     #[builder(default, setter(strip_option))]
     pub dst_kv_layout: Option<KvBlockLayout>,
 
+    /// Caller-provided device stream.
+    ///
+    /// When set, the transfer executor uses this stream instead of acquiring
+    /// one from the context pool, and skips event recording (caller manages
+    /// synchronization). Returns `completed()` immediately. Used by both the
+    /// multi-backend device executor and the CUDA planner path.
+    #[builder(default, setter(strip_option))]
+    pub device_stream: Option<Arc<DeviceStream>>,
+
     /// Optional logical route for transfer metrics.
     ///
     /// This is attached by higher layers that know the semantic tier movement
@@ -94,8 +97,9 @@ pub struct TransferOptions {
     /// `execute_direct_transfer` path runs unchanged. When `true`, the
     /// transfer goes through `plan_copy`, lowers `CopyPlan::Direct` to
     /// `Candidate::DirectDma`, and executes via the planner-aware
-    /// CudaAsync path. `CopyPlan::Transform` is rejected (PR-6 wires
-    /// the kernel catalog).
+    /// Async path. CUDA backend only — under `xpu-sycl` builds the
+    /// internal options builder bails when `use_planner=true` is combined
+    /// with kernel transforms or non-empty `axis_slices`.
     #[builder(default)]
     pub use_planner: bool,
 }
@@ -132,6 +136,9 @@ mod tests {
         assert!(options.layer_range.is_none());
         assert!(options.nixl_write_notification.is_none());
         assert!(options.bounce_buffer.is_none());
+        assert!(options.device_stream.is_none());
+        assert!(options.metric_route.is_none());
+        assert!(!options.use_planner);
     }
 
     #[test]
@@ -161,10 +168,12 @@ mod tests {
         let options = TransferOptions::builder()
             .nixl_write_notification(100)
             .layer_range(5..15)
+            .use_planner(true)
             .build()
             .unwrap();
 
         assert_eq!(options.nixl_write_notification, Some(100));
         assert_eq!(options.layer_range, Some(5..15));
+        assert!(options.use_planner);
     }
 }

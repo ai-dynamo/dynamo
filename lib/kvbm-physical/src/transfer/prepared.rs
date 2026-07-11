@@ -118,9 +118,9 @@ impl From<TransferStrategy> for StrategyKey {
     fn from(value: TransferStrategy) -> Self {
         match value {
             TransferStrategy::Memcpy => Self::Memcpy,
-            TransferStrategy::CudaAsyncH2D => Self::CudaH2D,
-            TransferStrategy::CudaAsyncD2H => Self::CudaD2H,
-            TransferStrategy::CudaAsyncD2D => Self::CudaD2D,
+            TransferStrategy::AsyncH2D | TransferStrategy::BlockingH2D => Self::CudaH2D,
+            TransferStrategy::AsyncD2H | TransferStrategy::BlockingD2H => Self::CudaD2H,
+            TransferStrategy::AsyncD2D => Self::CudaD2D,
             TransferStrategy::NixlRead => Self::NixlRead,
             TransferStrategy::NixlWrite => Self::NixlWrite,
             TransferStrategy::NixlReadFlipped => Self::NixlReadFlipped,

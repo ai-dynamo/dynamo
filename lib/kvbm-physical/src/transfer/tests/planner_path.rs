@@ -52,8 +52,8 @@ fn build_layout_for_planner(
     };
     match storage_kind {
         StorageKind::System => typed.allocate_system().build().unwrap(),
-        StorageKind::Pinned => typed.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(id) => typed.allocate_device(id).build().unwrap(),
+        StorageKind::Pinned => typed.allocate_pinned(test_allocator(0)).build().unwrap(),
+        StorageKind::Device(id) => typed.allocate_device(test_allocator(id)).build().unwrap(),
         StorageKind::Disk(_) => typed.allocate_disk(None).build().unwrap(),
     }
 }
@@ -199,7 +199,7 @@ fn build_fc_with_block_layout(
         .with_config(config)
         .with_block_layout(block_layout)
         .fully_contiguous()
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }
@@ -212,7 +212,7 @@ fn build_fc_with_block_layout(
 /// byte-for-byte.
 ///
 /// There's no legacy comparison path for transforms — the legacy
-/// CudaAsync executor doesn't dispatch `universal_from_block` /
+/// Async executor doesn't dispatch `universal_from_block` /
 /// `block_from_universal`, so a side-by-side check is impossible.
 /// The round-trip pattern is the strongest correctness check
 /// available.
@@ -366,7 +366,7 @@ async fn use_planner_small_inner_threshold_fallback_d2d() -> Result<()> {
             .with_config(config.clone())
             .with_block_layout(bl)
             .fully_contiguous()
-            .allocate_device(0)
+            .allocate_device(test_allocator(0))
             .build()
             .unwrap()
     };
@@ -437,7 +437,7 @@ fn build_fc_dtype_none(
         .with_config(config)
         .with_block_layout(block_layout)
         .fully_contiguous()
-        .allocate_device(0)
+        .allocate_device(test_allocator(0))
         .build()
         .unwrap()
 }
@@ -717,7 +717,7 @@ async fn per_layer_round_trip_hnd_to_nhd() -> Result<()> {
 /// `layer_range` with `requires_transform = true` and `use_planner = false`
 /// must auto-promote to the planner path under default options. Pins the
 /// production call shape: `intra_pass_offload` sets `layer_range` and
-/// `cuda_stream` but not `use_planner`, and the executor must transparently
+/// `device_stream` but not `use_planner`, and the executor must transparently
 /// route the call to the kernel catalog.
 #[tokio::test]
 async fn auto_promote_g1_nhd_to_g2_univ_with_layer_range() -> Result<()> {

@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_memory::resources::Resources;
+use dynamo_memory::{HostRegistrar, resources::Resources};
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tokio_util::sync::CancellationToken;
@@ -92,9 +92,10 @@ impl KvbmService {
     pub async fn start_with_pool(
         cfg: ServiceConfig,
         container: Arc<dyn ServiceContainer>,
+        registrar: Arc<dyn HostRegistrar>,
     ) -> ServiceResult<Self> {
         let instance_id = uuid::Uuid::new_v4().to_string();
-        let pool = HostMemoryPool::new(&cfg.pool, &instance_id)?;
+        let pool = HostMemoryPool::new(&cfg.pool, &instance_id, registrar)?;
         let lease = pool.lease_all()?;
         container
             .on_resources_attached(lease)
@@ -115,7 +116,7 @@ impl KvbmService {
         info!(
             capacity_slots = capacity,
             container = container.name(),
-            "discovered CUDA-visible GPUs (slot capacity)"
+            "discovered visible GPUs (slot capacity)"
         );
 
         let metrics = ServiceMetrics::new();
@@ -295,7 +296,7 @@ fn capacity_from_resources(resources: &Resources) -> u32 {
     let count = resources
         .gpus
         .iter()
-        .filter(|g| g.cuda_ordinal.is_some())
+        .filter(|g| g.device_ordinal.is_some())
         .count();
     u32::try_from(count).unwrap_or(u32::MAX)
 }

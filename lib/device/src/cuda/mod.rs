@@ -1,0 +1,686 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! CUDA backend implementation.
+//!
+//! Wraps cudarc types with the device abstraction traits.
+
+use crate::traits::*;
+use anyhow::{Result, Context as _};
+use cudarc::driver::result as cuda_result;
+use cudarc::driver::sys::CUresult;
+use cudarc::driver::DriverError;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use dynamo_memory::CudaMemPool;
+
+/// Whether to use write-combined pinned allocations.
+///
+/// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
+/// is set, or if a test allocation reveals the hardware does not support it
+/// (e.g. Grace Hopper / Blackwell with NVLink-C2C). Must be accessed only after
+/// a CUDA context has been bound to the current thread.
+static USE_WRITE_COMBINED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    if dynamo_memory::env_is_truthy("DYN_KVBM_DISABLE_WRITE_COMBINED") {
+        tracing::debug!("DYN_KVBM_DISABLE_WRITE_COMBINED set; write-combined disabled");
+        return false;
+    }
+    // Probe hardware support with a 1-byte test allocation.
+    // SAFETY: called from an allocation path that has already bound a CUDA context.
+    unsafe {
+        match cudarc::driver::result::malloc_host(
+            1,
+            cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+        ) {
+            Ok(ptr) => {
+                let _ = cudarc::driver::result::free_host(ptr);
+                true
+            }
+            Err(_) => {
+                tracing::debug!(
+                    "Write-combined memory not supported on this system; \
+                     will use regular pinned memory"
+                );
+                false
+            }
+        }
+    }
+});
+
+/// Allocates pinned host memory, using write-combined if [`USE_WRITE_COMBINED`]
+/// allows it, otherwise falling back to `CU_MEMHOSTALLOC_DEVICEMAP`.
+///
+/// # Safety
+/// Caller must ensure a valid CUDA context is bound to the current thread.
+unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8> {
+    if *USE_WRITE_COMBINED {
+        // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
+        unsafe {
+            cudarc::driver::result::malloc_host(
+                size,
+                cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED,
+            )
+        }
+        .map(|ptr| ptr as *mut u8)
+        .map_err(|e| anyhow::anyhow!("CUDA pinned host allocation failed: {:?}", e))
+    } else {
+        // SAFETY: caller guarantees a valid CUDA context is bound to the current thread
+        unsafe {
+            cudarc::driver::result::malloc_host(
+                size,
+                cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP,
+            )
+        }
+        .map(|ptr| ptr as *mut u8)
+        .map_err(|e| anyhow::anyhow!("CUDA pinned host allocation failed: {:?}", e))
+    }
+}
+
+/// CUDA device context wrapping `cudarc::driver::CudaContext`.
+#[derive(Debug)]
+pub struct CudaDeviceContext {
+    context: Arc<cudarc::driver::CudaContext>,
+    device_id: u32,
+}
+
+impl CudaDeviceContext {
+    pub fn new(device_id: u32) -> Result<Self> {
+        let context = cudarc::driver::CudaContext::new(device_id as usize)
+            .with_context(|| format!("Failed to create CUDA context for device {}", device_id))?;
+        Ok(Self { context, device_id })
+    }
+
+    /// Create from an existing `cudarc::driver::CudaContext` (for
+    /// compatibility with existing code that already owns one).
+    pub fn from_context(context: Arc<cudarc::driver::CudaContext>, device_id: u32) -> Self {
+        Self { context, device_id }
+    }
+
+    /// Get the underlying cudarc context.
+    pub fn inner(&self) -> &Arc<cudarc::driver::CudaContext> {
+        &self.context
+    }
+}
+
+impl DeviceContextOps for CudaDeviceContext {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn device_id(&self) -> u32 {
+        self.device_id
+    }
+
+    fn create_stream(&self) -> Result<Box<dyn DeviceStreamOps>> {
+        let stream = self.context.new_stream()
+            .context("Failed to create CUDA stream")?;
+        Ok(Box::new(CudaDeviceStream { stream }))
+    }
+
+    fn allocate_device(&self, size: usize) -> Result<u64> {
+        self.context.bind_to_thread()?;
+        let ptr = unsafe {
+            cuda_result::malloc_sync(size)
+                .context("Failed to allocate device memory")?
+        };
+        Ok(ptr)
+    }
+
+    fn free_device(&self, ptr: u64) -> Result<()> {
+        self.context.bind_to_thread()?;
+        unsafe {
+            cuda_result::free_sync(ptr)
+                .context("Failed to free device memory")?;
+        }
+        Ok(())
+    }
+
+    fn allocate_pinned(&self, size: usize) -> Result<u64> {
+        // Try NUMA-aware allocation on Linux unless explicitly disabled
+        #[cfg(target_os = "linux")]
+        {
+            if dynamo_memory::numa::is_numa_enabled() {
+                if let Some(pci) = self.pci_bdf_address() {
+                    let allocator = Arc::new(CudaPinnedAllocator {
+                        context: self.context.clone(),
+                    });
+                    match dynamo_memory::numa::worker_pool::NumaWorkerPool::global()
+                        .allocate_pinned_for_device(size, &pci, allocator)
+                    {
+                        Ok(Some(ptr)) => {
+                            tracing::debug!(
+                                "Using NUMA-aware allocation for {} bytes on GPU {}",
+                                size, self.device_id
+                            );
+                            return Ok(ptr as u64);
+                        }
+                        Ok(None) => {} // NUMA node unknown, fall through
+                        Err(e) => return Err(anyhow::anyhow!(
+                            "NUMA-aware pinned allocation failed: {}", e
+                        )),
+                    }
+                }
+            }
+        }
+
+        // Fall back to write-combined or device-mapped pinned memory.
+        // Bind CUDA context only for the fallback path (NUMA workers
+        // manage their own contexts on pinned NUMA threads).
+        self.context.bind_to_thread()
+            .context("Failed to bind CUDA context for pinned allocation")?;
+
+        let ptr = unsafe { malloc_host_prefer_writecombined(size)? };
+
+        assert!(!ptr.is_null(), "Failed to allocate pinned memory");
+        assert!(ptr.is_aligned(), "Pinned memory is not aligned");
+        assert!(size < isize::MAX as usize);
+
+        Ok(ptr as u64)
+    }
+
+    fn free_pinned(&self, ptr: u64) -> Result<()> {
+        unsafe {
+            cuda_result::free_host(ptr as *mut std::ffi::c_void)
+                .context("Failed to free pinned host memory")?;
+        }
+        Ok(())
+    }
+
+    unsafe fn disable_event_tracking(&self) -> Result<()> {
+        unsafe { self.context.disable_event_tracking(); }
+        Ok(())
+    }
+
+    fn create_memory_pool(
+        &self,
+        reserve_size: usize,
+        release_threshold: Option<u64>,
+    ) -> Result<Box<dyn DeviceMemPoolOps>> {
+        let mut builder = CudaMemPool::builder(self.context.clone(), reserve_size);
+        if let Some(threshold) = release_threshold {
+            builder = builder.release_threshold(threshold);
+        }
+        let pool = builder.build()?;
+        Ok(Box::new(CudaDeviceMemPool { pool }))
+    }
+
+    fn raw_handle(&self) -> Option<u64> {
+        Some(self.context.cu_device() as u64)
+    }
+
+    fn pci_bdf_address(&self) -> Option<String> {
+        use cudarc::driver::{result::device as cuda_device, sys as cuda_sys};
+        unsafe {
+            let mut dev = std::mem::MaybeUninit::uninit();
+            if cuda_sys::cuDeviceGet(dev.as_mut_ptr(), self.device_id as i32)
+                .result()
+                .is_err()
+            {
+                return None;
+            }
+            let dev = dev.assume_init();
+            let domain = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID,
+            ).ok()?;
+            let bus = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID,
+            ).ok()?;
+            let device = cuda_device::get_attribute(
+                dev,
+                cuda_sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID,
+            ).ok()?;
+            Some(format!("{:04x}:{:02x}:{:02x}.0", domain, bus, device))
+        }
+    }
+}
+
+/// CUDA allocator for NUMA-aware pinned host memory.
+///
+/// Used by [`NumaWorkerPool::allocate_pinned_for_device`] on a NUMA-pinned
+/// worker thread. Binds the CUDA context and calls `cuMemHostAlloc`.
+struct CudaPinnedAllocator {
+    context: Arc<cudarc::driver::CudaContext>,
+}
+
+impl dynamo_memory::PinnedAllocator for CudaPinnedAllocator {
+    fn alloc_pinned(&self, size: usize) -> std::result::Result<*mut u8, String> {
+        use cudarc::driver::result::malloc_host;
+        use cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP;
+
+        // Record NUMA node before CUDA context binding
+        let node_before_bind = dynamo_memory::numa::get_current_cpu_numa_node();
+
+        unsafe {
+            self.context
+                .bind_to_thread()
+                .map_err(|e| format!("CUDA bind_to_thread: {:?}", e))?;
+
+            // Verify thread is still on correct NUMA node after CUDA context binding.
+            // (Matches upstream do_cuda_pinned_allocation node_after_ctx check.)
+            let node_after_ctx = dynamo_memory::numa::get_current_cpu_numa_node();
+            if node_after_ctx != node_before_bind {
+                tracing::warn!(
+                    "Thread moved after CUDA context bind! Expected node {}, now on node {}",
+                    node_before_bind.0,
+                    node_after_ctx.0
+                );
+            }
+
+            malloc_host(size, CU_MEMHOSTALLOC_DEVICEMAP)
+                .map(|p| p as *mut u8)
+                .map_err(|e| format!("CUDA malloc_host: {:?}", e))
+        }
+    }
+
+    fn free_pinned(&self, ptr: *mut u8) -> std::result::Result<(), String> {
+        unsafe {
+            cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void)
+                .map_err(|e| format!("CUDA free_host: {:?}", e))
+        }
+    }
+}
+
+
+/// CUDA implementation of [`dynamo_memory::HostRegistrar`].
+///
+/// Calls `cuMemHostRegister_v2` / `cuMemHostUnregister` for DMA registration.
+/// Constructed from a device ordinal via [`CudaHostRegistrar::new`].
+#[derive(Debug)]
+pub struct CudaHostRegistrar {
+    context: Arc<cudarc::driver::CudaContext>,
+}
+
+/// Get or create a CUDA context for the given device ordinal.
+///
+/// Uses a process-wide cache so repeated calls with the same `device_id`
+/// return the same `Arc<CudaContext>`. Mirrors the pattern originally in
+/// `dynamo-memory` but lives here so `dynamo-memory` stays device-agnostic.
+pub fn cuda_context(device_id: u32) -> Result<Arc<cudarc::driver::CudaContext>> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<cudarc::driver::CudaContext>>>> = OnceLock::new();
+    let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
+
+    if let Some(existing) = map.get(&device_id) {
+        return Ok(existing.clone());
+    }
+
+    let ctx = cudarc::driver::CudaContext::new(device_id as usize)
+        .with_context(|| format!("cuda_context: failed to get CUDA context for device {}", device_id))?;
+    map.insert(device_id, ctx.clone());
+    Ok(ctx)
+}
+
+impl CudaHostRegistrar {
+    /// Create a registrar for the given CUDA device ordinal.
+    pub fn new(device_id: u32) -> Result<Self> {
+        let context = cuda_context(device_id)?;
+        Ok(Self { context })
+    }
+}
+
+impl dynamo_memory::HostRegistrar for CudaHostRegistrar {
+    unsafe fn register(&self, ptr: *mut std::ffi::c_void, len: usize) -> dynamo_memory::Result<()> {
+        self.context.bind_to_thread().map_err(dynamo_memory::StorageError::Cuda)?;
+        unsafe {
+            cudarc::driver::sys::cuMemHostRegister_v2(
+                ptr,
+                len,
+                cudarc::driver::sys::CU_MEMHOSTREGISTER_DEVICEMAP,
+            )
+            .result()
+            .map_err(dynamo_memory::StorageError::Cuda)?
+        };
+        Ok(())
+    }
+
+    unsafe fn unregister(&self, ptr: *mut std::ffi::c_void) -> dynamo_memory::Result<()> {
+        self.context.bind_to_thread().map_err(dynamo_memory::StorageError::Cuda)?;
+        unsafe {
+            cudarc::driver::sys::cuMemHostUnregister(ptr)
+                .result()
+                .map_err(dynamo_memory::StorageError::Cuda)?
+        };
+        Ok(())
+    }
+}
+
+/// Check if CUDA is available.
+///
+/// Uses `catch_unwind` because cudarc panics (instead of returning `Err`)
+/// when `libcuda.so` is not present on the system.
+///
+/// Temporarily suppresses the default panic hook to avoid noisy stderr output
+/// on XPU-only systems where libcuda.so is absent.
+pub fn is_available() -> bool {
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result =
+        std::panic::catch_unwind(|| cudarc::driver::CudaContext::new(0).is_ok()).unwrap_or(false);
+    std::panic::set_hook(prev_hook);
+    result
+}
+
+/// CUDA memory pool wrapper implementing DeviceMemPoolOps.
+pub struct CudaDeviceMemPool {
+    pool: CudaMemPool,
+}
+
+impl std::fmt::Debug for CudaDeviceMemPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaDeviceMemPool").finish()
+    }
+}
+
+impl CudaDeviceMemPool {
+    /// Get the underlying CudaMemPool.
+    pub fn inner(&self) -> &CudaMemPool {
+        &self.pool
+    }
+}
+
+impl DeviceMemPoolOps for CudaDeviceMemPool {
+    fn alloc_async(&self, size: usize, stream: &dyn DeviceStreamOps) -> Result<u64> {
+        let raw_handle = stream.raw_handle()
+            .ok_or_else(|| anyhow::anyhow!("Stream has no raw handle for pool allocation"))?;
+        // SAFETY: raw_handle returns a valid CUstream handle from CudaDeviceStream
+        unsafe { self.pool.alloc_async_raw(size, raw_handle as cudarc::driver::sys::CUstream) }
+    }
+
+    fn free_async(&self, ptr: u64, stream: &dyn DeviceStreamOps) -> Result<()> {
+        let raw_handle = stream.raw_handle()
+            .ok_or_else(|| anyhow::anyhow!("Stream has no raw handle for pool free"))?;
+        // SAFETY: raw_handle returns a valid CUstream handle from CudaDeviceStream
+        unsafe { self.pool.free_async_raw(ptr, raw_handle as cudarc::driver::sys::CUstream) }
+    }
+}
+
+/// CUDA stream wrapper.
+#[derive(Debug)]
+pub struct CudaDeviceStream {
+    stream: Arc<cudarc::driver::CudaStream>,
+}
+
+impl CudaDeviceStream {
+    /// Get the underlying CUDA stream.
+    pub fn inner(&self) -> &Arc<cudarc::driver::CudaStream> {
+        &self.stream
+    }
+}
+
+impl DeviceStreamOps for CudaDeviceStream {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn bind_to_thread(&self) -> Result<()> {
+        self.stream
+            .context()
+            .bind_to_thread()
+            .context("Failed to bind CUDA context to thread (stream)")
+    }
+
+    fn batch_copy(&self, src_ptrs: &[u64], dst_ptrs: &[u64], size: usize) -> Result<()> {
+        assert_eq!(src_ptrs.len(), dst_ptrs.len(), "batch_copy: src/dst length mismatch");
+        let num_copies = src_ptrs.len();
+        if num_copies == 0 {
+            return Ok(());
+        }
+
+        let cuda_stream = self.stream.cu_stream() as cudarc::runtime::sys::cudaStream_t;
+
+        // Build c_void pointer arrays for memcpy_batch
+        let src_cvoid: Vec<*const std::ffi::c_void> = src_ptrs
+            .iter()
+            .map(|&p| p as *const std::ffi::c_void)
+            .collect();
+        let dst_cvoid: Vec<*mut std::ffi::c_void> = dst_ptrs
+            .iter()
+            .map(|&p| p as *mut std::ffi::c_void)
+            .collect();
+
+        let status = unsafe {
+            kvbm_kernels::memcpy_batch(
+                src_cvoid.as_ptr(),
+                dst_cvoid.as_ptr(),
+                size,
+                num_copies,
+                kvbm_kernels::MemcpyBatchMode::BatchedWithFallback,
+                cuda_stream,
+            )
+        };
+
+        if status != cudarc::runtime::sys::cudaError::cudaSuccess {
+            return Err(anyhow::anyhow!("CUDA batch_copy (memcpy_batch) failed: {:?}", status));
+        }
+
+        tracing::debug!(
+            num_copies,
+            size,
+            batch_available = kvbm_kernels::is_memcpy_batch_available(),
+            "CUDA batch_copy completed"
+        );
+        Ok(())
+    }
+
+    fn memcpy_htod(&self, dst_device: u64, src_host: &[u8]) -> Result<()> {
+        unsafe {
+            cuda_result::memcpy_htod_async(
+                dst_device,
+                src_host,
+                self.stream.cu_stream(),
+            )
+            .map_err(|e| anyhow::anyhow!("CUDA memcpy_htod_async failed: {:?}", e))?;
+        }
+        Ok(())
+    }
+
+    fn memcpy_dtoh(&self, src_device: u64, dst_host: &mut [u8]) -> Result<()> {
+        unsafe {
+            cuda_result::memcpy_dtoh_async(
+                dst_host,
+                src_device,
+                self.stream.cu_stream(),
+            )
+            .map_err(|e| anyhow::anyhow!("CUDA memcpy_dtoh_async failed: {:?}", e))?;
+        }
+        Ok(())
+    }
+
+    fn vectorized_copy(
+        &self,
+        src_ptrs_device: u64,
+        dst_ptrs_device: u64,
+        chunk_size: usize,
+        count: usize,
+    ) -> Result<()> {
+        if count == 0 {
+            return Ok(());
+        }
+
+        let cuda_stream = self.stream.cu_stream() as cudarc::runtime::sys::cudaStream_t;
+
+        let status = unsafe {
+            kvbm_kernels::vectorized_copy(
+                src_ptrs_device as *mut *mut std::ffi::c_void,
+                dst_ptrs_device as *mut *mut std::ffi::c_void,
+                chunk_size,
+                count as i32,
+                cuda_stream,
+            )
+        };
+
+        if status != cudarc::runtime::sys::cudaError::cudaSuccess {
+            return Err(anyhow::anyhow!("CUDA vectorized_copy kernel failed: {:?}", status));
+        }
+
+        tracing::debug!(count, chunk_size, "CUDA vectorized_copy kernel launched");
+        Ok(())
+    }
+
+    fn record_event(&self) -> Result<Box<dyn DeviceEventOps>> {
+        let event = self.stream.record_event(None)
+            .context("Failed to record CUDA event")?;
+        Ok(Box::new(CudaDeviceEvent { event }))
+    }
+
+    fn wait_event(&self, event: &dyn DeviceEventOps) -> Result<()> {
+        let event_handle = event.raw_handle()
+            .ok_or_else(|| anyhow::anyhow!("CUDA wait_event: event has no raw handle"))?;
+        unsafe {
+            cuda_result::stream::wait_event(
+                self.stream.cu_stream(),
+                event_handle as cudarc::driver::sys::CUevent,
+                cudarc::driver::sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT,
+            )
+            .context("CUDA cuStreamWaitEvent failed")?;
+        }
+        Ok(())
+    }
+
+    fn synchronize(&self) -> Result<()> {
+        self.stream.synchronize()
+            .context("CUDA stream synchronization failed")?;
+        Ok(())
+    }
+
+    fn raw_handle(&self) -> Option<u64> {
+        Some(self.stream.cu_stream() as u64)
+    }
+}
+
+/// CUDA event wrapper.
+#[derive(Debug)]
+pub struct CudaDeviceEvent {
+    pub event: cudarc::driver::CudaEvent,
+}
+
+impl DeviceEventOps for CudaDeviceEvent {
+    fn is_complete(&self) -> Result<bool> {
+        unsafe {
+            match cuda_result::event::query(self.event.cu_event()) {
+                Ok(()) => Ok(true),
+                Err(DriverError(CUresult::CUDA_ERROR_NOT_READY)) => Ok(false),
+                Err(e) => Err(anyhow::anyhow!("CUDA event query failed: {:?}", e)),
+            }
+        }
+    }
+
+    fn synchronize(&self) -> Result<()> {
+        self.event.synchronize()
+            .context("CUDA event synchronization failed")?;
+        Ok(())
+    }
+
+
+    fn record_on_stream(&self, stream: &dyn DeviceStreamOps) -> Result<()> {
+        let handle = stream.raw_handle()
+            .ok_or_else(|| anyhow::anyhow!("CUDA event: stream has no raw handle"))?;
+        self.record_on_raw_stream(handle)
+    }
+
+    fn record_on_raw_stream(&self, stream_handle: u64) -> Result<()> {
+        unsafe {
+            cuda_result::event::record(
+                self.event.cu_event(),
+                stream_handle as cudarc::driver::sys::CUstream,
+            ).context("CUDA cuEventRecord failed")?;
+        }
+        Ok(())
+    }
+
+    fn wait_on_raw_stream(&self, stream_handle: u64) -> Result<()> {
+        unsafe {
+            cuda_result::stream::wait_event(
+                stream_handle as cudarc::driver::sys::CUstream,
+                self.event.cu_event(),
+                cudarc::driver::sys::CUevent_wait_flags::CU_EVENT_WAIT_DEFAULT,
+            )
+            .context("CUDA cuStreamWaitEvent (raw) failed")?;
+        }
+        Ok(())
+    }
+
+    fn raw_handle(&self) -> Option<u64> {
+        Some(self.event.cu_event() as u64)
+    }
+}
+
+// =====================================================================
+// CudaDeviceSlice<T> — owned cudarc-backed device buffer
+// =====================================================================
+
+/// Owned CUDA device-allocated buffer of `T` elements.
+///
+/// Wraps `cudarc::driver::CudaSlice<T::CudaRepr>`. The associated type
+/// indirection keeps the public [`crate::DeviceSlice`] surface element-
+/// typed in `T` while the cuda layer holds the concrete cudarc slice
+/// over `T::CudaRepr`. For the current `usize` impl the two coincide,
+/// so `clone_htod` passes the host slice straight through to cudarc
+/// without an intermediate `Vec` collect.
+pub struct CudaDeviceSlice<T: crate::DeviceDtype> {
+    inner: cudarc::driver::CudaSlice<T::CudaRepr>,
+}
+
+impl<T: crate::DeviceDtype> CudaDeviceSlice<T> {
+    /// Allocate a CUDA device buffer of `host.len()` elements and copy
+    /// `host` to it on `stream`'s queue.
+    pub(crate) fn clone_htod(
+        stream: &CudaDeviceStream,
+        host: &[T],
+    ) -> Result<Self>
+    where
+        T: crate::DeviceDtype<CudaRepr = T> + cudarc::driver::DeviceRepr,
+    {
+        // Identity-shape fast path: host slice is already in the cuda
+        // representation, so cudarc consumes it without an intermediate
+        // `Vec`. For non-identity element types a future overload would
+        // collect into `Vec<T::CudaRepr>` here; gated on `where` so the
+        // cost only appears when the shapes actually differ.
+        let inner = stream
+            .stream
+            .clone_htod(host)
+            .map_err(|e| anyhow::anyhow!("CUDA clone_htod failed: {:?}", e))?;
+        Ok(Self { inner })
+    }
+
+    /// Borrow the underlying cudarc slice — used by callers that need
+    /// the typed cudarc handle (e.g. graph-replay capture).
+    pub fn inner(&self) -> &cudarc::driver::CudaSlice<T::CudaRepr> {
+        &self.inner
+    }
+}
+
+impl<T: crate::DeviceDtype> crate::DeviceSliceOps<T> for CudaDeviceSlice<T> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn with_device_ptr(&self, f: &mut dyn FnMut(u64)) {
+        use cudarc::driver::DevicePtr;
+        let stream = self.inner.stream();
+        // `_guard` is cudarc's `SyncOnDrop`; keeping it alive for the
+        // entire closure body ensures any kernel dispatch inside `f`
+        // is ordered against the slice's owning stream.
+        let (raw, _guard) = self.inner.device_ptr(stream);
+        f(raw as u64);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cuda_context_creation() {
+        if !is_available() {
+            return;
+        }
+        let ctx = CudaDeviceContext::new(0);
+        assert!(ctx.is_ok());
+    }
+}

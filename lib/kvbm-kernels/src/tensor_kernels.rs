@@ -46,6 +46,7 @@ pub enum TensorDataType {
 }
 
 /// Identifies how each `[nt, nh, hd]` chunk is laid out in device memory.
+/// Shared by both CUDA and SYCL permute kernels.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockLayout {

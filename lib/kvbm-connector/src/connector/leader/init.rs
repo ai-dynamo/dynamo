@@ -21,7 +21,33 @@ use kvbm_logical::events::EventsManager;
 use kvbm_logical::manager::{BlockManager, FrequencyTrackingCapacity};
 
 use anyhow::{Context, Result, anyhow, bail};
+use kvbm_physical::device::DeviceBackend;
 use velo::{PeerInfo, WorkerAddress};
+
+fn effective_device_backend(configured: DeviceBackend) -> DeviceBackend {
+    if configured.is_available() {
+        return configured;
+    }
+
+    match DeviceBackend::detect_backend() {
+        Ok(detected) => {
+            tracing::warn!(
+                configured = %configured.name(),
+                detected = %detected.name(),
+                "Configured backend unavailable; falling back to detected backend"
+            );
+            detected
+        }
+        Err(err) => {
+            tracing::warn!(
+                configured = %configured.name(),
+                error = %err,
+                "Configured backend unavailable and auto-detect failed; keeping configured backend"
+            );
+            configured
+        }
+    }
+}
 
 impl ConnectorLeader {
     /// This is called by the Scheduler-side of the ConnectorAPI during the call to set_xfer_handshake_metadata.
@@ -353,6 +379,7 @@ impl ConnectorLeader {
         let initialize_futures = {
             tracing::debug!("Lock acquired for creating initialize futures");
             let state = self.init.lock();
+            let backend = effective_device_backend(self.runtime.config().backend);
             tracing::debug!(
                 num_workers = state.worker_connector_clients.len(),
                 "Creating initialize futures for all workers"
@@ -367,6 +394,7 @@ impl ConnectorLeader {
                     disk_block_count,
                     object: object_config.clone(),
                     parallelism: self.runtime.config().cache.parallelism,
+                    backend,
                 };
                 futures.push(worker.initialize(leader_config.clone())?);
             }

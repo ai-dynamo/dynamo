@@ -13,15 +13,13 @@
 //! - First-touch page allocation ensures correct NUMA placement
 
 use super::get_current_cpu_numa_node;
-use cudarc::driver::result::malloc_host;
-use cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP;
 use nix::libc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use super::{NumaNode, get_device_numa_node, pin_thread_to_numa_node};
+use super::{NumaNode, pin_thread_to_numa_node};
 use crate::StorageError;
 use crate::mmap_pinned::{MmappedPinnedOptions, MmappedPinnedStorage};
 
@@ -40,14 +38,32 @@ struct SendPtr(*mut u8);
 // The worker never accesses the pointer after sending it.
 unsafe impl Send for SendPtr {}
 
-/// Request to allocate CUDA pinned memory on a specific NUMA node.
+/// Backend-agnostic allocator for NUMA-pinned host memory.
+///
+/// Implementations are called on a worker thread that is already pinned to
+/// the target NUMA node. First-touch page walking is handled by the worker
+/// pool after allocation.
+pub trait PinnedAllocator: Send + Sync + 'static {
+    /// Allocate `size` bytes of host memory accessible by the device.
+    ///
+    /// Called on a NUMA-pinned worker thread. The implementation should
+    /// perform the backend-specific allocation (e.g., `cuMemHostAlloc`,
+    /// `sycl::malloc_host`) but does NOT need to do first-touch — the
+    /// worker handles that.
+    fn alloc_pinned(&self, size: usize) -> Result<*mut u8, String>;
+
+    /// Free a pointer previously returned by [`alloc_pinned`].
+    fn free_pinned(&self, ptr: *mut u8) -> Result<(), String>;
+}
+
+/// Request to allocate pinned memory on a specific NUMA node.
 struct AllocRequest {
     /// Number of bytes to allocate.
     size: usize,
     /// Target NUMA node for allocation.
     node: NumaNode,
-    /// CUDA device ID (for context binding).
-    gpu_id: u32,
+    /// Backend-specific allocator (CUDA, SYCL, etc.).
+    allocator: Arc<dyn PinnedAllocator>,
     /// Channel for sending back the allocation result.
     response: Sender<AllocResult>,
 }
@@ -124,10 +140,12 @@ impl NumaWorker {
             match requests.recv() {
                 Ok(req) => {
                     tracing::trace!(
-                        "Worker received CUDA pinned allocation request on node {}",
+                        "Worker received pinned allocation request on node {}",
                         node.0
                     );
-                    let result = Self::do_cuda_pinned_allocation(req.size, req.node, req.gpu_id);
+                    let result = Self::do_pinned_allocation(
+                        req.size, req.node, &*req.allocator,
+                    );
                     match result {
                         Ok(SendPtr(ptr)) => {
                             if let Err(_e) = req.response.send(Ok(SendPtr(ptr))) {
@@ -137,10 +155,8 @@ impl NumaWorker {
                                     req.size,
                                     ptr
                                 );
-                                unsafe {
-                                    let _ = cudarc::driver::result::free_host(
-                                        ptr as *mut std::ffi::c_void,
-                                    );
+                                if let Err(e) = req.allocator.free_pinned(ptr) {
+                                    tracing::error!("Failed to free leaked allocation: {}", e);
                                 }
                             }
                         }
@@ -161,8 +177,15 @@ impl NumaWorker {
         }
     }
 
-    /// Perform CUDA pinned memory allocation.
-    fn do_cuda_pinned_allocation(size: usize, node: NumaNode, gpu_id: u32) -> AllocResult {
+    /// Perform backend-agnostic pinned memory allocation with first-touch.
+    ///
+    /// The allocator handles the backend-specific allocation (CUDA/SYCL/etc),
+    /// while this method handles NUMA verification and first-touch page walking.
+    fn do_pinned_allocation(
+        size: usize,
+        node: NumaNode,
+        allocator: &dyn PinnedAllocator,
+    ) -> AllocResult {
         if size == 0 {
             return Err("Cannot allocate zero bytes".to_string());
         }
@@ -177,50 +200,27 @@ impl NumaWorker {
             );
         }
 
-        // Get or create CUDA context for this GPU
-        let ctx = crate::device::cuda_context(gpu_id)
-            .map_err(|e| format!("Failed to create CUDA context for device {}: {}", gpu_id, e))?;
+        // Delegate to backend-specific allocator
+        let ptr = allocator.alloc_pinned(size)?;
 
+        if ptr.is_null() {
+            return Err("Allocator returned null pointer".to_string());
+        }
+
+        // Verify thread is STILL on correct node before touching pages
+        let node_before_touch = get_current_cpu_numa_node();
+        if node_before_touch != node {
+            tracing::error!(
+                "Thread on wrong node before first-touch! Expected {}, on node {} - memory will be misplaced!",
+                node.0,
+                node_before_touch.0
+            );
+        }
+
+        // Touch one byte per page to trigger first-touch policy efficiently
+        // This is much faster than zeroing the entire region for large allocations
+        // SAFETY: ptr was just allocated with at least `size` bytes by the allocator.
         unsafe {
-            // Bind CUDA context to this worker thread before allocation
-            // This ensures malloc_host has a valid context to work with
-            ctx.bind_to_thread()
-                .map_err(|e| format!("Failed to bind CUDA context to worker thread: {:?}", e))?;
-
-            // Verify thread is still on correct node after CUDA context binding
-            let node_after_ctx = get_current_cpu_numa_node();
-            if node_after_ctx != node {
-                tracing::warn!(
-                    "Thread moved after CUDA context bind! Expected node {}, now on node {}",
-                    node.0,
-                    node_after_ctx.0
-                );
-            }
-
-            // Allocate CUDA pinned memory
-            // This is called from the pinned worker thread, so pages will be
-            // allocated on the correct NUMA node via first-touch
-            let ptr = malloc_host(size, CU_MEMHOSTALLOC_DEVICEMAP)
-                .map_err(|e| format!("malloc_host failed: {:?}", e))?;
-
-            let ptr = ptr as *mut u8;
-
-            if ptr.is_null() {
-                return Err("malloc_host returned null".to_string());
-            }
-
-            // Verify thread is STILL on correct node before touching pages
-            let node_before_touch = get_current_cpu_numa_node();
-            if node_before_touch != node {
-                tracing::error!(
-                    "Thread on wrong node before first-touch! Expected {}, on node {} - memory will be misplaced!",
-                    node.0,
-                    node_before_touch.0
-                );
-            }
-
-            // Touch one byte per page to trigger first-touch policy efficiently
-            // This is much faster than zeroing the entire region for large allocations
             let page_size = match libc::sysconf(libc::_SC_PAGESIZE) {
                 n if n > 0 => n as usize,
                 _ => 4096,
@@ -234,34 +234,32 @@ impl NumaWorker {
             if size > 0 && !size.is_multiple_of(page_size) {
                 std::ptr::write_volatile(ptr.add(size - 1), 0);
             }
-
-            // Verify final node after touching
-            let node_after_touch = get_current_cpu_numa_node();
-
-            tracing::trace!(
-                "Worker allocated {} bytes (CUDA pinned) on GPU {} (target NUMA node {}) at {:p} - thread nodes: before={} after_ctx={} before_touch={} after_touch={}",
-                size,
-                gpu_id,
-                node.0,
-                ptr,
-                node_before.0,
-                node_after_ctx.0,
-                node_before_touch.0,
-                node_after_touch.0
-            );
-
-            Ok(SendPtr(ptr))
         }
+
+        // Verify final node after touching
+        let node_after_touch = get_current_cpu_numa_node();
+
+        tracing::trace!(
+            "Worker allocated {} bytes (target NUMA node {}) at {:p} - thread nodes: before={} before_touch={} after_touch={}",
+            size,
+            node.0,
+            ptr,
+            node_before.0,
+            node_before_touch.0,
+            node_after_touch.0
+        );
+
+        Ok(SendPtr(ptr))
     }
 
     /// Request an allocation from this worker.
-    fn allocate(&self, size: usize, gpu_id: u32) -> AllocResult {
+    fn allocate(&self, size: usize, allocator: Arc<dyn PinnedAllocator>) -> AllocResult {
         let (response_tx, response_rx) = channel();
 
         let request = AllocRequest {
             size,
             node: self.node,
-            gpu_id,
+            allocator,
             response: response_tx,
         };
 
@@ -357,7 +355,7 @@ impl NumaWorkerPool {
     /// pages land on the right node. Returns the wrapped slab.
     ///
     /// Why one-shot instead of reusing persistent workers like
-    /// [`Self::allocate_pinned_for_gpu`]: the host-memory pool allocates
+    /// [`Self::allocate_pinned_for_device`]: the host-memory pool allocates
     /// once per NUMA node at startup and never again, so a thread per call
     /// is simpler and keeps the existing CUDA-path worker pool untouched.
     ///
@@ -401,50 +399,88 @@ impl NumaWorkerPool {
 
     /// Allocate CUDA pinned memory for a specific GPU (auto-detects NUMA node).
     ///
-    /// This method:
-    /// 1. Determines the GPU's NUMA node via CUDA driver PCI attributes + sysfs
-    /// 2. Routes the allocation to a worker pinned to that node
-    /// 3. The worker allocates and touches pages to ensure first-touch placement
+    /// This is the backend-agnostic entry point. The caller resolves the NUMA
+    /// node (e.g., via PCI BDF → sysfs) and provides a [`PinnedAllocator`]
+    /// for the backend-specific allocation.
     ///
-    /// Returns `None` if the GPU's NUMA node cannot be determined, signaling
+    /// The worker thread pinned to `node` will:
+    /// 1. Call `allocator.alloc_pinned(size)` on the pinned thread
+    /// 2. First-touch all pages to ensure correct NUMA placement
+    ///
+    /// # Arguments
+    /// * `size` - Number of bytes to allocate
+    /// * `node` - Target NUMA node
+    /// * `allocator` - Backend-specific allocator (CUDA, SYCL, etc.)
+    pub fn allocate_pinned_on_node(
+        &self,
+        size: usize,
+        node: NumaNode,
+        allocator: Arc<dyn PinnedAllocator>,
+    ) -> Result<*mut u8, String> {
+        tracing::debug!(
+            "Allocating {} bytes pinned memory on NUMA node {}",
+            size,
+            node.0
+        );
+
+        let worker = self.get_or_spawn_worker(node)?;
+        worker
+            .allocate(size, allocator)
+            .map(|send_ptr| send_ptr.0)
+    }
+
+    /// Allocate pinned memory for a device (NUMA node auto-detected from PCI address).
+    ///
+    /// Unified entry point for ALL backends (CUDA, SYCL/XPU, etc.):
+    /// 1. Resolves NUMA node from PCI BDF address (sysfs → vendor-smi fallback)
+    /// 2. Routes allocation to the NUMA-pinned worker thread
+    /// 3. Caller provides a [`PinnedAllocator`] for backend-specific allocation
+    ///
+    /// Both CUDA and SYCL callers use the identical pattern:
+    /// ```ignore
+    /// // cuda/mod.rs
+    /// allocate_pinned_for_device(size, &pci, Arc::new(CudaPinnedAllocator { .. }))
+    /// // sycl/mod.rs
+    /// allocate_pinned_for_device(size, &pci, Arc::new(SyclPinnedAllocator { .. }))
+    /// ```
+    ///
+    /// Returns `None` if the NUMA node cannot be determined, signaling
     /// the caller to fall back to non-NUMA allocation.
     ///
     /// # Arguments
     /// * `size` - Number of bytes to allocate
-    /// * `gpu_id` - CUDA device ID
-    ///
-    /// # Returns
-    /// `Some(ptr)` on success, `None` if NUMA node is unknown (caller should
-    /// use non-NUMA allocation). Returns `Err` on allocation failure.
-    pub fn allocate_pinned_for_gpu(
+    /// * `pci_address` - PCI BDF address
+    /// * `allocator` - Backend-specific allocator (CUDA, SYCL, etc.)
+    pub fn allocate_pinned_for_device(
         &self,
         size: usize,
-        gpu_id: u32,
+        pci_address: &str,
+        allocator: Arc<dyn PinnedAllocator>,
     ) -> Result<Option<*mut u8>, String> {
-        let node = match get_device_numa_node(gpu_id) {
+        let node = match super::get_numa_node_for_pci_address(pci_address) {
             Some(node) => node,
             None => {
                 tracing::debug!(
-                    "NUMA node unknown for GPU {}, skipping NUMA-aware allocation",
-                    gpu_id
+                    "NUMA node unknown for PCI {}, skipping NUMA-aware allocation",
+                    pci_address
                 );
                 return Ok(None);
             }
         };
 
         tracing::debug!(
-            "Allocating {} bytes pinned memory for GPU {} (NUMA node {})",
+            "Allocating {} bytes pinned memory for PCI {} (NUMA node {})",
             size,
-            gpu_id,
+            pci_address,
             node.0
         );
 
-        let worker = self.get_or_spawn_worker(node)?;
-        worker
-            .allocate(size, gpu_id)
-            .map(|send_ptr| Some(send_ptr.0))
+        self.allocate_pinned_on_node(size, node, allocator)
+            .map(Some)
     }
 }
+
+
 
 #[cfg(test)]
 mod tests {
@@ -499,12 +535,51 @@ mod cuda_tests {
     use super::*;
     use crate::numa::get_device_numa_node;
 
+    /// Test CUDA allocator that mirrors the real CudaPinnedAllocator
+    /// in kvbm-physical::device::cuda.
+    struct TestCudaAllocator {
+        gpu_id: u32,
+    }
+
+    impl PinnedAllocator for TestCudaAllocator {
+        fn alloc_pinned(&self, size: usize) -> Result<*mut u8, String> {
+            use cudarc::driver::result::malloc_host;
+            use cudarc::driver::sys::CU_MEMHOSTALLOC_DEVICEMAP;
+
+            let ctx = crate::numa::cuda_context(self.gpu_id)
+                .map_err(|e| format!("CUDA context: {}", e))?;
+            unsafe {
+                ctx.bind_to_thread()
+                    .map_err(|e| format!("bind_to_thread: {:?}", e))?;
+                malloc_host(size, CU_MEMHOSTALLOC_DEVICEMAP)
+                    .map(|p| p as *mut u8)
+                    .map_err(|e| format!("malloc_host: {:?}", e))
+            }
+        }
+
+        fn free_pinned(&self, ptr: *mut u8) -> Result<(), String> {
+            unsafe {
+                cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void)
+                    .map_err(|e| format!("free_host: {:?}", e))
+            }
+        }
+    }
+
+    fn test_allocator() -> Arc<dyn PinnedAllocator> {
+        Arc::new(TestCudaAllocator { gpu_id: 0 })
+    }
+
+    fn test_pci_and_allocator() -> Option<(String, Arc<dyn PinnedAllocator>)> {
+        let pci = crate::numa::get_pci_bus_address_from_cuda(0)?;
+        Some((pci, test_allocator()))
+    }
+
     #[test]
     fn test_worker_allocate_pinned() {
         let node = NumaNode(0);
         let worker = NumaWorker::spawn(node).unwrap();
 
-        let send_ptr = worker.allocate(4096, 0).unwrap();
+        let send_ptr = worker.allocate(4096, test_allocator()).unwrap();
         let ptr = send_ptr.0;
         assert!(!ptr.is_null());
 
@@ -516,8 +591,12 @@ mod cuda_tests {
     #[test]
     fn test_worker_pool() {
         let pool = NumaWorkerPool::new();
+        let (pci, allocator) = match test_pci_and_allocator() {
+            Some(v) => v,
+            None => { println!("No PCI address for GPU 0, skipping"); return; }
+        };
 
-        match pool.allocate_pinned_for_gpu(8192, 0).unwrap() {
+        match pool.allocate_pinned_for_device(8192, &pci, allocator).unwrap() {
             Some(ptr) => unsafe {
                 assert!(!ptr.is_null());
                 cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
@@ -533,10 +612,14 @@ mod cuda_tests {
     #[test]
     fn test_worker_reuse() {
         let pool = NumaWorkerPool::new();
+        let pci = match crate::numa::get_pci_bus_address_from_cuda(0) {
+            Some(p) => p,
+            None => { println!("No PCI address, skipping"); return; }
+        };
 
-        // If NUMA node is unknown, both calls return None — that's fine
-        let r1 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
-        let r2 = pool.allocate_pinned_for_gpu(1024, 0).unwrap();
+        // If NUMA node is unknown, both calls return None — that’s fine
+        let r1 = pool.allocate_pinned_for_device(1024, &pci, test_allocator()).unwrap();
+        let r2 = pool.allocate_pinned_for_device(1024, &pci, test_allocator()).unwrap();
 
         match (r1, r2) {
             (Some(ptr1), Some(ptr2)) => unsafe {
@@ -555,11 +638,12 @@ mod cuda_tests {
 
     #[test]
     fn test_zero_size_allocation_with_known_node() {
-        // Zero-size is rejected by the worker, but only if NUMA node is known.
-        // If NUMA node is unknown, allocate_pinned_for_gpu returns Ok(None) before
-        // reaching the worker.
         let pool = NumaWorkerPool::new();
-        let result = pool.allocate_pinned_for_gpu(0, 0);
+        let (pci, allocator) = match test_pci_and_allocator() {
+            Some(v) => v,
+            None => { println!("No PCI address, skipping"); return; }
+        };
+        let result = pool.allocate_pinned_for_device(0, &pci, allocator);
         match result {
             Ok(None) => {
                 println!("NUMA node unknown, zero-size check not reached");
@@ -588,8 +672,12 @@ mod cuda_tests {
     #[test]
     fn test_pinned_allocation_api() {
         let pool = NumaWorkerPool::new();
+        let (pci, allocator) = match test_pci_and_allocator() {
+            Some(v) => v,
+            None => { println!("No PCI address, skipping"); return; }
+        };
 
-        if let Some(ptr) = pool.allocate_pinned_for_gpu(1024, 0).unwrap() {
+        if let Some(ptr) = pool.allocate_pinned_for_device(1024, &pci, allocator).unwrap() {
             assert!(!ptr.is_null());
             unsafe {
                 cudarc::driver::result::free_host(ptr as *mut std::ffi::c_void).unwrap();
@@ -602,7 +690,7 @@ mod cuda_tests {
         let node = NumaNode(0);
         let worker = NumaWorker::spawn(node).unwrap();
 
-        let send_ptr = worker.allocate(1024, 0).unwrap();
+        let send_ptr = worker.allocate(1024, test_allocator()).unwrap();
         let ptr = send_ptr.0;
         assert!(!ptr.is_null());
 
@@ -611,3 +699,174 @@ mod cuda_tests {
         }
     }
 }
+
+
+#[cfg(all(test, feature = "testing-xpu-sycl"))]
+mod sycl_tests {
+    use super::*;
+    use oneapi_rs::sycl::safe::{SyclContext, SyclDevice};
+
+    /// Test SYCL allocator that mirrors the real SyclPinnedAllocator
+    struct TestSyclAllocator {
+        context: Arc<SyclContext>,
+    }
+
+    impl PinnedAllocator for TestSyclAllocator {
+        fn alloc_pinned(&self, size: usize) -> Result<*mut u8, String> {
+            unsafe { self.context
+                .malloc_host(size) }
+                .map(|p| p as *mut u8)
+                .map_err(|e| format!("SYCL malloc_host: {}", e))
+        }
+
+        fn free_pinned(&self, ptr: *mut u8) -> Result<(), String> {
+            unsafe { self.context
+                .free_raw(ptr as *mut std::ffi::c_void) }
+                .map_err(|e| format!("SYCL free_raw: {}", e))
+        }
+    }
+
+    fn sycl_context() -> Option<Arc<SyclContext>> {
+        let device = SyclDevice::by_ordinal(0).ok()?;
+        SyclContext::new(&device).ok()
+    }
+
+    fn test_allocator(context: &Arc<SyclContext>) -> Arc<dyn PinnedAllocator> {
+        Arc::new(TestSyclAllocator {
+            context: Arc::clone(context),
+        })
+    }
+
+    fn test_pci_address() -> Option<String> {
+        let dev = SyclDevice::by_ordinal(0).ok()?;
+        dev.info().ok()?.pci_address
+    }
+
+    #[test]
+    fn test_sycl_worker_allocate_pinned() {
+        let context = match sycl_context() {
+            Some(c) => c,
+            None => { println!("No SYCL device, skipping"); return; }
+        };
+        let node = NumaNode(0);
+        let worker = NumaWorker::spawn(node).unwrap();
+
+        let send_ptr = worker.allocate(4096, test_allocator(&context)).unwrap();
+        let ptr = send_ptr.0;
+        assert!(!ptr.is_null());
+
+        // Free through the context.
+        unsafe { context.free_raw(ptr as *mut std::ffi::c_void) }.unwrap();
+    }
+
+    #[test]
+    fn test_sycl_allocate_pinned_for_device() {
+        let context = match sycl_context() {
+            Some(c) => c,
+            None => { println!("No SYCL device, skipping"); return; }
+        };
+        let pci = match test_pci_address() {
+            Some(p) => p,
+            None => { println!("No PCI address for XPU 0, skipping"); return; }
+        };
+
+        let pool = NumaWorkerPool::new();
+        match pool.allocate_pinned_for_device(8192, &pci, test_allocator(&context)).unwrap() {
+            Some(ptr) => {
+                assert!(!ptr.is_null());
+                println!("SYCL NUMA-aware allocation succeeded for PCI {}", pci);
+                unsafe { context.free_raw(ptr as *mut std::ffi::c_void) }.unwrap();
+            }
+            None => {
+                println!(
+                    "NUMA node unknown for XPU PCI {}, allocation skipped (expected on single-socket)",
+                    pci
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sycl_worker_reuse() {
+        let context = match sycl_context() {
+            Some(c) => c,
+            None => { println!("No SYCL device, skipping"); return; }
+        };
+        let pci = match test_pci_address() {
+            Some(p) => p,
+            None => { println!("No PCI address, skipping"); return; }
+        };
+
+        let pool = NumaWorkerPool::new();
+        let r1 = pool.allocate_pinned_for_device(1024, &pci, test_allocator(&context)).unwrap();
+        let r2 = pool.allocate_pinned_for_device(1024, &pci, test_allocator(&context)).unwrap();
+
+        match (r1, r2) {
+            (Some(ptr1), Some(ptr2)) => {
+                assert!(!ptr1.is_null());
+                assert!(!ptr2.is_null());
+                assert_ne!(ptr1, ptr2);
+                unsafe { context.free_raw(ptr1 as *mut std::ffi::c_void) }.unwrap();
+                unsafe { context.free_raw(ptr2 as *mut std::ffi::c_void) }.unwrap();
+            }
+            (None, None) => {
+                println!("NUMA node unknown, both allocations skipped");
+            }
+            _ => panic!("inconsistent NUMA detection between two calls for same XPU"),
+        }
+    }
+
+    #[test]
+    fn test_sycl_zero_size_allocation() {
+        let context = match sycl_context() {
+            Some(c) => c,
+            None => { println!("No SYCL device, skipping"); return; }
+        };
+        let pci = match test_pci_address() {
+            Some(p) => p,
+            None => { println!("No PCI address, skipping"); return; }
+        };
+
+        let pool = NumaWorkerPool::new();
+        let result = pool.allocate_pinned_for_device(0, &pci, test_allocator(&context));
+        match result {
+            Ok(None) => println!("NUMA node unknown, zero-size check not reached"),
+            Err(e) => assert!(e.contains("zero")),
+            Ok(Some(_)) => panic!("zero-size allocation should not succeed"),
+        }
+    }
+
+    #[test]
+    fn test_sycl_pci_address_available() {
+        match test_pci_address() {
+            Some(pci) => {
+                println!("XPU 0 PCI address: {}", pci);
+                // Verify format: DDDD:BB:DD.F
+                assert!(pci.contains(':'), "PCI address should contain ':'");
+                assert!(pci.contains('.'), "PCI address should contain '.'");
+            }
+            None => {
+                println!("No PCI address for XPU 0 (PCI extension not available)");
+            }
+        }
+    }
+
+    #[test]
+    fn test_sycl_numa_node_for_xpu() {
+        let pci = match test_pci_address() {
+            Some(p) => p,
+            None => { println!("No PCI address, skipping"); return; }
+        };
+
+        match crate::numa::get_numa_node_for_pci_address(&pci) {
+            Some(node) => {
+                assert!(node.0 < 16, "NUMA node {} seems unreasonably high", node.0);
+                println!("XPU 0 (PCI {}) on NUMA node: {}", pci, node.0);
+            }
+            None => {
+                println!("XPU 0 (PCI {}) has no determinable NUMA node", pci);
+            }
+        }
+    }
+}
+

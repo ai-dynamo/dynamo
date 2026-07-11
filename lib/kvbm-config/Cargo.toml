@@ -35,6 +35,9 @@ nvtx = { version = "1.3", optional = true }
 # kvbm-common: BlockLayoutMode used by leader-import compatibility checks
 kvbm-common = { workspace = true }
 
+# dynamo-device: DeviceBackend enum for backend selection
+dynamo-device = { workspace = true }
+
 [dev-dependencies]
 temp-env = { version = "0.3.6" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -15,6 +15,8 @@ mod local_transfers;
 mod planner_graph_replay;
 mod planner_nixl;
 mod planner_path;
+#[cfg(feature = "xpu-sycl")]
+mod sycl_graph_replay;
 mod prepared_plan;
 
 /// Skip test if stub kernels are in use (no real CUDA available).
@@ -33,12 +35,14 @@ mod prepared_plan;
 #[allow(unused_macros)]
 macro_rules! skip_if_stubs {
     () => {
-        if kvbm_kernels::is_using_stubs() {
-            eprintln!(
-                "Skipping test '{}': stub kernels in use (no real CUDA)",
-                module_path!()
-            );
-            return;
+        if !DeviceBackend::Sycl.is_available() {
+            if kvbm_kernels::is_using_stubs() {
+                eprintln!(
+                    "Skipping test '{}': stub kernels in use (no real CUDA)",
+                    module_path!()
+                );
+                return;
+            }
         }
     };
 }
@@ -49,18 +53,22 @@ macro_rules! skip_if_stubs {
 #[allow(unused_macros)]
 macro_rules! skip_if_stubs_and_device {
     ($($kind:expr),+ $(,)?) => {
-        if kvbm_kernels::is_using_stubs() {
-            let needs_cuda = false $(|| matches!($kind, StorageKind::Device(_)))+;
-            if needs_cuda {
-                eprintln!(
-                    "Skipping test '{}': stub kernels in use and test requires Device storage",
-                    module_path!()
-                );
-                return Ok(());
+        if !DeviceBackend::Sycl.is_available() {
+            if kvbm_kernels::is_using_stubs() {
+                let needs_cuda = false $(|| matches!($kind, StorageKind::Device(_)))+;
+                if needs_cuda {
+                    eprintln!(
+                        "Skipping test '{}': stub kernels in use and test requires Device storage",
+                        module_path!()
+                    );
+                    return Ok(());
+                }
             }
         }
     };
 }
+
+
 
 // Make the macros available to submodules
 #[allow(unused_imports)]
@@ -74,6 +82,7 @@ use super::{
 };
 use crate::{
     BlockId,
+    device::{DeviceBackend, DeviceContext},
     layout::{
         BlockDimension, LayoutConfig,
         builder::{HasConfig, NoLayout, NoMemory, PhysicalLayoutBuilder},
@@ -184,6 +193,37 @@ pub fn create_test_agent_with_backends(name: &str, backends: &[&str]) -> Result<
     NixlAgent::with_backends(name, backends)
 }
 
+/// Build a `DeviceAllocator` for the active test backend (SYCL > CUDA), at
+/// the given `device_id`. Used by the `allocate_device` / `allocate_pinned`
+/// builder calls below — the builder API takes an `Arc<dyn DeviceAllocator>`
+/// since there's no longer a CUDA-typed shortcut.
+pub(crate) fn test_allocator(
+    device_id: u32,
+) -> std::sync::Arc<dyn dynamo_memory::DeviceAllocator> {
+    std::sync::Arc::new(DeviceContext::new(test_device_backend(), device_id).unwrap())
+}
+
+/// Select device backend for transfer tests.
+///
+/// Priority: SYCL (xpu-sycl) > CUDA.
+/// Panic if no device backend is available.
+fn test_device_backend() -> DeviceBackend {
+    #[cfg(feature = "xpu-sycl")]
+    {
+        if DeviceBackend::Sycl.is_available() {
+            return DeviceBackend::Sycl;
+        }
+    }
+
+
+    if DeviceBackend::Cuda.is_available() {
+        return DeviceBackend::Cuda;
+    }
+
+    panic!("No supported device backend available for transfer tests (need SYCL or CUDA)");
+}
+
+
 /// Create a fully contiguous physical layout with the specified storage type.
 pub fn create_fc_layout(
     agent: NixlAgent,
@@ -197,8 +237,8 @@ pub fn create_fc_layout(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(test_device_backend(), 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(test_device_backend(), device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
@@ -216,8 +256,8 @@ pub fn create_lw_layout(
 
     match storage_kind {
         StorageKind::System => builder.allocate_system().build().unwrap(),
-        StorageKind::Pinned => builder.allocate_pinned(None).build().unwrap(),
-        StorageKind::Device(device_id) => builder.allocate_device(device_id).build().unwrap(),
+        StorageKind::Pinned => builder.allocate_pinned(std::sync::Arc::new(DeviceContext::new(test_device_backend(), 0).unwrap())).build().unwrap(),
+        StorageKind::Device(device_id) => builder.allocate_device(std::sync::Arc::new(DeviceContext::new(test_device_backend(), device_id).unwrap())).build().unwrap(),
         StorageKind::Disk(_) => builder.allocate_disk(None).build().unwrap(),
     }
 }
@@ -245,8 +285,8 @@ pub fn create_layout_with_page_size(
                 .fully_contiguous();
             match spec.storage {
                 StorageKind::System => b.allocate_system().build().unwrap(),
-                StorageKind::Pinned => b.allocate_pinned(None).build().unwrap(),
-                StorageKind::Device(id) => b.allocate_device(id).build().unwrap(),
+                StorageKind::Pinned => b.allocate_pinned(test_allocator(0)).build().unwrap(),
+                StorageKind::Device(id) => b.allocate_device(test_allocator(id)).build().unwrap(),
                 StorageKind::Disk(_) => b.allocate_disk(None).build().unwrap(),
             }
         }
@@ -256,8 +296,8 @@ pub fn create_layout_with_page_size(
                 .layer_separate(BlockDimension::BlockIsFirstDim);
             match spec.storage {
                 StorageKind::System => b.allocate_system().build().unwrap(),
-                StorageKind::Pinned => b.allocate_pinned(None).build().unwrap(),
-                StorageKind::Device(id) => b.allocate_device(id).build().unwrap(),
+                StorageKind::Pinned => b.allocate_pinned(test_allocator(0)).build().unwrap(),
+                StorageKind::Device(id) => b.allocate_device(test_allocator(id)).build().unwrap(),
                 StorageKind::Disk(_) => b.allocate_disk(None).build().unwrap(),
             }
         }
@@ -275,7 +315,8 @@ pub fn create_transfer_context(
     crate::manager::TransferManager::builder()
         .capabilities(capabilities.unwrap_or_default())
         .nixl_agent(agent)
-        .cuda_device_id(0)
+        .device_id(0)
+        .device_backend(test_device_backend())
         .build()
 }
 

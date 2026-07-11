@@ -32,6 +32,12 @@
 //! cargo run -p kvbm-engine --features bench --bin bench_engine -- \
 //!     --devices 0,1 --page-sizes 128 --concurrency 1,2,4 --iterations 50
 //!
+//! # XPU (SYCL):
+//! cargo run -p kvbm-engine \
+//!     --no-default-features --features bench,kvbm-physical/xpu-sycl --bin bench_engine -- \
+//!     --backend sycl --devices 0 --page-sizes 32,64 --concurrency 1,2 --iterations 10 \
+//!     --skip-disk --skip-gds --num-blocks 256
+//!
 //! # Universal-TP perf impact — Qwen3-32B–style shape (TP=4 per-worker
 //! # view: num_kv_heads=2 / head_dim=128 / inner_dim=256 / 64 layers).
 //! # Run BOTH commands and diff bandwidth_gbs:
@@ -89,10 +95,36 @@ use kvbm_engine::{
 };
 use kvbm_logical::blocks::BlockRegistry;
 use kvbm_logical::manager::BlockManager;
+use dynamo_memory::DeviceAllocator;
+use kvbm_physical::device::{DeviceBackend, DeviceContext};
 use kvbm_physical::layout::{
     BlockDimension, KvBlockLayout, LayoutConfig, PhysicalLayout, TensorDataType,
 };
 use kvbm_physical::transfer::{NixlAgent, TransferManager, TransferOptions};
+
+/// Print a one-line-per-device summary (backend, BDF) for the devices
+/// this bench will actually use. Best-effort: failures degrade to
+/// "unknown" rather than aborting. Device name is omitted here because
+/// the cudarc / oneapi-rs crates are optional dependencies of
+/// `kvbm-engine` (gated behind `nccl` / `oneccl`); BDF is enough to
+/// disambiguate physical devices.
+fn eprint_selected_devices(backend: DeviceBackend, device_ids: &[u32]) {
+    let backend_tag = match backend {
+        DeviceBackend::Cuda => "cuda",
+        DeviceBackend::Sycl => "sycl",
+    };
+    eprintln!("Selected devices ({}):", device_ids.len());
+    for (slot, &dev_id) in device_ids.iter().enumerate() {
+        let bdf = match DeviceContext::new(backend, dev_id) {
+            Ok(ctx) => ctx.pci_bdf_address().unwrap_or_else(|| "unknown".to_string()),
+            Err(_) => "unknown".to_string(),
+        };
+        eprintln!(
+            "  device[{}] backend={}  bdf={}  ordinal={}",
+            slot, backend_tag, bdf, dev_id,
+        );
+    }
+}
 
 /// Block layout selector for G1/G2 layouts in the bench.
 ///
@@ -187,16 +219,21 @@ impl BenchLayout {
     }
 }
 
-/// Build a `PhysicalLayout` with the requested shape + block-layout
-/// tag + storage placement. `place` distinguishes G1 (device) from G2
-/// (pinned host) — G3 disk has its own inline builder path because
-/// disk paths feed through `allocate_disk(path)` rather than a
-/// device id.
+/// Where to allocate the resulting `PhysicalLayout`. Both arms carry the
+/// same `Arc<dyn DeviceAllocator>` because the merged `kvbm-physical`
+/// builder API is uniformly allocator-driven (post `dynamo-device`
+/// extraction). Variants stay distinct so the helper picks
+/// `allocate_device` vs `allocate_pinned` cleanly.
 enum Placement {
-    Device { device_id: u32 },
-    Pinned { device_id: u32 },
+    Device { ctx: Arc<dyn DeviceAllocator> },
+    Pinned { ctx: Arc<dyn DeviceAllocator> },
 }
 
+/// Build a `PhysicalLayout` with the requested shape + block-layout
+/// tag + storage placement. `placement` distinguishes G1 (device) from
+/// G2 (pinned host) — G3 disk has its own inline builder path because
+/// disk paths feed through `allocate_disk(path)` rather than an
+/// allocator.
 fn build_physical_layout(
     agent: NixlAgent,
     layout_config: LayoutConfig,
@@ -214,11 +251,12 @@ fn build_physical_layout(
         builder.fully_contiguous()
     };
     let layout = match placement {
-        Placement::Device { device_id } => builder.allocate_device(device_id).build()?,
-        Placement::Pinned { device_id } => builder.allocate_pinned(Some(device_id)).build()?,
+        Placement::Device { ctx } => builder.allocate_device(ctx).build()?,
+        Placement::Pinned { ctx } => builder.allocate_pinned(ctx).build()?,
     };
     Ok(layout)
 }
+
 
 // ─── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -228,6 +266,10 @@ fn build_physical_layout(
     about = "KVBM transfer bandwidth benchmark (leader+worker architecture)"
 )]
 struct Cli {
+    /// Device backend: cuda or sycl (default: auto-detect)
+    #[arg(long, default_value = "auto")]
+    backend: String,
+
     /// GPU device IDs (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = "0")]
     devices: Vec<u32>,
@@ -347,6 +389,7 @@ struct Cli {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BenchConfig {
+    backend: DeviceBackend,
     devices: Vec<u32>,
     page_sizes: Vec<usize>,
     concurrency: Vec<usize>,
@@ -384,7 +427,15 @@ fn default_prepared_cache() -> bool {
 
 impl From<Cli> for BenchConfig {
     fn from(cli: Cli) -> Self {
+        let backend = if cli.backend == "auto" {
+            DeviceBackend::detect_backend()
+                .expect("No GPU backend detected. Use --backend cuda|sycl to specify.")
+        } else {
+            cli.backend.parse()
+                .expect("Unknown backend. Valid: cuda, sycl, xpu, nvidia")
+        };
         Self {
+            backend,
             devices: cli.devices,
             page_sizes: cli.page_sizes,
             concurrency: cli.concurrency,
@@ -598,6 +649,7 @@ fn spawn_worker_thread(
     device_id: u32,
     page_size: usize,
     config: &BenchConfig,
+    backend: DeviceBackend,
 ) -> Result<WorkerHandle> {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -616,18 +668,35 @@ fn spawn_worker_thread(
     let join_handle = std::thread::Builder::new()
         .name(format!("bench-gpu-{device_id}"))
         .spawn(move || {
-            // Pin to device's NUMA node
-            if let Some(cpus) = dynamo_memory::numa::get_device_cpu_set(device_id) {
-                eprintln!(
-                    "[GPU {device_id}] Worker pinned to CPUs: {}",
-                    format_cpu_set(&cpus)
-                );
-                pin_thread_to_cpus(&cpus);
-            } else if let Some(node) = dynamo_memory::numa::get_device_numa_node(device_id) {
-                eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node}");
-                let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
-            } else {
-                eprintln!("[GPU {device_id}] No NUMA pinning (node unknown)");
+            // Pin to device's NUMA node (backend-agnostic via PCI BDF).
+            {
+                let pci_bdf = kvbm_physical::device::DeviceContext::new(backend, device_id)
+                    .ok()
+                    .and_then(|ctx| ctx.pci_bdf_address());
+
+                if let Some(ref bdf) = pci_bdf {
+                    // Try CPU-set subdivision (works for all backends now)
+                    if let Some(cpus) = dynamo_device::get_device_cpu_set(backend, bdf) {
+                        let numa_node = dynamo_memory::numa::get_numa_node_for_pci_address(bdf);
+                        let numa_str = match numa_node {
+                            Some(n) => format!("NUMA node {n}"),
+                            None => "NUMA unknown".to_string(),
+                        };
+                        eprintln!(
+                            "[GPU {device_id}] Worker pinned to CPUs: {} (PCI {bdf}, {numa_str})",
+                            format_cpu_set(&cpus)
+                        );
+                        pin_thread_to_cpus(&cpus);
+                    } else if let Some(node) = dynamo_memory::numa::get_numa_node_for_pci_address(bdf) {
+                        // Fallback: pin to whole NUMA node
+                        eprintln!("[GPU {device_id}] Worker pinned to NUMA node {node} (PCI {bdf})");
+                        let _ = dynamo_memory::numa::pin_thread_to_numa_node(node);
+                    } else {
+                        eprintln!("[GPU {device_id}] No NUMA affinity for PCI {bdf}");
+                    }
+                } else {
+                    eprintln!("[GPU {device_id}] No PCI address available, skipping NUMA pinning");
+                }
             }
 
             // Build tokio runtime on this NUMA-pinned thread
@@ -652,6 +721,12 @@ fn spawn_worker_thread(
                     eprintln!("[GPU {device_id}] GDS_MT backend unavailable");
                 }
 
+                // Create multi-backend device context for this GPU. The
+                // same `Arc<dyn DeviceAllocator>` feeds the layout
+                // builder for both G1 (device) and G2 (pinned host).
+                let ctx: Arc<dyn DeviceAllocator> =
+                    Arc::new(DeviceContext::new(backend, device_id)?);
+
                 // Create TransferManager. The prepared-plan cache is
                 // enabled by default; `--prepared-cache=false` toggles
                 // it off to measure the legacy per-call allocation
@@ -659,7 +734,8 @@ fn spawn_worker_thread(
                 let manager = TransferManager::builder()
                     .event_system(event_system)
                     .nixl_agent(agent.clone())
-                    .cuda_device_id(device_id as usize)
+                    .device_backend(backend)
+                    .device_id(device_id as usize)
                     .prepared_plan_cache_enabled(prepared_cache)
                     .build()?;
 
@@ -691,7 +767,7 @@ fn spawn_worker_thread(
                     agent.clone(),
                     layout_config.clone(),
                     g1_layout,
-                    Placement::Device { device_id },
+                    Placement::Device { ctx: ctx.clone() },
                 )?;
                 let g1_handle = manager.register_layout(g1)?;
 
@@ -700,7 +776,7 @@ fn spawn_worker_thread(
                     agent.clone(),
                     layout_config.clone(),
                     g2_layout,
-                    Placement::Pinned { device_id },
+                    Placement::Pinned { ctx: ctx.clone() },
                 )?;
                 let g2_handle = manager.register_layout(g2)?;
 
@@ -782,7 +858,7 @@ impl BenchInstance {
         // Spawn worker threads (one per device)
         let mut worker_handles = Vec::with_capacity(num_devices);
         for &device_id in &config.devices {
-            let handle = spawn_worker_thread(device_id, page_size, &config)?;
+            let handle = spawn_worker_thread(device_id, page_size, &config, config.backend)?;
             eprintln!("[GPU {device_id}] Worker ready");
             worker_handles.push(handle);
         }
@@ -1573,6 +1649,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = build_config(cli)?;
     validate_config(&config)?;
+
+    eprint_selected_devices(config.backend, &config.devices);
 
     eprintln!("KVBM Engine Benchmark (Leader+Worker Architecture)");
     eprintln!("  Devices: {:?}", config.devices);

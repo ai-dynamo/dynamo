@@ -2,25 +2,42 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Transfer context.
+//!
+//! Holds the resources shared by transfer executors: NIXL agent, device
+//! context/streams, memory pool, and the planner-driven graph/benchmark/
+//! prepared-plan caches.
+//!
+//! ## Stream pools
+//!
+//! One multi-backend `Arc<DeviceStream>` pool per direction
+//! (`h2d_streams`, `d2h_streams`). Round-robin across the pool is shared
+//! by whole-block `batch_copy` and per-chunk `vectorized_copy` — neither
+//! backend binds queues to distinct engine classes today.
+//!
+//! C-FFI launch sites (CUDA graph capture/replay, transform kernel
+//! FFI on both backends, benchmark direct DMA) downcast at the
+//! boundary via [`crate::device::DeviceStream::cuda_stream_arc`] /
+//! [`crate::device::DeviceStream::sycl_stream`] when they need a
+//! raw `cudaStream_t` / `sycl::queue*` to launch a C kernel. All
+//! other planner / executor / benchmark code paths use the
+//! device-agnostic `DeviceStream` API directly.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+
 use anyhow::Result;
-use cudarc::driver::{CudaContext, CudaEvent, CudaStream};
 use derive_builder::Builder;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use dynamo_memory::CudaMemPool;
+use crate::device::{DeviceBackend, DeviceContext, DeviceStream, DeviceEvent, DeviceMemPool};
 use dynamo_memory::nixl::{NixlAgent, NixlBackendConfig, XferRequest};
 use kvbm_observability::SharedKvbmObservability;
 use velo::EventManager;
 
 use crate::manager::TransferManager;
-use crate::transfer::benchmark::{
-    BenchmarkCache, BenchmarkCandidate, BenchmarkKey, BenchmarkOutcome,
-};
+use crate::transfer::benchmark::{BenchmarkCache, BenchmarkCandidate, BenchmarkKey, BenchmarkOutcome};
 use crate::transfer::graph_cache::GraphCache;
 use crate::transfer::prepared::PreparedPlanCache;
 
@@ -47,8 +64,16 @@ pub struct TransferConfig {
     #[builder(default = "NixlBackendConfig::default()")]
     nixl_backend_config: NixlBackendConfig,
 
+    /// Device ID for the compute backend (default: 0).
+    ///
+    /// Named `device_id` rather than the legacy `cuda_device_id` because
+    /// the same field selects an XPU ordinal under the SYCL backend.
     #[builder(default = "0")]
-    cuda_device_id: usize,
+    device_id: usize,
+
+    /// Device backend type (default: Cuda).
+    #[builder(default = "DeviceBackend::Cuda")]
+    device_backend: DeviceBackend,
 
     #[builder(default = "get_tokio_runtime()")]
     tokio_runtime: TokioRuntime,
@@ -56,15 +81,19 @@ pub struct TransferConfig {
     #[builder(default = "TransferCapabilities::default()")]
     capabilities: TransferCapabilities,
 
-    /// Size in bytes to pre-allocate for the CUDA memory pool (default: 64 MiB)
+    /// Size in bytes to pre-allocate for the device memory pool (default: 64 MiB)
     #[builder(default = "64 * 1024 * 1024")]
-    cuda_pool_reserve_size: usize,
+    pool_reserve_size: usize,
 
-    /// Release threshold for the CUDA memory pool (default: Some(64 MiB))
+    /// Release threshold for the device memory pool (default: Some(64 MiB))
     /// Memory above this threshold is returned to the system when freed.
     /// If None, no release threshold is set.
     #[builder(default = "Some(64 * 1024 * 1024)")]
-    cuda_pool_release_threshold: Option<u64>,
+    pool_release_threshold: Option<u64>,
+
+    /// Number of device streams per direction for round-robin concurrency (default: 4)
+    #[builder(default = "4")]
+    num_streams: usize,
 
     /// Shared observability registry and metrics.
     #[builder(default, setter(strip_option))]
@@ -129,6 +158,13 @@ impl TransferConfigBuilder {
         Ok(self)
     }
 
+    /// Legacy alias for `device_id`. Some external callers (notably the
+    /// kvbm-connector worker) still use the old name; we accept it as a
+    /// thin shim so call sites compile unchanged across the rebase.
+    pub fn cuda_device_id(self, device_id: usize) -> Self {
+        self.device_id(device_id)
+    }
+
     pub fn build(self) -> Result<TransferManager> {
         let mut config = self.build_internal()?;
 
@@ -148,8 +184,7 @@ impl TransferConfigBuilder {
         let nixl_agent =
             NixlAgent::from_nixl_backend_config(&agent_name, config.nixl_backend_config.clone())?;
 
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
-        let context = TransferContext::new(nixl_agent, cuda_context, config)?;
+        let context = TransferContext::new(nixl_agent, config)?;
         Ok(TransferManager::from_context(context))
     }
 }
@@ -167,13 +202,23 @@ impl TransferConfigBuilderWithAgent {
     /// Build the TransferManager using the pre-configured agent.
     pub fn build(self) -> Result<TransferManager> {
         let config = self.builder.build_internal()?;
-        let cuda_context = CudaContext::new(config.cuda_device_id)?;
-        let context = TransferContext::new(self.agent, cuda_context, config)?;
+        let context = TransferContext::new(self.agent, config)?;
         Ok(TransferManager::from_context(context))
     }
 
-    pub fn cuda_device_id(mut self, cuda_device_id: usize) -> Self {
-        self.builder = self.builder.cuda_device_id(cuda_device_id);
+    pub fn device_id(mut self, device_id: usize) -> Self {
+        self.builder = self.builder.device_id(device_id);
+        self
+    }
+
+    /// Legacy alias for `device_id`.
+    pub fn cuda_device_id(mut self, device_id: usize) -> Self {
+        self.builder = self.builder.device_id(device_id);
+        self
+    }
+
+    pub fn device_backend(mut self, backend: DeviceBackend) -> Self {
+        self.builder = self.builder.device_backend(backend);
         self
     }
 
@@ -229,22 +274,27 @@ pub struct TransferContext {
     worker_id: u64,
     nixl_agent: NixlAgent,
     #[allow(dead_code)]
-    cuda_context: Arc<CudaContext>,
-    d2h_stream: Arc<CudaStream>,
-    h2d_stream: Arc<CudaStream>,
-    d2h_streams: Vec<Arc<CudaStream>>,
-    h2d_streams: Vec<Arc<CudaStream>>,
-    current_d2h_stream: Arc<AtomicUsize>,
-    current_h2d_stream: Arc<AtomicUsize>,
-    #[allow(dead_code)]
     tokio_runtime: TokioRuntime,
     capabilities: TransferCapabilities,
     event_system: Arc<EventManager>,
-    // CUDA memory pool for kernel allocations
-    cuda_pool: Arc<CudaMemPool>,
+    // Device abstraction context and streams (multi-backend)
+    #[allow(dead_code)]
+    device_context: Arc<DeviceContext>,
+    /// Stream pools, round-robin per direction. Shared by whole-block
+    /// `batch_copy` and per-chunk `vectorized_copy` — neither backend
+    /// binds queues to distinct engines (CUDA: unified stream, SYCL:
+    /// engine ordinal is chosen by the runtime, not by the queue).
+    h2d_streams: Vec<Arc<DeviceStream>>,
+    d2h_streams: Vec<Arc<DeviceStream>>,
+    current_h2d_stream: Arc<AtomicUsize>,
+    current_d2h_stream: Arc<AtomicUsize>,
+    // Device memory pool for kernel allocations (multi-backend)
+    #[allow(dead_code)]
+    device_pool: Arc<DeviceMemPool>,
+
     // Channels for background notification handlers
     tx_nixl_status: mpsc::Sender<RegisterPollingNotification<notifications::NixlStatusChecker>>,
-    tx_cuda_event: mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>>,
+    tx_device_event: mpsc::Sender<RegisterPollingNotification<notifications::DeviceEventChecker>>,
     #[allow(dead_code)]
     tx_nixl_events: mpsc::Sender<notifications::RegisterNixlNotification>,
     observability: Option<SharedKvbmObservability>,
@@ -276,36 +326,53 @@ impl TransferContext {
 
     pub(crate) fn new(
         nixl_agent: NixlAgent,
-        cuda_context: Arc<CudaContext>,
         config: TransferConfig,
     ) -> Result<Self> {
         let TransferConfig {
             event_system,
             tokio_runtime,
             capabilities,
-            cuda_pool_reserve_size,
-            cuda_pool_release_threshold,
+            device_id,
+            device_backend,
+            pool_reserve_size,
+            pool_release_threshold,
+            num_streams,
             observability,
             prepared_plan_cache_enabled,
             prepared_plan_remote_capacity,
             // Fields already consumed by the builder path before this fn runs:
             nixl_agent_name: _,
             nixl_backend_config: _,
-            cuda_device_id: _,
         } = config;
 
-        unsafe { cuda_context.disable_event_tracking() };
+        // Create device context for the specified backend
+        let device_ctx = DeviceContext::new(device_backend, device_id as u32)?;
 
-        // Create CUDA memory pool for kernel allocations
-        let mut pool_builder = CudaMemPool::builder(cuda_context.clone(), cuda_pool_reserve_size);
-        if let Some(threshold) = cuda_pool_release_threshold {
-            pool_builder = pool_builder.release_threshold(threshold);
-        }
-        let cuda_pool = Arc::new(pool_builder.build()?);
+        // Disable event tracking (no-op on non-CUDA backends)
+        unsafe { device_ctx.disable_event_tracking()? };
+
+        // Create device memory pool
+        let device_pool = Arc::new(
+            device_ctx.create_memory_pool(pool_reserve_size, pool_release_threshold)?
+        );
+
+        // Create device stream pools (num_streams per direction, round-robin).
+        // One pool per direction matches the upstream CUDA design; both
+        // whole-block `batch_copy` and kernel `vectorized_copy` share the
+        // same pool, because neither backend binds queues to separate
+        // engine classes today.
+        let num_streams = num_streams.max(1); // Ensure at least 1 stream
+
+        let h2d_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
+            .map(|_| device_ctx.create_stream().map(Arc::new))
+            .collect::<Result<Vec<_>>>()?;
+        let d2h_streams: Vec<Arc<DeviceStream>> = (0..num_streams)
+            .map(|_| device_ctx.create_stream().map(Arc::new))
+            .collect::<Result<Vec<_>>>()?;
 
         // Create channels for background notification handlers
         let (tx_nixl_status, rx_nixl_status) = mpsc::channel(64);
-        let (tx_cuda_event, rx_cuda_event) = mpsc::channel(64);
+        let (tx_device_event, rx_device_event) = mpsc::channel(64);
         let (tx_nixl_events, rx_nixl_events) = mpsc::channel(64);
 
         // Spawn background handlers
@@ -317,9 +384,9 @@ impl TransferContext {
             event_system.clone(),
         ));
 
-        // Spawn CUDA event polling handler
+        // Spawn device event polling handler (multi-backend)
         handle.spawn(notifications::process_polling_notifications(
-            rx_cuda_event,
+            rx_device_event,
             event_system.clone(),
         ));
 
@@ -330,36 +397,20 @@ impl TransferContext {
             event_system.clone(),
         ));
 
-        let d2h_streams: Vec<Arc<CudaStream>> = (0..4)
-            .map(|_| cuda_context.new_stream())
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let h2d_streams: Vec<Arc<CudaStream>> = (0..4)
-            .map(|_| cuda_context.new_stream())
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let d2h_stream = d2h_streams[0].clone();
-        let h2d_stream = h2d_streams[0].clone();
-
-        let current_d2h_stream = Arc::new(AtomicUsize::new(0));
-        let current_h2d_stream = Arc::new(AtomicUsize::new(0));
-
         Ok(Self {
             worker_id: event_system.system_id(),
             nixl_agent,
-            cuda_context: cuda_context.clone(),
-            d2h_stream,
-            h2d_stream,
-            d2h_streams,
-            h2d_streams,
-            current_d2h_stream,
-            current_h2d_stream,
             tokio_runtime,
             capabilities,
             event_system,
-            cuda_pool,
+            device_context: Arc::new(device_ctx),
+            h2d_streams,
+            d2h_streams,
+            current_h2d_stream: Arc::new(AtomicUsize::new(0)),
+            current_d2h_stream: Arc::new(AtomicUsize::new(0)),
+            device_pool,
             tx_nixl_status,
-            tx_cuda_event,
+            tx_device_event,
             tx_nixl_events,
             observability,
             graph_cache: Arc::new(GraphCache::new()),
@@ -375,55 +426,10 @@ impl TransferContext {
         &self.nixl_agent
     }
 
+    /// Get the device context (multi-backend).
     #[allow(dead_code)]
-    pub(crate) fn cuda_context(&self) -> &Arc<CudaContext> {
-        &self.cuda_context
-    }
-
-    // Provides the same d2h stream per invocation
-    #[allow(dead_code)]
-    pub(crate) fn d2h_stream(&self) -> &Arc<CudaStream> {
-        &self.d2h_stream
-    }
-
-    // Provides the same h2d stream per invocation
-    #[allow(dead_code)]
-    pub(crate) fn h2d_stream(&self) -> &Arc<CudaStream> {
-        &self.h2d_stream
-    }
-
-    // Provides the next d2h stream in a round-robin fashion
-    pub(crate) fn next_d2h_streams(&self) -> Arc<CudaStream> {
-        let current_d2h_stream = self.current_d2h_stream.fetch_add(1, Ordering::Relaxed);
-        self.d2h_streams[current_d2h_stream % self.d2h_streams.len()].clone()
-    }
-
-    // Provides the next h2d stream in a round-robin fashion
-    pub(crate) fn next_h2d_streams(&self) -> Arc<CudaStream> {
-        let current_h2d_stream = self.current_h2d_stream.fetch_add(1, Ordering::Relaxed);
-        self.h2d_streams[current_h2d_stream % self.h2d_streams.len()].clone()
-    }
-
-    /// Acquire an H2D stream for use by caller.
-    ///
-    /// This returns a stream from the pool that the caller can use for multiple
-    /// sequential operations. The caller is responsible for all synchronization
-    /// (e.g., recording events after operations).
-    ///
-    /// Used for layer-wise transfers where all layers must execute on the same stream.
-    pub fn acquire_h2d_stream(&self) -> Arc<CudaStream> {
-        self.next_h2d_streams()
-    }
-
-    /// Acquire a D2H stream for use by caller.
-    ///
-    /// This returns a stream from the pool that the caller can use for multiple
-    /// sequential operations. The caller is responsible for all synchronization
-    /// (e.g., recording events after operations).
-    ///
-    /// Used for layer-wise transfers where all layers must execute on the same stream.
-    pub fn acquire_d2h_stream(&self) -> Arc<CudaStream> {
-        self.next_d2h_streams()
+    pub(crate) fn device_context(&self) -> &Arc<DeviceContext> {
+        &self.device_context
     }
 
     #[allow(dead_code)]
@@ -446,9 +452,34 @@ impl TransferContext {
         self.observability.as_ref()
     }
 
-    /// Get the CUDA memory pool for kernel allocations.
-    pub(crate) fn cuda_pool(&self) -> &Arc<CudaMemPool> {
-        &self.cuda_pool
+    /// Get the device memory pool for kernel allocations (multi-backend).
+    #[allow(dead_code)]
+    pub(crate) fn device_pool(&self) -> &Arc<DeviceMemPool> {
+        &self.device_pool
+    }
+
+    /// Get next H2D stream (round-robin across the H2D pool).
+    pub(crate) fn next_h2d_stream(&self) -> Arc<DeviceStream> {
+        let idx = self.current_h2d_stream.fetch_add(1, Ordering::Relaxed);
+        self.h2d_streams[idx % self.h2d_streams.len()].clone()
+    }
+
+    /// Get next D2H stream (round-robin across the D2H pool).
+    pub(crate) fn next_d2h_stream(&self) -> Arc<DeviceStream> {
+        let idx = self.current_d2h_stream.fetch_add(1, Ordering::Relaxed);
+        self.d2h_streams[idx % self.d2h_streams.len()].clone()
+    }
+
+    /// Acquire an H2D stream (public API for external callers).
+    #[doc(hidden)]
+    pub fn acquire_h2d_stream(&self) -> Arc<DeviceStream> {
+        self.next_h2d_stream()
+    }
+
+    /// Acquire a D2H stream (public API for external callers).
+    #[doc(hidden)]
+    pub fn acquire_d2h_stream(&self) -> Arc<DeviceStream> {
+        self.next_d2h_stream()
     }
 
     /// PR-7.4.1: Get the CUDA graph exec handle cache.
@@ -490,8 +521,6 @@ impl TransferContext {
         dst_handle: crate::manager::LayoutHandle,
         dst_layout: &crate::transfer::PhysicalLayout,
     ) -> anyhow::Result<()> {
-        use crate::transfer::prepared::{PreparedPlanKey, PreparedTransferPlan};
-        use crate::transfer::strategy::{TransferPlan, select_strategy};
         if !self.prepared_plan_cache.is_enabled() {
             return Ok(());
         }
@@ -501,6 +530,12 @@ impl TransferContext {
             // Same-layout direct copies don't use a prepared plan.
             return Ok(());
         }
+        // Transform-pair prewarm is backend-agnostic: `build_transform_invocation`
+        // returns pure `kernel_catalog` metadata and `PreparedTransferPlan::build_transform`
+        // does not touch a device stream. Both backends share the same cache.
+        use crate::transfer::executor::planner::build_transform_invocation;
+        use crate::transfer::prepared::{PreparedPlanKey, PreparedTransferPlan};
+        use crate::transfer::strategy::{TransferPlan, select_strategy};
         let plan = select_strategy(src_layout, dst_layout, self)?;
         let strategy = match plan {
             TransferPlan::Direct(strategy) => strategy,
@@ -511,9 +546,7 @@ impl TransferContext {
         let key = PreparedPlanKey::new(src_handle, dst_handle, strategy, &[]);
         self.prepared_plan_cache
             .get_or_insert_with(self.worker_id(), key, || {
-                let invocation = crate::transfer::executor::planner::build_transform_invocation(
-                    src_layout, dst_layout,
-                )?;
+                let invocation = build_transform_invocation(src_layout, dst_layout)?;
                 PreparedTransferPlan::build_transform(invocation, src_layout, dst_layout)
             })?;
         Ok(())
@@ -524,11 +557,13 @@ impl TransferContext {
     ///
     /// This is an explicit-API benchmark (Path B): the caller decides when
     /// to benchmark (e.g. at startup with known layout pairs) and provides
-    /// the key, pre-decoded candidates, and a CUDA stream to dispatch on.
+    /// the key, pre-decoded candidates, and a device stream to dispatch on.
     ///
     /// Supported variants: `DirectDma`, `TransformKernel`, and
     /// `NixlDirectDma`. All routes measure end-to-end transfer time
-    /// including device/network completion.
+    /// including device/network completion. Under `xpu-sycl` the
+    /// `DirectDma` and `TransformKernel` routes bail at the
+    /// dispatch-site pending the SYCL kernel-dispatch port.
     ///
     /// See [`BenchmarkCache::benchmark_pair`] for timing semantics and
     /// error conditions.
@@ -537,24 +572,24 @@ impl TransferContext {
         &self,
         key: BenchmarkKey,
         candidates: Vec<BenchmarkCandidate>,
-        stream: &Arc<CudaStream>,
+        stream: &Arc<DeviceStream>,
     ) -> anyhow::Result<BenchmarkOutcome> {
         self.benchmark_cache.benchmark_pair(key, candidates, stream)
     }
 
-    /// Clone the CUDA-event polling channel sender.
+    /// Clone the device-event polling channel sender.
     ///
     /// Used by the planner-driven Staged executor (PR-6.2) to register
-    /// CUDA events from inside a `tokio::spawn`-ed chain task without
+    /// device events from inside a `tokio::spawn`-ed chain task without
     /// holding `&TransferContext` across an `.await`.
-    pub(crate) fn tx_cuda_event_clone(
+    pub(crate) fn tx_device_event_clone(
         &self,
-    ) -> mpsc::Sender<RegisterPollingNotification<notifications::CudaEventChecker>> {
-        self.tx_cuda_event.clone()
+    ) -> mpsc::Sender<RegisterPollingNotification<notifications::DeviceEventChecker>> {
+        self.tx_device_event.clone()
     }
 
     /// Clone the NIXL status polling channel sender. Used for the same
-    /// reason as [`Self::tx_cuda_event_clone`] — Staged-task NIXL
+    /// reason as [`Self::tx_device_event_clone`] — Staged-task NIXL
     /// completion registration without `&TransferContext`.
     pub(crate) fn tx_nixl_status_clone(
         &self,
@@ -603,11 +638,10 @@ impl TransferContext {
         TransferCompleteNotification::from_awaiter(awaiter)
     }
 
-    /// Register a CUDA event for polling completion.
+    /// Register a device event for polling completion (multi-backend).
     ///
-    /// This method enqueues the CUDA event to be polled for completion.
-    /// Returns a notification object that can be awaited for completion.
-    pub(crate) fn register_cuda_event(&self, event: CudaEvent) -> TransferCompleteNotification {
+    /// Works with any DeviceEvent (CUDA, XPU).
+    pub(crate) fn register_device_event(&self, event: DeviceEvent) -> TransferCompleteNotification {
         let new_event = self
             .event_system
             .new_event()
@@ -620,15 +654,14 @@ impl TransferContext {
 
         let notification = notifications::RegisterPollingNotification {
             uuid: Uuid::new_v4(),
-            checker: notifications::CudaEventChecker::new(event),
+            checker: notifications::DeviceEventChecker::new(event),
             event_handle: handle,
             telemetry: None,
         };
 
-        // Send to background handler — log error if channel is full or closed
-        if let Err(e) = self.tx_cuda_event.try_send(notification) {
+        if let Err(e) = self.tx_device_event.try_send(notification) {
             tracing::error!(
-                "Failed to enqueue CUDA event notification: channel full or closed: {}",
+                "Failed to enqueue device event notification: channel full or closed: {}",
                 e
             );
         }
