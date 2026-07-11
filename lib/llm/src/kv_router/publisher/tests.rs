@@ -1441,7 +1441,10 @@ mod tests_startup_helpers {
     #[tokio::test]
     async fn test_authoritative_dp_rank_overrides_collapsed_wire_rank() {
         let dp_rank = dp_rank_after_listen(Some(0), Some(3), 1).await;
-        assert_eq!(dp_rank, 3, "authoritative dp_rank must override the wire rank");
+        assert_eq!(
+            dp_rank, 3,
+            "authoritative dp_rank must override the wire rank"
+        );
     }
 
     /// Multiplexed sources (e.g. a shared consolidator port) have no per-socket

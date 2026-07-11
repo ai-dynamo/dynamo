@@ -128,7 +128,10 @@ mod tests {
 
     #[test]
     fn bare_host_port_gets_http_scheme() {
-        assert_eq!(normalize_endpoint("127.0.0.1:50051"), "http://127.0.0.1:50051");
+        assert_eq!(
+            normalize_endpoint("127.0.0.1:50051"),
+            "http://127.0.0.1:50051"
+        );
     }
 
     #[test]
