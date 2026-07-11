@@ -1,0 +1,6 @@
+# Hash-locked native build environment for crick 0.0.8.
+Cython==3.2.8
+numpy==2.5.1
+setuptools==83.0.0
+setuptools-scm[toml]==10.2.0
+versioneer[toml]==0.29

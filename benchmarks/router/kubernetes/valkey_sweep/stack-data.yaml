@@ -1,0 +1,584 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: valkey-sweep-router-primary
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  serviceName: valkey-sweep-router-primary
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-router-primary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sweep-router-primary
+        app.kubernetes.io/component: valkey-data
+        app.kubernetes.io/part-of: valkey-router-sweep
+        valkey-sweep-ha-group: router
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: nvcr-pull-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/part-of: valkey-router-sweep
+                valkey-sweep-ha-group: router
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: valkey
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/.venv/bin/python
+        - /usr/local/libexec/dynamo/start_valkey.py
+        args:
+        - --master-name
+        - dynamo-router
+        - --bootstrap-role
+        - primary
+        - --bootstrap-primary-host
+        - valkey-sweep-router-primary-0.valkey-sweep-router-primary
+        - --allowed-master-host
+        - valkey-sweep-router-primary
+        - --allowed-master-host
+        - valkey-sweep-router-primary-0.valkey-sweep-router-primary
+        - --allowed-master-host
+        - valkey-sweep-router-replica
+        - --allowed-master-host
+        - valkey-sweep-router-replica-0.valkey-sweep-router-replica
+        - --
+        - --appendonly
+        - 'yes'
+        - --appendfsync
+        - everysec
+        - --save
+        - ''
+        - --maxmemory
+        - 8gb
+        - --maxmemory-policy
+        - noeviction
+        - --loadmodule
+        - /usr/local/lib/dynkv.so
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_DNS
+          value: valkey-sweep-router-primary-0.valkey-sweep-router-primary
+        - name: STATE_DIR
+          value: /data
+        ports:
+        - name: valkey
+          containerPort: 6379
+        readinessProbe:
+          exec:
+            command:
+            - /usr/local/bin/valkey-cli
+            - -h
+            - 127.0.0.1
+            - ping
+          initialDelaySeconds: 2
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: '2'
+            memory: 10Gi
+          limits:
+            cpu: '8'
+            memory: 12Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: valkey-sweep-router-primary-data
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: valkey-sweep-router-replica
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  serviceName: valkey-sweep-router-replica
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-router-replica
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sweep-router-replica
+        app.kubernetes.io/component: valkey-data
+        app.kubernetes.io/part-of: valkey-router-sweep
+        valkey-sweep-ha-group: router
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: nvcr-pull-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/part-of: valkey-router-sweep
+                valkey-sweep-ha-group: router
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: valkey
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/.venv/bin/python
+        - /usr/local/libexec/dynamo/start_valkey.py
+        args:
+        - --master-name
+        - dynamo-router
+        - --bootstrap-role
+        - replica
+        - --bootstrap-primary-host
+        - valkey-sweep-router-primary-0.valkey-sweep-router-primary
+        - --allowed-master-host
+        - valkey-sweep-router-primary
+        - --allowed-master-host
+        - valkey-sweep-router-primary-0.valkey-sweep-router-primary
+        - --allowed-master-host
+        - valkey-sweep-router-replica
+        - --allowed-master-host
+        - valkey-sweep-router-replica-0.valkey-sweep-router-replica
+        - --
+        - --appendonly
+        - 'yes'
+        - --appendfsync
+        - everysec
+        - --save
+        - ''
+        - --maxmemory
+        - 8gb
+        - --maxmemory-policy
+        - noeviction
+        - --loadmodule
+        - /usr/local/lib/dynkv.so
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_DNS
+          value: valkey-sweep-router-replica-0.valkey-sweep-router-replica
+        - name: STATE_DIR
+          value: /data
+        ports:
+        - name: valkey
+          containerPort: 6379
+        readinessProbe:
+          exec:
+            command:
+            - /usr/local/bin/valkey-cli
+            - -h
+            - 127.0.0.1
+            - ping
+          initialDelaySeconds: 2
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: '2'
+            memory: 10Gi
+          limits:
+            cpu: '8'
+            memory: 12Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: valkey-sweep-router-replica-data
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: valkey-sweep-tokenizer-primary
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  serviceName: valkey-sweep-tokenizer-primary
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-tokenizer-primary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sweep-tokenizer-primary
+        app.kubernetes.io/component: valkey-data
+        app.kubernetes.io/part-of: valkey-router-sweep
+        valkey-sweep-ha-group: tokenizer
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: nvcr-pull-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/part-of: valkey-router-sweep
+                valkey-sweep-ha-group: tokenizer
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: valkey
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/.venv/bin/python
+        - /usr/local/libexec/dynamo/start_valkey.py
+        args:
+        - --master-name
+        - dynamo-tokenizer
+        - --bootstrap-role
+        - primary
+        - --bootstrap-primary-host
+        - valkey-sweep-tokenizer-primary-0.valkey-sweep-tokenizer-primary
+        - --allowed-master-host
+        - valkey-sweep-tokenizer-primary
+        - --allowed-master-host
+        - valkey-sweep-tokenizer-primary-0.valkey-sweep-tokenizer-primary
+        - --allowed-master-host
+        - valkey-sweep-tokenizer-replica
+        - --allowed-master-host
+        - valkey-sweep-tokenizer-replica-0.valkey-sweep-tokenizer-replica
+        - --
+        - --appendonly
+        - 'no'
+        - --save
+        - ''
+        - --maxmemory
+        - 4gb
+        - --maxmemory-policy
+        - allkeys-lru
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_DNS
+          value: valkey-sweep-tokenizer-primary-0.valkey-sweep-tokenizer-primary
+        - name: STATE_DIR
+          value: /state
+        ports:
+        - name: valkey
+          containerPort: 6379
+        readinessProbe:
+          exec:
+            command:
+            - /usr/local/bin/valkey-cli
+            - -h
+            - 127.0.0.1
+            - ping
+          initialDelaySeconds: 2
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: '1'
+            memory: 5Gi
+          limits:
+            cpu: '8'
+            memory: 6Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: state
+          mountPath: /state
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: state
+        persistentVolumeClaim:
+          claimName: valkey-sweep-tokenizer-primary-state
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: valkey-sweep-tokenizer-replica
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  serviceName: valkey-sweep-tokenizer-replica
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-tokenizer-replica
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sweep-tokenizer-replica
+        app.kubernetes.io/component: valkey-data
+        app.kubernetes.io/part-of: valkey-router-sweep
+        valkey-sweep-ha-group: tokenizer
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: nvcr-pull-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/part-of: valkey-router-sweep
+                valkey-sweep-ha-group: tokenizer
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: valkey
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/.venv/bin/python
+        - /usr/local/libexec/dynamo/start_valkey.py
+        args:
+        - --master-name
+        - dynamo-tokenizer
+        - --bootstrap-role
+        - replica
+        - --bootstrap-primary-host
+        - valkey-sweep-tokenizer-primary-0.valkey-sweep-tokenizer-primary
+        - --allowed-master-host
+        - valkey-sweep-tokenizer-primary
+        - --allowed-master-host
+        - valkey-sweep-tokenizer-primary-0.valkey-sweep-tokenizer-primary
+        - --allowed-master-host
+        - valkey-sweep-tokenizer-replica
+        - --allowed-master-host
+        - valkey-sweep-tokenizer-replica-0.valkey-sweep-tokenizer-replica
+        - --
+        - --appendonly
+        - 'no'
+        - --save
+        - ''
+        - --maxmemory
+        - 4gb
+        - --maxmemory-policy
+        - allkeys-lru
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POD_DNS
+          value: valkey-sweep-tokenizer-replica-0.valkey-sweep-tokenizer-replica
+        - name: STATE_DIR
+          value: /state
+        ports:
+        - name: valkey
+          containerPort: 6379
+        readinessProbe:
+          exec:
+            command:
+            - /usr/local/bin/valkey-cli
+            - -h
+            - 127.0.0.1
+            - ping
+          initialDelaySeconds: 2
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: '1'
+            memory: 5Gi
+          limits:
+            cpu: '8'
+            memory: 6Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: state
+          mountPath: /state
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: state
+        persistentVolumeClaim:
+          claimName: valkey-sweep-tokenizer-replica-state
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: valkey-sweep-sentinel
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  serviceName: valkey-sweep-sentinel
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-sentinel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sweep-sentinel
+        app.kubernetes.io/component: sentinel
+        app.kubernetes.io/part-of: valkey-router-sweep
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: nvcr-pull-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/part-of: valkey-router-sweep
+                app.kubernetes.io/name: valkey-sweep-sentinel
+            topologyKey: kubernetes.io/hostname
+      initContainers:
+      - name: config
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        args:
+        - test -s /sentinel-data/sentinel.conf || cp /config/sentinel.conf /sentinel-data/sentinel.conf
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: config
+          mountPath: /config
+          readOnly: true
+        - name: sentinel-data
+          mountPath: /sentinel-data
+      containers:
+      - name: sentinel
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /usr/local/bin/valkey-server
+        args:
+        - /sentinel-data/sentinel.conf
+        - --sentinel
+        ports:
+        - name: sentinel
+          containerPort: 26379
+        readinessProbe:
+          exec:
+            command:
+            - /usr/local/bin/valkey-cli
+            - -h
+            - 127.0.0.1
+            - -p
+            - '26379'
+            - ping
+          initialDelaySeconds: 2
+          periodSeconds: 2
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: '2'
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: sentinel-data
+          mountPath: /sentinel-data
+      volumes:
+      - name: config
+        configMap:
+          name: valkey-sweep-config
+          items:
+          - key: sentinel.conf
+            path: sentinel.conf
+  volumeClaimTemplates:
+  - metadata:
+      name: sentinel-data
+      labels:
+        app.kubernetes.io/part-of: valkey-router-sweep
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: standard-rwo
+      resources:
+        requests:
+          storage: 1Gi

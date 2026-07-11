@@ -1,0 +1,48 @@
+lock-version = "1.0"
+created-by = "uv"
+requires-python = ">=3.12"
+
+[[packages]]
+name = "cython"
+version = "3.2.8"
+sdist = { url = "https://files.pythonhosted.org/packages/b6/6b/80101e02ebacaf9232ecf32bf6a788d36b27d820ee02434746252569ef98/cython-3.2.8.tar.gz", upload-time = 2026-06-30T07:41:57Z, size = 3290300, hashes = { sha256 = "f4f23a56b25221a06f91817fe8f3114ab8b48a4fac73187dbb64bc2c4a87961f" } }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/f4/bc5830abeb57a7c7498cd9a0f2df953fd9fc7f33e3f5352c9824802b83bb/cython-3.2.8-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2026-06-30T07:42:25Z, size = 3179546, hashes = { sha256 = "ab1fe11ebd61e497a848622cdd157a4324ac06e7935b1219715408844e15dd13" } },
+    { url = "https://files.pythonhosted.org/packages/c4/19/31aa63ab719b2e1eea5f200a8a54e2591dc1966a6b75e3de30ef8be9bc2c/cython-3.2.8-py3-none-any.whl", upload-time = 2026-06-30T07:41:55Z, size = 1258688, hashes = { sha256 = "f635e113677666de13a2ec2979e9b1d5b90617cdfd1a691d3559be81e2dd6cb9" } },
+]
+
+[[packages]]
+name = "numpy"
+version = "2.5.1"
+sdist = { url = "https://files.pythonhosted.org/packages/22/fd/89965aa4ac08c74998539fcbf24fa3540f3e15237fbeb6bcf9c908f4aade/numpy-2.5.1.tar.gz", upload-time = 2026-07-04T17:08:00Z, size = 20755553, hashes = { sha256 = "a48a113e6afea91f5608793bafa7ef2ad481fefbda87ec5069f483de61cb9fa3" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/a9/4b/a2b32dd94ee9ffbeecb28152240042a3949db33b1c834d44090b80e1b3b8/numpy-2.5.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2026-07-04T17:06:21Z, size = 15167977, hashes = { sha256 = "61ac47e772e6b8ea489e1d2f441a34c5c3ac17327e7ce294cbdf535795ad4e75" } }]
+
+[[packages]]
+name = "packaging"
+version = "26.2"
+sdist = { url = "https://files.pythonhosted.org/packages/d7/f1/e7a6dd94a8d4a5626c03e4e99c87f241ba9e350cd9e6d75123f992427270/packaging-26.2.tar.gz", upload-time = 2026-04-24T20:15:23Z, size = 228134, hashes = { sha256 = "ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/df/b2/87e62e8c3e2f4b32e5fe99e0b86d576da1312593b39f47d8ceef365e95ed/packaging-26.2-py3-none-any.whl", upload-time = 2026-04-24T20:15:22Z, size = 100195, hashes = { sha256 = "5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e" } }]
+
+[[packages]]
+name = "setuptools"
+version = "83.0.0"
+sdist = { url = "https://files.pythonhosted.org/packages/34/26/f5d29e25ffdb535afef2d35cdb55b325298f96debd670da4c325e08d70f4/setuptools-83.0.0.tar.gz", upload-time = 2026-07-04T15:31:22Z, size = 1154254, hashes = { sha256 = "025bccbbf0fa05b6192bc64ae1e7b16e001fd6d6d4d5de03c97b1c1ade523bef" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl", upload-time = 2026-07-04T15:31:20Z, size = 1008090, hashes = { sha256 = "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3" } }]
+
+[[packages]]
+name = "setuptools-scm"
+version = "10.2.0"
+sdist = { url = "https://files.pythonhosted.org/packages/61/fb/6b22ba201305ec33fa68c1419e984abe1aaee1b236a5e1186cc805738e95/setuptools_scm-10.2.0.tar.gz", upload-time = 2026-06-25T05:27:10Z, size = 67319, hashes = { sha256 = "ec8ea1738b92e42146a46e29a0e9de9ad462744c63cf9778677b95dfd605adde" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/46/b4/21180f6fbbf7ed2043bc353608c7b9cc6f7b3d342ad8c287a097e5ca8477/setuptools_scm-10.2.0-py3-none-any.whl", upload-time = 2026-06-25T05:27:09Z, size = 27741, hashes = { sha256 = "6cc5ac7da8e54d74e43503be2fa023eb7a1ca820d5c318e6ae20efc48110d6c7" } }]
+
+[[packages]]
+name = "vcs-versioning"
+version = "2.2.2"
+sdist = { url = "https://files.pythonhosted.org/packages/09/95/c95bb74950763a163defcf4cedf6c5edfca1d623fd5031b76516ece85076/vcs_versioning-2.2.2.tar.gz", upload-time = 2026-06-29T13:26:06Z, size = 143135, hashes = { sha256 = "4ac4ded78720cdb4d0291ae58ace87e1e9201912e1023f3029c6cce5c9152cfb" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/85/9e/1f06f4ddc3a74ccfe0877490caaf4a5233e65401160afc8cb13207815f5e/vcs_versioning-2.2.2-py3-none-any.whl", upload-time = 2026-06-29T13:26:05Z, size = 108014, hashes = { sha256 = "fe7fb216f8780a5516e7864a9333aacb1b70015b087a9be3918da76ef2760808" } }]
+
+[[packages]]
+name = "versioneer"
+version = "0.29"
+sdist = { url = "https://files.pythonhosted.org/packages/32/d7/854e45d2b03e1a8ee2aa6429dd396d002ce71e5d88b77551b2fb249cb382/versioneer-0.29.tar.gz", upload-time = 2023-07-07T15:09:28Z, size = 75141, hashes = { sha256 = "5ab283b9857211d61b53318b7c792cf68e798e765ee17c27ade9f6c924235731" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/b0/79/f0f1ca286b78f6f33c521a36b5cbd5bd697c0d66217d8856f443aeb9dd77/versioneer-0.29-py3-none-any.whl", upload-time = 2023-07-07T15:09:26Z, size = 46785, hashes = { sha256 = "0f1a137bb5d6811e96a79bb0486798aeae9b9c6efc24b389659cebb0ee396cb9" } }]

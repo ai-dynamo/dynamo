@@ -1,0 +1,2 @@
+# Hash-locked PEP 517 backend for the ai-dynamo wheel.
+hatchling==1.27.0

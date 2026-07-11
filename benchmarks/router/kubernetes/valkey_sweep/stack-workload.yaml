@@ -1,0 +1,292 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey-sweep-mocker
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-mocker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sweep-mocker
+        app.kubernetes.io/component: mocker
+        app.kubernetes.io/part-of: valkey-router-sweep
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: nvcr-pull-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 4
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/part-of: valkey-router-sweep
+            app.kubernetes.io/name: valkey-sweep-mocker
+      containers:
+      - name: mocker
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/.venv/bin/python
+        - -m
+        - dynamo.mocker
+        args:
+        - --model-path
+        - Qwen/Qwen3-0.6B
+        - --num-gpu-blocks-override
+        - '131072'
+        - --max-num-seqs
+        - '16384'
+        - --max-num-batched-tokens
+        - '16384'
+        - --speedup-ratio
+        - '100000'
+        - --data-parallel-size
+        - '1'
+        - --num-workers
+        - '1'
+        - --stagger-delay
+        - '0'
+        - --discovery-backend
+        - etcd
+        - --request-plane
+        - tcp
+        - --event-plane
+        - zmq
+        env:
+        - name: DYN_NAMESPACE
+          value: valkey-sweep-bootstrap
+        - name: ETCD_ENDPOINTS
+          value: http://etcd.bis-rl-3.svc.cluster.local:2379
+        - name: DYN_ROUTER_VALKEY_CONFIG
+          valueFrom:
+            configMapKeyRef:
+              name: valkey-sweep-config
+              key: router-valkey-config
+        - name: HF_HOME
+          value: /models
+        - name: TRANSFORMERS_OFFLINE
+          value: '1'
+        resources:
+          requests:
+            cpu: 250m
+            memory: 1Gi
+          limits:
+            cpu: '4'
+            memory: 8Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: shared-model-cache
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey-sweep-frontend
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sweep-frontend
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: valkey-router-sweep
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: nvcr-pull-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/part-of: valkey-router-sweep
+            app.kubernetes.io/name: valkey-sweep-frontend
+      containers:
+      - name: frontend
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/.venv/bin/python
+        - -m
+        - dynamo.frontend
+        args:
+        - --router-mode
+        - kv
+        - --http-port
+        - '8000'
+        - --kv-cache-block-size
+        - '16'
+        - --discovery-backend
+        - etcd
+        - --request-plane
+        - tcp
+        - --event-plane
+        - zmq
+        - --router-host-cache-hit-weight
+        - '0'
+        - --router-disk-cache-hit-weight
+        - '0'
+        env:
+        - name: DYN_NAMESPACE
+          value: valkey-sweep-bootstrap
+        - name: DYN_ROUTER_MIN_INITIAL_WORKERS
+          value: '10'
+        - name: ETCD_ENDPOINTS
+          value: http://etcd.bis-rl-3.svc.cluster.local:2379
+        - name: DYN_ROUTER_VALKEY_CONFIG
+          valueFrom:
+            configMapKeyRef:
+              name: valkey-sweep-config
+              key: router-valkey-config
+        - name: HF_HOME
+          value: /models
+        - name: TRANSFORMERS_OFFLINE
+          value: '1'
+        ports:
+        - name: http
+          containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /v1/models
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 3
+          timeoutSeconds: 2
+          failureThreshold: 100
+        resources:
+          requests:
+            cpu: '4'
+            memory: 4Gi
+          limits:
+            cpu: '32'
+            memory: 32Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: shared-model-cache
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: valkey-sweep-client
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-client
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sweep-client
+        app.kubernetes.io/component: benchmark-client
+        app.kubernetes.io/part-of: valkey-router-sweep
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+      - name: nvcr-pull-secret
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+        sysctls:
+        - name: net.ipv4.ip_local_port_range
+          value: 1024 65535
+      containers:
+      - name: client
+        image: ${VALKEY_SWEEP_IMAGE}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        args:
+        - 'trap : TERM INT; sleep infinity & wait'
+        env:
+        - name: HF_HOME
+          value: /models
+        - name: TRANSFORMERS_OFFLINE
+          value: '1'
+        resources:
+          requests:
+            cpu: '16'
+            memory: 32Gi
+          limits:
+            cpu: '64'
+            memory: 256Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: results
+          mountPath: /data
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: shared-model-cache
+      - name: results
+        emptyDir:
+          sizeLimit: 10Gi

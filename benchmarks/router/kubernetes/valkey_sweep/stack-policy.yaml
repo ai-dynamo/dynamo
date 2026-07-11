@@ -1,0 +1,371 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: valkey-sweep-router
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      valkey-sweep-ha-group: router
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: valkey-sweep-tokenizer
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      valkey-sweep-ha-group: tokenizer
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: valkey-sweep-sentinel
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/name: valkey-sweep-sentinel
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-router-ingress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      valkey-sweep-ha-group: router
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          valkey-sweep-ha-group: router
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: sentinel
+    - podSelector:
+        matchLabels: {app.kubernetes.io/part-of: valkey-router-sweep}
+        matchExpressions:
+        - key: app.kubernetes.io/component
+          operator: In
+          values: [mocker, frontend, benchmark-client]
+    ports: [{protocol: TCP, port: 6379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-tokenizer-ingress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      valkey-sweep-ha-group: tokenizer
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          valkey-sweep-ha-group: tokenizer
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: sentinel
+    - podSelector:
+        matchLabels: {app.kubernetes.io/part-of: valkey-router-sweep}
+        matchExpressions:
+        - key: app.kubernetes.io/component
+          operator: In
+          values: [frontend, benchmark-client]
+    ports: [{protocol: TCP, port: 6379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-sentinel-ingress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/component: sentinel
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels: {app.kubernetes.io/part-of: valkey-router-sweep}
+        matchExpressions:
+        - key: app.kubernetes.io/component
+          operator: In
+          values: [valkey-data, sentinel, mocker, frontend, benchmark-client]
+    ports: [{protocol: TCP, port: 26379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-frontend-ingress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/component: frontend
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: benchmark-client
+    ports: [{protocol: TCP, port: 8000}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-mocker-ingress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/component: mocker
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: frontend
+    ports: [{protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-router-egress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      valkey-sweep-ha-group: router
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          valkey-sweep-ha-group: router
+    ports: [{protocol: TCP, port: 6379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: sentinel
+    ports: [{protocol: TCP, port: 26379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-tokenizer-egress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      valkey-sweep-ha-group: tokenizer
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          valkey-sweep-ha-group: tokenizer
+    ports: [{protocol: TCP, port: 6379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: sentinel
+    ports: [{protocol: TCP, port: 26379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-sentinel-egress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/component: sentinel
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: valkey-data
+    ports: [{protocol: TCP, port: 6379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: sentinel
+    ports: [{protocol: TCP, port: 26379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-frontend-egress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/component: frontend
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: valkey-data
+    ports: [{protocol: TCP, port: 6379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: sentinel
+    ports: [{protocol: TCP, port: 26379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: mocker
+    ports: [{protocol: TCP}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/component: etcd
+    ports: [{protocol: TCP, port: 2379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-mocker-egress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/component: mocker
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          valkey-sweep-ha-group: router
+    ports: [{protocol: TCP, port: 6379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: sentinel
+    ports: [{protocol: TCP, port: 26379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: frontend
+    ports: [{protocol: TCP}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/component: etcd
+    ports: [{protocol: TCP, port: 2379}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: valkey-sweep-client-egress
+  namespace: bis-rl-3
+  labels: {app.kubernetes.io/part-of: valkey-router-sweep}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: valkey-router-sweep
+      app.kubernetes.io/component: benchmark-client
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+      podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: valkey-data
+    ports: [{protocol: TCP, port: 6379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: sentinel
+    ports: [{protocol: TCP, port: 26379}]
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: valkey-router-sweep
+          app.kubernetes.io/component: frontend
+    ports: [{protocol: TCP, port: 8000}]

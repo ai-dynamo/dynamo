@@ -1,0 +1,207 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: valkey-sweep-config
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+immutable: true
+data:
+  router-valkey-config: '{"allow_insecure_plaintext":true,"urls":["valkey://valkey-sweep-router-primary:6379","valkey://valkey-sweep-router-replica:6379"],"index_scope":"k8s-sweep","connection_pool_size":16,"required_replica_acks":1,"sentinel":{"urls":["valkey://valkey-sweep-sentinel-0.valkey-sweep-sentinel:26379","valkey://valkey-sweep-sentinel-1.valkey-sweep-sentinel:26379","valkey://valkey-sweep-sentinel-2.valkey-sweep-sentinel:26379"],"master_name":"dynamo-router","quorum":2},"allow_degraded_writes":true,"worker_events":true,"authoritative_admission":true,"admission_lease_ms":120000,"gc_interval_ms":60000,"gc_inspection_budget":256,"tokenizer_cache":{"enabled":true,"sentinel_master_name":"dynamo-tokenizer","scope":"k8s-sweep","key_prefix":"dynamo:tokenizer:v1","ttl_seconds":3600,"timeout_ms":100,"connection_pool_size":16,"max_pending_writes":1024,"l1_bytes":67108864,"extend":true}}'
+  sentinel.conf: 'port 26379
+
+    dir /sentinel-data
+
+    protected-mode no
+
+    sentinel resolve-hostnames yes
+
+    sentinel announce-hostnames yes
+
+    sentinel monitor dynamo-router valkey-sweep-router-primary 6379 2
+
+    sentinel down-after-milliseconds dynamo-router 5000
+
+    sentinel failover-timeout dynamo-router 30000
+
+    sentinel parallel-syncs dynamo-router 1
+
+    sentinel monitor dynamo-tokenizer valkey-sweep-tokenizer-primary 6379 2
+
+    sentinel down-after-milliseconds dynamo-tokenizer 5000
+
+    sentinel failover-timeout dynamo-tokenizer 30000
+
+    sentinel parallel-syncs dynamo-tokenizer 1
+
+    '
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-sweep-router-primary-data
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard-rwo
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-sweep-router-replica-data
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard-rwo
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-sweep-tokenizer-primary-state
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard-rwo
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: valkey-sweep-tokenizer-replica-state
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard-rwo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-sweep-router-primary
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+  - name: valkey
+    port: 6379
+    targetPort: valkey
+  selector:
+    app.kubernetes.io/part-of: valkey-router-sweep
+    app.kubernetes.io/name: valkey-sweep-router-primary
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-sweep-router-replica
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+  - name: valkey
+    port: 6379
+    targetPort: valkey
+  selector:
+    app.kubernetes.io/part-of: valkey-router-sweep
+    app.kubernetes.io/name: valkey-sweep-router-replica
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-sweep-tokenizer-primary
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+  - name: valkey
+    port: 6379
+    targetPort: valkey
+  selector:
+    app.kubernetes.io/part-of: valkey-router-sweep
+    app.kubernetes.io/name: valkey-sweep-tokenizer-primary
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-sweep-tokenizer-replica
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+  - name: valkey
+    port: 6379
+    targetPort: valkey
+  selector:
+    app.kubernetes.io/part-of: valkey-router-sweep
+    app.kubernetes.io/name: valkey-sweep-tokenizer-replica
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-sweep-sentinel
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+  - name: sentinel
+    port: 26379
+    targetPort: sentinel
+  selector:
+    app.kubernetes.io/part-of: valkey-router-sweep
+    app.kubernetes.io/name: valkey-sweep-sentinel
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: valkey-sweep-frontend
+  namespace: bis-rl-3
+  labels:
+    app.kubernetes.io/part-of: valkey-router-sweep
+spec:
+  clusterIP: None
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+  selector:
+    app.kubernetes.io/part-of: valkey-router-sweep
+    app.kubernetes.io/name: valkey-sweep-frontend
