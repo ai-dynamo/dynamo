@@ -186,7 +186,9 @@ batching path but is not a native-output parity test.
 The experimental engine-mode sweep compares Dynamo's default `AsyncLLM`
 EngineCore subprocess with the default-off synchronous in-process engine facade.
 It uses five fresh paired launches for every requested concurrency, alternates
-mode order, fixes the KV cache at 8 GiB, and records process RSS and GPU usage:
+mode order, fixes the KV cache at 8 GiB, and records process RSS and GPU usage.
+It explicitly disables both CustomEncoder caches so repeated content does not
+hide the engine-client overhead under test:
 
 ```bash
 GPU=0 examples/custom_encoder/benchmark/run_engine_mode_sweep.sh

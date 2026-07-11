@@ -118,6 +118,7 @@ for repeat in $(seq 1 "$REPEATS"); do
                 DYN_QWEN3_VL_GRAPH_IMAGE_SIZES=300x300 \
                 DYN_QWEN3_VL_GRAPH_BATCH_BUCKETS=1,2,4,8 \
                 DYN_QWEN3_VL_PREPROCESS_CACHE_SIZE=0 \
+                DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES=0 \
                 DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS=0 \
                 DYN_CUSTOM_ENCODER_TIMING=0 \
                 "$LAUNCH_SCRIPT" \
