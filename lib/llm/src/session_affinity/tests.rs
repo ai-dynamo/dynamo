@@ -161,6 +161,26 @@ async fn session_affinity_initialization_is_atomic() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn session_affinity_initialization_can_outlive_idle_ttl() {
+    let coordinator = AffinityCoordinator::new(Duration::from_secs(1)).unwrap();
+    let first = coordinator.acquire(&session_id(), None).await.unwrap();
+    let AffinityAcquire::Initialize(first) = first else {
+        panic!("first request must initialize");
+    };
+
+    coordinator.wait_for_reaper().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+
+    let lease = first.commit(target(7, Some(0))).unwrap();
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(target(7, Some(0)))
+    );
+    drop(lease);
+}
+
+#[tokio::test(start_paused = true)]
 async fn session_affinity_initializer_cancellation_wakes_waiter() {
     let coordinator = coordinator();
     let first = coordinator.acquire(&session_id(), None).await.unwrap();
@@ -211,6 +231,37 @@ async fn session_affinity_wait_stops_when_request_is_cancelled() {
         &[]
     ));
     drop(first);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_only_observes_cancellation_while_waiting() {
+    let coordinator = coordinator();
+    let context = Controller::default();
+    context.stop();
+
+    let first = coordinator
+        .acquire_with_context(&session_id(), None, &context)
+        .await
+        .unwrap();
+    let AffinityAcquire::Initialize(first) = first else {
+        panic!("vacant session must initialize despite a stopped context");
+    };
+    let first_lease = first.commit(target(7, Some(0))).unwrap();
+
+    let second = coordinator
+        .acquire_with_context(&session_id(), None, &context)
+        .await
+        .unwrap();
+    let AffinityAcquire::Bound {
+        target: bound_target,
+        lease: second_lease,
+    } = second
+    else {
+        panic!("bound session must be acquired despite a stopped context");
+    };
+    assert_eq!(bound_target, target(7, Some(0)));
+    drop(first_lease);
+    drop(second_lease);
 }
 
 #[tokio::test(start_paused = true)]
