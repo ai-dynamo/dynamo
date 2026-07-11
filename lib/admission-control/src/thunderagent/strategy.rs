@@ -121,21 +121,6 @@ struct SessionRequests {
     waiting: IndexSet<AdmissionId>,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct WorkerUsage {
-    used: usize,
-}
-
-impl WorkerUsage {
-    fn add_program(&mut self, tokens: usize) {
-        self.used = self.used.saturating_add(tokens);
-    }
-
-    fn remove_program(&mut self, tokens: usize) {
-        self.used = self.used.saturating_sub(tokens);
-    }
-}
-
 pub struct ThunderAgent<P> {
     capacity: P,
     config: ThunderAgentConfig,
@@ -212,7 +197,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let progress = request.progress.clone();
         let worker_eligibility = request.worker_eligibility.clone();
         let capacities = self.capacity.snapshot();
-        let capacity_known = !capacities.is_empty();
         let eligibility = worker_eligibility.snapshot();
         let worker_is_available = |worker| eligibility.allows(worker);
         let worker_is_structurally_allowed = |worker| eligibility.structurally_allows(worker);
@@ -274,10 +258,9 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             return AdmissionDecision::Defer;
         }
 
-        if !capacity_known
-            || !capacities
-                .iter()
-                .any(|capacity| worker_is_available(capacity.worker))
+        if !capacities
+            .iter()
+            .any(|capacity| worker_is_available(capacity.worker))
         {
             return AdmissionDecision::Ready(WorkerPlacement::Any);
         }
@@ -287,7 +270,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             .iter()
             .filter(|capacity| worker_is_available(capacity.worker))
             .filter_map(|capacity| {
-                let used = usage.get(&capacity.worker).map_or(0, |usage| usage.used);
+                let used = usage.get(&capacity.worker).copied().unwrap_or(0);
                 capacity
                     .tokens
                     .checked_sub(used)
@@ -511,14 +494,14 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         expired.len()
     }
 
-    fn worker_usage(&self) -> HashMap<WorkerWithDpRank, WorkerUsage> {
-        let mut usage = HashMap::<WorkerWithDpRank, WorkerUsage>::new();
+    fn worker_usage(&self) -> HashMap<WorkerWithDpRank, usize> {
+        let mut usage = HashMap::<WorkerWithDpRank, usize>::new();
         for program in self.programs.values() {
             if !program.is_suspended()
                 && let Some(worker) = program.assigned_worker
             {
-                let worker_usage = usage.entry(worker).or_default();
-                worker_usage.add_program(program.footprint());
+                let used = usage.entry(worker).or_default();
+                *used = used.saturating_add(program.footprint());
             }
         }
         usage
@@ -527,7 +510,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
     fn greedy_resume(
         &mut self,
         capacities: &[WorkerCapacity],
-        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        usage: &mut HashMap<WorkerWithDpRank, usize>,
         eligibility: &HashMap<AdmissionId, WorkerEligibilitySnapshot>,
     ) -> (Vec<AdmissionAction>, usize) {
         let mut paused: Vec<String> = self
@@ -561,7 +544,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             .filter_map(|capacity| {
                 let limit = scale_tokens(capacity.tokens, ceiling);
                 let remaining =
-                    limit.saturating_sub(usage.get(&capacity.worker).map_or(0, |usage| usage.used));
+                    limit.saturating_sub(usage.get(&capacity.worker).copied().unwrap_or(0));
                 (remaining > 0).then_some((capacity.worker, remaining))
             })
             .collect();
@@ -607,8 +590,8 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             actions.extend(self.resume_program(&session_id, Some(worker)));
             resumed += 1;
             let program = &self.programs[&session_id];
-            let worker_usage = usage.entry(worker).or_default();
-            worker_usage.add_program(program.footprint());
+            let used = usage.entry(worker).or_default();
+            *used = used.saturating_add(program.footprint());
             let updated = remaining - required;
             if updated > 0 {
                 backend_caps[position] = (worker, updated);
@@ -655,7 +638,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
     fn pause_until_safe(
         &mut self,
         capacities: &[WorkerCapacity],
-        usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
+        usage: &mut HashMap<WorkerWithDpRank, usize>,
     ) -> (usize, usize) {
         let mut acting = HashMap::<WorkerWithDpRank, Vec<(usize, String)>>::new();
         let mut reasoning = HashMap::<WorkerWithDpRank, Vec<(usize, String)>>::new();
@@ -685,7 +668,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
         let mut marked_total = 0;
         for capacity in capacities {
             let threshold = scale_tokens(capacity.tokens, self.config.pause_threshold);
-            let worker_used = usage.get(&capacity.worker).map_or(0, |usage| usage.used);
+            let worker_used = usage.get(&capacity.worker).copied().unwrap_or(0);
             if worker_used <= threshold {
                 continue;
             }
@@ -694,7 +677,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             let mut marked = 0;
             if let Some(candidates) = acting.get(&capacity.worker) {
                 for (_, session_id) in candidates {
-                    if usage.get(&capacity.worker).map_or(0, |usage| usage.used) <= target {
+                    if usage.get(&capacity.worker).copied().unwrap_or(0) <= target {
                         break;
                     }
                     let Some(program) = self.programs.get(session_id) else {
@@ -703,11 +686,11 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     let used = program.footprint();
                     self.suspend_idle(session_id);
                     paused += 1;
-                    let worker_usage = usage.entry(capacity.worker).or_default();
-                    worker_usage.remove_program(used);
+                    let worker_used = usage.entry(capacity.worker).or_default();
+                    *worker_used = worker_used.saturating_sub(used);
                 }
             }
-            if usage.get(&capacity.worker).map_or(0, |usage| usage.used) > target
+            if usage.get(&capacity.worker).copied().unwrap_or(0) > target
                 && let Some(candidates) = reasoning.get(&capacity.worker)
             {
                 for (_, session_id) in candidates {
@@ -716,7 +699,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                     }
                 }
             }
-            let used_after = usage.get(&capacity.worker).map_or(0, |usage| usage.used);
+            let used_after = usage.get(&capacity.worker).copied().unwrap_or(0);
             paused_total += paused;
             marked_total += marked;
             tracing::info!(
@@ -1288,7 +1271,7 @@ mod tests {
         assert!(strategy.programs.contains_key("busy"));
 
         let usage = strategy.worker_usage();
-        assert_eq!(usage[&worker(1)].used, 1_200);
+        assert_eq!(usage[&worker(1)], 1_200);
     }
 
     #[test]
