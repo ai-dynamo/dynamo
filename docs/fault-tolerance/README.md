@@ -1,138 +1,39 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Fault Tolerance
-subtitle: Handle failures gracefully with request migration, cancellation, and graceful shutdown
+title: Introduction
+subtitle: Configure how Dynamo handles worker failures, overload, and shutdown in production.
 ---
 
-Dynamo provides comprehensive fault tolerance mechanisms to ensure reliable LLM inference in production deployments. This section covers the various strategies and features that enable Dynamo to handle failures gracefully and maintain service availability.
+Dynamo keeps LLM inference reliable through two kinds of fault-tolerance behavior:
 
-## Overview
+- **Configurable behaviors** — off or conservative by default, these need you to opt in and tune them for your workload. They are the focus of this section.
+- **Built-in behaviors** — automatic runtime mechanisms (failure detection, service discovery, request cancellation) that require no configuration. These are covered in the Knowledge Base, linked at the bottom.
 
-Fault tolerance in Dynamo operates at multiple levels:
+This section walks through the three behaviors you configure yourself.
 
-| Layer | Mechanism | Purpose |
-|-------|-----------|---------|
-| **Request** | Migration, Cancellation | Handle in-flight request failures |
-| **Worker** | Health Checks, Graceful Shutdown | Detect and recover from worker failures |
-| **Engine Process** | [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) | Active/passive recovery for same-node engine-process failures in Kubernetes |
-| **System** | Load Shedding, Request Rejection | Prevent system overload |
-| **Infrastructure** | etcd HA, NATS resilience | Handle infrastructure component failures |
+## Configurable behaviors
 
-## Key Features
+Each guide is short and practical: what the behavior does, how to turn it on, and how to check it works.
 
-### Request Migration
+- **[Request Migration](request-migration.md)** — If a worker breaks in the middle of answering a request, another worker picks it up and finishes the answer. The user never notices. **Off by default** — you turn it on.
+- **[Request Rejection](request-rejection.md)** — When every worker is too busy, Dynamo turns new requests away with a "try again later" message instead of getting slower for everyone. **Off by default** — you turn it on and set how busy is "too busy."
+- **[Graceful Shutdown](graceful-shutdown.md)** — When a worker is asked to stop, it finishes the requests it's already handling before shutting down, instead of dropping them. **On by default** — you adjust how long it waits.
 
-When a worker fails during request processing, Dynamo can migrate in-progress requests to healthy workers. The migration system:
+## Built-in behaviors (Knowledge Base)
 
-- Preserves partial generation state (accumulated tokens)
-- Transparently continues generation on a new worker
-- Maintains seamless token flow to clients
+These operate automatically and are documented as architecture references, not configuration guides:
 
-See [Request Migration](request-migration.md) for details.
+- [Request Cancellation](../design-docs/request-cancellation.md) — the frontend and runtime abort in-flight requests when a client disconnects.
+- [Fault Tolerance Testing](../design-docs/fault-tolerance-testing.md) — the framework for validating these behaviors (cancellation, migration, etcd HA failover, hardware fault injection).
+- [Health Checks](../observability/health-checks.md) — liveness/readiness endpoints and engine monitoring that drive failure detection.
+- [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) — same-node active/passive engine recovery for Kubernetes (does not preserve in-flight requests or KV cache state).
+- [Distributed Runtime](../design-docs/distributed-runtime.md) — the service discovery and lease mechanism that detects worker loss and reroutes traffic.
 
-### Request Cancellation
+## Configuration reference
 
-Dynamo supports canceling in-flight requests to free computational resources:
+Every flag and environment variable for the configurable behaviors is cataloged in the Reference tab:
 
-- Graceful stop signals for clean termination
-- Kill signals for immediate termination
-- Hierarchical cancellation propagation through request chains
-
-See [Request Cancellation Architecture](../design-docs/request-cancellation.md) for details.
-
-### Graceful Shutdown
-
-Workers handle shutdown signals (SIGTERM/SIGINT) gracefully:
-
-- Immediately stop accepting new requests
-- Optionally drain in-flight requests before terminating
-- Clean up resources (engines, connections, temp files)
-
-See [Graceful Shutdown](graceful-shutdown.md) for details.
-
-### Request Rejection (Load Shedding)
-
-When workers are overloaded, Dynamo rejects new requests to prevent cascading failures:
-
-- Configurable busy thresholds based on KV cache utilization
-- Real-time worker load monitoring
-- HTTP 503 responses with retry guidance
-
-See [Request Rejection](request-rejection.md) for details.
-
-### Health Checks
-
-Dynamo provides multiple health check mechanisms:
-
-- **HTTP Endpoints**: `/health` and `/live` endpoints for orchestration
-- **Canary Health Checks**: Active monitoring via periodic test requests
-- **Engine Monitoring**: Automatic shutdown on engine failure detection
-
-See [Health Checks](../observability/health-checks.md) for details.
-
-### Shadow Engine Failover
-
-For Kubernetes deployments, [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) can help with same-node recovery from unknown backend engine or software-process failures. It uses GPU Memory Service to keep model weights resident while a standby or replacement engine attaches. It does not preserve in-flight requests or KV cache state, and it does not cover GPU or node loss.
-
-## Configuration Quick Reference
-
-| Feature | Environment Variable | Default |
-|---------|---------------------|---------|
-| Worker health port | `DYN_SYSTEM_PORT` | `9090` |
-| Canary health checks | `DYN_HEALTH_CHECK_ENABLED` | `false` |
-| Canary wait time | `DYN_CANARY_WAIT_TIME` | `10` seconds |
-| Health check timeout | `DYN_HEALTH_CHECK_REQUEST_TIMEOUT` | `3` seconds |
-| Decode blocks threshold | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` |
-| Prefill tokens threshold | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` |
-
-
-## Failure Scenarios and Recovery
-
-### Worker Pod Restart
-
-1. Worker receives SIGTERM from Kubernetes
-2. Endpoints are immediately invalidated (no new requests)
-3. In-flight requests complete or migrate (based on configuration)
-4. Resources are cleaned up
-5. Pod restarts with fresh state
-
-### Worker Crash (Unexpected)
-
-1. etcd lease expires (TTL-based detection)
-2. Client discovers endpoint removal via etcd watch
-3. New requests route to remaining healthy workers
-4. In-flight requests on crashed worker are migrated (if enabled)
-
-### Network Partition
-
-1. Worker loses connectivity to etcd/NATS
-2. Lease keep-alive fails, lease eventually expires
-3. Worker is removed from service discovery
-4. Traffic reroutes to reachable workers
-
-### GPU Failure
-
-1. Engine health check detects GPU error (XID, OOM, etc.)
-2. Worker initiates graceful shutdown
-3. Runtime is shut down, engine cleaned up
-4. Process exits with code 1 for pod restart
-
-## Testing Fault Tolerance
-
-Dynamo includes a comprehensive testing framework for validating fault tolerance:
-
-- Request cancellation tests
-- Migration tests with worker failures
-- etcd HA failover tests
-- Hardware fault injection (GPU XID, network partitions)
-
-See [Fault Tolerance Testing](../design-docs/fault-tolerance-testing.md) for details.
-
-## Related Documentation
-
-- [Observability](../observability/README.md) - Metrics and monitoring
-- [Shadow Engine Failover](../kubernetes/shadow-engine-failover.md) - Same-node active/passive engine failover for Kubernetes deployments
-- [Distributed Runtime](../design-docs/distributed-runtime.md) - Service discovery architecture
-- [Event Plane](../design-docs/event-plane.md) - Pub/sub for KV cache events and worker metrics
-- [Discovery Plane](../design-docs/discovery-plane.md) - Service discovery and coordination
+- [Frontend Configuration](../components/frontend/configuration.md) — migration limit, admission control, and busy thresholds.
+- [Runtime Configuration](../reference/runtime-config-reference.mdx) — worker-side engine request limit.
+- [Observability Environment Variables](../reference/observability/environment-variables.mdx) — health-check and system-port variables.

@@ -234,7 +234,7 @@ navigation:
             path: features/lora/README.md
           - section: Fault Tolerance
             contents:
-              - page: Overview
+              - page: Introduction
                 path: fault-tolerance/README.md
               - page: Request Migration
                 path: fault-tolerance/request-migration.md
