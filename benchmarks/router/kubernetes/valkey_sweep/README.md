@@ -127,9 +127,12 @@ kubectl exec -n bis-rl-3 biswa-dind -- env \
     git fsck --strict
     context=$(mktemp -d)
     trap "rm -rf \"$context\"" EXIT
+    bundle="$context/source.bundle"
+    git bundle create "$bundle" HEAD
     mkdir "$context/root"
     git archive --format=tar HEAD | tar -x -C "$context/root"
-    git bundle create "$context/root/source.bundle" HEAD
+    rm -rf -- "$context/root/source.bundle"
+    install -m 0600 "$bundle" "$context/root/source.bundle"
     tar -C "$context/root" -cf "$context/context.tar" .
     docker buildx build --load \
       --platform linux/arm64 \

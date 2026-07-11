@@ -620,6 +620,9 @@ def test_stack_has_scalable_clients_network_isolation_and_no_embedded_secret() -
     assert "GIT_LFS_SKIP_SMUDGE=1 git clone" in dockerfile_text
     assert "git -C /source fsck --strict" in dockerfile_text
     assert "git -C /source rev-parse --is-shallow-repository" in dockerfile_text
+    readme_text = (SWEEP_DIR / "README.md").read_text(encoding="utf-8")
+    assert 'rm -rf -- "$context/root/source.bundle"' in readme_text
+    assert 'install -m 0600 "$bundle" "$context/root/source.bundle"' in readme_text
 
     for deployment_name in ("valkey-sweep-mocker", "valkey-sweep-frontend"):
         env = resources[("Deployment", deployment_name)]["spec"]["template"]["spec"][
