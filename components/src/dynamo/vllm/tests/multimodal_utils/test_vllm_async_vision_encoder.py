@@ -10,6 +10,7 @@ a missing/invalid hardcoded image_token_id and reaps its thread.
 """
 
 import asyncio
+import math
 import threading
 from contextlib import suppress
 
@@ -306,6 +307,24 @@ def test_driver_override_to_zero_with_overriding_backend_raises():
 def test_preprocess_concurrency_rejects_negative():
     with pytest.raises(ValueError, match="preprocess_concurrency"):
         AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=-1)
+
+
+@pytest.mark.parametrize("queue_wait_ms", [-1.0, math.inf, math.nan])
+def test_queue_wait_rejects_negative_or_nonfinite(queue_wait_ms):
+    with pytest.raises(ValueError, match="queue_wait_ms"):
+        AsyncVisionEncoder(_FakeBackend(), queue_wait_ms=queue_wait_ms)
+
+
+def test_positive_queue_wait_requires_graph_buckets():
+    with pytest.raises(ValueError, match="requires CUDA graph buckets"):
+        AsyncVisionEncoder(_FakeBackend(), queue_wait_ms=1)
+
+
+def test_positive_queue_wait_accepts_graph_backend():
+    class _GraphBackend(_FakeBackend):
+        buckets = (1, 2, 4, 8)
+
+    AsyncVisionEncoder(_GraphBackend(), queue_wait_ms=1)
 
 
 def test_load_bad_batch_cost_fails_without_spawning_pool():

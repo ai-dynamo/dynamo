@@ -11,12 +11,13 @@ thread, coalescing items from concurrent async ``submit()`` calls into batches.
   CUDA-graph capture), then every ``fn`` call, then an optional ``on_stop`` at
   teardown — so anything thread-affine (CUDA graphs, the device/stream) is
   captured and replayed on the same thread;
-- **eager batching by default**: whenever the worker is free it drains everything
-  queued and runs it as one ``fn`` call, then repeats (no timer) — a lone item
-  runs the next loop, and batch size auto-scales with load. Pass ``max_batch_cost``
-  to **micro-batch** instead: the drained items are split into batches whose
-  summed per-item ``cost`` stays within that budget. Optional opaque
-  ``bucket_key`` values partition incompatible items before cost packing.
+- **bounded coalescing**: whenever the worker is free it takes the first item,
+  drains queued work, and may wait up to ``max_wait_s`` after dequeuing that first
+  item for more arrivals. A zero wait is immediate eager-drain. Timed collection
+  ends early once one compatible ``bucket_key`` group's summed cost reaches
+  ``max_batch_cost``; incompatible costs never declare a collection full. The
+  drained items are then split into batches whose summed per-item ``cost`` stays
+  within that budget.
 
 The caller speaks in opaque items plus optional per-item scalar ``cost`` and
 hashable ``bucket_key``
@@ -37,6 +38,7 @@ import asyncio
 import bisect
 import concurrent.futures
 import logging
+import math
 import os
 import queue
 import threading
@@ -115,6 +117,11 @@ class ThreadedMicroBatcher(Generic[T, R]):
             the serving loop ends), iff ``on_start`` succeeded. Its failure is
             logged, never raised.
         name: Worker thread name.
+        max_wait_s: Maximum intentional collection delay after the actor dequeues
+            the first item. This does not bound total queue residence behind an
+            in-flight ``fn``. Zero (default) preserves immediate eager-drain. A
+            compatible group that fills ``max_batch_cost`` dispatches before the
+            deadline.
         join_timeout_s: Seconds ``shutdown()`` waits for an in-flight ``fn``.
     """
 
@@ -127,10 +134,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
         on_start: Optional[Callable[[], None]] = None,
         on_stop: Optional[Callable[[], None]] = None,
         name: str = "micro-batcher",
+        max_wait_s: float = 0.0,
         join_timeout_s: float = 10.0,
     ) -> None:
         if max_batch_cost is not None and max_batch_cost < 1:
             raise ValueError("max_batch_cost must be >= 1 (or None for pass-through)")
+        if not math.isfinite(max_wait_s) or max_wait_s < 0:
+            raise ValueError("max_wait_s must be finite and >= 0")
         graph_buckets = tuple(buckets or ())
         if graph_buckets:
             if max_batch_cost is None:
@@ -157,6 +167,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
         self._on_start = on_start
         self._on_stop = on_stop
         self._name = name
+        self._max_wait_s = max_wait_s
         self._join_timeout_s = join_timeout_s
 
         self._queue: queue.Queue = queue.Queue()
@@ -359,23 +370,39 @@ class ThreadedMicroBatcher(Generic[T, R]):
             )
 
     def _collect(self) -> Optional[List[_Work]]:
-        """Block for one item, then eager-drain everything else already queued.
-
-        No timed hold: pull only what is immediately available, then run."""
+        """Block for one item, then collect until full or the hold expires."""
         first = self._queue.get()
         if first is _SHUTDOWN:
             return None
         works: List[_Work] = [first]
-        # Eager drain: pull everything immediately available, then run.
+        collected_costs = {first.bucket_key: first.cost}
+        deadline = time.monotonic() + self._max_wait_s
         while True:
+            if (
+                self._max_wait_s > 0
+                and self._max_batch_cost is not None
+                and any(
+                    cost >= self._max_batch_cost for cost in collected_costs.values()
+                )
+            ):
+                break
             try:
-                item = self._queue.get_nowait()
+                if self._max_wait_s == 0:
+                    item = self._queue.get_nowait()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    item = self._queue.get(timeout=remaining)
             except queue.Empty:
                 break
             if item is _SHUTDOWN:
                 self._queue.put(_SHUTDOWN)  # drain this round, stop next loop
                 break
             works.append(item)
+            collected_costs[item.bucket_key] = (
+                collected_costs.get(item.bucket_key, 0) + item.cost
+            )
         return works
 
     def _dispatch(self, works: List[_Work]) -> None:

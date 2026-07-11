@@ -1092,15 +1092,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # AsyncVisionEncoder glue, which owns the preprocess pool and
         # ThreadedMicroBatcher actor thread. load() runs backend.build() there
         # (the backend picks its own device) and cleans that thread up on failure.
-        encoder = AsyncVisionEncoder(backend_cls())
+        queue_wait_raw = os.environ.get("DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS", "0")
+        try:
+            queue_wait_ms = float(queue_wait_raw)
+        except ValueError as exc:
+            raise ValueError(
+                "DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS must be finite and nonnegative, "
+                f"got {queue_wait_raw!r}"
+            ) from exc
+        if not math.isfinite(queue_wait_ms) or queue_wait_ms < 0:
+            raise ValueError(
+                "DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS must be finite and nonnegative, "
+                f"got {queue_wait_raw!r}"
+            )
+        encoder = AsyncVisionEncoder(backend_cls(), queue_wait_ms=queue_wait_ms)
         encoder.load(config.model)
         # Assign only after a successful load so a failed load (which already shut
         # its own thread down) leaves _custom_encoder None.
         self._custom_encoder = encoder
         logger.info(
-            "Loaded CustomEncoder %s from %s",
+            "Loaded CustomEncoder %s from %s (queue_wait_ms=%.3f)",
             custom_encoder_class,
             config.model,
+            queue_wait_ms,
         )
 
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
