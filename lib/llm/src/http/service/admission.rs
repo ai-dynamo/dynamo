@@ -47,15 +47,23 @@ use dynamo_runtime::metrics::request_plane::REQUEST_PLANE_INFLIGHT;
 /// (`metric_model` collapses to the shared unknown-model sentinel); such
 /// requests are exempted here so they surface the usual 404 instead of a
 /// misleading admission 503.
+///
+/// The effective limit resolves per the DEP: a per-model override supplied
+/// at model registration (MDC `router_config`) wins over the frontend-global
+/// `--rejection-frontend-request-concurrency-limit`; either alone activates
+/// the gate for that model.
 pub(crate) fn evaluate_model_concurrency_gate(
     state: &State,
     model: &str,
     metric_model: &str,
 ) -> Option<String> {
-    let limit = state.admission_gate_config().request_concurrency_limit()?;
     if model != metric_model {
         return None;
     }
+    let limit = state
+        .manager()
+        .request_concurrency_limit_override(model)
+        .or_else(|| state.admission_gate_config().request_concurrency_limit())?;
     let inflight = state.metrics_clone().get_inflight_count(metric_model);
     if inflight >= 0 && inflight as u64 > limit {
         return Some(reject(

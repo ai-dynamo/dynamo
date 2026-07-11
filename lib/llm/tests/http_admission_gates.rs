@@ -8,6 +8,7 @@
 
 use anyhow::Error;
 use async_stream::stream;
+use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::frontend_config::AdmissionGateConfig;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -192,6 +193,97 @@ async fn test_concurrency_gate_rejects_over_limit_per_model() {
     }
     let after = post_chat(port, &chat_request("slow", 1)).await;
     assert_eq!(after.status(), StatusCode::OK);
+
+    svc.cancel_token.cancel();
+    svc.task.abort();
+}
+
+/// Register a chat model whose MDC carries a per-model concurrency override.
+fn add_model_with_override(manager: &dynamo_llm::discovery::ModelManager, model: &str, limit: u64) {
+    let mut card = ModelDeploymentCard::with_name_only(model);
+    card.router_config = Some(RouterConfig {
+        rejection_frontend_request_concurrency_limit: Some(limit),
+        ..Default::default()
+    });
+    let mdcsum = card.mdcsum().to_string();
+    manager
+        .add_chat_completions_model_with_card(model, &mdcsum, card, Arc::new(DelayEngine {}))
+        .unwrap();
+}
+
+/// Hold one slow request on `model` in flight and assert the next request to
+/// the same model is rejected (or admitted, per `expect_reject`).
+async fn assert_second_request(
+    port: u16,
+    metrics: &dynamo_llm::http::service::Metrics,
+    model: &str,
+    expect_reject: bool,
+) {
+    let holder = {
+        let model = model.to_string();
+        tokio::spawn(async move { post_chat(port, &chat_request(&model, 2000)).await })
+    };
+    let start = tokio::time::Instant::now();
+    while metrics.get_inflight_count(model) < 1 {
+        assert!(
+            start.elapsed() < tokio::time::Duration::from_secs(2),
+            "held request for {model} never became inflight"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+
+    let second = post_chat(port, &chat_request(model, 1)).await;
+    if expect_reject {
+        assert_eq!(
+            second.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "model {model} should gate its second concurrent request"
+        );
+    } else {
+        assert_eq!(
+            second.status(),
+            StatusCode::OK,
+            "model {model} should admit its second concurrent request"
+        );
+    }
+    assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_concurrency_gate_mdc_override_activates_without_global_default() {
+    // No global limit configured: only the model whose MDC supplies an
+    // override is gated; other served models stay unlimited. An out-of-
+    // contract override of 0 is treated as absent rather than rejecting
+    // all traffic.
+    let svc = start_gate_service(AdmissionGateConfig::new(None, None, None)).await;
+    let manager = svc.state.manager();
+    add_model_with_override(manager, "capped", 1);
+    add_model_with_override(manager, "zeroed", 0);
+    let metrics = svc.state.metrics_clone();
+
+    assert_second_request(svc.port, &metrics, "capped", true).await;
+    assert_second_request(svc.port, &metrics, "fast", false).await;
+    assert_second_request(svc.port, &metrics, "zeroed", false).await;
+    assert_eq!(
+        metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, "capped"),
+        1
+    );
+
+    svc.cancel_token.cancel();
+    svc.task.abort();
+}
+
+#[tokio::test]
+async fn test_concurrency_gate_mdc_override_wins_over_global_default() {
+    // Global limit 1, but the MDC override raises "roomy" to 3: the override
+    // takes precedence for that model while other models keep the global.
+    let svc = start_gate_service(AdmissionGateConfig::new(Some(1), None, None)).await;
+    let manager = svc.state.manager();
+    add_model_with_override(manager, "roomy", 3);
+    let metrics = svc.state.metrics_clone();
+
+    assert_second_request(svc.port, &metrics, "roomy", false).await;
+    assert_second_request(svc.port, &metrics, "fast", true).await;
 
     svc.cancel_token.cancel();
     svc.task.abort();

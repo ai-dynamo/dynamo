@@ -431,13 +431,17 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
+    /// Per-model frontend admission override for the request concurrency gate.
+    /// Supplied by workers via register_llm's router_config to override the
+    /// frontend's global --rejection-frontend-request-concurrency-limit.
+    rejection_frontend_request_concurrency_limit: Option<u64>,
     session_affinity_ttl_secs: Option<u64>,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, rejection_frontend_request_concurrency_limit=None))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -446,6 +450,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        rejection_frontend_request_concurrency_limit: Option<u64>,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -467,12 +472,19 @@ impl RouterConfig {
         }
         .validate()
         .map_err(PyValueError::new_err)?;
+        if rejection_frontend_request_concurrency_limit == Some(0) {
+            return Err(PyValueError::new_err(
+                "rejection_frontend_request_concurrency_limit must be >= 1 \
+                 (omit it to use the frontend default)",
+            ));
+        }
         Ok(Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
+            rejection_frontend_request_concurrency_limit,
             session_affinity_ttl_secs,
         })
     }
@@ -488,6 +500,8 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
+            rejection_frontend_request_concurrency_limit: rc
+                .rejection_frontend_request_concurrency_limit,
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
         }

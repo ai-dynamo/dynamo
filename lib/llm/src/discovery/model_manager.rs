@@ -721,16 +721,30 @@ impl ModelManager {
         card_checksum: &str,
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
+        self.add_chat_completions_model_with_card(
+            model,
+            card_checksum,
+            Self::aggregated_local_card(),
+            engine,
+        )
+    }
+
+    /// Like [`Self::add_chat_completions_model`], but with a caller-supplied
+    /// ModelDeploymentCard so in-process registrations can carry card-level
+    /// settings (e.g. a per-model `router_config` override).
+    pub fn add_chat_completions_model_with_card(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        card: ModelDeploymentCard,
+        engine: OpenAIChatCompletionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_chat_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_chat_{}", model);
-        let mut ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            Self::aggregated_local_card(),
-        );
+        let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
@@ -1605,6 +1619,14 @@ impl ModelManager {
     ) -> Option<LoadThresholdConfig> {
         let model_entry = self.models.get(model)?;
         model_entry.load_threshold_config(config)
+    }
+
+    /// Per-model frontend admission concurrency override from model
+    /// registration (MDC `router_config`), if any of the model's worker
+    /// sets supplied one.
+    pub fn request_concurrency_limit_override(&self, model: &str) -> Option<u64> {
+        self.get_model(model)
+            .and_then(|model_entry| model_entry.request_concurrency_limit_override())
     }
 
     /// Lists all models with worker monitors configured.
