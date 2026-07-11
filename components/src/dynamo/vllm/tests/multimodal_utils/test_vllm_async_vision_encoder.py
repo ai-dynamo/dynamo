@@ -220,14 +220,24 @@ async def test_shutdown_waits_for_preprocess_before_backend_close():
 
 def test_load_fails_fast_on_build_error_and_reaps_threads():
     class _BadBuild(_FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self.build_calls = 0
+
         def build(self, model_id):
+            self.build_calls += 1
             raise RuntimeError("build failed")
 
-    enc = AsyncVisionEncoder(_BadBuild())
+    backend = _BadBuild()
+    enc = AsyncVisionEncoder(backend)
     with pytest.raises(RuntimeError, match="build failed"):
         enc.load("m")
     assert enc._batcher is None
     assert enc._pool is None
+
+    with pytest.raises(RuntimeError, match="called twice"):
+        enc.load("m")
+    assert backend.build_calls == 1
 
 
 def test_load_fails_fast_on_missing_image_token_id():
