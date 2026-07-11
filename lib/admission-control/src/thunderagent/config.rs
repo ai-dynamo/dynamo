@@ -20,7 +20,6 @@ pub enum ConfigError {
 pub struct ThunderAgentConfig {
     pub pause_threshold: f64,
     pub pause_target: f64,
-    pub resume_hysteresis: f64,
     pub resume_timeout_seconds: f64,
     pub session_retention_seconds: f64,
     pub scheduler_interval_seconds: f64,
@@ -31,7 +30,6 @@ impl Default for ThunderAgentConfig {
         Self {
             pause_threshold: 0.95,
             pause_target: 0.80,
-            resume_hysteresis: 0.10,
             resume_timeout_seconds: 1_800.0,
             session_retention_seconds: 1_800.0,
             scheduler_interval_seconds: 5.0,
@@ -52,17 +50,6 @@ impl ThunderAgentConfig {
         if self.pause_target > self.pause_threshold {
             return Err(ConfigError::Invalid(
                 "pause_target must not exceed pause_threshold",
-            ));
-        }
-        if !self.resume_hysteresis.is_finite()
-            || self.resume_hysteresis < 0.0
-            || self.resume_hysteresis > 1.0
-        {
-            return Err(ConfigError::Invalid("resume_hysteresis must be in [0, 1]"));
-        }
-        if self.resume_hysteresis > self.pause_threshold {
-            return Err(ConfigError::Invalid(
-                "resume_hysteresis must not exceed pause_threshold",
             ));
         }
         validate_positive_duration(
@@ -102,10 +89,8 @@ mod tests {
 
     #[test]
     fn options_use_defaults_and_reject_unknown_fields() {
-        let options = serde_yaml::from_str::<Mapping>(
-            "pause_threshold: 0.7\npause_target: 0.6\nresume_hysteresis: 0.05",
-        )
-        .unwrap();
+        let options =
+            serde_yaml::from_str::<Mapping>("pause_threshold: 0.7\npause_target: 0.6").unwrap();
         let config = ThunderAgentConfig::from_options(&options).unwrap();
         assert_eq!(config.pause_threshold, 0.7);
         assert_eq!(config.pause_target, 0.6);
@@ -121,10 +106,6 @@ mod tests {
             ThunderAgentConfig {
                 pause_threshold: 0.7,
                 pause_target: 0.8,
-                ..Default::default()
-            },
-            ThunderAgentConfig {
-                resume_hysteresis: 0.96,
                 ..Default::default()
             },
             ThunderAgentConfig {
