@@ -49,8 +49,6 @@ Worker eligibility is live. A deferred request retains `WorkerEligibility` and t
 
 Capacity is `total_kv_blocks * block_size + native_offloading_capacity_tokens` for each worker/rank. Workers with missing or zero device capacity are excluded from ThunderAgent capacity gating, with a one-time warning. If no worker reports usable metadata, capacity gating is disabled and requests continue through normal router selection.
 
-Set `capacity_control: false` to retain session affinity and lifecycle tracking while disabling fit checks and pressure-driven suspend/resume. This is the affinity-only control for isolating whether capacity control earns its complexity.
-
 Only Running or IdleResident programs with an assigned worker contribute usage:
 
 ```text

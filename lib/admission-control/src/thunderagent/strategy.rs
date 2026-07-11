@@ -149,7 +149,6 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
     pub fn new(capacity: P, config: ThunderAgentConfig) -> Result<Self, ConfigError> {
         config.validate()?;
         tracing::info!(
-            capacity_control = config.capacity_control,
             pause_threshold = config.pause_threshold,
             pause_target = config.pause_target,
             resume_hysteresis = config.resume_hysteresis,
