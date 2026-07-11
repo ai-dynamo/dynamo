@@ -55,6 +55,11 @@ class DynamoRuntimeConfig(ConfigBase):
     # default; when set, these surface env vars that the Rust runtime reads
     # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
     engine_request_limit: Optional[int] = None
+    # Per-model frontend admission override carried on this worker's MDC at
+    # registration. Overrides the frontend's global
+    # --rejection-frontend-request-concurrency-limit for the served model.
+    # None = use the frontend default.
+    rejection_frontend_request_concurrency_limit: Optional[int] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -89,6 +94,16 @@ class DynamoRuntimeConfig(ConfigBase):
         if self.engine_request_limit is not None and self.engine_request_limit <= 0:
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+            )
+
+        if (
+            self.rejection_frontend_request_concurrency_limit is not None
+            and self.rejection_frontend_request_concurrency_limit <= 0
+        ):
+            raise ValueError(
+                "--rejection-frontend-request-concurrency-limit must be a "
+                "positive integer, got "
+                f"{self.rejection_frontend_request_concurrency_limit}"
             )
 
     def _validate_output_modalities(self) -> None:
@@ -334,4 +349,18 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Max requests handled concurrently by the engine (worker-pool "
             "semaphore size). Enables worker-side request rejection when set. "
             "Disabled by default.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--rejection-frontend-request-concurrency-limit",
+            env_var="DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT",
+            default=None,
+            arg_type=int,
+            help="Per-model frontend admission override: maximum concurrent "
+            "frontend-admitted requests for the model this worker serves. "
+            "Carried on the worker's registration (MDC) and takes precedence "
+            "over the frontend's global "
+            "--rejection-frontend-request-concurrency-limit. Disabled by "
+            "default (frontend default applies).",
         )

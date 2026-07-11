@@ -641,7 +641,7 @@ impl Model {
     }
 
     /// Per-model frontend admission concurrency override supplied at model
-    /// registration (MDC `router_config`), used ahead of the frontend-global
+    /// registration (on the MDC), used ahead of the frontend-global
     /// `--rejection-frontend-request-concurrency-limit`. The first WorkerSet
     /// carrying one wins. Zero is out of contract (registration validates
     /// >= 1) and is treated as absent so it cannot reject all traffic.
@@ -650,9 +650,7 @@ impl Model {
             entry
                 .value()
                 .card()
-                .router_config
-                .as_ref()
-                .and_then(|rc| rc.rejection_frontend_request_concurrency_limit)
+                .rejection_frontend_request_concurrency_limit
                 .filter(|&limit| limit > 0)
         })
     }

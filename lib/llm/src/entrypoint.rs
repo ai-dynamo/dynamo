@@ -47,13 +47,6 @@ pub struct RouterConfig {
     pub kv_router_config: KvRouterConfig,
     /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
-    /// Per-model frontend admission override: maximum concurrent
-    /// frontend-admitted requests for this model. When a worker supplies
-    /// this through its MDC `router_config`, it overrides the frontend's
-    /// global `--rejection-frontend-request-concurrency-limit` for the
-    /// model. Must be >= 1; absent means "use the frontend default".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rejection_frontend_request_concurrency_limit: Option<u64>,
     /// Deprecated compatibility field. Routing and readiness ignore this value.
     #[serde(default)]
     pub enforce_disagg: bool,
@@ -67,7 +60,6 @@ impl RouterConfig {
             router_mode,
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
-            rejection_frontend_request_concurrency_limit: None,
             enforce_disagg: false,
             session_affinity_ttl_secs: None,
         }

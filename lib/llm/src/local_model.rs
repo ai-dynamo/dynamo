@@ -69,6 +69,7 @@ pub struct LocalModelBuilder {
     metrics_config: MetricsConfig,
     frontend_api_config: FrontendApiConfig,
     admission_gate_config: AdmissionGateConfig,
+    rejection_frontend_request_concurrency_limit: Option<u64>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -95,6 +96,7 @@ impl Default for LocalModelBuilder {
             metrics_config: Default::default(),
             frontend_api_config: Default::default(),
             admission_gate_config: Default::default(),
+            rejection_frontend_request_concurrency_limit: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
@@ -191,6 +193,15 @@ impl LocalModelBuilder {
         admission_gate_config: AdmissionGateConfig,
     ) -> &mut Self {
         self.admission_gate_config = admission_gate_config;
+        self
+    }
+
+    /// Per-model frontend admission concurrency override carried on the MDC.
+    pub fn rejection_frontend_request_concurrency_limit(
+        &mut self,
+        limit: Option<u64>,
+    ) -> &mut Self {
+        self.rejection_frontend_request_concurrency_limit = limit;
         self
     }
 
@@ -358,6 +369,8 @@ impl LocalModelBuilder {
             if !self.model_aliases.is_empty() {
                 card.set_aliases(self.model_aliases.clone());
             }
+            card.rejection_frontend_request_concurrency_limit =
+                self.rejection_frontend_request_concurrency_limit;
 
             return Ok(LocalModel {
                 card,
@@ -415,6 +428,8 @@ impl LocalModelBuilder {
         if !self.model_aliases.is_empty() {
             card.set_aliases(self.model_aliases.clone());
         }
+        card.rejection_frontend_request_concurrency_limit =
+            self.rejection_frontend_request_concurrency_limit;
 
         Ok(LocalModel {
             card,

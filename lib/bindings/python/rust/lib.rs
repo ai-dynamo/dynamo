@@ -360,7 +360,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, rejection_frontend_request_concurrency_limit=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -385,6 +385,7 @@ fn register_model<'p>(
     ignore_weights: bool,
     max_gpu_lora_count: Option<u32>,
     model_aliases: Option<Vec<String>>,
+    rejection_frontend_request_concurrency_limit: Option<u64>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -491,6 +492,15 @@ fn register_model<'p>(
     let explicit_router_config: Option<RouterConfig> = router_config.map(|rc| rc.into());
     let model_aliases = model_aliases.unwrap_or_default();
 
+    // Per-model frontend admission override. Zero would reject all traffic
+    // for the model, so require >= 1 (omit for the frontend default).
+    if rejection_frontend_request_concurrency_limit == Some(0) {
+        return Err(PyValueError::new_err(
+            "rejection_frontend_request_concurrency_limit must be >= 1 \
+             (omit it to use the frontend's global default)",
+        ));
+    }
+
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
         .map(|s| {
@@ -562,6 +572,8 @@ fn register_model<'p>(
             card.runtime_config = runtime_config.inner;
             card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
+            card.rejection_frontend_request_concurrency_limit =
+                rejection_frontend_request_concurrency_limit;
 
             // Register the Model Deployment Card via discovery interface
             let discovery = endpoint.inner.drt().discovery();
@@ -601,6 +613,9 @@ fn register_model<'p>(
             .model_aliases(model_aliases)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
+            .rejection_frontend_request_concurrency_limit(
+                rejection_frontend_request_concurrency_limit,
+            )
             .runtime_config({
                 let mut rc = runtime_config.inner;
                 // The base worker registration carries the worker's LoRA slot capacity so the

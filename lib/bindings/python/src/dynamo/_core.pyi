@@ -1647,7 +1647,6 @@ class RouterConfig:
         active_prefill_tokens_threshold_frac: Optional[float] = None,
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
-        rejection_frontend_request_concurrency_limit: Optional[int] = None,
     ) -> None:
         """
         Create a RouterConfig.
@@ -1660,9 +1659,6 @@ class RouterConfig:
             active_prefill_tokens_threshold_frac: Fraction of max_num_batched_tokens for busy detection
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Enable session affinity with this process-local cache TTL in seconds
-            rejection_frontend_request_concurrency_limit: Per-model override for the frontend admission
-                request concurrency gate; supplied by workers via register_llm's router_config and
-                takes precedence over the frontend's global --rejection-frontend-request-concurrency-limit
         """
         ...
 
@@ -2336,9 +2332,15 @@ async def register_model(
     ignore_weights: bool = False,
     max_gpu_lora_count: Optional[int] = None,
     model_aliases: Optional[List[str]] = None,
+    rejection_frontend_request_concurrency_limit: Optional[int] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
+
+    Frontend admission override:
+        `rejection_frontend_request_concurrency_limit` is carried on the MDC and
+        overrides the frontend's global --rejection-frontend-request-concurrency-limit
+        for this model. Must be >= 1; omit to use the frontend default.
     LoRA Registration:
         The `lora_name` and `base_model_path` parameters must be provided together or not at all.
         Providing only one of these parameters will raise a ValueError.

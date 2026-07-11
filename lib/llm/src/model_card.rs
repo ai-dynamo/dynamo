@@ -905,6 +905,15 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_config: Option<RouterConfig>,
 
+    /// Per-model frontend admission override: maximum concurrent
+    /// frontend-admitted requests for this model. When set, it takes
+    /// precedence over the frontend's global
+    /// `--rejection-frontend-request-concurrency-limit` for this model.
+    /// Registration validates >= 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub rejection_frontend_request_concurrency_limit: Option<u64>,
+
     /// Sibling files (e.g. `preprocessor_config.json`) the worker
     /// advertises alongside the typed slots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1663,6 +1672,7 @@ impl ModelDeploymentCard {
             media_decoder: None,
             media_fetcher: None,
             router_config: None,
+            rejection_frontend_request_concurrency_limit: None,
             extra_files: Vec::new(),
             checksum: OnceLock::new(),
         })

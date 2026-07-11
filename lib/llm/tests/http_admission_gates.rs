@@ -8,7 +8,6 @@
 
 use anyhow::Error;
 use async_stream::stream;
-use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::frontend_config::AdmissionGateConfig;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -201,10 +200,7 @@ async fn test_concurrency_gate_rejects_over_limit_per_model() {
 /// Register a chat model whose MDC carries a per-model concurrency override.
 fn add_model_with_override(manager: &dynamo_llm::discovery::ModelManager, model: &str, limit: u64) {
     let mut card = ModelDeploymentCard::with_name_only(model);
-    card.router_config = Some(RouterConfig {
-        rejection_frontend_request_concurrency_limit: Some(limit),
-        ..Default::default()
-    });
+    card.rejection_frontend_request_concurrency_limit = Some(limit);
     let mdcsum = card.mdcsum().to_string();
     manager
         .add_chat_completions_model_with_card(model, &mdcsum, card, Arc::new(DelayEngine {}))

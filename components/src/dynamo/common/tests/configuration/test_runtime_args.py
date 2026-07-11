@@ -111,3 +111,45 @@ def test_fpm_trace_help_lists_flag_and_env(monkeypatch):
     assert "--fpm-trace" in help_text
     assert "--no-fpm-trace" in help_text
     assert "DYN_FPM_TRACE" in help_text
+
+
+# --- Per-model frontend admission override (DIS-2186) ---
+
+
+@pytest.fixture()
+def _clear_override_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(
+        "DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT", raising=False
+    )
+
+
+def test_worker_concurrency_override_disabled_by_default(_clear_override_env):
+    config, _ = _parse_runtime_args([])
+
+    assert config.rejection_frontend_request_concurrency_limit is None
+
+
+def test_worker_concurrency_override_parses(_clear_override_env):
+    config, _ = _parse_runtime_args(
+        ["--rejection-frontend-request-concurrency-limit", "64"]
+    )
+
+    assert config.rejection_frontend_request_concurrency_limit == 64
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_worker_concurrency_override_rejects_non_positive(
+    _clear_override_env, value: str
+):
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        _parse_runtime_args(
+            ["--rejection-frontend-request-concurrency-limit", value]
+        )
+
+
+def test_worker_concurrency_override_env_var(monkeypatch):
+    monkeypatch.setenv("DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT", "32")
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.rejection_frontend_request_concurrency_limit == 32

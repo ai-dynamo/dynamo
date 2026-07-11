@@ -94,7 +94,7 @@ counted in the `dynamo_frontend_admission_rejection_total` metric (labeled by
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--rejection-frontend-request-concurrency-limit` | `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT` | disabled | Max concurrent frontend-admitted requests, enforced separately for each served model. Acts as the per-model default; a worker can override it for its model by passing `rejection_frontend_request_concurrency_limit` in the `router_config` it registers with (`register_llm`) |
+| `--rejection-frontend-request-concurrency-limit` | `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT` | disabled | Max concurrent frontend-admitted requests, enforced separately for each served model. Acts as the per-model default; a worker can override it for its model with the worker-side `--rejection-frontend-request-concurrency-limit` flag (carried on its registration / MDC via `register_llm`) |
 | `--rejection-frontend-runtime-task-limit` | `DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT` | disabled | Max alive tasks on the frontend runtime (frontend-local self-protection, not per-model) |
 | `--rejection-frontend-request-plane-connection-limit` | `DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT` | disabled | Max in-flight request-plane streams to workers, i.e. outbound transport pressure (frontend-local, not per-model) |
 
