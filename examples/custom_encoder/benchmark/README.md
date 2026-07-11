@@ -1,0 +1,33 @@
+# Qwen3-VL CustomEncoder benchmark
+
+This workload exercises Dynamo's cross-request custom vision batching with a
+public Qwen3-VL-2B vision tower and the full Qwen3-VL-2B checkpoint in vLLM.
+
+Start the topology:
+
+```bash
+examples/custom_encoder/launch/agg_qwen3_vl.sh
+```
+
+In another shell, generate and run the workload:
+
+```bash
+python examples/custom_encoder/benchmark/generate_workload.py
+examples/custom_encoder/benchmark/run_aiperf.sh
+```
+
+The generator creates five 299×299 and four 500×500 deterministic JPEGs, then
+cycles them across 100 requests. Every request contains one image and the same
+text prompt. It pads that prompt so the estimated mean server-side ISL is near
+515 after the variable number of visual tokens is spliced in. The benchmark
+uses concurrency 8 and forces 70 generated tokens with `ignore_eos:true`.
+
+Artifacts are written below `logs/qwen3_vl_custom_encoder/`. The command uses
+server token counts because client-side tokenization cannot see the visual-token
+expansion performed by the custom encoder. Confirm the actual mean ISL and OSL
+from the aiperf export rather than relying only on the generator's estimate.
+
+Qwen3-VL's native path also injects DeepStack vision features into intermediate
+language-model layers. The current CustomEncoder interface carries only primary
+image embeddings, so this workload measures the real ViT/projector and Dynamo
+batching path but is not a native-output parity test.
