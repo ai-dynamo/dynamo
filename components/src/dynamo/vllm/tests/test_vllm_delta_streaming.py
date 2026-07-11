@@ -59,11 +59,11 @@ def _output(
     )
 
 
-def _request_output(outputs, *, prompt_token_ids=None):
+def _request_output(outputs, *, prompt_token_ids=None, num_cached_tokens=0):
     return SimpleNamespace(
         outputs=outputs,
         prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [101],
-        num_cached_tokens=0,
+        num_cached_tokens=num_cached_tokens,
         kv_transfer_params=None,
     )
 
@@ -131,7 +131,7 @@ async def test_generate_tokens_passes_delta_chunks_without_cumulative_slicing():
         "prompt_tokens": 2,
         "completion_tokens": 4,
         "total_tokens": 6,
-        "prompt_tokens_details": None,
+        "prompt_tokens_details": {"cached_tokens": 0},
     }
 
 
@@ -242,7 +242,18 @@ async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
 
 
 @pytest.mark.asyncio
-async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
+@pytest.mark.parametrize(
+    ("num_cached_tokens", "expected_prompt_tokens_details"),
+    [
+        (None, None),
+        (0, {"cached_tokens": 0}),
+        (1, {"cached_tokens": 1}),
+    ],
+)
+async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage(
+    num_cached_tokens,
+    expected_prompt_tokens_details,
+):
     pytest.importorskip("vllm.usage.usage_lib")
     from dynamo.vllm.llm_engine import VllmLLMEngine
     from dynamo.vllm.multimodal_utils.request_processor import (
@@ -252,7 +263,9 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
     responses = [
         _request_output([_output([1])], prompt_token_ids=[10, 11]),
         _request_output(
-            [_output([2, 3], finish_reason="length")], prompt_token_ids=[10, 11]
+            [_output([2, 3], finish_reason="length")],
+            prompt_token_ids=[10, 11],
+            num_cached_tokens=num_cached_tokens,
         ),
     ]
     engine = VllmLLMEngine.__new__(VllmLLMEngine)
@@ -288,6 +301,59 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
         "prompt_tokens": 2,
         "completion_tokens": 3,
         "total_tokens": 5,
+        "prompt_tokens_details": expected_prompt_tokens_details,
+    }
+
+
+@pytest.mark.asyncio
+async def test_unified_decode_preserves_prefill_cached_token_details():
+    pytest.importorskip("vllm.usage.usage_lib")
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+    from dynamo.vllm.multimodal_utils.request_processor import (
+        VllmMultimodalRequestProcessor,
+    )
+
+    responses = [
+        _request_output(
+            [_output([1], finish_reason="length")],
+            prompt_token_ids=[10, 11],
+            num_cached_tokens=0,
+        )
+    ]
+    engine = VllmLLMEngine.__new__(VllmLLMEngine)
+    engine.engine_client = _FakeEngineClient(responses)
+    engine._default_sampling_params = {}
+    engine._model_max_len = None
+    engine.disaggregation_mode = DisaggregationMode.DECODE
+    engine.enable_rl = False
+    engine._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
+    engine._dp_range = None
+
+    chunks = [
+        chunk
+        async for chunk in VllmLLMEngine.generate(
+            engine,
+            {
+                "token_ids": [10, 11],
+                "sampling_options": {},
+                "stop_conditions": {},
+                "output_options": {},
+                "prefill_result": {
+                    "disaggregated_params": {
+                        "kv_transfer_params": {"remote_engine_id": "prefill-1"}
+                    },
+                    "prompt_tokens_details": {"cached_tokens": 8},
+                },
+            },
+            _FakeContext(),
+        )
+    ]
+
+    assert chunks[-1]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 8
     }
 
 

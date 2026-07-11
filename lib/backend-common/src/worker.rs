@@ -1790,6 +1790,10 @@ mod tests {
             EngineControlPolicy::Direct
         );
         assert_eq!(
+            engine_control_policy("clear_kv_blocks"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
             engine_control_policy("sleep"),
             EngineControlPolicy::UnregisterBefore
         );

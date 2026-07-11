@@ -2,12 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::prompt_membership_trie::WorkerLookup;
 use super::single::ActiveSequences;
 use crate::protocols::{DpRank, WorkerId, WorkerWithDpRank};
 
@@ -66,7 +64,6 @@ pub enum WorkerTopologyError {
 #[derive(Clone)]
 pub(super) struct RemovedWorkerState {
     pub(super) worker: WorkerWithDpRank,
-    pub(super) trie_lookup: Arc<RwLock<WorkerLookup>>,
 }
 
 impl std::fmt::Debug for RemovedWorkerState {
@@ -86,7 +83,6 @@ pub(super) struct WorkerTopologyChange {
 pub(super) struct WorkerSlot {
     pub(super) worker: WorkerWithDpRank,
     pub(super) sequences: RwLock<ActiveSequences>,
-    pub(super) trie_lookup: Arc<RwLock<WorkerLookup>>,
 }
 
 impl WorkerSlot {
@@ -99,7 +95,6 @@ impl WorkerSlot {
         Self {
             worker,
             sequences: RwLock::new(sequences),
-            trie_lookup: Arc::new(RwLock::new(WorkerLookup::default())),
         }
     }
 }
@@ -286,13 +281,7 @@ impl WorkerTable {
             self.index.insert(worker, idx);
         }
 
-        let removed = old
-            .into_values()
-            .map(|slot| RemovedWorkerState {
-                worker: slot.worker,
-                trie_lookup: slot.trie_lookup,
-            })
-            .collect();
+        let removed = old.into_values().map(RemovedWorkerState::from).collect();
 
         WorkerTopologyChange { added, removed }
     }
@@ -331,7 +320,6 @@ impl From<WorkerSlot> for RemovedWorkerState {
     fn from(slot: WorkerSlot) -> Self {
         Self {
             worker: slot.worker,
-            trie_lookup: slot.trie_lookup,
         }
     }
 }
@@ -492,7 +480,7 @@ mod tests {
                 }),
                 Instant::now(),
             );
-            assert_eq!(outcome.membership_delta.stores[0].hashes, vec![1, 2, 3],);
+            assert_eq!(outcome.membership_delta.stores[0].path, vec![1, 2, 3]);
         }
 
         let change = table
