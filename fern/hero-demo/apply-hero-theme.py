@@ -11,12 +11,15 @@ import json
 import sys
 
 THEME = {
-    "fg": "#e6edf3",
+    # Plain terminal output uses the default fg → keep it a soft gray so it
+    # reads as "normal output". Typed commands use WHITE (palette index 7),
+    # which we pin to pure white below so commands pop brighter than output.
+    "fg": "#8b949e",
     "bg": "#0d1117",
     "palette": ":".join([
         # normal: black red green yellow blue magenta cyan white
         "#484f58", "#ff7b72", "#3fb950", "#e3b341",
-        "#58a6ff", "#bc8cff", "#39c5cf", "#b1bac4",
+        "#58a6ff", "#bc8cff", "#39c5cf", "#ffffff",
         # bright
         "#6e7681", "#ffa198", "#56d364", "#e3b341",
         "#79c0ff", "#d2a8ff", "#56d4dd", "#ffffff",

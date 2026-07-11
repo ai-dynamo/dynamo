@@ -80,7 +80,7 @@ export interface TerminalDemoProps {
   autoPlay?: boolean;
   /** Show the control bar. Default false for a clean hero. */
   controls?: boolean;
-  /** Player theme: asciinema | dracula | monokai | nord | solarized-dark | solarized-light | tango. */
+  /** Force a named player theme (asciinema | dracula | monokai | nord | solarized-dark | solarized-light | tango). Omit to use the cast's embedded term.theme palette. */
   theme?: string;
   /** Poster frame, e.g. "npt:0:04" or a data URL. */
   poster?: string;
@@ -148,7 +148,7 @@ export function TerminalDemo({
   loop = true,
   autoPlay = true,
   controls = false,
-  theme = "asciinema",
+  theme,
   poster,
   cols,
   rows,
@@ -172,6 +172,7 @@ export function TerminalDemo({
     } | null = null;
     let disposed = false;
     let trimTimer: ReturnType<typeof setInterval> | null = null;
+    let releaseTimer: ReturnType<typeof setTimeout> | null = null;
 
     const prefersReducedMotion =
       typeof window !== "undefined" &&
@@ -200,9 +201,12 @@ export function TerminalDemo({
           // Always build the control bar into the DOM; we reveal it via CSS on
           // toggle so switching never re-creates the player (no jump/reset).
           controls: true,
-          theme,
           fit,
           startAt,
+          // Only force a named theme when explicitly asked. Otherwise omit it so
+          // the player uses the cast's embedded term.theme header (our GitHub
+          // Dark palette). Passing theme="asciinema" would override that header.
+          ...(theme ? { theme } : {}),
           ...(poster ? { poster } : {}),
           ...(cols ? { cols } : {}),
           ...(rows ? { rows } : {}),
@@ -211,9 +215,32 @@ export function TerminalDemo({
 
         player = AsciinemaPlayer.create(src, containerRef.current, options);
 
-        // Release the pre-load aspect-ratio reserve once the player has mounted
-        // its own sized terminal, so the container can grow when controls open.
-        if (!disposed) setLoaded(true);
+        // Release the pre-load aspect-ratio reserve only AFTER the player has
+        // fetched and fit the cast — the fitted terminal height then matches the
+        // reserve, so the box doesn't jump. Releasing synchronously here (before
+        // fit) let the unfitted, natural-font-size terminal briefly define the
+        // height: an expand-then-shrink flash. We wait for the 'play' event
+        // (fires post-mount/fit under autoplay) and keep a timeout fallback so
+        // the reserve is never stuck if the event never arrives.
+        const release = () => {
+          if (!disposed) setLoaded(true);
+        };
+        let released = false;
+        const releaseOnce = () => {
+          if (released) return;
+          released = true;
+          release();
+        };
+        const playerWithEvents = player as typeof player & {
+          addEventListener?: (event: string, handler: () => void) => void;
+        };
+        if (typeof playerWithEvents?.addEventListener === "function") {
+          playerWithEvents.addEventListener("play", releaseOnce);
+          playerWithEvents.addEventListener("playing", releaseOnce);
+        }
+        // Fallback: if autoplay is blocked (e.g. reduced motion) or no event
+        // fires, release after a short delay so the reserve doesn't linger.
+        releaseTimer = setTimeout(releaseOnce, shouldAutoPlay ? 1200 : 400);
 
         // Manual trim/loop: asciinema-player has no native "endAt", so poll the
         // clock and seek back (or pause) at the boundary. Fully defensive — if a
@@ -245,6 +272,7 @@ export function TerminalDemo({
       disposed = true;
       setLoaded(false);
       if (trimTimer) clearInterval(trimTimer);
+      if (releaseTimer) clearTimeout(releaseTimer);
       try {
         player?.dispose?.();
       } catch {
@@ -362,7 +390,7 @@ const TERMINAL_DEMO_CSS = `
   align-items: center;
   justify-content: center;
   width: 24px;
-  height: 20px;
+  height: 24px;
   padding: 0;
   border: 0;
   border-radius: 5px;
@@ -406,9 +434,14 @@ const TERMINAL_DEMO_CSS = `
   width: 100%;
   aspect-ratio: var(--dynamo-term-aspect, 2.16);
   background: #0d1117;
+  /* Clip the pre-fit frame: the player mounts at its natural font size for one
+     frame before fit="width" scales it down, briefly overflowing this reserved
+     box. Hide that overflow so the terminal never flashes oversized on load. */
+  overflow: hidden;
 }
 .dynamo-terminal-demo--loaded .dynamo-terminal-demo__player {
   aspect-ratio: auto;
+  overflow: visible;
 }
 .dynamo-terminal-demo__player .ap-player {
   display: block;
