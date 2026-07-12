@@ -315,7 +315,7 @@ async def test_generate_tokens_accepts_final_only_multi_choice_output():
         "prompt_tokens": 2,
         "completion_tokens": 3,
         "total_tokens": 5,
-        "prompt_tokens_details": None,
+        "prompt_tokens_details": {"cached_tokens": 0},
     }
 
 
