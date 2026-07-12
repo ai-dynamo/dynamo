@@ -2947,7 +2947,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.default_sampling_params,
             self.model_max_len,
             enable_rl=self.config.enable_rl,
-            disaggregation_mode=self.config.disaggregation_mode,
+            disaggregation_mode=mode,
         )
 
         if kv_params is not None:
@@ -3276,7 +3276,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             self.default_sampling_params,
             self.model_max_len,
             enable_rl=self.config.enable_rl,
-            disaggregation_mode=self.config.disaggregation_mode,
+            disaggregation_mode=DisaggregationMode.PREFILL,
         )
 
         # One protocol instance per request; carries per-request state
