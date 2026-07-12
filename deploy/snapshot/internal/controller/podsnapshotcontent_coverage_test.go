@@ -12,7 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -185,7 +187,7 @@ func TestRemoveCaptureEligibleLabel_PatchErrorLeavesLabel(t *testing.T) {
 	assert.True(t, labeled)
 }
 
-func TestSetSnapshotContentSucceeded_StatusPatchErrorLeavesNoCondition(t *testing.T) {
+func TestSetSnapshotContentSucceeded_StatusPatchErrorReturnsError(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
@@ -194,12 +196,13 @@ func TestSetSnapshotContentSucceeded_StatusPatchErrorLeavesNoCondition(t *testin
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	w.setSnapshotContentSucceeded(context.Background(), content)
+	err := w.setSnapshotContentSucceeded(context.Background(), content)
 
+	require.Error(t, err)
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
 }
 
-func TestSetSnapshotContentFailed_StatusPatchErrorLeavesNoCondition(t *testing.T) {
+func TestSetSnapshotContentFailed_StatusPatchErrorReturnsError(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
@@ -208,7 +211,31 @@ func TestSetSnapshotContentFailed_StatusPatchErrorLeavesNoCondition(t *testing.T
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	w.setSnapshotContentFailed(context.Background(), content, "SomeReason", errors.New("boom"))
+	err := w.setSnapshotContentFailed(context.Background(), content, "SomeReason", errors.New("boom"))
 
+	require.Error(t, err)
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
+}
+
+// conflictErr returns a 409 Conflict error for the status subresource.
+func conflictErr() error {
+	return apierrors.NewConflict(schema.GroupResource{Resource: "podsnapshotcontents"}, "podsnapshotcontent-x", errors.New("resource version conflict"))
+}
+
+func TestSetSnapshotContentFailed_ConflictReturnsError(t *testing.T) {
+	// Patch returns Conflict — optimistic lock rejected; error propagates to caller.
+	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
+	funcs := interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			return conflictErr()
+		},
+	}
+	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
+
+	err := w.setSnapshotContentFailed(context.Background(), content, "CheckpointFailed", errors.New("dump error"))
+
+	require.Error(t, err)
+	// The store is unchanged (no status written through the intercepted client).
+	got := getContent(t, w, content.Name)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 }

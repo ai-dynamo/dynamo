@@ -37,7 +37,7 @@ type result struct {
 	Status             string
 }
 
-func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, error) {
+func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (_ *result, retErr error) {
 	if strings.TrimSpace(opts.ManifestPath) == "" {
 		return nil, fmt.Errorf("missing required flags: --manifest")
 	}
@@ -99,12 +99,19 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		return nil, err
 	}
 
+	// Clean up the Job on any error after this point. The PodSnapshot is left in place
+	// to aid debugging when the flow fails.
+	defer func() {
+		if retErr != nil {
+			_ = clientset.BatchV1().Jobs(namespace).Delete(ctx, checkpointJobName, metav1.DeleteOptions{})
+		}
+	}()
+
 	waitCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
 	defer cancel()
 
 	sourcePod, err := waitForSourcePod(waitCtx, clientset, namespace, checkpointJobName, createdJob.UID)
 	if err != nil {
-		_ = clientset.BatchV1().Jobs(namespace).Delete(ctx, checkpointJobName, metav1.DeleteOptions{})
 		return nil, err
 	}
 
