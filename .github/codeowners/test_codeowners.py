@@ -30,6 +30,7 @@ from build_codeowners import (  # noqa: E402
     is_policy_change,
     split_coverage,
 )
+import who_owns  # noqa: E402
 from codeowners_match import (  # noqa: E402
     Area,
     ResolvedModel,
@@ -594,9 +595,9 @@ class TestEmissionIsTreeIndependent:
         import inspect
 
         sig = inspect.signature(_render_codeowners)
-        assert (
-            "tree" not in sig.parameters
-        ), "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
+        assert "tree" not in sig.parameters, (
+            "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
+        )
         sig_base = inspect.signature(compute_resolution)
         # tree is still accepted (backward-compat) but must default to None
         # so callers that omit it get pure behavior for free.
@@ -869,6 +870,74 @@ class TestPolicyChangeFallback:
         result = _run_build(repo, areas, "--changed-only", "--base", base)
         assert result.returncode == 1
         assert "owned/b.txt" in result.stdout
+
+
+# ------------------------------------------------------------------
+# who_owns.team_members() -- roster expansion (--people)
+# ------------------------------------------------------------------
+
+
+class TestTeamMembers:
+    def test_expands_team_via_fetcher(self) -> None:
+        cache: dict = {}
+        fetched = []
+
+        def fake(org: str, slug: str) -> list[str]:
+            fetched.append((org, slug))
+            return ["zoe", "amy"]
+
+        members = who_owns.team_members("@acme/router", fetch=fake, cache=cache)
+        assert members == ["amy", "zoe"]  # sorted
+        assert fetched == [("acme", "router")]
+        # second lookup served from cache, fetcher not called again
+        assert who_owns.team_members("@acme/router", fetch=fake, cache=cache) == [
+            "amy",
+            "zoe",
+        ]
+        assert fetched == [("acme", "router")]
+
+    def test_fetch_failure_returns_none_and_caches_negative(self) -> None:
+        cache: dict = {}
+        calls = []
+
+        def boom(org: str, slug: str) -> list[str]:
+            calls.append(slug)
+            raise subprocess.CalledProcessError(1, "gh")
+
+        assert who_owns.team_members("@acme/router", fetch=boom, cache=cache) is None
+        assert who_owns.team_members("@acme/router", fetch=boom, cache=cache) is None
+        assert calls == ["router"]  # failure cached; no retry storm
+
+    def test_individual_handle_passes_through(self) -> None:
+        def never(org: str, slug: str) -> list[str]:
+            raise AssertionError("fetcher must not be called for @handles")
+
+        assert who_owns.team_members("@octocat", fetch=never, cache={}) is None
+
+
+class TestChangedFiles:
+    def test_includes_untracked_files(self, tmp_path) -> None:
+        # Brand-new (unstaged) files are the ones the coverage gate cares
+        # about most; `git diff` alone never lists them.
+        repo = tmp_path / "r"
+        repo.mkdir()
+
+        def git(*args: str) -> None:
+            subprocess.check_output(
+                ["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL
+            )
+
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (repo / "tracked.txt").write_text("x")
+        git("add", "tracked.txt")
+        git("commit", "-q", "-m", "init")
+        (repo / "tracked.txt").write_text("y")  # modified, unstaged
+        (repo / "brand_new.txt").write_text("z")  # untracked
+
+        files = who_owns.changed_files(str(repo), "HEAD")
+        assert files == ["brand_new.txt", "tracked.txt"]
 
 
 # ------------------------------------------------------------------
