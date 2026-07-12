@@ -21,6 +21,11 @@ A line with more than one team is co-ownership: under "any one approves," any on
 of them satisfies the gate, so co-ownership adds review *visibility* without
 adding required approvals.
 
+External contributors: every PR also gets a "Who reviews this PR" table in
+the `codeowners-reviewers` workflow's run summary (Actions tab), expanded to
+member names when the repo's org-read token is configured -- no org
+membership or local tooling needed.
+
 ## Files
 
 | File | What it is |

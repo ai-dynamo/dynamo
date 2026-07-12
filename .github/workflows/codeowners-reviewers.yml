@@ -1,0 +1,59 @@
+name: codeowners-reviewers
+
+# Posts "who reviews this PR" (owning teams, expanded to member logins when an
+# org-read token is available) into the run's job summary. On a public repo the
+# summary is visible to everyone -- including external contributors, who cannot
+# see team membership on GitHub itself -- and it ages out with run retention
+# instead of living in the PR conversation or git history.
+#
+# SECURITY: this runs on pull_request_target so the org-read secret is
+# available for fork PRs. It must therefore NEVER check out or execute code
+# from the PR head: it checks out the BASE ref only and reads the PR's file
+# list via the API. Do not add a head-ref checkout to this workflow.
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  reviewers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # base ref only (see SECURITY note above)
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - name: Post owners to the job summary
+        env:
+          # ORG_READ_TOKEN: fine-grained token with org members:read, set as a
+          # repo secret. Optional -- without it the default token is used,
+          # member lookups fail closed, and the summary shows team handles.
+          GH_TOKEN: ${{ secrets.ORG_READ_TOKEN || github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          files=$(gh api "repos/${{ github.repository }}/pulls/${PR}/files" --paginate --jq '.[].filename')
+          total=$(printf '%s\n' "$files" | grep -c . || true)
+          shown=$(printf '%s\n' "$files" | head -200)
+          {
+            echo "## Who reviews this PR"
+            echo
+            echo "Owning teams are auto-requested on the PR; any one owner per matched rule approves."
+            echo "Member expansion needs org-visible team data -- when unavailable, team handles are shown."
+            echo
+            echo '```'
+            # `--` ends option parsing: a filename beginning with `-` must
+            # reach argparse as a path, never as an option.
+            printf '%s\n' "$shown" | xargs -d '\n' python .github/codeowners/who_owns.py \
+              --codeowners CODEOWNERS --people --
+            echo '```'
+            if [ "$total" -gt 200 ]; then
+              echo
+              echo "_Showing the first 200 of ${total} changed files._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
