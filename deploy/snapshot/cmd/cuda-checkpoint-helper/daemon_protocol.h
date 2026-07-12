@@ -5,11 +5,14 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <pthread.h>
+#include <signal.h>
 #include <string>
 #include <vector>
 
@@ -115,6 +118,47 @@ class OwnedUnixSocket {
   bool bound_ = false;
 };
 
+class ShutdownSignalOwner {
+ public:
+  struct ShutdownResult {
+    const char* operation = nullptr;
+    int error_code = 0;
+
+    bool ok() const { return error_code == 0; }
+  };
+
+  ShutdownSignalOwner() = default;
+  ShutdownSignalOwner(const ShutdownSignalOwner&) = delete;
+  ShutdownSignalOwner& operator=(const ShutdownSignalOwner&) = delete;
+  ~ShutdownSignalOwner() noexcept;
+
+  bool Start(std::string* error);
+  ShutdownResult RequestShutdownNoThrow() noexcept;
+  ShutdownResult StopAndJoinNoThrow() noexcept;
+  bool StopAndJoin(std::string* error);
+  void Close() noexcept;
+  bool ShutdownRequested() const
+  {
+    return shutdown_requested_.load(std::memory_order_acquire);
+  }
+  int operation_stop_fd() const { return operation_stop_pipe_[0]; }
+  int health_stop_fd() const { return health_stop_pipe_[0]; }
+
+ private:
+  static void* ThreadEntry(void* owner) noexcept;
+  void Run() noexcept;
+
+  std::atomic<bool> shutdown_requested_{false};
+  sigset_t signals_{};
+  pthread_t thread_{};
+  std::atomic<bool> thread_started_{false};
+  int signal_fd_ = -1;
+  int operation_stop_pipe_[2]{-1, -1};
+  int health_stop_pipe_[2]{-1, -1};
+  int control_pipe_[2]{-1, -1};
+  int thread_error_ = 0;
+};
+
 using OperationExecutor = std::function<Response(const Request&)>;
 using CompletionExecutor = std::function<int32_t()>;
 
@@ -131,7 +175,9 @@ bool ResponseAllowsServerContinue(const Response& response);
 int32_t FinishHandledOperation(
     bool post_handle_succeeded, int32_t failure_status,
     const CompletionExecutor& completion, OperationState* state);
-int PollForInputOrStop(int input_fd, int stop_fd);
+int PollForInputOrStop(
+    int input_fd, int stop_fd,
+    const std::function<void()>& before_poll = {});
 const char* ActionName(Action action);
 Response HealthResponse(const OperationHealth& health);
 

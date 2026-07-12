@@ -6,15 +6,20 @@
 #include "daemon_protocol.h"
 
 #include <cassert>
+#include <barrier>
 #include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
+#include <functional>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 
@@ -226,28 +231,113 @@ TestSocketLifecycle()
 }
 
 void
-TestStopPipeWakesWaiters()
+RunBounded(const std::function<void()>& test)
+{
+  const pid_t child = fork();
+  assert(child >= 0);
+  if (child == 0) {
+    test();
+    _exit(0);
+  }
+
+  int status = 0;
+  pid_t wait_result = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while ((wait_result = waitpid(child, &status, WNOHANG)) == 0 &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  if (wait_result == 0) {
+    assert(kill(child, SIGKILL) == 0);
+    assert(waitpid(child, &status, 0) == child);
+    assert(false && "bounded shutdown test timed out");
+  }
+  assert(wait_result == child);
+  assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+void
+RunSignalOwnerScenario(bool external_signal)
+{
+  ShutdownSignalOwner signal_owner;
+  std::string error;
+  assert(signal_owner.Start(&error));
+
+  int silent_operation_client[2];
+  int silent_health_client[2];
+  assert(socketpair(
+             AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0,
+             silent_operation_client) == 0);
+  assert(socketpair(
+             AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0,
+             silent_health_client) == 0);
+  std::barrier waiters_started(3);
+  const auto rendezvous = [&] { waiters_started.arrive_and_wait(); };
+  const auto wait_for_stop = [&](int client_fd, int stop_fd) {
+    assert(PollForInputOrStop(client_fd, stop_fd, rendezvous) == 0);
+    unsigned char wake = 0;
+    assert(read(stop_fd, &wake, sizeof(wake)) == sizeof(wake));
+  };
+  std::thread operation_waiter(
+      [&] {
+        wait_for_stop(
+            silent_operation_client[0],
+            signal_owner.operation_stop_fd());
+      });
+  std::thread health_waiter(
+      [&] {
+        wait_for_stop(
+            silent_health_client[0],
+            signal_owner.health_stop_fd());
+      });
+  waiters_started.arrive_and_wait();
+
+  if (external_signal) {
+    assert(kill(getpid(), SIGTERM) == 0);
+    operation_waiter.join();
+    health_waiter.join();
+    assert(signal_owner.ShutdownRequested());
+    assert(signal_owner.StopAndJoin(&error));
+  } else {
+    assert(signal_owner.StopAndJoin(&error));
+    operation_waiter.join();
+    health_waiter.join();
+    assert(signal_owner.ShutdownRequested());
+  }
+  signal_owner.Close();
+  close(silent_operation_client[0]);
+  close(silent_operation_client[1]);
+  close(silent_health_client[0]);
+  close(silent_health_client[1]);
+}
+
+void
+TestExternalSignalWakesIndependentWaiters()
+{
+  RunBounded([] { RunSignalOwnerScenario(true); });
+}
+
+void
+TestInternalStopJoinsSignalOwnerAndWakesIndependentWaiters()
+{
+  RunBounded([] { RunSignalOwnerScenario(false); });
+}
+
+void
+TestPollDoesNotConsumeStopWake()
 {
   int stop_pipe[2];
-  assert(pipe(stop_pipe) == 0);
-  const int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-  assert(listener >= 0);
-  std::thread accept_waiter([&] { assert(PollForInputOrStop(listener, stop_pipe[0]) == 0); });
+  int silent_client[2];
+  assert(pipe2(stop_pipe, O_CLOEXEC | O_NONBLOCK) == 0);
+  assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, silent_client) == 0);
   const unsigned char wake = 1;
   assert(write(stop_pipe[1], &wake, sizeof(wake)) == sizeof(wake));
-  accept_waiter.join();
-  unsigned char drained = 0;
-  assert(read(stop_pipe[0], &drained, sizeof(drained)) == sizeof(drained));
-
-  int silent_client[2];
-  assert(socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, silent_client) == 0);
-  std::thread client_waiter(
-      [&] { assert(PollForInputOrStop(silent_client[0], stop_pipe[0]) == 0); });
-  assert(write(stop_pipe[1], &wake, sizeof(wake)) == sizeof(wake));
-  client_waiter.join();
+  assert(PollForInputOrStop(silent_client[0], stop_pipe[0]) == 0);
+  assert(PollForInputOrStop(silent_client[0], stop_pipe[0]) == 0);
+  unsigned char remaining = 0;
+  assert(read(stop_pipe[0], &remaining, sizeof(remaining)) == sizeof(remaining));
   close(silent_client[0]);
   close(silent_client[1]);
-  close(listener);
   close(stop_pipe[0]);
   close(stop_pipe[1]);
 }
@@ -261,6 +351,8 @@ main()
   TestExecutionIdentityAndFatalControlFlow();
   TestHealthStates();
   TestSocketLifecycle();
-  TestStopPipeWakesWaiters();
+  TestExternalSignalWakesIndependentWaiters();
+  TestInternalStopJoinsSignalOwnerAndWakesIndependentWaiters();
+  TestPollDoesNotConsumeStopWake();
   return 0;
 }

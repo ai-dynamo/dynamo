@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cctype>
@@ -21,10 +22,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -42,19 +45,44 @@ namespace transfer = cuda_checkpoint_transfer;
 using Clock = std::chrono::steady_clock;
 namespace daemon_protocol = cuda_checkpoint_daemon;
 
-volatile sig_atomic_t shutdown_requested = 0;
-volatile sig_atomic_t shutdown_write_fd = -1;
-
-void
-RequestShutdown(int)
-{
-  shutdown_requested = 1;
-  if (shutdown_write_fd >= 0) {
-    const unsigned char wake = 1;
-    const ssize_t written = write(shutdown_write_fd, &wake, sizeof(wake));
-    (void)written;
+class ScopedFd {
+ public:
+  explicit ScopedFd(int fd) : fd_(fd) {}
+  ScopedFd(const ScopedFd&) = delete;
+  ScopedFd& operator=(const ScopedFd&) = delete;
+  ~ScopedFd() noexcept
+  {
+    if (fd_ >= 0) {
+      close(fd_);
+    }
   }
-}
+
+  int get() const { return fd_; }
+
+ private:
+  int fd_;
+};
+
+class DaemonThreadShutdown {
+ public:
+  DaemonThreadShutdown(
+      daemon_protocol::ShutdownSignalOwner* signal_owner,
+      daemon_protocol::ShutdownSignalOwner::ShutdownResult* result)
+      : signal_owner_(signal_owner), result_(result)
+  {
+  }
+  DaemonThreadShutdown(const DaemonThreadShutdown&) = delete;
+  DaemonThreadShutdown& operator=(const DaemonThreadShutdown&) = delete;
+
+  ~DaemonThreadShutdown() noexcept
+  {
+    *result_ = signal_owner_->StopAndJoinNoThrow();
+  }
+
+ private:
+  daemon_protocol::ShutdownSignalOwner* signal_owner_;
+  daemon_protocol::ShutdownSignalOwner::ShutdownResult* result_;
+};
 
 bool
 ParsePositiveSeconds(const char* value, uint64_t* seconds_out)
@@ -846,18 +874,18 @@ RunHealthServer(
     if (daemon_protocol::PollForInputOrStop(socket->fd(), shutdown_fd) == 0) {
       break;
     }
-    const int client_fd = accept4(socket->fd(), nullptr, nullptr, SOCK_CLOEXEC);
-    if (client_fd < 0) {
+    const int accepted_fd = accept4(socket->fd(), nullptr, nullptr, SOCK_CLOEXEC);
+    if (accepted_fd < 0) {
       if (errno == EINTR) {
         continue;
       }
       break;
     }
-    if (daemon_protocol::PollForInputOrStop(client_fd, shutdown_fd) == 0) {
-      close(client_fd);
+    ScopedFd client_fd(accepted_fd);
+    if (daemon_protocol::PollForInputOrStop(client_fd.get(), shutdown_fd) == 0) {
       break;
     }
-    const ssize_t received = recv(client_fd, packet.data(), packet.size(), MSG_TRUNC);
+    const ssize_t received = recv(client_fd.get(), packet.data(), packet.size(), MSG_TRUNC);
     daemon_protocol::Request request;
     daemon_protocol::Response response;
     std::string error;
@@ -873,15 +901,24 @@ RunHealthServer(
     }
     std::vector<unsigned char> encoded;
     if (daemon_protocol::EncodeResponse(response, &encoded, &error)) {
-      (void)send(client_fd, encoded.data(), encoded.size(), MSG_NOSIGNAL);
+      (void)send(client_fd.get(), encoded.data(), encoded.size(), MSG_NOSIGNAL);
     }
-    close(client_fd);
   }
 }
 
 int
 RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
 {
+  // Construct contexts first so signal ownership is stopped before contexts are
+  // released on every return path.
+  RetainedContexts contexts;
+  daemon_protocol::ShutdownSignalOwner signal_owner;
+  std::string setup_error;
+  if (!signal_owner.Start(&setup_error)) {
+    std::fprintf(stderr, "daemon shutdown setup failed: %s\n", setup_error.c_str());
+    return 1;
+  }
+
   const std::filesystem::path path(socket_path);
   if (!ValidSocketPath(socket_path)) {
     std::fprintf(stderr, "invalid daemon socket path\n");
@@ -901,7 +938,6 @@ RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
     PrintCudaError(status);
     return 1;
   }
-  RetainedContexts contexts;
   int device_count = 0;
   double enumeration_seconds = 0.0;
   double retain_seconds = 0.0;
@@ -922,102 +958,133 @@ RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
     std::fprintf(stderr, "daemon health socket setup failed: %s\n", socket_error.c_str());
     return 1;
   }
-  int shutdown_pipe[2];
-  if (pipe2(shutdown_pipe, O_CLOEXEC | O_NONBLOCK) != 0) {
-    std::perror("create shutdown pipe");
-    return 1;
-  }
-  struct sigaction action {};
-  action.sa_handler = RequestShutdown;
-  action.sa_flags = 0;
-  sigemptyset(&action.sa_mask);
-  (void)sigaction(SIGTERM, &action, nullptr);
-  (void)sigaction(SIGINT, &action, nullptr);
-  shutdown_write_fd = shutdown_pipe[1];
   daemon_protocol::OperationHealth operation_health{
       std::chrono::seconds(max_operation_seconds)};
   operation_health.MarkReady();
-  std::thread health_thread(
-      RunHealthServer, &health_socket, shutdown_pipe[0], &operation_health);
-  std::fprintf(
-      stdout,
-      "{\"event\":\"cuda_checkpoint_daemon_ready\",\"schema_version\":1,\"cuda_init_seconds\":%.6f,"
-      "\"cuda_device_count\":%d,\"device_enumeration_seconds\":%.6f,"
-      "\"primary_context_retain_seconds\":%.6f}\n",
-      init_seconds, device_count, enumeration_seconds, retain_seconds);
-  std::fflush(stdout);
-
-  std::vector<unsigned char> packet(daemon_protocol::kMaxRequestSize + 1);
+  daemon_protocol::ShutdownSignalOwner::ShutdownResult shutdown_result;
+  daemon_protocol::ShutdownSignalOwner::ShutdownResult health_shutdown_result;
+  std::atomic<bool> health_thread_failed{false};
   bool daemon_fatal = false;
-  while (!shutdown_requested && !daemon_fatal) {
-    if (daemon_protocol::PollForInputOrStop(operation_socket.fd(), shutdown_pipe[0]) == 0) {
-      break;
+  {
+    // The guard is destroyed before the jthread: it stops and joins the signal
+    // owner, which wakes the health server, and then jthread joins the server.
+    std::jthread health_thread;
+    try {
+      health_thread = std::jthread([&]() noexcept {
+        try {
+          RunHealthServer(
+              &health_socket, signal_owner.health_stop_fd(), &operation_health);
+        }
+        catch (...) {
+          health_shutdown_result = signal_owner.RequestShutdownNoThrow();
+          health_thread_failed.store(true, std::memory_order_release);
+        }
+      });
     }
-    const int client_fd = accept4(operation_socket.fd(), nullptr, nullptr, SOCK_CLOEXEC);
-    if (client_fd < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      if (shutdown_requested) {
-        break;
-      }
-      std::perror("accept");
-      break;
+    catch (const std::system_error& exception) {
+      std::fprintf(stderr, "create daemon health thread failed: %s\n", exception.what());
+      return 1;
     }
-    if (daemon_protocol::PollForInputOrStop(client_fd, shutdown_pipe[0]) == 0) {
-      close(client_fd);
-      break;
-    }
-    const ssize_t received = recv(client_fd, packet.data(), packet.size(), MSG_TRUNC);
-    daemon_protocol::Response response;
-    daemon_protocol::Request request;
-    std::string protocol_error;
-    if (received <= 0 || static_cast<size_t>(received) > daemon_protocol::kMaxRequestSize ||
-        !daemon_protocol::ParseRequest(packet.data(), received, &request, &protocol_error)) {
-      response.cuda_status = CUDA_ERROR_INVALID_VALUE;
-      response.error = received <= 0 ? "failed to receive request" : protocol_error;
-    } else if (request.action == daemon_protocol::Action::kHealth) {
-      response.cuda_status = CUDA_ERROR_INVALID_VALUE;
-      response.error = "health requests must use the health socket";
-    } else {
-      const auto rpc_start = Clock::now();
-      operation_health.Begin(request.action, request.pid);
-      daemon_fatal = !daemon_protocol::ExecuteValidated(
-          request, "/host/proc",
-          [&contexts](const daemon_protocol::Request& validated) {
-            return RunDaemonOperation(validated, &contexts);
-          },
-          &response);
-      operation_health.End();
+    DaemonThreadShutdown shutdown_threads(&signal_owner, &shutdown_result);
+    try {
       std::fprintf(
           stdout,
-          "{\"event\":\"cuda_checkpoint_daemon_operation\",\"schema_version\":1,\"action\":\"%s\","
-          "\"pid\":%u,\"cuda_status\":%d,\"fatal\":%s,\"rpc_service_seconds\":%.6f}\n",
-          daemon_protocol::ActionName(request.action), request.pid,
-          response.cuda_status, (response.flags & daemon_protocol::kResponseFatal) != 0 ? "true" : "false",
-          SecondsSince(rpc_start));
+          "{\"event\":\"cuda_checkpoint_daemon_ready\",\"schema_version\":1,\"cuda_init_seconds\":%.6f,"
+          "\"cuda_device_count\":%d,\"device_enumeration_seconds\":%.6f,"
+          "\"primary_context_retain_seconds\":%.6f}\n",
+          init_seconds, device_count, enumeration_seconds, retain_seconds);
       std::fflush(stdout);
+
+      std::vector<unsigned char> packet(daemon_protocol::kMaxRequestSize + 1);
+      while (!signal_owner.ShutdownRequested() && !daemon_fatal) {
+        if (daemon_protocol::PollForInputOrStop(
+                operation_socket.fd(), signal_owner.operation_stop_fd()) == 0) {
+          break;
+        }
+        const int accepted_fd =
+            accept4(operation_socket.fd(), nullptr, nullptr, SOCK_CLOEXEC);
+        if (accepted_fd < 0) {
+          if (errno == EINTR) {
+            continue;
+          }
+          if (signal_owner.ShutdownRequested()) {
+            break;
+          }
+          std::perror("accept");
+          break;
+        }
+        ScopedFd client_fd(accepted_fd);
+        if (daemon_protocol::PollForInputOrStop(
+                client_fd.get(), signal_owner.operation_stop_fd()) == 0) {
+          break;
+        }
+        const ssize_t received =
+            recv(client_fd.get(), packet.data(), packet.size(), MSG_TRUNC);
+        daemon_protocol::Response response;
+        daemon_protocol::Request request;
+        std::string protocol_error;
+        if (received <= 0 || static_cast<size_t>(received) > daemon_protocol::kMaxRequestSize ||
+            !daemon_protocol::ParseRequest(packet.data(), received, &request, &protocol_error)) {
+          response.cuda_status = CUDA_ERROR_INVALID_VALUE;
+          response.error = received <= 0 ? "failed to receive request" : protocol_error;
+        } else if (request.action == daemon_protocol::Action::kHealth) {
+          response.cuda_status = CUDA_ERROR_INVALID_VALUE;
+          response.error = "health requests must use the health socket";
+        } else {
+          const auto rpc_start = Clock::now();
+          operation_health.Begin(request.action, request.pid);
+          daemon_fatal = !daemon_protocol::ExecuteValidated(
+              request, "/host/proc",
+              [&contexts](const daemon_protocol::Request& validated) {
+                return RunDaemonOperation(validated, &contexts);
+              },
+              &response);
+          operation_health.End();
+          std::fprintf(
+              stdout,
+              "{\"event\":\"cuda_checkpoint_daemon_operation\",\"schema_version\":1,\"action\":\"%s\","
+              "\"pid\":%u,\"cuda_status\":%d,\"fatal\":%s,\"rpc_service_seconds\":%.6f}\n",
+              daemon_protocol::ActionName(request.action), request.pid,
+              response.cuda_status, (response.flags & daemon_protocol::kResponseFatal) != 0 ? "true" : "false",
+              SecondsSince(rpc_start));
+          std::fflush(stdout);
+        }
+        std::vector<unsigned char> encoded;
+        if (!daemon_protocol::EncodeResponse(response, &encoded, &protocol_error)) {
+          daemon_protocol::Response bounded{
+              .cuda_status = CUDA_ERROR_OPERATING_SYSTEM,
+              .flags = response.flags & daemon_protocol::kResponseFatal,
+              .output = "",
+              .error = "daemon response exceeded protocol limit",
+          };
+          (void)daemon_protocol::EncodeResponse(bounded, &encoded, &protocol_error);
+        }
+        (void)send(client_fd.get(), encoded.data(), encoded.size(), MSG_NOSIGNAL);
+      }
     }
-    std::vector<unsigned char> encoded;
-    if (!daemon_protocol::EncodeResponse(response, &encoded, &protocol_error)) {
-      daemon_protocol::Response bounded{
-          .cuda_status = CUDA_ERROR_OPERATING_SYSTEM,
-          .flags = response.flags & daemon_protocol::kResponseFatal,
-          .output = "",
-          .error = "daemon response exceeded protocol limit",
-      };
-      (void)daemon_protocol::EncodeResponse(bounded, &encoded, &protocol_error);
+    catch (const std::exception& exception) {
+      std::fprintf(stderr, "daemon processing failed: %s\n", exception.what());
+      daemon_fatal = true;
     }
-    (void)send(client_fd, encoded.data(), encoded.size(), MSG_NOSIGNAL);
-    close(client_fd);
+    catch (...) {
+      std::fprintf(stderr, "daemon processing failed: unknown exception\n");
+      daemon_fatal = true;
+    }
   }
-  shutdown_write_fd = -1;
-  const unsigned char wake = 1;
-  const ssize_t written = write(shutdown_pipe[1], &wake, sizeof(wake));
-  (void)written;
-  health_thread.join();
-  close(shutdown_pipe[0]);
-  close(shutdown_pipe[1]);
+  if (health_thread_failed.load(std::memory_order_acquire)) {
+    std::fprintf(stderr, "daemon health thread failed\n");
+    daemon_fatal = true;
+    if (!health_shutdown_result.ok()) {
+      shutdown_result = health_shutdown_result;
+    }
+  }
+  if (!shutdown_result.ok()) {
+    std::fprintf(
+        stderr, "daemon shutdown failed: %s: %s\n",
+        shutdown_result.operation, std::strerror(shutdown_result.error_code));
+    daemon_fatal = true;
+  }
+  signal_owner.Close();
   health_socket.Close();
   operation_socket.Close();
   const auto release_start = Clock::now();

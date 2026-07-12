@@ -14,6 +14,7 @@
 #include <fstream>
 #include <limits>
 #include <poll.h>
+#include <sys/signalfd.h>
 #include <sstream>
 #include <sys/file.h>
 #include <sys/socket.h>
@@ -94,6 +95,24 @@ uint64_t DurationSeconds(
     std::chrono::steady_clock::time_point end)
 {
   return std::chrono::duration_cast<std::chrono::seconds>(end - start).count();
+}
+
+int WriteWake(int fd)
+{
+  const unsigned char wake = 1;
+  ssize_t written;
+  do {
+    written = write(fd, &wake, sizeof(wake));
+  } while (written < 0 && errno == EINTR);
+  if (written == static_cast<ssize_t>(sizeof(wake))) {
+    return 0;
+  }
+  return written < 0 ? errno : EIO;
+}
+
+void SetError(std::string* error, const char* operation, int error_code)
+{
+  *error = std::string(operation) + ": " + std::strerror(error_code);
 }
 
 }  // namespace
@@ -529,13 +548,205 @@ OwnedUnixSocket::Close()
   }
 }
 
+ShutdownSignalOwner::~ShutdownSignalOwner() noexcept
+{
+  (void)StopAndJoinNoThrow();
+  Close();
+}
+
+bool
+ShutdownSignalOwner::Start(std::string* error)
+{
+  if (thread_started_ || signal_fd_ >= 0) {
+    *error = "shutdown signal owner already started";
+    return false;
+  }
+
+  if (sigemptyset(&signals_) != 0 ||
+      sigaddset(&signals_, SIGTERM) != 0 ||
+      sigaddset(&signals_, SIGINT) != 0) {
+    SetError(error, "build shutdown signal set", errno);
+    return false;
+  }
+  const int mask_error = pthread_sigmask(SIG_BLOCK, &signals_, nullptr);
+  if (mask_error != 0) {
+    SetError(error, "block shutdown signals", mask_error);
+    return false;
+  }
+  // Keep the mask blocked until process exit. Restoring it after the owner is
+  // joined would reopen a window for the default signal action during teardown.
+
+  if (pipe2(operation_stop_pipe_, O_CLOEXEC | O_NONBLOCK) != 0) {
+    SetError(error, "create operation shutdown pipe", errno);
+    Close();
+    return false;
+  }
+  if (pipe2(health_stop_pipe_, O_CLOEXEC | O_NONBLOCK) != 0) {
+    SetError(error, "create health shutdown pipe", errno);
+    Close();
+    return false;
+  }
+  if (pipe2(control_pipe_, O_CLOEXEC | O_NONBLOCK) != 0) {
+    SetError(error, "create signal owner control pipe", errno);
+    Close();
+    return false;
+  }
+  signal_fd_ = signalfd(-1, &signals_, SFD_CLOEXEC | SFD_NONBLOCK);
+  if (signal_fd_ < 0) {
+    SetError(error, "create shutdown signal fd", errno);
+    Close();
+    return false;
+  }
+
+  const int thread_error = pthread_create(
+      &thread_, nullptr, &ShutdownSignalOwner::ThreadEntry, this);
+  if (thread_error != 0) {
+    SetError(error, "create shutdown signal thread", thread_error);
+    Close();
+    return false;
+  }
+  thread_started_ = true;
+  return true;
+}
+
+bool
+ShutdownSignalOwner::StopAndJoin(std::string* error)
+{
+  const ShutdownResult result = StopAndJoinNoThrow();
+  if (!result.ok()) {
+    SetError(error, result.operation, result.error_code);
+    return false;
+  }
+  return true;
+}
+
+ShutdownSignalOwner::ShutdownResult
+ShutdownSignalOwner::RequestShutdownNoThrow() noexcept
+{
+  if (!thread_started_) {
+    return {};
+  }
+
+  const int wake_error = WriteWake(control_pipe_[1]);
+  if (wake_error != 0) {
+    return {
+        .operation = "wake shutdown signal thread",
+        .error_code = wake_error,
+    };
+  }
+  return {};
+}
+
+ShutdownSignalOwner::ShutdownResult
+ShutdownSignalOwner::StopAndJoinNoThrow() noexcept
+{
+  if (!thread_started_) {
+    return {};
+  }
+
+  const ShutdownResult wake_result = RequestShutdownNoThrow();
+  const int join_error = pthread_join(thread_, nullptr);
+  if (join_error != 0) {
+    return {
+        .operation = "join shutdown signal thread",
+        .error_code = join_error,
+    };
+  }
+  thread_started_ = false;
+  if (!wake_result.ok()) {
+    return wake_result;
+  }
+  if (thread_error_ != 0) {
+    return {
+        .operation = "shutdown signal thread",
+        .error_code = thread_error_,
+    };
+  }
+  return {};
+}
+
+void
+ShutdownSignalOwner::Close() noexcept
+{
+  if (thread_started_) {
+    return;
+  }
+  for (int* pipe : {operation_stop_pipe_, health_stop_pipe_, control_pipe_}) {
+    for (size_t index = 0; index < 2; ++index) {
+      if (pipe[index] >= 0) {
+        close(pipe[index]);
+        pipe[index] = -1;
+      }
+    }
+  }
+  if (signal_fd_ >= 0) {
+    close(signal_fd_);
+    signal_fd_ = -1;
+  }
+}
+
+void*
+ShutdownSignalOwner::ThreadEntry(void* owner) noexcept
+{
+  static_cast<ShutdownSignalOwner*>(owner)->Run();
+  return nullptr;
+}
+
+void
+ShutdownSignalOwner::Run() noexcept
+{
+  pollfd descriptors[2]{
+      {.fd = signal_fd_, .events = POLLIN, .revents = 0},
+      {.fd = control_pipe_[0], .events = POLLIN, .revents = 0},
+  };
+  int poll_result;
+  do {
+    poll_result = poll(descriptors, 2, -1);
+  } while (poll_result < 0 && errno == EINTR);
+  if (poll_result < 0) {
+    thread_error_ = errno;
+  } else if (
+      (descriptors[0].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) != 0) {
+    signalfd_siginfo signal_info{};
+    const ssize_t bytes = read(signal_fd_, &signal_info, sizeof(signal_info));
+    if (bytes != static_cast<ssize_t>(sizeof(signal_info))) {
+      thread_error_ = bytes < 0 ? errno : EIO;
+    } else if (
+        signal_info.ssi_signo != SIGTERM &&
+        signal_info.ssi_signo != SIGINT) {
+      thread_error_ = EINVAL;
+    }
+  } else if (
+      (descriptors[1].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) != 0) {
+    unsigned char control = 0;
+    const ssize_t bytes = read(control_pipe_[0], &control, sizeof(control));
+    if (bytes != static_cast<ssize_t>(sizeof(control))) {
+      thread_error_ = bytes < 0 ? errno : EIO;
+    }
+  } else {
+    thread_error_ = EIO;
+  }
+
+  shutdown_requested_.store(true, std::memory_order_release);
+  const int operation_error = WriteWake(operation_stop_pipe_[1]);
+  const int health_error = WriteWake(health_stop_pipe_[1]);
+  if (thread_error_ == 0) {
+    thread_error_ = operation_error != 0 ? operation_error : health_error;
+  }
+}
+
 int
-PollForInputOrStop(int input_fd, int stop_fd)
+PollForInputOrStop(
+    int input_fd, int stop_fd,
+    const std::function<void()>& before_poll)
 {
   pollfd descriptors[2]{
       {.fd = input_fd, .events = POLLIN, .revents = 0},
       {.fd = stop_fd, .events = POLLIN, .revents = 0},
   };
+  if (before_poll) {
+    before_poll();
+  }
   for (;;) {
     const int result = poll(descriptors, 2, -1);
     if (result < 0 && errno == EINTR) {
