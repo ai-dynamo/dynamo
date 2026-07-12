@@ -10,17 +10,20 @@ avoid importing from conftest and to keep values consistent.
 import os
 from enum import IntEnum
 
-QWEN = "Qwen/Qwen3-0.6B"
-LLAMA = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"  # on an l4 gpu, must limit --max-seq-len, otherwise it will not fit
-GPT_OSS = "openai/gpt-oss-20b"
-QWEN_EMBEDDING = "Qwen/Qwen3-Embedding-4B"
+from tests.utils.model_registry import (
+    DEFAULT_TEST_MODELS,
+    DEEPSEEK_AI_DEEPSEEK_R1_DISTILL_LLAMA_8B,
+    OPENAI_GPT_OSS_20B,
+    QWEN_QWEN3_0_6B,
+    QWEN_QWEN3_EMBEDDING_4B,
+)
 
-TEST_MODELS = [
-    QWEN,
-    LLAMA,
-    GPT_OSS,
-    QWEN_EMBEDDING,
-]
+QWEN = QWEN_QWEN3_0_6B
+LLAMA = DEEPSEEK_AI_DEEPSEEK_R1_DISTILL_LLAMA_8B  # on an l4 gpu, must limit --max-seq-len, otherwise it will not fit
+GPT_OSS = OPENAI_GPT_OSS_20B
+QWEN_EMBEDDING = QWEN_QWEN3_EMBEDDING_4B
+
+TEST_MODELS = list(DEFAULT_TEST_MODELS)
 
 
 # Default ports used by test payloads/scripts when not overridden.

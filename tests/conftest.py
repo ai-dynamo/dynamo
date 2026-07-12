@@ -25,6 +25,12 @@ from tests.utils.collection_env_guard import (
     snapshot_collection_env,
 )
 from tests.utils.constants import TEST_MODELS, DefaultPort
+from tests.utils.model_registry import (
+    DEFAULT_CI_MODEL_SNAPSHOT_CAP_GIB,
+    downloadable_model_ids,
+    get_model_spec,
+    validate_ci_model_ids,
+)
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
     ServicePorts,
@@ -441,6 +447,7 @@ def download_models(model_list=None, ignore_weights=False):
     """
     if model_list is None:
         model_list = TEST_MODELS
+    model_list = downloadable_model_ids(model_list)
 
     # Check for HF_TOKEN in environment. snapshot_download() picks it up
     # automatically via huggingface_hub's token resolution (HF_TOKEN env var →
@@ -463,6 +470,16 @@ def download_models(model_list=None, ignore_weights=False):
 
     failures = []
     for model_id in model_list:
+        spec = get_model_spec(model_id)
+        if spec.over_cap_exception:
+            logging.warning(
+                "CI model %s is a registered over-cap exception: "
+                "%.1f GiB > %.1f GiB. Reason: %s",
+                model_id,
+                spec.snapshot_size_gib,
+                DEFAULT_CI_MODEL_SNAPSHOT_CAP_GIB,
+                spec.exception_reason,
+            )
         logging.info(
             f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
         )
@@ -745,6 +762,16 @@ def pytest_collection_modifyitems(config, items):
         return
 
     # Collect models via explicit pytest mark from final filtered items only
+    models_to_download = _collect_models_to_download(items)
+
+    # Store models to download in pytest config for fixtures to access
+    if models_to_download:
+        config.models_to_download = models_to_download
+
+
+def _collect_models_to_download(items) -> set[str]:
+    """Collect and validate Hugging Face model ids from pytest model marks."""
+
     models_to_download = set()
     for item in items:
         # Only collect from items that are not skipped
@@ -755,10 +782,8 @@ def pytest_collection_modifyitems(config, items):
         for model_mark in item.iter_markers("model"):
             for repo_id in model_mark.args:
                 models_to_download.add(repo_id)
-
-    # Store models to download in pytest config for fixtures to access
-    if models_to_download:
-        config.models_to_download = models_to_download
+    validate_ci_model_ids(models_to_download)
+    return models_to_download
 
 
 class EtcdServer(ManagedProcess):
