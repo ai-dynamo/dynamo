@@ -178,6 +178,7 @@ areas:
   - benchmarks/multimodal/
   - benchmarks/omni/
   - components/src/dynamo/common/multimodal/
+  - examples/custom_encoder/
   - components/src/dynamo/trtllm/multimodal/
   - components/src/dynamo/vllm/multimodal_handlers/
   - components/src/dynamo/vllm/multimodal_utils/
