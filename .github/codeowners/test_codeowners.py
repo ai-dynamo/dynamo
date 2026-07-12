@@ -447,6 +447,31 @@ class TestTeamMembers:
         assert who_owns.team_members("@octocat", fetch=never, cache={}) is None
 
 
+class TestChangedFiles:
+    def test_includes_untracked_files(self, tmp_path) -> None:
+        # Brand-new (unstaged) files are the ones the coverage gate cares
+        # about most; `git diff` alone never lists them.
+        repo = tmp_path / "r"
+        repo.mkdir()
+
+        def git(*args: str) -> None:
+            subprocess.check_output(
+                ["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL
+            )
+
+        git("init", "-q")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        (repo / "tracked.txt").write_text("x")
+        git("add", "tracked.txt")
+        git("commit", "-q", "-m", "init")
+        (repo / "tracked.txt").write_text("y")  # modified, unstaged
+        (repo / "brand_new.txt").write_text("z")  # untracked
+
+        files = who_owns.changed_files(str(repo), "HEAD")
+        assert files == ["brand_new.txt", "tracked.txt"]
+
+
 # ------------------------------------------------------------------
 # TypedDict / dataclass surface
 # ------------------------------------------------------------------

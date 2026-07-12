@@ -141,12 +141,17 @@ def _team_url(team: str) -> str | None:
 def changed_files(repo: str, base: str) -> list[str]:
     """Files changed vs ``base`` (merge-base diff), falling back to plain diff.
 
-    Returns ``[]`` only when a diff actually succeeded and was empty. If every
-    fallback fails (not a git checkout, unknown base), the last git error is
-    surfaced instead of masquerading as "no changed files".
+    Untracked (not yet staged) files are included too -- brand-new paths are
+    exactly the ones the coverage gate cares about, and ``git diff`` alone
+    never shows them.
+
+    Returns ``[]`` only when the lookups actually succeeded and were empty.
+    If everything fails (not a git checkout, unknown base), the last git
+    error is surfaced instead of masquerading as "no changed files".
     """
     last_err: subprocess.CalledProcessError | None = None
     any_ok = False
+    changed: list[str] = []
     for args in ([f"{base}...HEAD"], [base], []):
         try:
             out = subprocess.check_output(
@@ -158,15 +163,26 @@ def changed_files(repo: str, base: str) -> list[str]:
             last_err = err
             continue
         any_ok = True
-        files = [p for p in out.splitlines() if p.strip()]
-        if files:
-            return files
+        changed = [p for p in out.splitlines() if p.strip()]
+        if changed:
+            break
+    untracked: list[str] = []
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", repo, "ls-files", "--others", "--exclude-standard"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        untracked = [p for p in out.splitlines() if p.strip()]
+        any_ok = True
+    except (OSError, subprocess.CalledProcessError):
+        pass
     if not any_ok and last_err is not None:
         raise SystemExit(
             f"git diff failed in {repo!r} (not a checkout, or base "
             f"{base!r} unavailable): {last_err}"
         )
-    return []
+    return sorted(set(changed) | set(untracked))
 
 
 def main() -> int:

@@ -22,6 +22,11 @@ team membership to members of the org, so this works for org members with an
 authenticated `gh`; everyone else sees the team handles (the actual reviewers
 appear on the PR once it opens).
 
+External contributors: every PR also gets a "Who reviews this PR" table in
+the `codeowners-reviewers` workflow's run summary (Actions tab), expanded to
+member names when the repo's org-read token is configured -- no org
+membership or local tooling needed.
+
 A line with more than one team is co-ownership: under "any one approves," any one
 of them satisfies the gate, so co-ownership adds review *visibility* without
 adding required approvals.

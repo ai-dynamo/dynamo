@@ -1,5 +1,5 @@
 ---
-name: dynamo-codeowners
+name: repo-codeowners
 description: Work with Dynamo's generated CODEOWNERS - find out who reviews a change, fix a failing codeowners CI check, change review routing, or grant an external contributor area-scoped ownership. Use when the codeowners check fails on a PR, a new directory is unclaimed, someone asks who reviews a path or PR, review routing needs to change, or a contributor should be added as a code owner.
 license: Apache-2.0
 metadata:
@@ -40,6 +40,9 @@ Add `--people` to expand each team to its member logins. This works only for
 NVIDIA org members with an authenticated `gh` - GitHub does not show team
 membership to non-members. Without it (or when the lookup fails), the team
 handles are the answer; the actual reviewers appear on the PR once it opens.
+For an open PR, the `codeowners-reviewers` workflow also posts this table
+(with member names when the org-read secret is configured) to its run summary
+in the Actions tab, visible to external contributors.
 
 ## Flow 2: The `codeowners` CI check failed
 
