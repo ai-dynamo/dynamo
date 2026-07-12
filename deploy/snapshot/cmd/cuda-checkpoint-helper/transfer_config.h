@@ -13,6 +13,11 @@
 
 namespace cuda_checkpoint_transfer {
 
+enum class TransferOperation {
+  kCheckpoint,
+  kRestore,
+};
+
 constexpr size_t kDefaultBufferCount = 1;
 constexpr size_t kDefaultChunkBytes = 64ULL * 1024ULL * 1024ULL;
 constexpr size_t kMinimumChunkBytes = 1ULL * 1024ULL * 1024ULL;
@@ -56,6 +61,7 @@ struct TransferChunk {
 bool ParseSize(std::string_view value, size_t* parsed);
 bool ValidateTransferOptions(const TransferOptions& options, std::string* error);
 bool CalculatePinnedBytes(size_t device_count, const TransferOptions& options, size_t* bytes, std::string* error);
+int StorageFileOpenFlags(TransferOperation operation);
 bool BuildTransferChunks(
     size_t extent_size, const StorageLayout& storage, const TransferOptions& options,
     std::vector<TransferChunk>* chunks, std::string* error);

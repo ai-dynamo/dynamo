@@ -5,6 +5,8 @@
 
 #include "transfer_config.h"
 
+#include <fcntl.h>
+
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
@@ -94,6 +96,13 @@ CalculatePinnedBytes(size_t device_count, const TransferOptions& options, size_t
     return false;
   }
   return true;
+}
+
+int
+StorageFileOpenFlags(TransferOperation operation)
+{
+  const int access = operation == TransferOperation::kCheckpoint ? O_RDWR | O_CREAT | O_TRUNC : O_RDONLY;
+  return access | O_CLOEXEC | O_NOFOLLOW;
 }
 
 bool

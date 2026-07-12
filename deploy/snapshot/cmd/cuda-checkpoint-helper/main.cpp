@@ -31,31 +31,67 @@ namespace {
 
 namespace storage = cuda_checkpoint_storage;
 namespace transfer = cuda_checkpoint_transfer;
+using Clock = std::chrono::steady_clock;
+
+double
+SecondsSince(Clock::time_point start)
+{
+  return std::chrono::duration<double>(Clock::now() - start).count();
+}
+
+double
+SecondsBetween(Clock::time_point start, Clock::time_point end)
+{
+  return std::chrono::duration<double>(end - start).count();
+}
 
 class RetainedContexts {
  public:
-  CUresult RetainAll()
+  RetainedContexts() = default;
+  RetainedContexts(const RetainedContexts&) = delete;
+  RetainedContexts& operator=(const RetainedContexts&) = delete;
+
+  CUresult RetainAll(int* device_count, double* enumeration_seconds, double* retain_seconds)
   {
+    const auto enumeration_start = Clock::now();
     int count = 0;
     CUresult status = cuDeviceGetCount(&count);
+    *enumeration_seconds = SecondsSince(enumeration_start);
+    *device_count = count;
     if (status != CUDA_SUCCESS) {
       return status;
     }
     contexts_.reserve(count);
     for (int ordinal = 0; ordinal < count; ++ordinal) {
+      const auto retain_start = Clock::now();
       CUdevice device = 0;
       status = cuDeviceGet(&device, ordinal);
       if (status != CUDA_SUCCESS) {
+        *retain_seconds += SecondsSince(retain_start);
         return status;
       }
       CUcontext context = nullptr;
       status = cuDevicePrimaryCtxRetain(&context, device);
+      *retain_seconds += SecondsSince(retain_start);
       if (status != CUDA_SUCCESS) {
         return status;
       }
       contexts_.push_back({device, context});
     }
     return CUDA_SUCCESS;
+  }
+
+  CUresult ReleaseAll()
+  {
+    CUresult first_error = CUDA_SUCCESS;
+    while (!contexts_.empty()) {
+      const CUresult status = cuDevicePrimaryCtxRelease(contexts_.back().device);
+      if (first_error == CUDA_SUCCESS && status != CUDA_SUCCESS) {
+        first_error = status;
+      }
+      contexts_.pop_back();
+    }
+    return first_error;
   }
 
   size_t size() const { return contexts_.size(); }
@@ -79,9 +115,7 @@ class RetainedContexts {
 
   ~RetainedContexts()
   {
-    for (auto it = contexts_.rbegin(); it != contexts_.rend(); ++it) {
-      (void)cuDevicePrimaryCtxRelease(it->device);
-    }
+    (void)ReleaseAll();
   }
 
  private:
@@ -249,13 +283,17 @@ ResolveOperationComplete()
 CUresult
 DoCustomStorage(
     int pid, bool checkpoint, const std::string& device_map, const std::filesystem::path& storage_dir,
-    const transfer::TransferOptions& transfer_options)
+    const transfer::TransferOptions& transfer_options, Clock::time_point helper_main_start)
 {
+  const auto custom_storage_start = Clock::now();
+  const auto symbol_resolution_start = Clock::now();
   cuda_checkpoint_compat::OperationCompleteFn operation_complete = ResolveOperationComplete();
+  const double symbol_resolution_seconds = SecondsSince(symbol_resolution_start);
   if (operation_complete == nullptr) {
     std::fprintf(stderr, "CUDA custom storage unavailable: cuCheckpointOperationComplete symbol not found\n");
     return CUDA_ERROR_NOT_SUPPORTED;
   }
+  const auto storage_directory_start = Clock::now();
   if (!storage_dir.is_absolute()) {
     std::fprintf(stderr, "custom storage directory must be absolute\n");
     return CUDA_ERROR_INVALID_VALUE;
@@ -282,17 +320,25 @@ DoCustomStorage(
       return CUDA_ERROR_INVALID_VALUE;
     }
   }
+  const double storage_directory_validation_seconds = SecondsSince(storage_directory_start);
 
+  const auto cuda_init_start = Clock::now();
   CUresult status = cuInit(0);
+  const double cuda_init_seconds = SecondsSince(cuda_init_start);
   if (status != CUDA_SUCCESS) {
     return status;
   }
   RetainedContexts retained_contexts;
-  status = retained_contexts.RetainAll();
+  int cuda_device_count = 0;
+  double device_enumeration_seconds = 0.0;
+  double primary_context_retain_seconds = 0.0;
+  status = retained_contexts.RetainAll(
+      &cuda_device_count, &device_enumeration_seconds, &primary_context_retain_seconds);
   if (status != CUDA_SUCCESS) {
     return status;
   }
 
+  const auto manifest_validation_start = Clock::now();
   std::vector<storage::ManifestExtent> manifest;
   std::string manifest_error;
   if (!checkpoint && (!storage::ReadManifest(storage_dir, &manifest, &manifest_error) ||
@@ -300,27 +346,33 @@ DoCustomStorage(
     std::fprintf(stderr, "custom storage manifest validation failed: %s\n", manifest_error.c_str());
     return CUDA_ERROR_INVALID_VALUE;
   }
+  const double manifest_validation_seconds = SecondsSince(manifest_validation_start);
 
   cuda_checkpoint_compat::StorageInfo* info = nullptr;
   std::vector<CUcheckpointGpuPair> gpu_pairs;
   std::vector<storage::DevicePair> storage_pairs;
+  const auto device_map_preparation_start = Clock::now();
+  if (!checkpoint && !ParseDeviceMap(device_map, &gpu_pairs, &storage_pairs)) {
+    return CUDA_ERROR_INVALID_VALUE;
+  }
+  const double device_map_preparation_seconds = SecondsSince(device_map_preparation_start);
+  const auto cuda_process_api_start = Clock::now();
   if (checkpoint) {
     cuda_checkpoint_compat::CheckpointArgs args{};
     args.customStorageInfo_out = &info;
     status = cuCheckpointProcessCheckpoint(pid, cuda_checkpoint_compat::NativeArgs(&args));
   } else {
-    if (!ParseDeviceMap(device_map, &gpu_pairs, &storage_pairs)) {
-      return CUDA_ERROR_INVALID_VALUE;
-    }
     cuda_checkpoint_compat::RestoreArgs args{};
     args.gpuPairs = gpu_pairs.empty() ? nullptr : gpu_pairs.data();
     args.gpuPairsCount = gpu_pairs.size();
     args.customStorageInfo_out = &info;
     status = cuCheckpointProcessRestore(pid, cuda_checkpoint_compat::NativeArgs(&args));
   }
+  const double cuda_process_api_seconds = SecondsSince(cuda_process_api_start);
   if (status != CUDA_SUCCESS) {
     return status;
   }
+  const auto metadata_job_construction_start = Clock::now();
   if (info == nullptr || info->handle == nullptr || info->deviceCount > retained_contexts.size() ||
       (info->deviceCount > 0 && info->perDeviceData == nullptr)) {
     std::fprintf(stderr, "CUDA returned invalid custom storage information\n");
@@ -372,8 +424,10 @@ DoCustomStorage(
     }
     total_bytes += extent.size;
   }
+  const double metadata_job_construction_seconds = SecondsSince(metadata_job_construction_start);
 
-  const auto start = std::chrono::steady_clock::now();
+  const auto start = Clock::now();
+  const auto worker_orchestration_start = Clock::now();
   std::vector<std::thread> workers;
   std::vector<unsigned char> worker_success(transfer_jobs.size(), 0);
   std::vector<std::string> worker_errors(transfer_jobs.size());
@@ -418,6 +472,7 @@ DoCustomStorage(
   for (auto& worker : workers) {
     worker.join();
   }
+  const double worker_orchestration_seconds = SecondsSince(worker_orchestration_start);
   if (!worker_start_error.empty()) {
     std::fprintf(stderr, "failed to start custom storage worker: %s\n", worker_start_error.c_str());
     return CUDA_ERROR_OPERATING_SYSTEM;
@@ -458,6 +513,7 @@ DoCustomStorage(
     return CUDA_ERROR_OPERATING_SYSTEM;
   }
 
+  const auto post_transfer_validation_start = Clock::now();
   if (checkpoint) {
     if (!storage::ValidateExtentFiles(storage_dir, manifest, &manifest_error)) {
       std::fprintf(stderr, "custom storage extent validation failed: %s\n", manifest_error.c_str());
@@ -468,9 +524,12 @@ DoCustomStorage(
       return CUDA_ERROR_OPERATING_SYSTEM;
     }
   }
+  const double post_transfer_validation_seconds = SecondsSince(post_transfer_validation_start);
 
   // This is the sole acknowledgment point; CUDA exposes no public abort for failures above.
+  const auto operation_complete_start = Clock::now();
   status = operation_complete(info->handle);
+  const double cuda_operation_complete_seconds = SecondsSince(operation_complete_start);
   if (status != CUDA_SUCCESS) {
     if (checkpoint && !storage::RemoveManifest(storage_dir, &manifest_error)) {
       std::fprintf(
@@ -480,9 +539,16 @@ DoCustomStorage(
     return status;
   }
 
-  const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  // Preserve the original transfer interval: worker setup through CUDA acknowledgment.
+  const double seconds = SecondsSince(start);
   const double gib_per_second =
       seconds == 0.0 ? 0.0 : static_cast<double>(total_bytes) / (1024.0 * 1024.0 * 1024.0) / seconds;
+  const auto primary_context_release_start = Clock::now();
+  const CUresult primary_context_release_status = retained_contexts.ReleaseAll();
+  const auto telemetry_end = Clock::now();
+  const double primary_context_release_seconds = SecondsBetween(primary_context_release_start, telemetry_end);
+  const double custom_storage_total_seconds = SecondsBetween(custom_storage_start, telemetry_end);
+  const double helper_main_to_telemetry_seconds = SecondsBetween(helper_main_start, telemetry_end);
   std::fprintf(
       stdout,
       "{\"event\":\"cuda_custom_storage_transfer\",\"schema_version\":1,"
@@ -491,11 +557,33 @@ DoCustomStorage(
       "\"transfer_chunk_bytes\":%zu,\"pinned_bytes\":%zu,\"setup_service_seconds\":%.6f,"
       "\"pipeline_service_seconds\":%.6f,\"storage_service_seconds\":%.6f,"
       "\"cuda_wait_service_seconds\":%.6f,\"fsync_service_seconds\":%.6f,"
-      "\"cleanup_service_seconds\":%.6f}\n",
+      "\"cleanup_service_seconds\":%.6f,"
+      "\"timing_scope\":\"monotonic_wall;totals_contain_subphases;"
+      "service_seconds_are_cross_worker_sums_and_may_overlap\","
+      "\"helper_main_to_telemetry_seconds\":%.6f,\"custom_storage_total_seconds\":%.6f,"
+      "\"symbol_resolution_seconds\":%.6f,\"storage_directory_validation_seconds\":%.6f,"
+      "\"cuda_init_seconds\":%.6f,\"cuda_device_count\":%d,\"device_enumeration_seconds\":%.6f,"
+      "\"primary_context_retain_seconds\":%.6f,\"manifest_validation_seconds\":%.6f,"
+      "\"device_map_preparation_seconds\":%.6f,\"cuda_process_api_seconds\":%.6f,"
+      "\"metadata_job_construction_seconds\":%.6f,\"worker_orchestration_seconds\":%.6f,"
+      "\"post_transfer_validation_seconds\":%.6f,\"cuda_operation_complete_seconds\":%.6f,"
+      "\"primary_context_release_seconds\":%.6f,\"primary_context_release_success\":%s,"
+      "\"primary_context_release_status\":%d}\n",
       checkpoint ? "checkpoint" : "restore", manifest.size(), total_bytes, seconds, gib_per_second,
       transfer_options.buffer_count, transfer_options.chunk_bytes, pinned_bytes, setup_service_seconds,
       pipeline_service_seconds, storage_service_seconds, cuda_wait_service_seconds, fsync_service_seconds,
-      cleanup_service_seconds);
+      cleanup_service_seconds, helper_main_to_telemetry_seconds, custom_storage_total_seconds,
+      symbol_resolution_seconds, storage_directory_validation_seconds, cuda_init_seconds, cuda_device_count,
+      device_enumeration_seconds, primary_context_retain_seconds, manifest_validation_seconds,
+      device_map_preparation_seconds, cuda_process_api_seconds, metadata_job_construction_seconds,
+      worker_orchestration_seconds, post_transfer_validation_seconds, cuda_operation_complete_seconds,
+      primary_context_release_seconds, primary_context_release_status == CUDA_SUCCESS ? "true" : "false",
+      static_cast<int>(primary_context_release_status));
+  if (primary_context_release_status != CUDA_SUCCESS) {
+    std::fprintf(
+        stderr, "warning: retained CUDA primary context release failed with status %d after operation acknowledgment\n",
+        static_cast<int>(primary_context_release_status));
+  }
   return CUDA_SUCCESS;
 }
 
@@ -517,6 +605,7 @@ DoLegacyRestore(int pid, const std::string& device_map)
 int
 main(int argc, char** argv)
 {
+  const auto helper_main_start = Clock::now();
   std::string action;
   std::string device_map;
   std::string storage_mode = "legacy";
@@ -610,7 +699,7 @@ main(int argc, char** argv)
       return PrintUsageError();
     }
     if (storage_mode == "posix") {
-      status = DoCustomStorage(pid, true, "", storage_dir, transfer_options);
+      status = DoCustomStorage(pid, true, "", storage_dir, transfer_options, helper_main_start);
     } else {
       CUcheckpointCheckpointArgs args{};
       status = cuCheckpointProcessCheckpoint(pid, &args);
@@ -619,7 +708,8 @@ main(int argc, char** argv)
     if (timeout_ms != 0) {
       return PrintUsageError();
     }
-    status = storage_mode == "posix" ? DoCustomStorage(pid, false, device_map, storage_dir, transfer_options)
+    status = storage_mode == "posix"
+                 ? DoCustomStorage(pid, false, device_map, storage_dir, transfer_options, helper_main_start)
                                      : DoLegacyRestore(pid, device_map);
   } else if (action == "unlock") {
     if (timeout_ms != 0 || !device_map.empty() || storage_mode != "legacy") {

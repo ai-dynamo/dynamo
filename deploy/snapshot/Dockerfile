@@ -164,6 +164,9 @@ COPY cmd/cuda-checkpoint-helper/benchmark.cpp ./cmd/cuda-checkpoint-helper/bench
 COPY cmd/cuda-checkpoint-helper/benchmark_cache.cpp ./cmd/cuda-checkpoint-helper/benchmark_cache.cpp
 COPY cmd/cuda-checkpoint-helper/benchmark_cache.h ./cmd/cuda-checkpoint-helper/benchmark_cache.h
 COPY cmd/cuda-checkpoint-helper/benchmark_cache_test.cpp ./cmd/cuda-checkpoint-helper/benchmark_cache_test.cpp
+COPY cmd/cuda-checkpoint-helper/benchmark_storage.cpp ./cmd/cuda-checkpoint-helper/benchmark_storage.cpp
+COPY cmd/cuda-checkpoint-helper/benchmark_storage.h ./cmd/cuda-checkpoint-helper/benchmark_storage.h
+COPY cmd/cuda-checkpoint-helper/benchmark_storage_test.cpp ./cmd/cuda-checkpoint-helper/benchmark_storage_test.cpp
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper \
     ./cmd/cuda-checkpoint-helper/main.cpp \
@@ -180,6 +183,7 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-nixl-posix-benchmark \
     ./cmd/cuda-checkpoint-helper/benchmark.cpp \
     ./cmd/cuda-checkpoint-helper/benchmark_cache.cpp \
+    ./cmd/cuda-checkpoint-helper/benchmark_storage.cpp \
     ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
     ./cmd/cuda-checkpoint-helper/transfer_engine.cpp \
     -I/usr/local/cuda/include \
@@ -206,6 +210,13 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
       ./cmd/cuda-checkpoint-helper/benchmark_cache.cpp \
       ./cmd/cuda-checkpoint-helper/benchmark_cache_test.cpp \
     && /cuda-checkpoint-helper-benchmark-cache-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-benchmark-storage-test \
+      ./cmd/cuda-checkpoint-helper/benchmark_storage.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+      ./cmd/cuda-checkpoint-helper/benchmark_storage_test.cpp \
+    && /cuda-checkpoint-helper-benchmark-storage-test
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin

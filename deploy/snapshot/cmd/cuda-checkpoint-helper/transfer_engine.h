@@ -16,11 +16,6 @@
 
 namespace cuda_checkpoint_transfer {
 
-enum class TransferOperation {
-  kCheckpoint,
-  kRestore,
-};
-
 struct StorageFileMetrics {
   size_t bytes = 0;
   double storage_seconds = 0.0;

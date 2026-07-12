@@ -242,11 +242,7 @@ OpenStorageFiles(
       *error = "storage file " + std::to_string(index) + " is too large for POSIX offsets";
       return false;
     }
-    int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW;
-    if (operation == TransferOperation::kCheckpoint) {
-      flags |= O_CREAT | O_TRUNC;
-    }
-    FileDescriptor descriptor(open(file.path.c_str(), flags, 0600));
+    FileDescriptor descriptor(open(file.path.c_str(), StorageFileOpenFlags(operation), 0600));
     if (descriptor.get() < 0) {
       *error = "open storage file " + std::to_string(index) + " failed: " + std::strerror(errno);
       return false;

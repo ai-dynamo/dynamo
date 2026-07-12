@@ -2,7 +2,9 @@ package cuda
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -29,6 +31,120 @@ type helperActionRunner interface {
 }
 
 type commandHelperActionRunner struct{}
+
+type customStorageTelemetry struct {
+	Event                        string          `json:"event"`
+	HelperMainToTelemetrySeconds json.RawMessage `json:"helper_main_to_telemetry_seconds"`
+}
+
+type customStorageTelemetryParse struct {
+	status             string
+	err                string
+	helperMainDuration time.Duration
+}
+
+func parseCustomStorageTelemetry(output string, processWall time.Duration) customStorageTelemetryParse {
+	sawMalformedJSON := false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var telemetry customStorageTelemetry
+		if err := json.Unmarshal([]byte(line), &telemetry); err != nil {
+			sawMalformedJSON = true
+			continue
+		}
+		if telemetry.Event != "cuda_custom_storage_transfer" {
+			continue
+		}
+		if len(telemetry.HelperMainToTelemetrySeconds) == 0 ||
+			string(telemetry.HelperMainToTelemetrySeconds) == "null" {
+			return customStorageTelemetryParse{
+				status: "missing-duration",
+				err:    "expected helper_main_to_telemetry_seconds",
+			}
+		}
+		var seconds json.Number
+		if err := json.Unmarshal(telemetry.HelperMainToTelemetrySeconds, &seconds); err != nil {
+			return customStorageTelemetryParse{
+				status: "invalid-duration",
+				err:    "helper_main_to_telemetry_seconds is not a number",
+			}
+		}
+		value, err := strconv.ParseFloat(seconds.String(), 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+			return customStorageTelemetryParse{
+				status: "invalid-duration",
+				err:    "helper_main_to_telemetry_seconds is not finite",
+			}
+		}
+		if value < 0 {
+			return customStorageTelemetryParse{
+				status: "invalid-duration",
+				err:    "helper_main_to_telemetry_seconds is negative",
+			}
+		}
+
+		// The helper prints six fractional digits, so tolerate at most one
+		// microsecond of upward rounding without adding to processWall.
+		const roundingToleranceSeconds = 1e-6
+		processWallSeconds := processWall.Seconds()
+		if value > processWallSeconds+roundingToleranceSeconds {
+			return customStorageTelemetryParse{
+				status: "duration-exceeds-process-wall",
+				err:    "helper_main_to_telemetry_seconds exceeds process wall duration",
+			}
+		}
+		if value >= processWallSeconds ||
+			value*float64(time.Second) >= float64(math.MaxInt64) {
+			return customStorageTelemetryParse{
+				status:             "valid",
+				helperMainDuration: processWall,
+			}
+		}
+		return customStorageTelemetryParse{
+			status:             "valid",
+			helperMainDuration: time.Duration(value * float64(time.Second)),
+		}
+	}
+	if sawMalformedJSON {
+		return customStorageTelemetryParse{
+			status: "malformed-json",
+			err:    "malformed JSON telemetry output",
+		}
+	}
+	return customStorageTelemetryParse{
+		status: "event-absent",
+		err:    "cuda_custom_storage_transfer event not found",
+	}
+}
+
+func customStorageSuccessLogValues(
+	pid int,
+	action string,
+	processWall time.Duration,
+	output string,
+	telemetry customStorageTelemetryParse,
+) []any {
+	values := []any{
+		"pid", pid,
+		"action", action,
+		"duration", processWall,
+		"helper_process_wall_duration", processWall,
+		"helper_telemetry_status", telemetry.status,
+	}
+	if telemetry.status == "valid" {
+		values = append(
+			values,
+			"helper_main_to_telemetry_duration", telemetry.helperMainDuration,
+			"helper_process_overhead_duration", processWall-telemetry.helperMainDuration,
+		)
+	} else {
+		values = append(values, "helper_telemetry_error", telemetry.err)
+	}
+	return append(values, "output", output)
+}
 
 func (commandHelperActionRunner) run(
 	ctx context.Context,
@@ -106,11 +222,9 @@ func runAction(ctx context.Context, pid int, action, deviceMap, storageMode, sto
 		return fmt.Errorf("cuda-checkpoint-helper %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
 	}
 	if storageMode == "posix" && (action == actionCheckpoint || action == actionRestore) {
+		telemetry := parseCustomStorageTelemetry(out, duration)
 		log.Info("CUDA custom-storage transfer succeeded",
-			"pid", pid,
-			"action", action,
-			"duration", duration,
-			"output", out,
+			customStorageSuccessLogValues(pid, action, duration, out, telemetry)...,
 		)
 		return nil
 	}

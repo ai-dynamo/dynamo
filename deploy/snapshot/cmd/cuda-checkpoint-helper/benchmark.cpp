@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "benchmark_cache.h"
+#include "benchmark_storage.h"
 #include "transfer_config.h"
 #include "transfer_engine.h"
 
@@ -47,6 +48,9 @@ struct Options {
   size_t iterations = 3;
   benchmark::CacheProfile cache_profile = benchmark::CacheProfile::kBufferedWarm;
   bool operation_set = false;
+  bool warmups_set = false;
+  bool cache_profile_set = false;
+  bool existing_file = false;
 };
 
 int
@@ -63,10 +67,12 @@ PrintUsage(FILE* stream)
              "  --transfer-buffer-count <count>    Pinned pipeline slots (default: %zu)\n"
              "  --transfer-chunk-bytes <bytes>     Bytes per slot (default: %zu)\n"
              "  --file-count <count>               Contiguous physical shards (default: 1)\n"
-             "  --warmups <count>                  Untimed warmup runs (default: 1)\n"
+             "  --warmups <count>                  Untimed warmup runs (default: 1; existing-file: 0)\n"
              "  --iterations <count>               Measured runs (default: 3)\n"
              "  --cache-profile <profile>          Restore cache profile: buffered-warm or\n"
              "                                     client-evicted (default: buffered-warm)\n"
+             "  --existing-file                    Restore existing exact-size shard(s) read-only;\n"
+             "                                     omitted --warmups defaults to zero\n"
              "  --help                             Show this help\n"
              "\n"
              "Aliases: write=checkpoint, read=restore. Each measured run writes one JSON object "
@@ -121,10 +127,14 @@ ParseOptions(int argc, char** argv, Options* options, bool* help, std::string* e
         transfer::ParseSize(argv[index], &options->transfer.chunk_bytes)) {
     } else if (argument == "--file-count" && ++index < argc && transfer::ParseSize(argv[index], &options->file_count)) {
     } else if (argument == "--warmups" && ++index < argc && transfer::ParseSize(argv[index], &options->warmups)) {
+      options->warmups_set = true;
     } else if (argument == "--iterations" && ++index < argc && transfer::ParseSize(argv[index], &options->iterations)) {
     } else if (
         argument == "--cache-profile" && ++index < argc &&
         benchmark::ParseCacheProfile(argv[index], &options->cache_profile)) {
+      options->cache_profile_set = true;
+    } else if (argument == "--existing-file") {
+      options->existing_file = true;
     } else if (argument == "--help" || argument == "-h") {
       *help = true;
       return true;
@@ -148,6 +158,18 @@ ParseOptions(int argc, char** argv, Options* options, bool* help, std::string* e
   }
   if (options->iterations == 0 || options->iterations > kMaximumIterations || options->warmups > kMaximumIterations) {
     *error = "--iterations must be between 1 and 1000 and --warmups cannot exceed 1000";
+    return false;
+  }
+  options->warmups = benchmark::EffectiveWarmups(options->existing_file, options->warmups_set, options->warmups);
+  const benchmark::BenchmarkStorageOptions storage_options{
+      options->operation == transfer::TransferOperation::kRestore,
+      options->existing_file,
+      options->warmups_set,
+      options->warmups,
+      options->cache_profile_set,
+      options->cache_profile,
+  };
+  if (!benchmark::ValidateBenchmarkStorageOptions(storage_options, error)) {
     return false;
   }
   return transfer::ValidateTransferOptions(options->transfer, error);
@@ -215,36 +237,13 @@ class CUDAResources {
   CUstream stream_ = nullptr;
 };
 
-uint64_t
-PatternWord(uint64_t index)
-{
-  uint64_t value = index + 0x9e3779b97f4a7c15ULL;
-  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
-  return value ^ (value >> 31);
-}
-
-void
-FillPattern(unsigned char* data, size_t size, size_t logical_offset)
-{
-  size_t done = 0;
-  while (done < size) {
-    const size_t absolute = logical_offset + done;
-    const uint64_t word = PatternWord(absolute / sizeof(uint64_t));
-    const size_t byte_in_word = absolute % sizeof(uint64_t);
-    const size_t length = std::min(sizeof(uint64_t) - byte_in_word, size - done);
-    std::memcpy(data + done, reinterpret_cast<const unsigned char*>(&word) + byte_in_word, length);
-    done += length;
-  }
-}
-
 void
 InitializeDevicePattern(const CUDAResources& cuda, size_t bytes)
 {
   std::vector<unsigned char> pattern(std::min(bytes, kPatternBufferBytes));
   for (size_t offset = 0; offset < bytes;) {
     const size_t length = std::min(pattern.size(), bytes - offset);
-    FillPattern(pattern.data(), length, offset);
+    benchmark::FillPattern(pattern.data(), length, offset);
     CheckCUDA(cuMemcpyHtoD(cuda.device_ptr() + offset, pattern.data(), length), "initialize device pattern");
     offset += length;
   }
@@ -265,7 +264,7 @@ VerifyDevicePattern(const CUDAResources& cuda, size_t bytes)
   for (size_t offset = 0; offset < bytes;) {
     const size_t length = std::min(actual.size(), bytes - offset);
     CheckCUDA(cuMemcpyDtoH(actual.data(), cuda.device_ptr() + offset, length), "read device verification data");
-    FillPattern(expected.data(), length, offset);
+    benchmark::FillPattern(expected.data(), length, offset);
     const auto mismatch =
         std::mismatch(actual.begin(), actual.begin() + static_cast<std::ptrdiff_t>(length), expected.begin());
     if (mismatch.first != actual.begin() + static_cast<std::ptrdiff_t>(length)) {
@@ -355,8 +354,7 @@ OpenLayoutFiles(const transfer::StorageLayout& layout, bool create)
       if (fstat(descriptor, &file_stat) != 0) {
         throw std::runtime_error("stat benchmark file failed: " + file.path.string() + ": " + std::strerror(errno));
       }
-      if (!S_ISREG(file_stat.st_mode) || file_stat.st_size < 0 ||
-          static_cast<size_t>(file_stat.st_size) != file.size) {
+      if (!S_ISREG(file_stat.st_mode) || file_stat.st_size < 0 || static_cast<size_t>(file_stat.st_size) != file.size) {
         throw std::runtime_error(
             "benchmark file is not regular or has the wrong size: " + file.path.string() + ": expected " +
             std::to_string(file.size) + " bytes");
@@ -375,7 +373,7 @@ PrepareStoragePattern(const transfer::StorageLayout& layout)
   for (const auto& range : layout.ranges) {
     for (size_t done = 0; done < range.size;) {
       const size_t length = std::min(pattern.size(), range.size - done);
-      FillPattern(pattern.data(), length, range.logical_offset + done);
+      benchmark::FillPattern(pattern.data(), length, range.logical_offset + done);
       WriteAllAt(files[range.file_index].get(), pattern.data(), length, range.file_offset + done);
       done += length;
     }
@@ -397,7 +395,7 @@ VerifyStoragePattern(const transfer::StorageLayout& layout)
     for (size_t done = 0; done < range.size;) {
       const size_t length = std::min(actual.size(), range.size - done);
       ReadAllAt(files[range.file_index].get(), actual.data(), length, range.file_offset + done);
-      FillPattern(expected.data(), length, range.logical_offset + done);
+      benchmark::FillPattern(expected.data(), length, range.logical_offset + done);
       const auto mismatch =
           std::mismatch(actual.begin(), actual.begin() + static_cast<std::ptrdiff_t>(length), expected.begin());
       if (mismatch.first != actual.begin() + static_cast<std::ptrdiff_t>(length)) {
@@ -425,16 +423,13 @@ GiBPerSecond(size_t bytes, double seconds)
 std::string
 ResultJSON(
     const Options& options, size_t iteration, size_t pinned_bytes, const transfer::StorageLayout& layout,
-    const transfer::TransferMetrics& metrics, const benchmark::CacheEvictionResult& eviction)
+    const transfer::TransferMetrics& metrics, const benchmark::CacheEvictionResult& eviction,
+    const benchmark::ClientCacheState& client_cache_state)
 {
   const bool restore = options.operation == transfer::TransferOperation::kRestore;
   const bool eviction_requested = restore && options.cache_profile == benchmark::CacheProfile::kClientEvicted;
   const std::string_view cache_profile =
       restore ? benchmark::CacheProfileName(options.cache_profile) : std::string_view("not-applicable");
-  const std::string_view client_cache_residency =
-      !restore ? std::string_view("not-applicable")
-               : (eviction_requested ? std::string_view("unknown-after-advice")
-                                     : std::string_view("buffered-warm"));
   const std::string_view server_cache_residency =
       restore ? std::string_view("unknown-may-be-warm") : std::string_view("not-applicable");
   const std::string_view eviction_status =
@@ -452,6 +447,10 @@ ResultJSON(
          << ",\"file_count\":" << layout.files.size() << ",\"max_storage_requests_in_flight\":1"
          << ",\"timing_scope\":\"transfer_engine_setup_through_cleanup\""
          << ",\"pattern_setup_timed\":false,\"verification_timed\":false"
+         << ",\"storage_prepared_by_invocation\":" << (options.existing_file ? "false" : "true")
+         << ",\"existing_file\":" << (options.existing_file ? "true" : "false") << ",\"warmups\":" << options.warmups
+         << ",\"warmups_explicit\":" << (options.warmups_set ? "true" : "false") << ","
+         << benchmark::ClientCacheStateJSON(client_cache_state)
          << ",\"cache_profile\":" << transfer::JsonEscape(cache_profile)
          << ",\"client_cache_eviction_requested\":" << (eviction_requested ? "true" : "false")
          << ",\"client_cache_eviction_best_effort\":" << (eviction_requested ? "true" : "false")
@@ -466,7 +465,6 @@ ResultJSON(
     output << transfer::JsonEscape(eviction.errors[index]);
   }
   output << "]"
-         << ",\"client_cache_residency\":" << transfer::JsonEscape(client_cache_residency)
          << ",\"server_cache_residency\":" << transfer::JsonEscape(server_cache_residency)
          << ",\"duration_seconds\":" << metrics.total_seconds
          << ",\"effective_gib_per_second\":" << GiBPerSecond(metrics.bytes, metrics.total_seconds)
@@ -494,7 +492,8 @@ ResultJSON(
 
 std::string
 FailureJSON(
-    const Options& options, size_t iteration, const benchmark::CacheEvictionResult& eviction, std::string_view error)
+    const Options& options, size_t iteration, const benchmark::CacheEvictionResult& eviction,
+    const benchmark::ClientCacheState& client_cache_state, std::string_view error)
 {
   const bool restore = options.operation == transfer::TransferOperation::kRestore;
   const bool eviction_requested = restore && options.cache_profile == benchmark::CacheProfile::kClientEvicted;
@@ -510,6 +509,10 @@ FailureJSON(
   output << "{\"event\":\"cuda_nixl_posix_benchmark\",\"schema_version\":1"
          << ",\"success\":false,\"operation\":" << transfer::JsonEscape(options.operation_name)
          << ",\"iteration\":" << iteration << ",\"cache_profile\":" << transfer::JsonEscape(cache_profile)
+         << ",\"storage_prepared_by_invocation\":" << (options.existing_file ? "false" : "true")
+         << ",\"existing_file\":" << (options.existing_file ? "true" : "false") << ",\"warmups\":" << options.warmups
+         << ",\"warmups_explicit\":" << (options.warmups_set ? "true" : "false") << ","
+         << benchmark::ClientCacheStateJSON(client_cache_state)
          << ",\"client_cache_eviction_requested\":" << (eviction_requested ? "true" : "false")
          << ",\"client_cache_eviction_best_effort\":" << (eviction_requested ? "true" : "false")
          << ",\"client_cache_eviction_status\":" << transfer::JsonEscape(eviction_status)
@@ -578,24 +581,30 @@ RunBenchmark(const Options& options)
   if (!transfer::CalculatePinnedBytes(1, options.transfer, &pinned_bytes, &error)) {
     throw std::runtime_error("invalid pinned-memory configuration: " + error);
   }
+  if (options.existing_file && !benchmark::ValidateExistingStorageLayout(layout, &error)) {
+    throw std::runtime_error("invalid existing storage layout: " + error);
+  }
 
   CUDAResources cuda;
   cuda.Allocate(options.device, options.bytes);
   if (options.operation == transfer::TransferOperation::kCheckpoint) {
     InitializeDevicePattern(cuda, options.bytes);
   } else {
-    PrepareStoragePattern(layout);
+    if (!options.existing_file) {
+      PrepareStoragePattern(layout);
+    }
     ValidateStorageFiles(layout);
   }
 
   std::fprintf(
       stderr,
       "Benchmarking %s: bytes=%zu device=%d slots=%zu chunk_bytes=%zu files=%zu "
-      "warmups=%zu iterations=%zu cache_profile=%.*s (one synchronous storage request in flight)\n",
+      "warmups=%zu iterations=%zu cache_profile=%.*s existing_file=%s "
+      "(one synchronous storage request in flight)\n",
       options.operation_name.c_str(), options.bytes, options.device, options.transfer.buffer_count,
       options.transfer.chunk_bytes, options.file_count, options.warmups, options.iterations,
       static_cast<int>(benchmark::CacheProfileName(options.cache_profile).size()),
-      benchmark::CacheProfileName(options.cache_profile).data());
+      benchmark::CacheProfileName(options.cache_profile).data(), options.existing_file ? "true" : "false");
 
   for (size_t index = 0; index < options.warmups; ++index) {
     (void)ApplyCacheProfile(options, layout);
@@ -606,14 +615,19 @@ RunBenchmark(const Options& options)
   double total_throughput = 0.0;
   for (size_t index = 0; index < options.iterations; ++index) {
     const benchmark::CacheEvictionResult eviction = ApplyCacheProfile(options, layout);
+    // A measured failure is rethrown below, so index > 0 guarantees every
+    // preceding measured restore completed and read the full file.
+    const benchmark::ClientCacheState client_cache_state = benchmark::ClientCacheStateBeforeMeasuredIteration(
+        options.operation == transfer::TransferOperation::kRestore, options.existing_file, options.warmups, index,
+        options.cache_profile);
     try {
       const transfer::TransferMetrics metrics = RunTransfer(options, layout, cuda, true);
-      std::cout << ResultJSON(options, index, pinned_bytes, layout, metrics, eviction) << std::endl;
+      std::cout << ResultJSON(options, index, pinned_bytes, layout, metrics, eviction, client_cache_state) << std::endl;
       total_seconds += metrics.total_seconds;
       total_throughput += GiBPerSecond(metrics.bytes, metrics.total_seconds);
     }
     catch (const std::exception& exception) {
-      std::cout << FailureJSON(options, index, eviction, exception.what()) << std::endl;
+      std::cout << FailureJSON(options, index, eviction, client_cache_state, exception.what()) << std::endl;
       throw;
     }
   }

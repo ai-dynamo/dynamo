@@ -87,6 +87,121 @@ func TestCustomStorageProcessDir(t *testing.T) {
 	}
 }
 
+func TestParseCustomStorageTelemetry(t *testing.T) {
+	tests := []struct {
+		name         string
+		output       string
+		processWall  time.Duration
+		wantStatus   string
+		wantDuration time.Duration
+	}{
+		{
+			name:         "valid payload",
+			output:       "diagnostic\n" + `{"event":"cuda_custom_storage_transfer","helper_main_to_telemetry_seconds":1.25}`,
+			processWall:  2 * time.Second,
+			wantStatus:   "valid",
+			wantDuration: 1250 * time.Millisecond,
+		},
+		{
+			name:        "absent event",
+			output:      `{"event":"other","helper_main_to_telemetry_seconds":1}`,
+			processWall: 2 * time.Second,
+			wantStatus:  "event-absent",
+		},
+		{
+			name:        "malformed JSON",
+			output:      `{"event":"cuda_custom_storage_transfer",`,
+			processWall: 2 * time.Second,
+			wantStatus:  "malformed-json",
+		},
+		{
+			name:        "missing field",
+			output:      `{"event":"cuda_custom_storage_transfer"}`,
+			processWall: 2 * time.Second,
+			wantStatus:  "missing-duration",
+		},
+		{
+			name:        "negative",
+			output:      `{"event":"cuda_custom_storage_transfer","helper_main_to_telemetry_seconds":-1}`,
+			processWall: 2 * time.Second,
+			wantStatus:  "invalid-duration",
+		},
+		{
+			name:        "nonfinite extreme",
+			output:      `{"event":"cuda_custom_storage_transfer","helper_main_to_telemetry_seconds":1e309}`,
+			processWall: 2 * time.Second,
+			wantStatus:  "invalid-duration",
+		},
+		{
+			name:        "greater than wall",
+			output:      `{"event":"cuda_custom_storage_transfer","helper_main_to_telemetry_seconds":2.1}`,
+			processWall: 2 * time.Second,
+			wantStatus:  "duration-exceeds-process-wall",
+		},
+		{
+			name:         "rounding tolerance",
+			output:       `{"event":"cuda_custom_storage_transfer","helper_main_to_telemetry_seconds":2.000001}`,
+			processWall:  2 * time.Second,
+			wantStatus:   "valid",
+			wantDuration: 2 * time.Second,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := parseCustomStorageTelemetry(test.output, test.processWall)
+			if got.status != test.wantStatus {
+				t.Fatalf("status = %q, want %q (error: %s)", got.status, test.wantStatus, got.err)
+			}
+			if got.helperMainDuration != test.wantDuration {
+				t.Fatalf("helper main duration = %v, want %v", got.helperMainDuration, test.wantDuration)
+			}
+		})
+	}
+}
+
+func TestCustomStorageSuccessLogValues(t *testing.T) {
+	toMap := func(values []any) map[string]any {
+		result := make(map[string]any, len(values)/2)
+		for index := 0; index < len(values); index += 2 {
+			result[values[index].(string)] = values[index+1]
+		}
+		return result
+	}
+
+	processWall := 2 * time.Second
+	invalid := toMap(customStorageSuccessLogValues(
+		42,
+		actionRestore,
+		processWall,
+		"output",
+		parseCustomStorageTelemetry(`{"event":"cuda_custom_storage_transfer"}`, processWall),
+	))
+	if invalid["duration"] != processWall || invalid["helper_process_wall_duration"] != processWall {
+		t.Fatalf("invalid telemetry log fields lost process wall duration: %#v", invalid)
+	}
+	if _, found := invalid["helper_main_to_telemetry_duration"]; found {
+		t.Fatalf("invalid telemetry fabricated helper duration: %#v", invalid)
+	}
+	if _, found := invalid["helper_process_overhead_duration"]; found {
+		t.Fatalf("invalid telemetry fabricated process overhead: %#v", invalid)
+	}
+
+	valid := toMap(customStorageSuccessLogValues(
+		42,
+		actionRestore,
+		processWall,
+		"output",
+		parseCustomStorageTelemetry(
+			`{"event":"cuda_custom_storage_transfer","helper_main_to_telemetry_seconds":1.25}`,
+			processWall,
+		),
+	))
+	if valid["helper_main_to_telemetry_duration"] != 1250*time.Millisecond ||
+		valid["helper_process_overhead_duration"] != 750*time.Millisecond {
+		t.Fatalf("valid telemetry derived durations are wrong: %#v", valid)
+	}
+}
+
 type helperActionCall struct {
 	pid         int
 	action      string

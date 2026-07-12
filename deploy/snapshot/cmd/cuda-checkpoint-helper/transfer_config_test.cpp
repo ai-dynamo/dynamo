@@ -5,6 +5,8 @@
 
 #include "transfer_config.h"
 
+#include <fcntl.h>
+
 #include <iostream>
 #include <limits>
 #include <string>
@@ -21,6 +23,20 @@ Check(bool condition, const std::string& message)
     std::cerr << message << "\n";
   }
   return condition;
+}
+
+bool
+TestStorageOpenModePolicy()
+{
+  const int restore_flags = transfer::StorageFileOpenFlags(transfer::TransferOperation::kRestore);
+  const int checkpoint_flags = transfer::StorageFileOpenFlags(transfer::TransferOperation::kCheckpoint);
+  return Check((restore_flags & O_ACCMODE) == O_RDONLY, "restore storage is not opened read-only") &&
+         Check((restore_flags & (O_CREAT | O_TRUNC)) == 0, "restore storage can be created or truncated") &&
+         Check((restore_flags & (O_CLOEXEC | O_NOFOLLOW)) == (O_CLOEXEC | O_NOFOLLOW),
+               "restore storage lacks descriptor safeguards") &&
+         Check((checkpoint_flags & O_ACCMODE) == O_RDWR, "checkpoint storage is not opened writable") &&
+         Check((checkpoint_flags & (O_CREAT | O_TRUNC)) == (O_CREAT | O_TRUNC),
+               "checkpoint storage is not created and truncated");
 }
 
 bool
@@ -151,8 +167,8 @@ TestJsonEscaping()
 int
 main()
 {
-  if (!TestOptionParsingAndBounds() || !TestPinnedMemoryCalculation() || !TestChunkRingAndShardedLayout() ||
-      !TestLayoutGapsAndOverflowRejected() || !TestJsonEscaping()) {
+  if (!TestOptionParsingAndBounds() || !TestPinnedMemoryCalculation() || !TestStorageOpenModePolicy() ||
+      !TestChunkRingAndShardedLayout() || !TestLayoutGapsAndOverflowRejected() || !TestJsonEscaping()) {
     return 1;
   }
   std::cout << "CUDA transfer configuration tests passed\n";
