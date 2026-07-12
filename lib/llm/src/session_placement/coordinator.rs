@@ -5,37 +5,33 @@ use std::{
     future::Future,
     sync::{
         Arc, Weak,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use dashmap::{DashMap, mapref::entry::Entry};
+use parking_lot::Mutex;
 use thiserror::Error;
-use tokio::{sync::Notify, time::Instant};
+use tokio::{runtime::Handle, sync::Notify, task::JoinHandle, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 const MIN_IDLE_TTL: Duration = Duration::from_secs(1);
 const MAX_IDLE_TTL: Duration = Duration::from_secs(31_536_000);
+// DashMap removal and the global count update are separate atomic operations. Retry a bounded
+// number of times when a concurrent removal has exposed a map slot but not yet released its count.
+const CAPACITY_CONTENTION_RETRIES: usize = 2;
 
-/// Resource and lifetime limits for session placement state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SessionPlacementConfig {
-    /// Time a committed placement remains after its last active request.
-    pub idle_ttl: Duration,
-    /// Maximum time an initialization owner may hold a provisional placement.
-    ///
-    /// `None` preserves the owner until it commits or is dropped.
-    pub initialization_timeout: Option<Duration>,
-    /// Maximum number of initializing and committed entries.
-    pub max_entries: usize,
-    /// Maximum encoded placement-key size.
-    pub max_key_bytes: usize,
+pub(crate) struct SessionPlacementConfig {
+    pub(crate) idle_ttl: Duration,
+    pub(crate) initialization_timeout: Option<Duration>,
+    pub(crate) max_entries: usize,
+    pub(crate) max_key_bytes: usize,
 }
 
-/// Failures produced while configuring or acquiring session placement state.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum SessionPlacementError {
+pub(crate) enum SessionPlacementError {
     #[error("invalid session placement configuration: {0}")]
     InvalidConfig(&'static str),
 
@@ -60,19 +56,115 @@ pub enum SessionPlacementError {
     #[error("session placement initialization changed")]
     InitializationChanged,
 
+    #[error(
+        "session placement dispatch {attempt_id} for target generation {target_generation} has an ambiguous outcome"
+    )]
+    DispatchAmbiguous {
+        attempt_id: u64,
+        target_generation: u64,
+    },
+
+    #[error(
+        "session placement target generation changed from {expected_generation} to {actual_generation}"
+    )]
+    TargetGenerationChanged {
+        expected_generation: u64,
+        actual_generation: u64,
+    },
+
     #[error("session placement acquisition was cancelled")]
     AcquireCancelled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct PlacementAttemptId(u64);
+
+impl PlacementAttemptId {
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TargetGeneration(u64);
+
+impl TargetGeneration {
+    pub(crate) const UNVERSIONED: Self = Self(0);
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "versioned targets are consumed by the global-router integration"
+        )
+    )]
+    pub(crate) fn new(generation: u64) -> Self {
+        Self(generation)
+    }
+
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+}
+
+struct VersionedTargetInner<T> {
+    target: T,
+    generation: TargetGeneration,
+}
+
+pub(crate) struct VersionedTarget<T> {
+    inner: Arc<VersionedTargetInner<T>>,
+}
+
+impl<T> VersionedTarget<T> {
+    fn new(target: T, generation: TargetGeneration) -> Self {
+        Self {
+            inner: Arc::new(VersionedTargetInner { target, generation }),
+        }
+    }
+
+    pub(crate) fn target(&self) -> &T {
+        &self.inner.target
+    }
+
+    pub(crate) fn generation(&self) -> TargetGeneration {
+        self.inner.generation
+    }
+
+    fn same_as(&self, other: &Self) -> bool {
+        self.generation() == other.generation() && Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl<T> Clone for VersionedTarget<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+// A reservation may be replaced before dispatch begins. Once a target is Dispatching, every
+// non-definitive outcome is quarantined as Ambiguous so another owner cannot silently replay it.
 enum PlacementEntry<T> {
-    Initializing {
-        revision: u64,
+    Reserved {
+        attempt: PlacementAttemptId,
         notify: Arc<Notify>,
         deadline: Option<Instant>,
     },
+    Dispatching {
+        attempt: PlacementAttemptId,
+        candidate: VersionedTarget<T>,
+        notify: Arc<Notify>,
+        deadline: Option<Instant>,
+    },
+    Ambiguous {
+        attempt: PlacementAttemptId,
+        candidate: VersionedTarget<T>,
+    },
     Bound {
-        target: T,
-        revision: u64,
+        target: VersionedTarget<T>,
+        revision: PlacementAttemptId,
         active_leases: usize,
         idle_deadline: Instant,
     },
@@ -82,22 +174,40 @@ struct SessionPlacementInner<T> {
     entries: DashMap<String, PlacementEntry<T>>,
     config: SessionPlacementConfig,
     entry_count: AtomicUsize,
-    next_revision: AtomicU64,
+    next_attempt: AtomicU64,
     cancel: CancellationToken,
+    reaper_running: AtomicBool,
+    reaper: Mutex<Option<JoinHandle<()>>>,
     #[cfg(test)]
     reaper_started: Arc<Notify>,
     #[cfg(test)]
+    reaper_completed: Arc<Notify>,
+    #[cfg(test)]
     waiter_observed: Arc<Notify>,
+}
+
+struct ReaperRunning<T> {
+    inner: Weak<SessionPlacementInner<T>>,
+}
+
+impl<T> Drop for ReaperRunning<T> {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            inner.reaper_running.store(false, Ordering::Release);
+        }
+    }
 }
 
 impl<T> Drop for SessionPlacementInner<T> {
     fn drop(&mut self) {
         self.cancel.cancel();
+        if let Some(reaper) = self.reaper.get_mut().take() {
+            reaper.abort();
+        }
     }
 }
 
-/// Coordinates bounded soft placement state for arbitrary cloneable routing targets.
-pub struct SessionPlacement<T> {
+pub(crate) struct SessionPlacement<T> {
     inner: Arc<SessionPlacementInner<T>>,
 }
 
@@ -111,30 +221,35 @@ impl<T> Clone for SessionPlacement<T> {
 
 impl<T> SessionPlacement<T>
 where
-    T: Clone + Send + Sync + 'static,
+    T: Send + Sync + 'static,
 {
-    /// Creates a coordinator and starts its idle-state reaper on the current Tokio runtime.
-    pub fn new(config: SessionPlacementConfig) -> Result<Self, SessionPlacementError> {
+    pub(crate) fn new(config: SessionPlacementConfig) -> Result<Self, SessionPlacementError> {
         validate_config(config)?;
-        tokio::runtime::Handle::try_current()
-            .map_err(|_| SessionPlacementError::RuntimeUnavailable)?;
+        let handle =
+            Handle::try_current().map_err(|_| SessionPlacementError::RuntimeUnavailable)?;
         let inner = Arc::new(SessionPlacementInner {
             entries: DashMap::new(),
             config,
             entry_count: AtomicUsize::new(0),
-            next_revision: AtomicU64::new(1),
+            next_attempt: AtomicU64::new(1),
             cancel: CancellationToken::new(),
+            reaper_running: AtomicBool::new(false),
+            reaper: Mutex::new(None),
             #[cfg(test)]
             reaper_started: Arc::new(Notify::new()),
             #[cfg(test)]
+            reaper_completed: Arc::new(Notify::new()),
+            #[cfg(test)]
             waiter_observed: Arc::new(Notify::new()),
         });
-        Self::spawn_reaper(&inner);
+        *inner.reaper.lock() = Some(Self::spawn_reaper_task(&inner, &handle));
         Ok(Self { inner })
     }
 
-    /// Acquires an existing placement or ownership of the key's provisional initialization.
-    pub async fn acquire(&self, key: &str) -> Result<PlacementAcquire<T>, SessionPlacementError> {
+    pub(crate) async fn acquire(
+        &self,
+        key: &str,
+    ) -> Result<PlacementAcquire<T>, SessionPlacementError> {
         self.acquire_inner(key, std::future::pending()).await
     }
 
@@ -158,106 +273,135 @@ where
         F: Future<Output = ()>,
     {
         self.validate_key(key)?;
+        self.ensure_reaper();
         let key = key.to_owned();
+        let mut reaped_for_capacity = false;
+        let mut capacity_contention_retries = 0;
         tokio::pin!(cancellation);
 
         loop {
             let now = Instant::now();
             match self.inner.entries.entry(key.clone()) {
                 Entry::Vacant(entry) => {
-                    self.reserve_entry()?;
-                    let revision = self.next_revision();
+                    if let Err(error) = self.reserve_entry() {
+                        drop(entry);
+                        if reaped_for_capacity {
+                            if capacity_contention_retries < CAPACITY_CONTENTION_RETRIES
+                                && self.inner.entries.len() < self.inner.config.max_entries
+                            {
+                                capacity_contention_retries += 1;
+                                tokio::task::yield_now().await;
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                        self.reap_expired_async().await;
+                        reaped_for_capacity = true;
+                        continue;
+                    }
+                    let attempt = self.next_attempt();
                     let notify = Arc::new(Notify::new());
-                    entry.insert(PlacementEntry::Initializing {
-                        revision,
+                    entry.insert(PlacementEntry::Reserved {
+                        attempt,
                         notify: notify.clone(),
-                        deadline: self
-                            .inner
-                            .config
-                            .initialization_timeout
-                            .map(|timeout| now + timeout),
+                        deadline: self.initialization_deadline(now),
                     });
                     return Ok(PlacementAcquire::Initialize(PlacementInitialization {
                         placement: Arc::downgrade(&self.inner),
                         key,
-                        revision,
+                        attempt,
                         notify,
                         active: true,
                     }));
                 }
                 Entry::Occupied(mut entry) => match entry.get_mut() {
-                    PlacementEntry::Initializing {
+                    PlacementEntry::Reserved {
                         notify, deadline, ..
                     } if deadline.as_ref().is_some_and(|deadline| *deadline <= now) => {
                         let stale_notify = notify.clone();
-                        let revision = self.next_revision();
+                        let attempt = self.next_attempt();
                         let notify = Arc::new(Notify::new());
-                        *entry.get_mut() = PlacementEntry::Initializing {
-                            revision,
+                        *entry.get_mut() = PlacementEntry::Reserved {
+                            attempt,
                             notify: notify.clone(),
-                            deadline: self
-                                .inner
-                                .config
-                                .initialization_timeout
-                                .map(|timeout| now + timeout),
+                            deadline: self.initialization_deadline(now),
                         };
                         drop(entry);
                         stale_notify.notify_waiters();
                         return Ok(PlacementAcquire::Initialize(PlacementInitialization {
                             placement: Arc::downgrade(&self.inner),
                             key,
-                            revision,
+                            attempt,
                             notify,
                             active: true,
                         }));
                     }
-                    PlacementEntry::Initializing {
+                    PlacementEntry::Reserved {
                         notify, deadline, ..
                     } => {
-                        #[cfg(test)]
-                        self.inner.waiter_observed.notify_one();
                         let deadline = *deadline;
                         let notified = notify.clone().notified_owned();
-                        tokio::pin!(notified);
-                        notified.as_mut().enable();
-                        drop(entry);
-                        let timeout = async move {
-                            match deadline {
-                                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                                None => std::future::pending::<()>().await,
-                            }
+                        self.wait_for_initialization(
+                            entry,
+                            notified,
+                            deadline,
+                            cancellation.as_mut(),
+                        )
+                        .await?;
+                    }
+                    PlacementEntry::Dispatching {
+                        attempt,
+                        candidate,
+                        notify,
+                        deadline,
+                    } if deadline.as_ref().is_some_and(|deadline| *deadline <= now) => {
+                        let attempt = *attempt;
+                        let candidate = candidate.clone();
+                        let notify = notify.clone();
+                        *entry.get_mut() = PlacementEntry::Ambiguous {
+                            attempt,
+                            candidate: candidate.clone(),
                         };
-                        tokio::pin!(timeout);
-                        tokio::select! {
-                            biased;
-                            _ = cancellation.as_mut() => {
-                                return Err(SessionPlacementError::AcquireCancelled);
-                            }
-                            _ = notified => {}
-                            _ = timeout.as_mut() => {}
-                        }
+                        drop(entry);
+                        notify.notify_waiters();
+                        return Err(dispatch_ambiguous(attempt, candidate.generation()));
+                    }
+                    PlacementEntry::Dispatching {
+                        notify, deadline, ..
+                    } => {
+                        let deadline = *deadline;
+                        let notified = notify.clone().notified_owned();
+                        self.wait_for_initialization(
+                            entry,
+                            notified,
+                            deadline,
+                            cancellation.as_mut(),
+                        )
+                        .await?;
+                    }
+                    PlacementEntry::Ambiguous { attempt, candidate } => {
+                        return Err(dispatch_ambiguous(*attempt, candidate.generation()));
                     }
                     PlacementEntry::Bound {
+                        target,
                         active_leases,
                         idle_deadline,
                         ..
                     } if *active_leases == 0 && *idle_deadline <= now => {
-                        let revision = self.next_revision();
+                        let stale_target = target.clone();
+                        let attempt = self.next_attempt();
                         let notify = Arc::new(Notify::new());
-                        *entry.get_mut() = PlacementEntry::Initializing {
-                            revision,
+                        *entry.get_mut() = PlacementEntry::Reserved {
+                            attempt,
                             notify: notify.clone(),
-                            deadline: self
-                                .inner
-                                .config
-                                .initialization_timeout
-                                .map(|timeout| now + timeout),
+                            deadline: self.initialization_deadline(now),
                         };
                         drop(entry);
+                        drop(stale_target);
                         return Ok(PlacementAcquire::Initialize(PlacementInitialization {
                             placement: Arc::downgrade(&self.inner),
                             key,
-                            revision,
+                            attempt,
                             notify,
                             active: true,
                         }));
@@ -284,29 +428,155 @@ where
         }
     }
 
-    /// Returns a valid committed target without creating state or acquiring a request lease.
-    pub fn query(&self, key: &str) -> Result<Option<T>, SessionPlacementError> {
+    async fn wait_for_initialization<F>(
+        &self,
+        entry: dashmap::mapref::entry::OccupiedEntry<'_, String, PlacementEntry<T>>,
+        notified: tokio::sync::futures::OwnedNotified,
+        deadline: Option<Instant>,
+        mut cancellation: std::pin::Pin<&mut F>,
+    ) -> Result<(), SessionPlacementError>
+    where
+        F: Future<Output = ()>,
+    {
+        #[cfg(test)]
+        self.inner.waiter_observed.notify_one();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        drop(entry);
+        let timeout = async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(timeout);
+        tokio::select! {
+            biased;
+            _ = cancellation.as_mut() => Err(SessionPlacementError::AcquireCancelled),
+            _ = notified => Ok(()),
+            _ = timeout.as_mut() => Ok(()),
+        }
+    }
+
+    pub(crate) fn query(
+        &self,
+        key: &str,
+    ) -> Result<Option<VersionedTarget<T>>, SessionPlacementError> {
         self.validate_key(key)?;
+        self.ensure_reaper();
         let Some(entry) = self.inner.entries.get(key) else {
             return Ok(None);
         };
-        let PlacementEntry::Bound {
-            target,
-            active_leases,
-            idle_deadline,
-            ..
-        } = entry.value()
-        else {
-            return Ok(None);
-        };
-        if *active_leases == 0 && *idle_deadline <= Instant::now() {
-            return Ok(None);
+        match entry.value() {
+            PlacementEntry::Ambiguous { attempt, candidate } => {
+                Err(dispatch_ambiguous(*attempt, candidate.generation()))
+            }
+            PlacementEntry::Bound {
+                target,
+                active_leases,
+                idle_deadline,
+                ..
+            } if *active_leases > 0 || *idle_deadline > Instant::now() => Ok(Some(target.clone())),
+            _ => Ok(None),
         }
-        Ok(Some(target.clone()))
     }
 
-    fn spawn_reaper(inner: &Arc<SessionPlacementInner<T>>) {
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "ambiguous dispatch recovery is consumed by the global-router integration"
+        )
+    )]
+    pub(crate) fn resolve_ambiguous(
+        &self,
+        key: &str,
+        attempt: PlacementAttemptId,
+        generation: TargetGeneration,
+        resolution: AmbiguousResolution,
+    ) -> Result<Option<PlacementLease<T>>, SessionPlacementError> {
+        self.validate_key(key)?;
+        match resolution {
+            AmbiguousResolution::Accepted => {
+                let Some(mut entry) = self.inner.entries.get_mut(key) else {
+                    return Err(SessionPlacementError::InitializationCancelled);
+                };
+                let PlacementEntry::Ambiguous {
+                    attempt: current,
+                    candidate,
+                } = entry.value()
+                else {
+                    return Err(SessionPlacementError::InitializationChanged);
+                };
+                validate_attempt(*current, candidate, attempt, generation)?;
+                let target = candidate.clone();
+                *entry = PlacementEntry::Bound {
+                    target,
+                    revision: attempt,
+                    active_leases: 1,
+                    idle_deadline: Instant::now() + self.inner.config.idle_ttl,
+                };
+                drop(entry);
+                Ok(Some(PlacementLease {
+                    placement: Arc::downgrade(&self.inner),
+                    key: key.to_owned(),
+                    revision: attempt,
+                    active: true,
+                }))
+            }
+            AmbiguousResolution::DefinitelyNotAccepted => {
+                let removed = self.inner.entries.remove_if(key, |_, entry| {
+                    matches!(
+                        entry,
+                        PlacementEntry::Ambiguous {
+                            attempt: current,
+                            candidate,
+                        } if *current == attempt && candidate.generation() == generation
+                    )
+                });
+                if removed.is_none() {
+                    return self.ambiguous_resolution_error(key, attempt, generation);
+                }
+                self.inner.entry_count.fetch_sub(1, Ordering::Relaxed);
+                drop(removed);
+                Ok(None)
+            }
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "only used by the deferred global-router recovery path"
+        )
+    )]
+    fn ambiguous_resolution_error(
+        &self,
+        key: &str,
+        attempt: PlacementAttemptId,
+        generation: TargetGeneration,
+    ) -> Result<Option<PlacementLease<T>>, SessionPlacementError> {
+        let Some(entry) = self.inner.entries.get(key) else {
+            return Err(SessionPlacementError::InitializationCancelled);
+        };
+        let PlacementEntry::Ambiguous {
+            attempt: current,
+            candidate,
+        } = entry.value()
+        else {
+            return Err(SessionPlacementError::InitializationChanged);
+        };
+        validate_attempt(*current, candidate, attempt, generation)?;
+        Err(SessionPlacementError::InitializationChanged)
+    }
+
+    fn spawn_reaper_task(inner: &Arc<SessionPlacementInner<T>>, handle: &Handle) -> JoinHandle<()> {
         let weak = Arc::downgrade(inner);
+        let running = ReaperRunning {
+            inner: weak.clone(),
+        };
+        inner.reaper_running.store(true, Ordering::Release);
         let cancel = inner.cancel.clone();
         let period = inner
             .config
@@ -317,40 +587,59 @@ where
             .min(Duration::from_secs(30));
         #[cfg(test)]
         let reaper_started = inner.reaper_started.clone();
-        tokio::spawn(async move {
+        #[cfg(test)]
+        let reaper_completed = inner.reaper_completed.clone();
+        handle.spawn(async move {
+            let _running = running;
+            let sleep = tokio::time::sleep(period);
+            tokio::pin!(sleep);
             #[cfg(test)]
             reaper_started.notify_one();
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => return,
-                    _ = tokio::time::sleep(period) => {}
+                    _ = sleep.as_mut() => {}
                 }
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
-                let now = Instant::now();
-                inner.entries.retain(|_, entry| {
-                    let retain = match entry {
-                        PlacementEntry::Initializing {
-                            notify, deadline, ..
-                        } if deadline.as_ref().is_some_and(|deadline| *deadline <= now) => {
-                            notify.notify_waiters();
-                            false
-                        }
-                        PlacementEntry::Bound {
-                            active_leases: 0,
-                            idle_deadline,
-                            ..
-                        } if *idle_deadline <= now => false,
-                        _ => true,
-                    };
-                    if !retain {
-                        inner.entry_count.fetch_sub(1, Ordering::Relaxed);
-                    }
-                    retain
+                let cleanup = tokio::task::spawn_blocking(move || {
+                    inner.reap_expired(Instant::now());
                 });
+                match cleanup.await {
+                    Ok(()) => {
+                        #[cfg(test)]
+                        reaper_completed.notify_one();
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, "session placement cleanup task failed");
+                    }
+                }
+                sleep.as_mut().reset(Instant::now() + period);
             }
-        });
+        })
+    }
+
+    fn ensure_reaper(&self) {
+        if self.inner.reaper_running.load(Ordering::Acquire) {
+            return;
+        }
+        let mut reaper = self.inner.reaper.lock();
+        if self.inner.reaper_running.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(handle) = Handle::try_current() {
+            *reaper = Some(Self::spawn_reaper_task(&self.inner, &handle));
+        }
+    }
+
+    async fn reap_expired_async(&self) {
+        let inner = self.inner.clone();
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || inner.reap_expired(Instant::now())).await
+        {
+            tracing::warn!(?error, "session placement capacity cleanup task failed");
+        }
     }
 
     fn validate_key(&self, key: &str) -> Result<(), SessionPlacementError> {
@@ -375,8 +664,15 @@ where
             })
     }
 
-    fn next_revision(&self) -> u64 {
-        self.inner.next_revision.fetch_add(1, Ordering::Relaxed)
+    fn next_attempt(&self) -> PlacementAttemptId {
+        PlacementAttemptId(self.inner.next_attempt.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn initialization_deadline(&self, now: Instant) -> Option<Instant> {
+        self.inner
+            .config
+            .initialization_timeout
+            .map(|timeout| now + timeout)
     }
 
     #[cfg(test)]
@@ -392,6 +688,23 @@ where
     #[cfg(test)]
     pub(crate) async fn wait_for_reaper(&self) {
         self.inner.reaper_started.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_reap(&self) {
+        self.inner.reaper_completed.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn stop_reaper_for_test(&self) {
+        let reaper = {
+            let mut reaper = self.inner.reaper.lock();
+            reaper.take()
+        };
+        if let Some(reaper) = reaper {
+            reaper.abort();
+            let _ = reaper.await;
+        }
     }
 
     #[cfg(test)]
@@ -417,89 +730,161 @@ where
     }
 }
 
-/// Result of acquiring placement state for a session key.
-pub enum PlacementAcquire<T> {
-    /// The caller owns provisional initialization and must commit or drop it.
-    Initialize(PlacementInitialization<T>),
-    /// The session already has a committed target and an active-request lease.
-    Bound { target: T, lease: PlacementLease<T> },
+impl<T> SessionPlacementInner<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn reap_expired(&self, now: Instant) {
+        let keys: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let is_expired = match entry.value() {
+                    PlacementEntry::Reserved { deadline, .. }
+                    | PlacementEntry::Dispatching { deadline, .. } => {
+                        deadline.as_ref().is_some_and(|deadline| *deadline <= now)
+                    }
+                    PlacementEntry::Bound {
+                        active_leases: 0,
+                        idle_deadline,
+                        ..
+                    } => *idle_deadline <= now,
+                    _ => false,
+                };
+                is_expired.then(|| entry.key().clone())
+            })
+            .collect();
+
+        for key in keys {
+            let mut transitioned_notify = None;
+            if let Some(mut entry) = self.entries.get_mut(&key)
+                && let PlacementEntry::Dispatching {
+                    attempt,
+                    candidate,
+                    notify,
+                    deadline,
+                } = entry.value_mut()
+                && deadline.as_ref().is_some_and(|deadline| *deadline <= now)
+            {
+                let attempt = *attempt;
+                let candidate = candidate.clone();
+                transitioned_notify = Some(notify.clone());
+                *entry = PlacementEntry::Ambiguous { attempt, candidate };
+            }
+            if let Some(notify) = transitioned_notify {
+                notify.notify_waiters();
+                continue;
+            }
+
+            let removed = self.entries.remove_if(&key, |_, entry| {
+                matches!(
+                    entry,
+                    PlacementEntry::Reserved {
+                        deadline: Some(deadline),
+                        ..
+                    } if *deadline <= now
+                ) || matches!(
+                    entry,
+                    PlacementEntry::Bound {
+                        active_leases: 0,
+                        idle_deadline,
+                        ..
+                    } if *idle_deadline <= now
+                )
+            });
+            let Some((_key, removed_entry)) = removed else {
+                continue;
+            };
+            self.entry_count.fetch_sub(1, Ordering::Relaxed);
+            if let PlacementEntry::Reserved { notify, .. } = &removed_entry {
+                notify.notify_waiters();
+            }
+            drop(removed_entry);
+        }
+    }
 }
 
-/// Exclusive ownership of a provisional placement decision.
-pub struct PlacementInitialization<T> {
+pub(crate) enum PlacementAcquire<T> {
+    Initialize(PlacementInitialization<T>),
+    Bound {
+        target: VersionedTarget<T>,
+        lease: PlacementLease<T>,
+    },
+}
+
+pub(crate) struct PlacementInitialization<T> {
     placement: Weak<SessionPlacementInner<T>>,
     key: String,
-    revision: u64,
+    attempt: PlacementAttemptId,
     notify: Arc<Notify>,
     active: bool,
 }
 
-impl<T> PlacementInitialization<T> {
-    /// Commits the target after the request plane confirms that dispatch was accepted.
-    pub fn commit(mut self, target: T) -> Result<PlacementLease<T>, SessionPlacementError> {
+impl<T> PlacementInitialization<T>
+where
+    T: Send + Sync + 'static,
+{
+    pub(crate) fn begin_dispatch(
+        mut self,
+        target: T,
+        generation: TargetGeneration,
+    ) -> Result<PlacementDispatch<T>, SessionPlacementError> {
         let Some(inner) = self.placement.upgrade() else {
             return Err(SessionPlacementError::CoordinatorDropped);
         };
         let Some(mut entry) = inner.entries.get_mut(&self.key) else {
             return Err(SessionPlacementError::InitializationCancelled);
         };
-        let now = Instant::now();
-        let initialization_is_current = matches!(
-            entry.value(),
-            PlacementEntry::Initializing {
-                revision,
-                deadline,
-                ..
-            } if *revision == self.revision
-                && deadline
-                    .as_ref()
-                    .is_none_or(|deadline| *deadline > now)
-        );
-        if !initialization_is_current {
-            let initialization_expired = matches!(
-                entry.value(),
-                PlacementEntry::Initializing {
-                    revision,
-                    deadline,
-                    ..
-                } if *revision == self.revision
-                    && deadline
-                        .as_ref()
-                        .is_some_and(|deadline| *deadline <= now)
-            );
-            drop(entry);
-            if initialization_expired {
-                let removed = inner.entries.remove_if(&self.key, |_, entry| {
-                    matches!(
-                        entry,
-                        PlacementEntry::Initializing { revision, .. }
-                            if *revision == self.revision
-                    )
-                });
-                if removed.is_some() {
-                    inner.entry_count.fetch_sub(1, Ordering::Relaxed);
-                }
-                self.notify.notify_waiters();
-                self.active = false;
-                return Err(SessionPlacementError::InitializationCancelled);
-            }
+        let PlacementEntry::Reserved {
+            attempt,
+            notify,
+            deadline,
+        } = entry.value()
+        else {
+            return Err(SessionPlacementError::InitializationChanged);
+        };
+        if *attempt != self.attempt {
             return Err(SessionPlacementError::InitializationChanged);
         }
-        *entry = PlacementEntry::Bound {
-            target,
-            revision: self.revision,
-            active_leases: 1,
-            idle_deadline: Instant::now() + inner.config.idle_ttl,
+        if deadline
+            .as_ref()
+            .is_some_and(|deadline| *deadline <= Instant::now())
+        {
+            drop(entry);
+            return Err(SessionPlacementError::InitializationCancelled);
+        }
+        let notify = notify.clone();
+        let deadline = *deadline;
+        let candidate = VersionedTarget::new(target, generation);
+        *entry = PlacementEntry::Dispatching {
+            attempt: self.attempt,
+            candidate: candidate.clone(),
+            notify,
+            deadline,
         };
         drop(entry);
         self.active = false;
-        self.notify.notify_waiters();
-        Ok(PlacementLease {
+        Ok(PlacementDispatch {
             placement: Arc::downgrade(&inner),
             key: self.key.clone(),
-            revision: self.revision,
+            attempt: self.attempt,
+            candidate,
+            notify: self.notify.clone(),
             active: true,
         })
+    }
+
+    pub(crate) fn commit_already_accepted(
+        self,
+        target: T,
+        generation: TargetGeneration,
+    ) -> Result<PlacementLease<T>, SessionPlacementError> {
+        // Compatibility only: callers must not use this around an in-flight dispatch. New
+        // forwarding paths must call `begin_dispatch` before sending and finish with the
+        // transport's explicit outcome.
+        self.begin_dispatch(target, generation)?
+            .finish(PlacementDispatchOutcome::Accepted)?
+            .ok_or(SessionPlacementError::InitializationChanged)
     }
 }
 
@@ -514,27 +899,253 @@ impl<T> Drop for PlacementInitialization<T> {
         let removed = inner.entries.remove_if(&self.key, |_, entry| {
             matches!(
                 entry,
-                PlacementEntry::Initializing { revision, .. } if *revision == self.revision
+                PlacementEntry::Reserved { attempt, .. } if *attempt == self.attempt
             )
         });
         if removed.is_some() {
             inner.entry_count.fetch_sub(1, Ordering::Relaxed);
         }
+        drop(removed);
         self.notify.notify_waiters();
     }
 }
 
-/// Active-request lease that prevents a committed placement from expiring.
-pub struct PlacementLease<T> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlacementDispatchOutcome {
+    Accepted,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "transport outcome mapping is added with the global-router integration"
+        )
+    )]
+    DefinitelyNotAccepted,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "transport outcome mapping is added with the global-router integration"
+        )
+    )]
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "ambiguous dispatch recovery is consumed by the global-router integration"
+    )
+)]
+pub(crate) enum AmbiguousResolution {
+    Accepted,
+    DefinitelyNotAccepted,
+}
+
+pub(crate) struct PlacementDispatch<T> {
     placement: Weak<SessionPlacementInner<T>>,
     key: String,
-    revision: u64,
+    attempt: PlacementAttemptId,
+    candidate: VersionedTarget<T>,
+    notify: Arc<Notify>,
+    active: bool,
+}
+
+impl<T> PlacementDispatch<T>
+where
+    T: Send + Sync + 'static,
+{
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "attempt IDs are consumed by the global-router recovery path"
+        )
+    )]
+    pub(crate) fn attempt_id(&self) -> PlacementAttemptId {
+        self.attempt
+    }
+
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the global-router dispatch path reads the reserved target"
+        )
+    )]
+    pub(crate) fn target(&self) -> &VersionedTarget<T> {
+        &self.candidate
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        outcome: PlacementDispatchOutcome,
+    ) -> Result<Option<PlacementLease<T>>, SessionPlacementError> {
+        let Some(inner) = self.placement.upgrade() else {
+            return Err(SessionPlacementError::CoordinatorDropped);
+        };
+        match outcome {
+            PlacementDispatchOutcome::Accepted => {
+                let Some(mut entry) = inner.entries.get_mut(&self.key) else {
+                    return Err(SessionPlacementError::InitializationCancelled);
+                };
+                let notify = match entry.value() {
+                    PlacementEntry::Dispatching {
+                        attempt,
+                        candidate,
+                        notify,
+                        ..
+                    } => {
+                        validate_attempt(
+                            *attempt,
+                            candidate,
+                            self.attempt,
+                            self.candidate.generation(),
+                        )?;
+                        Some(notify.clone())
+                    }
+                    PlacementEntry::Ambiguous { attempt, candidate } => {
+                        validate_attempt(
+                            *attempt,
+                            candidate,
+                            self.attempt,
+                            self.candidate.generation(),
+                        )?;
+                        None
+                    }
+                    _ => return Err(SessionPlacementError::InitializationChanged),
+                };
+                *entry = PlacementEntry::Bound {
+                    target: self.candidate.clone(),
+                    revision: self.attempt,
+                    active_leases: 1,
+                    idle_deadline: Instant::now() + inner.config.idle_ttl,
+                };
+                drop(entry);
+                self.active = false;
+                if let Some(notify) = notify {
+                    notify.notify_waiters();
+                }
+                Ok(Some(PlacementLease {
+                    placement: Arc::downgrade(&inner),
+                    key: self.key.clone(),
+                    revision: self.attempt,
+                    active: true,
+                }))
+            }
+            PlacementDispatchOutcome::DefinitelyNotAccepted => {
+                let removed = inner.entries.remove_if(&self.key, |_, entry| {
+                    matches!(
+                        entry,
+                        PlacementEntry::Dispatching {
+                            attempt,
+                            candidate,
+                            ..
+                        } | PlacementEntry::Ambiguous {
+                            attempt,
+                            candidate,
+                        } if *attempt == self.attempt && candidate.same_as(&self.candidate)
+                    )
+                });
+                if removed.is_none() {
+                    return Err(SessionPlacementError::InitializationChanged);
+                }
+                inner.entry_count.fetch_sub(1, Ordering::Relaxed);
+                let notify = removed.as_ref().and_then(|(_, entry)| match entry {
+                    PlacementEntry::Dispatching { notify, .. } => Some(notify.clone()),
+                    _ => None,
+                });
+                drop(removed);
+                self.active = false;
+                if let Some(notify) = notify {
+                    notify.notify_waiters();
+                }
+                Ok(None)
+            }
+            PlacementDispatchOutcome::Ambiguous => {
+                self.mark_ambiguous(&inner)?;
+                self.active = false;
+                Ok(None)
+            }
+        }
+    }
+
+    fn mark_ambiguous(
+        &self,
+        inner: &Arc<SessionPlacementInner<T>>,
+    ) -> Result<(), SessionPlacementError> {
+        let Some(mut entry) = inner.entries.get_mut(&self.key) else {
+            return Err(SessionPlacementError::InitializationCancelled);
+        };
+        match entry.value() {
+            PlacementEntry::Dispatching {
+                attempt, candidate, ..
+            } => validate_attempt(
+                *attempt,
+                candidate,
+                self.attempt,
+                self.candidate.generation(),
+            )?,
+            PlacementEntry::Ambiguous { attempt, candidate } => {
+                return validate_attempt(
+                    *attempt,
+                    candidate,
+                    self.attempt,
+                    self.candidate.generation(),
+                );
+            }
+            _ => return Err(SessionPlacementError::InitializationChanged),
+        }
+        *entry = PlacementEntry::Ambiguous {
+            attempt: self.attempt,
+            candidate: self.candidate.clone(),
+        };
+        drop(entry);
+        self.notify.notify_waiters();
+        Ok(())
+    }
+}
+
+impl<T> Drop for PlacementDispatch<T> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Some(inner) = self.placement.upgrade() else {
+            return;
+        };
+        let Some(mut entry) = inner.entries.get_mut(&self.key) else {
+            return;
+        };
+        let PlacementEntry::Dispatching {
+            attempt, candidate, ..
+        } = entry.value()
+        else {
+            return;
+        };
+        if *attempt != self.attempt || !candidate.same_as(&self.candidate) {
+            return;
+        }
+        *entry = PlacementEntry::Ambiguous {
+            attempt: self.attempt,
+            candidate: self.candidate.clone(),
+        };
+        drop(entry);
+        self.notify.notify_waiters();
+    }
+}
+
+pub(crate) struct PlacementLease<T> {
+    placement: Weak<SessionPlacementInner<T>>,
+    key: String,
+    revision: PlacementAttemptId,
     active: bool,
 }
 
 impl<T> PlacementLease<T> {
-    /// Removes the matching placement, without affecting a newer revision.
-    pub fn invalidate(&mut self) {
+    pub(crate) fn invalidate(&mut self) {
         if !self.active {
             return;
         }
@@ -551,6 +1162,7 @@ impl<T> PlacementLease<T> {
         if removed.is_some() {
             inner.entry_count.fetch_sub(1, Ordering::Relaxed);
         }
+        drop(removed);
     }
 
     pub(crate) fn abandon(&mut self) {
@@ -590,6 +1202,35 @@ impl<T> PlacementLease<T> {
 impl<T> Drop for PlacementLease<T> {
     fn drop(&mut self) {
         self.release(true);
+    }
+}
+
+fn validate_attempt<T>(
+    current_attempt: PlacementAttemptId,
+    current_target: &VersionedTarget<T>,
+    expected_attempt: PlacementAttemptId,
+    expected_generation: TargetGeneration,
+) -> Result<(), SessionPlacementError> {
+    if current_attempt != expected_attempt {
+        return Err(SessionPlacementError::InitializationChanged);
+    }
+    let actual_generation = current_target.generation();
+    if actual_generation != expected_generation {
+        return Err(SessionPlacementError::TargetGenerationChanged {
+            expected_generation: expected_generation.get(),
+            actual_generation: actual_generation.get(),
+        });
+    }
+    Ok(())
+}
+
+fn dispatch_ambiguous(
+    attempt: PlacementAttemptId,
+    generation: TargetGeneration,
+) -> SessionPlacementError {
+    SessionPlacementError::DispatchAmbiguous {
+        attempt_id: attempt.get(),
+        target_generation: generation.get(),
     }
 }
 

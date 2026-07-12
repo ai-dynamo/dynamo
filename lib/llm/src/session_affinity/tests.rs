@@ -489,7 +489,7 @@ async fn session_affinity_reaper_removes_idle_entries_and_stops_on_drop() {
 
     coordinator.wait_for_reaper().await;
     tokio::time::advance(Duration::from_secs(10)).await;
-    tokio::task::yield_now().await;
+    coordinator.wait_for_reap().await;
     assert_eq!(coordinator.entry_count(), 0);
 
     drop(coordinator);

@@ -20,7 +20,7 @@ use crate::{
     },
     session_placement::{
         PlacementAcquire, PlacementInitialization, PlacementLease, SessionPlacement,
-        SessionPlacementConfig, SessionPlacementError,
+        SessionPlacementConfig, SessionPlacementError, TargetGeneration,
     },
 };
 use dynamo_runtime::{
@@ -138,6 +138,7 @@ impl AffinityCoordinator {
                 }))
             }
             PlacementAcquire::Bound { target, mut lease } => {
+                let target = *target.target();
                 if let Err(error) =
                     validate_bound_target(session_id.as_str(), target, requested_target)
                 {
@@ -161,7 +162,8 @@ impl AffinityCoordinator {
         let target = self
             .placement
             .query(session_id.as_str())
-            .map_err(map_placement_error)?;
+            .map_err(map_placement_error)?
+            .map(|target| *target.target());
         if let Some(target) = target {
             validate_bound_target(session_id.as_str(), target, requested_target)?;
         }
@@ -191,6 +193,11 @@ impl AffinityCoordinator {
     #[cfg(test)]
     pub(super) async fn wait_for_reaper(&self) {
         self.placement.wait_for_reaper().await;
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_reap(&self) {
+        self.placement.wait_for_reap().await;
     }
 
     #[cfg(test)]
@@ -263,7 +270,7 @@ impl AffinityInitialization {
         validate_bound_target(&self.session_id, target, self.requested_target)?;
         let lease = self
             .initialization
-            .commit(target)
+            .commit_already_accepted(target, TargetGeneration::UNVERSIONED)
             .map_err(map_placement_error)?;
         Ok(AffinityLease { lease })
     }
@@ -391,6 +398,10 @@ fn map_placement_error(error: SessionPlacementError) -> Error {
         }
         SessionPlacementError::InitializationChanged => {
             invalid_argument("session affinity initialization changed")
+        }
+        error @ SessionPlacementError::DispatchAmbiguous { .. }
+        | error @ SessionPlacementError::TargetGenerationChanged { .. } => {
+            anyhow::Error::new(error)
         }
         SessionPlacementError::AcquireCancelled => {
             invalid_argument("session affinity acquisition was cancelled")
