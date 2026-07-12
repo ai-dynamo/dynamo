@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use dynamo_llm::protocols::common::FinishReason;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::engine::AsyncEngineContext;
@@ -30,6 +31,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
 use crate::engine::{GenerateContext, LLMEngine, RawEngine};
+use crate::error::{BackendError, DynamoError, ErrorType};
 
 /// Test-only override count. Compiled out of release builds — tests acquire
 /// an `OtlpExportOverride` RAII guard to force-enable the recording
@@ -74,6 +76,10 @@ impl StreamSpanFinalizer {
 
     fn mark_completed(&self) {
         self.completed.set(true);
+    }
+
+    fn completed(&self) -> bool {
+        self.completed.get()
     }
 }
 
@@ -203,6 +209,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+        let expected_outputs = request.sampling_options.n.unwrap_or(1).max(1) as usize;
 
         // Per-request worker-side span. Nests under `handle_payload` (set up
         // by the runtime's NATS ingress) so the trace tree has a contiguous
@@ -371,6 +378,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             let mut chunk_count: usize = 0;
             let mut output_token_count: usize = 0;
             let mut signalled = false;
+            let mut finished_indexes = std::collections::HashSet::new();
             // ITL samples (ms) — millisecond gap between successive non-empty
             // token chunks. Aggregate; we only render percentiles at terminal
             // so the per-chunk overhead is one timestamp + one Vec push.
@@ -436,10 +444,56 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         {
                             chunk.worker_trace_link = Some(link.clone());
                         }
-                        yield Annotated::from_data(chunk);
                         if is_terminal {
-                            finalizer.mark_completed();
-                            break;
+                            let globally_terminal = matches!(
+                                chunk.finish_reason,
+                                Some(FinishReason::Cancelled | FinishReason::Error(_))
+                            );
+                            match chunk.index {
+                                Some(index) => {
+                                    if usize::try_from(index).map_or(true, |index| index >= expected_outputs) {
+                                        yield Annotated::from_err(DynamoError::builder()
+                                            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                                            .message(format!(
+                                                "engine returned terminal output index {index}, but request asked for {expected_outputs} output(s)"
+                                            ))
+                                            .build());
+                                        finalizer.mark_completed();
+                                        break;
+                                    }
+                                    if !finished_indexes.insert(index) {
+                                        yield Annotated::from_err(DynamoError::builder()
+                                            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                                            .message(format!(
+                                                "engine returned more than one terminal for output index {index}"
+                                            ))
+                                            .build());
+                                        finalizer.mark_completed();
+                                        break;
+                                    }
+                                }
+                                None if expected_outputs > 1 && !globally_terminal => {
+                                    yield Annotated::from_err(DynamoError::builder()
+                                        .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                                        .message(format!(
+                                            "engine returned an unindexed terminal for a {expected_outputs}-output request"
+                                        ))
+                                        .build());
+                                    finalizer.mark_completed();
+                                    break;
+                                }
+                                None => {}
+                            }
+                            let all_outputs_finished = globally_terminal
+                                || (chunk.index.is_none() && expected_outputs == 1)
+                                || finished_indexes.len() == expected_outputs;
+                            yield Annotated::from_data(chunk);
+                            if all_outputs_finished {
+                                finalizer.mark_completed();
+                                break;
+                            }
+                        } else {
+                            yield Annotated::from_data(chunk);
                         }
                     }
                     Err(dynamo_err) => {
@@ -467,6 +521,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         break;
                     }
                 }
+            }
+            if !finalizer.completed()
+                && !stream_ctx.is_stopped()
+                && finished_indexes.len() < expected_outputs
+            {
+                yield Annotated::from_err(DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                    .message(format!(
+                        "engine stream ended after {}/{} terminal output(s)",
+                        finished_indexes.len(), expected_outputs
+                    ))
+                    .build());
+                finalizer.mark_completed();
             }
             tracing::debug!(
                 request_id = stream_ctx.id(),
@@ -701,6 +768,26 @@ mod tests {
             0,
             "clean completion must not call engine.abort"
         );
+    }
+
+    #[tokio::test]
+    async fn adapter_forwards_all_indexed_terminals_for_multi_output_request() {
+        let mut first = LLMEngineOutput::length();
+        first.index = Some(0);
+        let mut second = LLMEngineOutput::stop();
+        second.index = Some(1);
+        let (engine, abort_ct) = MockEngine::new(vec![first, second]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Aggregated);
+        let mut request = make_request(vec![1, 2, 3]);
+        request.sampling_options.n = Some(2);
+
+        let stream = adapter.generate(Context::new(request)).await.unwrap();
+        let collected = stream.collect::<Vec<_>>().await;
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].data.as_ref().unwrap().index, Some(0));
+        assert_eq!(collected[1].data.as_ref().unwrap().index, Some(1));
+        assert_eq!(abort_ct.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

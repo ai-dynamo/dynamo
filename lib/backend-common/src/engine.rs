@@ -20,10 +20,13 @@ use futures::stream::BoxStream;
 use tokio::sync::watch;
 
 use crate::error::DynamoError;
+use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::model_type::ModelType;
+use dynamo_llm::worker_type::WorkerType;
 
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::{
-    LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
+    LLMEngineOutput, LogProbs, PromptLogprobEntry, PromptLogprobs, TopLogprob, TopLogprobs,
 };
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, MultimodalData, MultimodalDataMap, PrefillResult, PreprocessedRequest,
@@ -200,9 +203,10 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// emit a terminal `Ok(chunk)` with `FinishReason::Cancelled`.
     ///
     /// Stream item: `Result<LLMEngineOutput, DynamoError>`.
-    ///   * `Ok(chunk)` carries normal output. Exactly one terminal `Ok`
-    ///     chunk (one with `finish_reason` set) must be the last item
-    ///     yielded, and no items may follow it.
+    ///   * `Ok(chunk)` carries normal output. Single-output streams have one
+    ///     terminal `Ok` chunk (one with `finish_reason` set). Multi-output
+    ///     streams have one terminal per distinct `index`; no later chunk may
+    ///     target an already-finished index.
     ///   * `Err(dynamo_err)` carries a typed mid-stream failure (e.g.
     ///     `BackendError::InvalidArgument`). It is itself terminal — the
     ///     framework forwards it as `Annotated::error` and stops polling
@@ -256,6 +260,19 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// can observe transfer completion (e.g. a connector or scheduler).
     async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
         Ok(None)
+    }
+
+    /// Long-lived remote-engine liveness watch. Returning is fatal to the
+    /// serving worker and causes its discovery registration to be removed.
+    /// In-process engines normally keep the default pending future.
+    async fn watch(&self) -> Result<(), DynamoError> {
+        std::future::pending().await
+    }
+
+    /// Ask an out-of-process engine to stop admission and wait for terminal
+    /// drain completion. Called before quiescence polling and cleanup.
+    async fn drain(&self) -> Result<(), DynamoError> {
+        Ok(())
     }
 
     /// Release all engine resources. Called exactly once.
@@ -381,6 +398,20 @@ pub trait LLMEngine: Send + Sync + 'static {
     async fn on_endpoint_ready(
         &self,
         _endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
+    /// Hand the engine a clone of the fully populated base-model card before
+    /// it is attached. Dynamic-LoRA engines use this to publish adapter model
+    /// cards with identical tokenizer/runtime/routing metadata.
+    async fn on_model_ready(
+        &self,
+        _endpoint: dynamo_runtime::component::Endpoint,
+        _base_model: LocalModel,
+        _model_type: ModelType,
+        _worker_type: WorkerType,
+        _needs: Vec<Vec<WorkerType>>,
     ) -> Result<(), DynamoError> {
         Ok(())
     }

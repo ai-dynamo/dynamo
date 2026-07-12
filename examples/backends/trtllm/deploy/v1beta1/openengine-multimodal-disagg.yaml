@@ -1,0 +1,166 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Image/video P/D deliberately sends the ordered raw media to both roles. The
+# decode engine needs it to reconstruct local mRoPE metadata while consuming the
+# KV handoff produced by the context engine.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-openengine-multimodal-disagg
+spec:
+  backendFramework: trtllm
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command: [/bin/sh, -c]
+          env:
+          - name: DYN_NAMESPACE
+            value: dynamo
+          image: my-registry/dynamo-openengine-sidecar:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: ContextWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --openengine-endpoint
+          - http://127.0.0.1:50051
+          - --expected-engine
+          - tensorrt_llm
+          command: [dynamo-openengine-sidecar]
+          env:
+          - name: DYN_NAMESPACE
+            value: dynamo
+          - name: DYN_SYSTEM_PORT
+            value: "8081"
+          - name: DYN_LORA_ENABLED
+            value: "false"
+          image: my-registry/dynamo-openengine-sidecar:my-tag
+          name: main
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+            requests:
+              cpu: "1"
+              memory: 2Gi
+        - args:
+          - Qwen/Qwen3-VL-2B-Instruct
+          - --backend
+          - pytorch
+          - --host
+          - 127.0.0.1
+          - --port
+          - "8001"
+          - --config
+          - /workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/prefill.yaml
+          - --server_role
+          - CONTEXT
+          - --openengine-host
+          - 127.0.0.1
+          - --openengine-port
+          - "50051"
+          command: [trtllm-serve]
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: OPENENGINE_SCHEMA_RELEASE
+            value: cea19cb06acf03c911b84d5c147e519b60dd92a6
+          image: my-registry/tensorrtllm-openengine:my-tag
+          name: engine
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+        volumes:
+        - emptyDir: {}
+          name: model-cache
+    replicas: 1
+    type: prefill
+  - name: GenerationWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --openengine-endpoint
+          - http://127.0.0.1:50052
+          - --expected-engine
+          - tensorrt_llm
+          command: [dynamo-openengine-sidecar]
+          env:
+          - name: DYN_NAMESPACE
+            value: dynamo
+          - name: DYN_SYSTEM_PORT
+            value: "8082"
+          - name: DYN_LORA_ENABLED
+            value: "false"
+          image: my-registry/dynamo-openengine-sidecar:my-tag
+          name: main
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+            requests:
+              cpu: "1"
+              memory: 2Gi
+        - args:
+          - Qwen/Qwen3-VL-2B-Instruct
+          - --backend
+          - pytorch
+          - --host
+          - 127.0.0.1
+          - --port
+          - "8002"
+          - --config
+          - /workspace/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/decode.yaml
+          - --server_role
+          - GENERATION
+          - --openengine-host
+          - 127.0.0.1
+          - --openengine-port
+          - "50052"
+          command: [trtllm-serve]
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: OPENENGINE_SCHEMA_RELEASE
+            value: cea19cb06acf03c911b84d5c147e519b60dd92a6
+          image: my-registry/tensorrtllm-openengine:my-tag
+          name: engine
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+        volumes:
+        - emptyDir: {}
+          name: model-cache
+    replicas: 1
+    type: decode

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # TensorRT-LLM Kubernetes Deployment Configurations
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying TensorRT-LLM inference graphs using the **DynamoGraphDeployment** resource.
@@ -67,6 +72,53 @@ TensorRT-LLM worker. This example uses the conservative engine configuration in
 - `TRTLLMWorker`: Single GPU TensorRT-LLM worker restored with
   `experimental.checkpoint.enabled: true` and
   `startupPolicy: WaitForCheckpoint`
+
+### 8. **OpenEngine Sidecar Examples** (`v1beta1/openengine-*.yaml`)
+
+The OpenEngine examples keep TRT-LLM in the GPU container and run
+`dynamo-openengine-sidecar` as the CPU-only `main` container in the same pod.
+Loopback OpenEngine gRPC connects the pair; TRT-LLM's HTTP listener remains
+available and uses the same `LLM` instance.
+
+- `openengine-agg.yaml`: aggregate text
+- `openengine-disagg.yaml`: context-first 1P1D text and LoRA
+- `openengine-multimodal-agg.yaml`: aggregate image/video
+- `openengine-multimodal-disagg.yaml`: image/video context-first 1P1D
+- `openengine-audio.yaml`: aggregate Phi-4 audio
+- `openengine-lora.yaml`: aggregate lazy LoRA lifecycle
+
+Replace both placeholder images with builds containing the sidecar and the
+local TRT-LLM fork. The TRT-LLM image must also contain this repository's
+`/workspace/examples/backends/trtllm/engine_configs` directory. Every engine is
+started with the PyTorch backend and immutable OpenEngine schema release
+`cea19cb06acf03c911b84d5c147e519b60dd92a6`.
+
+LoRA manifests expect a PVC named `trtllm-openengine-lora-cache`. For 1P1D it
+must support `ReadWriteMany`, because context and generation are different pods
+and both mount `/lora-cache`. Create it before the DGD, for example:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: trtllm-openengine-lora-cache
+spec:
+  accessModes: [ReadWriteMany]
+  resources:
+    requests:
+      storage: 20Gi
+```
+
+OpenEngine workers publish model cards with no frontend media decoder. This is
+the URL/data passthrough mode: ordered media stays encoded until TRT-LLM fetches
+and decodes it. Do not add a frontend media decoder to these deployments;
+decoded/RDMA media is intentionally rejected by the sidecar.
+
+The Phi-4 audio manifest additionally expects a PVC named
+`trtllm-openengine-phi4-model`. Populate its root with a raw git clone of
+`microsoft/Phi-4-multimodal-instruct` before creating the DGD. The mounted
+directory must contain the bundled `speech-lora/` subdirectory; TRT-LLM's
+Phi-4-MM loader does not support the Hugging Face snapshot layout.
 
 ## CRD Structure
 
