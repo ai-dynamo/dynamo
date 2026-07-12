@@ -17,6 +17,11 @@ python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed --base m
 python .github/codeowners/who_owns.py --codeowners CODEOWNERS lib/llm/foo.rs deploy/operator/bar.go
 ```
 
+Add `--people` to expand each team to its member logins. GitHub only shows
+team membership to members of the org, so this works for org members with an
+authenticated `gh`; everyone else sees the team handles (the actual reviewers
+appear on the PR once it opens).
+
 A line with more than one team is co-ownership: under "any one approves," any one
 of them satisfies the gate, so co-ownership adds review *visibility* without
 adding required approvals.

@@ -11,6 +11,10 @@ has to read 300 rules to find a reviewer.
   # the teams that will be auto-requested on your PR (union over changed files)
   python who_owns.py --codeowners CODEOWNERS --changed --base main
 
+  # same, expanding each team to its member logins (org members only --
+  # GitHub does not show team membership to non-members)
+  python who_owns.py --codeowners CODEOWNERS --changed --people
+
 Owners listed on a single line are co-owners (any one's approval satisfies
 the gate). Advisory teams are auto-requested too, but never block the merge.
 
@@ -59,6 +63,79 @@ def advisory_for(
         if pat and match(pat, filepath):
             teams.update(r.get("request_review_from", []))
     return teams
+
+
+_TEAM_CACHE: dict[str, list[str] | None] = {}
+_PEOPLE_WARNED = False
+
+
+def _gh_fetch(org: str, slug: str) -> list[str]:
+    """Fetch a team's member logins via the ``gh`` CLI."""
+    out = subprocess.check_output(
+        [
+            "gh",
+            "api",
+            f"orgs/{org}/teams/{slug}/members",
+            "--paginate",
+            "--jq",
+            ".[].login",
+        ],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    )
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def team_members(team, fetch=_gh_fetch, cache=None):
+    """Member logins for an ``@org/slug`` team, or ``None`` when unavailable.
+
+    GitHub only shows team membership to members of the org, so this works
+    for org members with an authenticated ``gh`` and cannot work for external
+    contributors -- callers degrade to the team handle. Individual ``@handle``
+    owners (no slash) return ``None`` and pass through unchanged. Results,
+    including failures, are cached per run.
+    """
+    if cache is None:
+        cache = _TEAM_CACHE
+    if team in cache:
+        return cache[team]
+    members = None
+    if team.startswith("@") and "/" in team:
+        org, slug = team[1:].split("/", 1)
+        try:
+            members = sorted(fetch(org, slug))
+        except (OSError, subprocess.CalledProcessError):
+            members = None
+    cache[team] = members
+    return members
+
+
+def _warn_people_unavailable() -> None:
+    global _PEOPLE_WARNED
+    if not _PEOPLE_WARNED:
+        print(
+            "note: team membership is only visible to org members "
+            "(authenticated gh required); showing teams only",
+            file=sys.stderr,
+        )
+        _PEOPLE_WARNED = True
+
+
+def _with_people(owner: str) -> str:
+    """Render an owner as ``@org/team (member, member, ...)`` when possible."""
+    members = team_members(owner)
+    if members is None:
+        if owner.startswith("@") and "/" in owner:
+            _warn_people_unavailable()
+        return owner
+    return f"{owner} ({', '.join(members) if members else 'no members'})"
+
+
+def _team_url(team: str) -> str | None:
+    if team.startswith("@") and "/" in team:
+        org, slug = team[1:].split("/", 1)
+        return f"https://github.com/orgs/{org}/teams/{slug}"
+    return None
 
 
 def changed_files(repo: str, base: str) -> list[str]:
@@ -116,6 +193,12 @@ def main() -> int:
     ap.add_argument(
         "--base", default="main", help="base ref for --changed (default: main)"
     )
+    ap.add_argument(
+        "--people",
+        action="store_true",
+        help="expand teams to member logins (org members with an "
+        "authenticated gh only; membership is not publicly visible)",
+    )
     ap.add_argument("--repo", default=".", help="repo root for --changed (default: .)")
     ap.add_argument(
         "paths", nargs="*", help="paths to resolve (when not using --changed)"
@@ -136,6 +219,9 @@ def main() -> int:
         if not files:
             ap.error("pass one or more paths, or use --changed")
 
+    # Per-path expansion only for explicit paths (small N); --changed PRs can
+    # touch many files, so people are shown once in the union summary instead.
+    expand_paths = args.people and not args.changed
     union_owners: set[str] = set()
     union_advisory: set[str] = set()
     for f in files:
@@ -144,7 +230,7 @@ def main() -> int:
         union_owners.update(owners)
         union_advisory.update(adv)
         owners_str = (
-            " ".join(owners)
+            " ".join(_with_people(o) if expand_paths else o for o in owners)
             if owners
             else "(no owner -- falls through; CI coverage gate should block this)"
         )
@@ -158,7 +244,9 @@ def main() -> int:
         print("\n" + "=" * 60)
         print(f"Teams auto-requested on this PR ({len(union_owners)}):")
         for t in sorted(union_owners):
-            print(f"  {t}")
+            print(f"  {_with_people(t) if args.people else t}")
+            if args.people and (url := _team_url(t)):
+                print(f"      {url}")
         if union_advisory:
             print(f"Advisory (non-blocking), {len(union_advisory)}:")
             for t in sorted(union_advisory):

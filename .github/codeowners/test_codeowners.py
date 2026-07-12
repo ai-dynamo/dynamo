@@ -401,6 +401,53 @@ class TestComputeResolution:
 
 
 # ------------------------------------------------------------------
+# who_owns.team_members() -- roster expansion (--people)
+# ------------------------------------------------------------------
+
+import subprocess  # noqa: E402
+
+import who_owns  # noqa: E402
+
+
+class TestTeamMembers:
+    def test_expands_team_via_fetcher(self) -> None:
+        cache: dict = {}
+        fetched = []
+
+        def fake(org: str, slug: str) -> list[str]:
+            fetched.append((org, slug))
+            return ["zoe", "amy"]
+
+        members = who_owns.team_members("@acme/router", fetch=fake, cache=cache)
+        assert members == ["amy", "zoe"]  # sorted
+        assert fetched == [("acme", "router")]
+        # second lookup served from cache, fetcher not called again
+        assert who_owns.team_members("@acme/router", fetch=fake, cache=cache) == [
+            "amy",
+            "zoe",
+        ]
+        assert fetched == [("acme", "router")]
+
+    def test_fetch_failure_returns_none_and_caches_negative(self) -> None:
+        cache: dict = {}
+        calls = []
+
+        def boom(org: str, slug: str) -> list[str]:
+            calls.append(slug)
+            raise subprocess.CalledProcessError(1, "gh")
+
+        assert who_owns.team_members("@acme/router", fetch=boom, cache=cache) is None
+        assert who_owns.team_members("@acme/router", fetch=boom, cache=cache) is None
+        assert calls == ["router"]  # failure cached; no retry storm
+
+    def test_individual_handle_passes_through(self) -> None:
+        def never(org: str, slug: str) -> list[str]:
+            raise AssertionError("fetcher must not be called for @handles")
+
+        assert who_owns.team_members("@octocat", fetch=never, cache={}) is None
+
+
+# ------------------------------------------------------------------
 # TypedDict / dataclass surface
 # ------------------------------------------------------------------
 

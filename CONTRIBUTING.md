@@ -29,6 +29,7 @@ Or view the source: [`docs/contribution-guide.md`](docs/contribution-guide.md)
 
 - [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue)
 - [Help wanted](https://github.com/ai-dynamo/dynamo/labels/help-wanted)
+- [Code ownership](.github/codeowners/README.md) -- who reviews my PR, fixing the `codeowners` check, earning area ownership
 - [Open a bug report](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)
 - [Propose a feature](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)
 - [Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)

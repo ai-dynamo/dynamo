@@ -35,6 +35,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dep-status` — check DEP status and list DEPs by lifecycle state or area
 - `dep-update` — advance DEP lifecycle: triage, PIC assignment, review, approval
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
+- `dynamo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
 - `graham-code-review` — strict Rust/systems review in Graham King's style
@@ -135,7 +136,13 @@ cargo fmt --all && cargo clippy --workspace
 - Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
   routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
   coverage and `CODEOWNERS`↔`areas.yaml` drift. See
-  `.github/codeowners/README.md` (use `who_owns.py` to check who reviews a path).
+  `.github/codeowners/README.md` (use `who_owns.py --changed` to check who
+  reviews your PR; `--people` expands teams to members for org members).
+  If the `codeowners` check fails after adding a new directory, claim it with
+  one line under the owning area in `areas.yaml`, regenerate, and commit both
+  files together. External contributors earn area-scoped co-ownership via
+  `.github/codeowners/external_contributors.yaml`. The `dynamo-codeowners`
+  skill automates all of this.
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
   triggers it. Fix failures before requesting human review.
