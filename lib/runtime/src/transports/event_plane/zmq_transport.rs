@@ -330,9 +330,9 @@ impl ZmqSubTransport {
                     "Socket pump received ZMQ message"
                 );
 
-                let frame_message = frames
-                    .pop_back()
-                    .expect("four-frame multipart must contain a payload");
+                let Some(frame_message) = frames.pop_back() else {
+                    continue;
+                };
                 let frame_bytes = Bytes::from_owner(ZmqMessageOwner(frame_message));
                 match Frame::decode(frame_bytes) {
                     Ok(frame) => {
