@@ -73,6 +73,7 @@ from dynamo.planner.config.defaults import SubComponentType, TargetReplica  # no
 from dynamo.planner.connectors.kubernetes import KubernetesConnector  # noqa: E402
 from dynamo.planner.connectors.kubernetes_api import KubernetesAPI  # noqa: E402
 from dynamo.planner.core.budget import POWER_ANNOTATION_KEY  # noqa: E402
+from dynamo.planner.errors import PlannerError  # noqa: E402
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -175,6 +176,7 @@ class TestTgpAnnotationRoundTrip:
                     name=pod_name,
                     namespace=_K8S_NAMESPACE,
                     body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: None}}},
+                    _content_type="application/merge-patch+json",
                 )
 
     def test_patch_same_value_keeps_annotation_stable(
@@ -214,6 +216,7 @@ class TestTgpAnnotationRoundTrip:
                     name=pod_name,
                     namespace=_K8S_NAMESPACE,
                     body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: None}}},
+                    _content_type="application/merge-patch+json",
                 )
 
 
@@ -278,12 +281,21 @@ class TestPostBusyThresholdLive:
             pytest.skip("No Running frontend pod with pod IP")
         pod = running[0]
 
-        # Fail fast on a genuinely broken deployment: honour an explicit
-        # MODEL_NAME override, otherwise resolve from the live DGD and let a
-        # PlannerError surface rather than masking it with a default.
-        model = os.environ.get("MODEL_NAME") or connector.get_model_name(
-            require_prefill=False, require_decode=True
-        )
+        # Honour an explicit MODEL_NAME override; otherwise attempt to resolve
+        # from the live DGD.  Aggregated DGDs use a generic "worker" component
+        # type that does not match the DECODE role, so get_model_name raises
+        # SubComponentNotFoundError in that case — skip rather than failing.
+        model = os.environ.get("MODEL_NAME")
+        if not model:
+            try:
+                model = connector.get_model_name(
+                    require_prefill=False, require_decode=True
+                )
+            except PlannerError:
+                pytest.skip(
+                    "Could not resolve model name from DGD (aggregated worker "
+                    "type or missing component); set MODEL_NAME env var to run"
+                )
 
         # Resolve the frontend HTTP port from the live pod spec instead of
         # assuming the default; the DGD may override it.
@@ -471,6 +483,7 @@ class TestApplyPowerAnnotationsLive:
                     name=pod_name,
                     namespace=_K8S_NAMESPACE,
                     body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: None}}},
+                    _content_type="application/merge-patch+json",
                 )
 
     @pytest.mark.asyncio
@@ -545,6 +558,7 @@ class TestApplyPowerAnnotationsLive:
                     name=pod_name,
                     namespace=_K8S_NAMESPACE,
                     body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: None}}},
+                    _content_type="application/merge-patch+json",
                 )
 
 

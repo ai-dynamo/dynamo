@@ -296,11 +296,17 @@ class KubernetesAPI:
         annotation so the Power Agent DaemonSet can read and apply it via NVML.
         Only issues a PATCH when the annotation is missing or has changed
         (callers do the string-equality check before calling this method).
+
+        Uses application/merge-patch+json (RFC 7396) so the body is treated as
+        a partial object update.  Without this the kubernetes-client defaults to
+        application/json-patch+json (RFC 6902), which expects a list of ops and
+        would reject the dict body with a 415/422.
         """
         self.core_api.patch_namespaced_pod(
             name=pod_name,
             namespace=self.current_namespace,
             body={"metadata": {"annotations": {key: value}}},
+            _content_type="application/merge-patch+json",
         )
 
     def remove_pod_annotation(self, pod_name: str, key: str) -> None:
@@ -310,11 +316,15 @@ class KubernetesAPI:
         delete an annotation key (a regular PATCH with a missing key is a
         no-op).  Used by the power-annotation disable/rollback path so the
         Power Agent can observe the missing key and release the GPU cap.
+
+        Uses application/merge-patch+json (RFC 7396) — same reason as
+        patch_pod_annotation.
         """
         self.core_api.patch_namespaced_pod(
             name=pod_name,
             namespace=self.current_namespace,
             body={"metadata": {"annotations": {key: None}}},
+            _content_type="application/merge-patch+json",
         )
 
     def list_pods_by_label(self, label_selector: str) -> list:

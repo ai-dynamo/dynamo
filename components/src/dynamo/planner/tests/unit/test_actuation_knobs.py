@@ -197,6 +197,7 @@ class TestPatchPodAnnotation:
             name="my-pod",
             namespace="test-ns",
             body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: "300"}}},
+            _content_type="application/merge-patch+json",
         )
 
 
