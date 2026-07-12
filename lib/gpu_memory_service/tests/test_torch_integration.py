@@ -115,6 +115,38 @@ class _AliasedRuntimeTensor(torch.nn.Module):
         )
 
 
+class _MLALikeModule(torch.nn.Module):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        *,
+        derived_source: torch.Tensor | None = None,
+    ) -> None:
+        super().__init__()
+        self.kv_lora_rank = 2
+        self.num_heads = 2
+        self.qk_nope_head_dim = 1
+        self.v_head_dim = 2
+        self.kv_b_proj = torch.nn.Linear(2, 6, bias=False, device="cuda")
+        self.kv_b_proj.weight = torch.nn.Parameter(weight)
+        projected = (derived_source if derived_source is not None else weight).T.view(
+            2, 2, 3
+        )
+        w_uk, w_uv = projected.split([1, 2], dim=-1)
+        self.W_UV = w_uv.transpose(0, 1)
+        self.W_UV_alias = self.W_UV
+        self.W_UK_T = w_uk.permute(1, 2, 0)
+
+    def process_weights_after_loading(self, dtype: torch.dtype) -> None:
+        projected = self.kv_b_proj.weight.to(dtype).T.view(2, 2, 3)
+        w_uk, w_uv = projected.split([1, 2], dim=-1)
+        self.W_UV = w_uv.transpose(0, 1)
+        self.W_UK_T = w_uk.permute(1, 2, 0)
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return torch.bmm(value, self.W_UV)
+
+
 @pytest.fixture
 def running_gms(tmp_path):
     socket_path = str(tmp_path / "gms.sock")
@@ -362,6 +394,121 @@ def test_finalize_gms_write_rebinds_nonparameter_tensors(running_gms):
         writer.close()
 
 
+def test_normalize_mla_views_in_live_gms_pool(running_gms):
+    writer = GMSClientMemoryManager(running_gms, device=0)
+    writer.connect(RequestedLockType.RW)
+    baseline = torch.arange(12, device="cuda", dtype=torch.float32).view(6, 2)
+    allocation_id, gms_weight = _make_gms_tensor(writer, baseline, tag="weights")
+    model = _MLALikeModule(gms_weight)
+    value = torch.arange(12, device="cuda", dtype=torch.float32).view(2, 3, 2)
+    expected = model(value).detach().clone()
+    original = model.W_UV
+    allocation_sizes = {
+        mapping.allocation_id: mapping.aligned_size
+        for mapping in writer.mappings.values()
+    }
+
+    try:
+        mla_stats = model_loader._normalize_mla_derived_tensors(writer, model)
+        stats = prepare_gms_write(writer, model)
+        retained_allocation_ids = {
+            mapping.allocation_id for mapping in writer.mappings.values()
+        }
+        pruned_mla_source_bytes = model_loader._pruned_mla_source_bytes(
+            allocation_sizes,
+            retained_allocation_ids,
+            mla_stats.source_allocation_ids,
+        )
+
+        assert model.W_UV is model.W_UV_alias is original
+        assert model.W_UV._base is None
+        assert model.W_UK_T._base is None
+        assert not model_loader._is_gms_mapped_tensor(writer, model.W_UV)
+        assert not model_loader._is_gms_mapped_tensor(writer, model.W_UK_T)
+        assert mla_stats.private_bytes == sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (model.W_UV, model.W_UK_T)
+        )
+        assert mla_stats.source_allocation_ids == frozenset({allocation_id})
+        assert allocation_id in retained_allocation_ids
+        assert stats.pruned_bytes == stats.pruned_count == 0
+        assert pruned_mla_source_bytes == 0
+        assert stats.committed_bytes == sum(
+            mapping.aligned_size for mapping in writer.mappings.values()
+        )
+        assert (
+            stats.pruned_bytes - pruned_mla_source_bytes + mla_stats.private_bytes
+            == mla_stats.private_bytes
+        )
+        _assert_exact_tensor_equal(expected, model(value))
+    finally:
+        del model
+        del gms_weight
+        writer.close()
+
+
+def test_normalize_mla_views_prunes_live_gms_temporary_source(running_gms):
+    writer = GMSClientMemoryManager(running_gms, device=0)
+    writer.connect(RequestedLockType.RW)
+    baseline = torch.arange(12, device="cuda", dtype=torch.float32).view(6, 2)
+    weight_allocation_id, gms_weight = _make_gms_tensor(writer, baseline, tag="weights")
+    source_allocation_id, temporary_source = _make_gms_tensor(
+        writer, baseline + 1, tag="weights"
+    )
+    model = _MLALikeModule(gms_weight, derived_source=temporary_source)
+    del temporary_source
+    value = torch.arange(12, device="cuda", dtype=torch.float32).view(2, 3, 2)
+    expected = model(value).detach().clone()
+    original_w_uv = model.W_UV
+    original_w_uk_t = model.W_UK_T
+    allocation_sizes = {
+        mapping.allocation_id: mapping.aligned_size
+        for mapping in writer.mappings.values()
+    }
+    source_aligned_bytes = allocation_sizes[source_allocation_id]
+
+    try:
+        mla_stats = model_loader._normalize_mla_derived_tensors(writer, model)
+        stats = prepare_gms_write(writer, model)
+        retained_allocation_ids = {
+            mapping.allocation_id for mapping in writer.mappings.values()
+        }
+        pruned_mla_source_bytes = model_loader._pruned_mla_source_bytes(
+            allocation_sizes,
+            retained_allocation_ids,
+            mla_stats.source_allocation_ids,
+        )
+        private_storages = {
+            model_loader._storage_key(tensor): tensor.untyped_storage().nbytes()
+            for tensor in (model.W_UV, model.W_UK_T)
+        }
+        private_bytes = sum(private_storages.values())
+        memory_usage_offset_bytes = (
+            stats.pruned_bytes - pruned_mla_source_bytes + mla_stats.private_bytes
+        )
+
+        assert model.W_UV is model.W_UV_alias is original_w_uv
+        assert model.W_UK_T is original_w_uk_t
+        assert model.W_UV._base is None
+        assert model.W_UK_T._base is None
+        assert not model_loader._is_gms_mapped_tensor(writer, model.W_UV)
+        assert not model_loader._is_gms_mapped_tensor(writer, model.W_UK_T)
+        assert mla_stats.source_allocation_ids == frozenset({source_allocation_id})
+        assert weight_allocation_id in retained_allocation_ids
+        assert source_allocation_id not in retained_allocation_ids
+        assert stats.pruned_count == 1
+        assert stats.pruned_bytes == source_aligned_bytes
+        assert pruned_mla_source_bytes == source_aligned_bytes
+        assert mla_stats.private_bytes == private_bytes
+        assert memory_usage_offset_bytes == private_bytes
+        assert stats.committed_bytes == allocation_sizes[weight_allocation_id]
+        _assert_exact_tensor_equal(expected, model(value))
+    finally:
+        del model
+        del gms_weight
+        writer.close()
+
+
 @pytest.mark.timeout(60)
 def test_deferred_gms_write_preserves_runtime_tensor_aliases(running_gms, monkeypatch):
     socket_path = running_gms
@@ -425,7 +572,7 @@ def test_deferred_gms_write_preserves_runtime_tensor_aliases(running_gms, monkey
         model_loader._store_pending_gms_write(
             writer,
             stats,
-            rebound_bytes,
+            stats.pruned_bytes + rebound_bytes,
             retained_gms_tensors,
         )
         assert model_loader.publish_pending_gms_write()

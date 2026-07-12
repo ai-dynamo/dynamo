@@ -302,11 +302,13 @@ class GMSWorker(Worker):
 
             imported_weights_bytes = get_imported_weights_bytes()
             memory_usage_offset_bytes = get_model_memory_usage_offset_bytes()
-            # The offset is not committed/restored GMS weight state. It is
-            # load-time memory excluded from committed GMS bytes (pruned
-            # load-time allocations plus private rebound clones). vLLM uses
-            # model_memory_usage for KV sizing, so omitting it can allocate
-            # an oversized cache.
+            # The offset is live model memory outside committed GMS weights.
+            # For a writer it starts with pruned load-time allocations, then
+            # replaces any pruned MLA source allocation with the unique
+            # private cache storage that survives normalization. Readers add
+            # the same private cache storage after rebuilding MLA state.
+            # vLLM uses model_memory_usage for KV sizing, so omitting it can
+            # allocate an oversized cache.
             model_memory_usage_bytes = int(
                 imported_weights_bytes + memory_usage_offset_bytes
             )
