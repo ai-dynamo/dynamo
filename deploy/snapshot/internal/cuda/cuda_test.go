@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	podresourcesv1 "k8s.io/kubelet/pkg/apis/podresources/v1"
 
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
@@ -29,6 +30,7 @@ func TestHelperActionArgs(t *testing.T) {
 		BufferCount: types.DefaultCUDATransferBufferCount,
 		ChunkBytes:  types.DefaultCUDATransferChunkBytes,
 	}
+
 	tests := []struct {
 		name string
 		got  []string
@@ -214,6 +216,8 @@ type recordingHelperActionRunner struct {
 	calls      []helperActionCall
 	failAction string
 	failPID    int
+	stateValue string
+	stateCalls int
 }
 
 func (r *recordingHelperActionRunner) run(
@@ -224,6 +228,7 @@ func (r *recordingHelperActionRunner) run(
 	storageMode,
 	storageDir string,
 	_ types.CUDATransferSettings,
+	_ snapshotruntime.ProcessDetails,
 	_ logr.Logger,
 ) error {
 	r.calls = append(r.calls, helperActionCall{
@@ -239,7 +244,11 @@ func (r *recordingHelperActionRunner) run(
 	return nil
 }
 
-func (*recordingHelperActionRunner) state(context.Context, int) (string, error) {
+func (r *recordingHelperActionRunner) state(context.Context, int) (string, error) {
+	r.stateCalls++
+	if r.stateValue != "" {
+		return r.stateValue, nil
+	}
 	return "", errors.New("unexpected state query")
 }
 
@@ -345,6 +354,46 @@ func TestRestoreAndUnlockProcessTreeRestoreFailureSkipsAllUnlocks(t *testing.T) 
 		if call.action == actionUnlock {
 			t.Fatalf("unlock called after restore failure: %+v", runner.calls)
 		}
+	}
+}
+
+func TestDaemonUnlockFailureDoesNotTrustNumericPIDState(t *testing.T) {
+	runner := &recordingHelperActionRunner{
+		failAction: actionUnlock,
+		failPID:    11,
+		stateValue: "running",
+	}
+	settings := types.CUDATransferSettings{
+		BufferCount:  1,
+		ChunkBytes:   64 * 1024 * 1024,
+		DaemonSocket: "/run/cuda-checkpoint-helper/helper.sock",
+	}
+	_, err := restoreAndUnlockProcessTree(
+		context.Background(), []int{11}, "", types.CUDAStorageModePOSIX,
+		"/checkpoints/example", settings, runner, logr.Discard(),
+	)
+	if err == nil {
+		t.Fatal("restoreAndUnlockProcessTree() masked daemon unlock failure")
+	}
+	if runner.stateCalls != 0 {
+		t.Fatalf("daemon unlock failure queried numeric PID state %d times", runner.stateCalls)
+	}
+}
+
+func TestValidatedProcessIdentitiesRejectsDuplicateOrIncompleteIdentity(t *testing.T) {
+	valid := snapshotruntime.ProcessDetails{
+		OutermostPID:   42,
+		InnermostPID:   7,
+		StartTimeTicks: 123,
+		Cgroup:         "0::/kubepods/test\n",
+	}
+	if _, _, err := validatedProcessIdentities([]snapshotruntime.ProcessDetails{valid, valid}); err == nil {
+		t.Fatal("validatedProcessIdentities() accepted duplicate host PID")
+	}
+	incomplete := valid
+	incomplete.Cgroup = ""
+	if _, _, err := validatedProcessIdentities([]snapshotruntime.ProcessDetails{incomplete}); err == nil {
+		t.Fatal("validatedProcessIdentities() accepted incomplete identity")
 	}
 }
 

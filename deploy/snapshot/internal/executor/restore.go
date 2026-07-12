@@ -68,6 +68,35 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
+	if len(result.DeferredCUDAProcesses) > 0 {
+		hostProcesses := make([]snapshotruntime.ProcessDetails, 0, len(result.DeferredCUDAProcesses))
+		for _, namespaceProcess := range result.DeferredCUDAProcesses {
+			process, err := snapshotruntime.ResolveHostProcessIdentity(
+				snapshotruntime.HostProcPath,
+				namespaceProcess,
+			)
+			if err != nil {
+				return 0, fmt.Errorf("resolve restored CUDA host process identity: %w", err)
+			}
+			if err := snapshotruntime.ValidateProcessIdentity(snapshotruntime.HostProcPath, process); err != nil {
+				return 0, fmt.Errorf("validate restored CUDA process identity: %w", err)
+			}
+			hostProcesses = append(hostProcesses, process)
+		}
+		cudaTimings, err := cuda.RestoreAndUnlockProcessTreeValidated(
+			ctx,
+			hostProcesses,
+			snap.CUDADeviceMap,
+			snap.CUDAStorageMode,
+			req.CheckpointLocation,
+			req.CUDATransfer,
+			log,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("host CUDA restore failed: %w", err)
+		}
+		result.CUDADuration += cudaTimings.TotalDuration
+	}
 	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
@@ -188,6 +217,10 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
 		CgroupRoot:     cgroupRoot,
 		CUDADeviceMap:  cudaDeviceMap,
+		CUDAStorageMode: func() string {
+			mode, _ := m.CUDA.EffectiveStorageMode()
+			return mode
+		}(),
 	}, nil
 }
 
@@ -205,14 +238,35 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if err := cudaTransfer.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid CUDA transfer settings: %w", err)
 	}
-	args := []string{
+	nsenterPrefix := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
-		"-m", "-u", "-i", "-n", "-p",
-		"--", req.NSRestorePath,
-		"--checkpoint-path", checkpointPath,
+		"-m", "-u", "-i", "-n", "-p", "--",
 	}
+	deferCUDA := snap.CUDAStorageMode == types.CUDAStorageModePOSIX && cudaTransfer.DaemonSocket != ""
+	if deferCUDA {
+		capabilityArgs := append(append([]string{}, nsenterPrefix...), req.NSRestorePath, "--check-defer-cuda-capability")
+		output, err := exec.CommandContext(ctx, "nsenter", capabilityArgs...).CombinedOutput()
+		capability := strings.TrimSpace(string(output))
+		if err != nil {
+			return nil, fmt.Errorf(
+				"placeholder nsrestore does not support deferred CUDA restore; use a placeholder image built with this snapshot-agent version: %w (output: %s)",
+				err,
+				capability,
+			)
+		}
+		if capability != "defer-cuda-v1" {
+			return nil, fmt.Errorf(
+				"placeholder nsrestore does not support deferred CUDA restore; use a placeholder image built with this snapshot-agent version (capability response: %q)",
+				capability,
+			)
+		}
+	}
+	args := append(append([]string{}, nsenterPrefix...),
+		req.NSRestorePath,
+		"--checkpoint-path", checkpointPath,
+	)
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
@@ -226,6 +280,9 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
+	}
+	if deferCUDA {
+		args = append(args, "--defer-cuda")
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)

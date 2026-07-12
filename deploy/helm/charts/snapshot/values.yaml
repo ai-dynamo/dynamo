@@ -173,6 +173,25 @@ config:
     # normalized to integer output. Pinned use is approximately active GPUs *
     # transferBufferCount * transferChunkBytes.
     transferChunkBytes: 67108864
+    # Persistent helper is opt-in. It retains all visible CUDA primary
+    # contexts once in a sidecar and serves bounded local socket requests.
+    daemon:
+      enabled: false
+      socketPath: /run/cuda-checkpoint-helper/helper.sock
+      # Only falls back when connecting fails before a request is sent.
+      fallback: false
+      # Busy operations remain healthy until this conservative watchdog
+      # deadline. Increase it for transfers expected to exceed six hours.
+      maxOperationSeconds: 21600
+      # Helper resources are independent from the agent. Transfer buffers use
+      # pinned host memory in addition to this container memory allowance.
+      resources:
+        limits:
+          cpu: 2
+          memory: 1Gi
+        requests:
+          cpu: 250m
+          memory: 256Mi
 
   overlay:
     # Rootfs diff tar exclusions. Absolute-looking paths are normalized

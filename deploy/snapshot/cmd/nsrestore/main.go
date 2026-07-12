@@ -31,8 +31,21 @@ func main() {
 	)
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	deferCUDA := flag.Bool("defer-cuda", false, "Return restored CUDA process identities without restoring CUDA")
+	checkDeferCUDACapability := flag.Bool(
+		"check-defer-cuda-capability",
+		false,
+		"Report support for host-side deferred CUDA restore and exit",
+	)
 	flag.Parse()
 
+	if *checkDeferCUDACapability {
+		if flag.NArg() != 0 {
+			fatal(log, nil, "--check-defer-cuda-capability takes no arguments")
+		}
+		_, _ = os.Stdout.WriteString("defer-cuda-v1\n")
+		return
+	}
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
@@ -50,6 +63,7 @@ func main() {
 		CUDATransfer:   transferSettings,
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
+		DeferCUDA:      *deferCUDA,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

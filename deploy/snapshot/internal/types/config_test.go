@@ -15,6 +15,72 @@ func validAgentConfig() *AgentConfig {
 	}
 }
 
+func TestAgentConfigRejectsAgentStorageOverlappingCUDAHelperDirectory(t *testing.T) {
+	for _, basePath := range []string{
+		"/",
+		"/run",
+		"/run/cuda-checkpoint-helper",
+		"/run/cuda-checkpoint-helper/checkpoints",
+	} {
+		cfg := validAgentConfig()
+		cfg.Storage.BasePath = basePath
+		cfg.CUDACheckpoint.StorageMode = CUDAStorageModePOSIX
+		cfg.CUDACheckpoint.DaemonSocketPath = "/run/cuda-checkpoint-helper/helper.sock"
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate() accepted overlapping agent storage path %q", basePath)
+		}
+	}
+
+	cfg := validAgentConfig()
+	cfg.Storage.AccessMode = StorageAccessModePodMount
+	cfg.Storage.BasePath = "/run/cuda-checkpoint-helper/checkpoints"
+	cfg.CUDACheckpoint.StorageMode = CUDAStorageModePOSIX
+	cfg.CUDACheckpoint.DaemonSocketPath = "/run/cuda-checkpoint-helper/helper.sock"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("pod-mounted storage does not collide in the agent pod: %v", err)
+	}
+}
+
+func TestAgentConfigRejectsUnsafeCUDAHelperSocketPaths(t *testing.T) {
+	for _, socket := range []string{
+		"/helper.sock",
+		"/host/proc/helper.sock",
+		"/run/cuda-checkpoint-helper/../helper.sock",
+		"/run/cuda-checkpoint-helper/" + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.sock",
+	} {
+		cfg := validAgentConfig()
+		cfg.CUDACheckpoint.StorageMode = CUDAStorageModePOSIX
+		cfg.CUDACheckpoint.DaemonSocketPath = socket
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("Validate() accepted unsafe daemon socket path %q", socket)
+		}
+	}
+}
+
+func TestAgentConfigValidateCUDAHelperDaemon(t *testing.T) {
+	cfg := validAgentConfig()
+	cfg.CUDACheckpoint.StorageMode = CUDAStorageModePOSIX
+	cfg.CUDACheckpoint.DaemonSocketPath = "/run/cuda-checkpoint-helper/helper.sock"
+	cfg.CUDACheckpoint.DaemonFallback = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	settings := cfg.CUDACheckpoint.TransferSettings()
+	if settings.DaemonSocket != cfg.CUDACheckpoint.DaemonSocketPath || !settings.DaemonFallback {
+		t.Fatalf("TransferSettings() = %+v, want daemon configuration", settings)
+	}
+
+	cfg.CUDACheckpoint.DaemonSocketPath = "relative.sock"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected relative daemon socket path to be rejected")
+	}
+	cfg.CUDACheckpoint.DaemonSocketPath = "/run/cuda-checkpoint-helper/helper.sock"
+	cfg.CUDACheckpoint.StorageMode = CUDAStorageModeLegacy
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected daemon socket with legacy storage mode to be rejected")
+	}
+}
+
 func TestCUDATransferSettingsWithDefaults(t *testing.T) {
 	got := (CUDATransferSettings{}).WithDefaults()
 	if got.BufferCount != DefaultCUDATransferBufferCount || got.ChunkBytes != DefaultCUDATransferChunkBytes {

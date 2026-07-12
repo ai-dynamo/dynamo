@@ -124,6 +124,10 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
+            {{- if .Values.config.cudaCheckpoint.daemon.enabled }}
+            - name: cuda-helper-socket
+              mountPath: {{ .Values.config.cudaCheckpoint.daemon.socketPath | dir | quote }}
+            {{- end }}
             {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
             # Mount the checkpoint PVC directly in namespace-local agent mode
             - name: checkpoints
@@ -165,11 +169,70 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        {{- if .Values.config.cudaCheckpoint.daemon.enabled }}
+        - name: cuda-checkpoint-helper
+          image: "{{ .Values.daemonset.image.repository }}:{{ .Values.daemonset.image.tag }}"
+          imagePullPolicy: {{ .Values.daemonset.image.pullPolicy }}
+          command:
+            - /usr/local/bin/cuda-checkpoint-helper
+          args:
+            - --daemon
+            - --socket
+            - {{ .Values.config.cudaCheckpoint.daemon.socketPath | quote }}
+            - --max-operation-seconds
+            - {{ .Values.config.cudaCheckpoint.daemon.maxOperationSeconds | quote }}
+          securityContext:
+            privileged: true
+          startupProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - {{ .Values.config.cudaCheckpoint.daemon.socketPath | quote }}
+            periodSeconds: 2
+            failureThreshold: 150
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - {{ .Values.config.cudaCheckpoint.daemon.socketPath | quote }}
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - {{ .Values.config.cudaCheckpoint.daemon.socketPath | quote }}
+            periodSeconds: 30
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: cuda-helper-socket
+              mountPath: {{ .Values.config.cudaCheckpoint.daemon.socketPath | dir | quote }}
+            - name: host-proc
+              mountPath: /host/proc
+            {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.config.cudaCheckpoint.daemon.resources | nindent 12 }}
+        {{- end }}
       volumes:
         # Configuration ConfigMap
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
+        {{- if .Values.config.cudaCheckpoint.daemon.enabled }}
+        - name: cuda-helper-socket
+          emptyDir: {}
+        {{- end }}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles

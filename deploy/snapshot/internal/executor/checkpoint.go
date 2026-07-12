@@ -277,9 +277,17 @@ func captureCheckpoint(
 		if err != nil {
 			return nil, err
 		}
-		cudaTimings, err := cuda.LockAndCheckpointProcessTree(
+		processes := make([]snapshotruntime.ProcessDetails, 0, len(state.CUDAHostPIDs))
+		for _, pid := range state.CUDAHostPIDs {
+			process, readErr := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+			if readErr != nil {
+				return nil, fmt.Errorf("capture CUDA process identity for host PID %d: %w", pid, readErr)
+			}
+			processes = append(processes, process)
+		}
+		cudaTimings, err := cuda.LockAndCheckpointProcessTreeValidated(
 			ctx,
-			state.CUDAHostPIDs,
+			processes,
 			storageMode,
 			checkpointDir,
 			cudaTransfer,

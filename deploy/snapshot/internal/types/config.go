@@ -4,9 +4,13 @@ package types
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var cudaHelperSocketPathPattern = regexp.MustCompile(`^/run/cuda-checkpoint-helper/[A-Za-z0-9._-]+$`)
 
 // AgentConfig holds the full agent configuration: static checkpoint settings
 // from the ConfigMap YAML, plus runtime fields from environment variables.
@@ -20,17 +24,30 @@ type AgentConfig struct {
 	CRIU                CRIUSettings           `yaml:"criu"`
 }
 
+func pathsOverlap(first, second string) bool {
+	first = filepath.Clean(first)
+	second = filepath.Clean(second)
+	return first == string(filepath.Separator) || second == string(filepath.Separator) ||
+		first == second ||
+		strings.HasPrefix(first, second+string(filepath.Separator)) ||
+		strings.HasPrefix(second, first+string(filepath.Separator))
+}
+
 // CUDACheckpointSettings holds CUDA checkpoint storage settings.
 type CUDACheckpointSettings struct {
 	StorageMode         string  `yaml:"storageMode"`
 	TransferBufferCount *int    `yaml:"transferBufferCount"`
 	TransferChunkBytes  *uint64 `yaml:"transferChunkBytes"`
+	DaemonSocketPath    string  `yaml:"daemonSocketPath"`
+	DaemonFallback      bool    `yaml:"daemonFallback"`
 }
 
 // CUDATransferSettings holds validated custom-storage transfer settings.
 type CUDATransferSettings struct {
-	BufferCount int
-	ChunkBytes  uint64
+	BufferCount    int
+	ChunkBytes     uint64
+	DaemonSocket   string
+	DaemonFallback bool
 }
 
 const (
@@ -53,12 +70,16 @@ const (
 	maxCUDATransferChunkBytes     = 256 * 1024 * 1024
 	maxCUDAPinnedBytesPerDevice   = 1 * 1024 * 1024 * 1024
 	cudaTransferBufferAlignment   = 4096
+	CUDAHelperSocketDirectory     = "/run/cuda-checkpoint-helper"
+	maxUnixSocketPathBytes        = 100
 )
 
 func (c CUDACheckpointSettings) TransferSettings() CUDATransferSettings {
 	settings := CUDATransferSettings{
-		BufferCount: DefaultCUDATransferBufferCount,
-		ChunkBytes:  DefaultCUDATransferChunkBytes,
+		BufferCount:    DefaultCUDATransferBufferCount,
+		ChunkBytes:     DefaultCUDATransferChunkBytes,
+		DaemonSocket:   c.DaemonSocketPath,
+		DaemonFallback: c.DaemonFallback,
 	}
 	if c.TransferBufferCount != nil {
 		settings.BufferCount = *c.TransferBufferCount
@@ -135,7 +156,31 @@ func (c *AgentConfig) Validate() error {
 			Message: fmt.Sprintf("unsupported access mode %q; expected %q or %q", c.Storage.AccessMode, StorageAccessModeAgentMount, StorageAccessModePodMount),
 		}
 	}
+	daemonSocketPath := strings.TrimSpace(c.CUDACheckpoint.DaemonSocketPath)
+	if daemonSocketPath != "" {
+		if !filepath.IsAbs(daemonSocketPath) || filepath.Clean(daemonSocketPath) != daemonSocketPath ||
+			filepath.Dir(daemonSocketPath) != CUDAHelperSocketDirectory ||
+			len(daemonSocketPath) > maxUnixSocketPathBytes ||
+			!cudaHelperSocketPathPattern.MatchString(daemonSocketPath) {
+			return &ConfigError{
+				Field: "cudaCheckpoint.daemonSocketPath",
+				Message: fmt.Sprintf(
+					"daemonSocketPath must be a clean path under %s and at most %d bytes",
+					CUDAHelperSocketDirectory,
+					maxUnixSocketPathBytes,
+				),
+			}
+		}
+	}
+	c.CUDACheckpoint.DaemonSocketPath = daemonSocketPath
 	c.Storage.AccessMode = accessMode
+	if daemonSocketPath != "" && accessMode == StorageAccessModeAgentMount &&
+		pathsOverlap(basePath, CUDAHelperSocketDirectory) {
+		return &ConfigError{
+			Field:   "storage.basePath",
+			Message: "agent-mounted storage.basePath must not overlap the CUDA helper socket directory",
+		}
+	}
 	storageMode := strings.ToLower(strings.TrimSpace(c.CUDACheckpoint.StorageMode))
 	if storageMode == "" {
 		storageMode = CUDAStorageModeLegacy
@@ -149,6 +194,12 @@ func (c *AgentConfig) Validate() error {
 		}
 	}
 	c.CUDACheckpoint.StorageMode = storageMode
+	if daemonSocketPath != "" && storageMode != CUDAStorageModePOSIX {
+		return &ConfigError{
+			Field:   "cudaCheckpoint.daemonSocketPath",
+			Message: "daemonSocketPath requires cudaCheckpoint.storageMode=posix",
+		}
+	}
 	if c.CUDACheckpoint.TransferBufferCount == nil {
 		value := DefaultCUDATransferBufferCount
 		c.CUDACheckpoint.TransferBufferCount = &value

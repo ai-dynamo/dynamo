@@ -22,13 +22,15 @@ type RestoreOptions struct {
 	CUDATransfer   types.CUDATransferSettings
 	CgroupRoot     string
 	TargetPodIP    string
+	DeferCUDA      bool
 }
 
 type RestoreInNamespaceResult struct {
-	RestoredPID            int           `json:"restoredPID"`
-	NSRestoreSetupDuration time.Duration `json:"nsrestoreSetupDuration"`
-	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
-	CUDADuration           time.Duration `json:"cudaDuration"`
+	RestoredPID            int                              `json:"restoredPID"`
+	NSRestoreSetupDuration time.Duration                    `json:"nsrestoreSetupDuration"`
+	CRIURestoreDuration    time.Duration                    `json:"criuRestoreDuration"`
+	CUDADuration           time.Duration                    `json:"cudaDuration"`
+	DeferredCUDAProcesses  []snapshotruntime.ProcessDetails `json:"deferredCUDAProcesses,omitempty"`
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -86,6 +88,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		NSRestoreSetupDuration: manifestReadDuration + configureDuration + executeTimings.nsrestoreSetupDuration,
 		CRIURestoreDuration:    executeTimings.criuRestoreDuration,
 		CUDADuration:           executeTimings.cudaDuration,
+		DeferredCUDAProcesses:  executeTimings.deferredCUDAProcesses,
 	}
 	log.V(1).Info("nsrestore timing summary",
 		"restored_pid", restoredPID,
@@ -101,6 +104,7 @@ type nsrestorePhaseTimings struct {
 	nsrestoreSetupDuration time.Duration
 	criuRestoreDuration    time.Duration
 	cudaDuration           time.Duration
+	deferredCUDAProcesses  []snapshotruntime.ProcessDetails
 }
 
 func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
@@ -177,17 +181,30 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(
-			ctx,
-			restorePIDs,
-			opts.CUDADeviceMap,
-			cudaStorageMode,
-			opts.CheckpointPath,
-			opts.CUDATransfer,
-			log,
-		)
-		if err != nil {
-			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
+		if opts.DeferCUDA {
+			for _, pid := range restorePIDs {
+				process, err := snapshotruntime.ReadProcessDetails("/proc", pid)
+				if err != nil {
+					return nil, 0, fmt.Errorf("capture restored CUDA process identity for PID %d: %w", pid, err)
+				}
+				if process.StartTimeTicks == 0 || process.Cgroup == "" {
+					return nil, 0, fmt.Errorf("capture restored CUDA process identity for PID %d: incomplete proc identity", pid)
+				}
+				timings.deferredCUDAProcesses = append(timings.deferredCUDAProcesses, process)
+			}
+		} else {
+			_, err = cuda.RestoreAndUnlockProcessTree(
+				ctx,
+				restorePIDs,
+				opts.CUDADeviceMap,
+				cudaStorageMode,
+				opts.CheckpointPath,
+				opts.CUDATransfer,
+				log,
+			)
+			if err != nil {
+				return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
+			}
 		}
 	}
 	timings.cudaDuration = time.Since(cudaStart)

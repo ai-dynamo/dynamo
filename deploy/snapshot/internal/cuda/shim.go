@@ -3,6 +3,7 @@ package cuda
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os/exec"
@@ -16,9 +17,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
-const (
-	cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
+var cudaCheckpointHelperBinary = "/usr/local/bin/cuda-checkpoint-helper"
 
+const (
 	actionLock       = "lock"
 	actionCheckpoint = "checkpoint"
 	actionRestore    = "restore"
@@ -26,11 +27,27 @@ const (
 )
 
 type helperActionRunner interface {
-	run(context.Context, int, string, string, string, string, types.CUDATransferSettings, logr.Logger) error
+	run(
+		context.Context,
+		int,
+		string,
+		string,
+		string,
+		string,
+		types.CUDATransferSettings,
+		snapshotruntime.ProcessDetails,
+		logr.Logger,
+	) error
 	state(context.Context, int) (string, error)
 }
 
 type commandHelperActionRunner struct{}
+
+type identityValidatingRunner struct {
+	runner     helperActionRunner
+	procRoot   string
+	identities map[int]snapshotruntime.ProcessDetails
+}
 
 type customStorageTelemetry struct {
 	Event                        string          `json:"event"`
@@ -154,13 +171,62 @@ func (commandHelperActionRunner) run(
 	storageMode,
 	storageDir string,
 	transferSettings types.CUDATransferSettings,
+	identity snapshotruntime.ProcessDetails,
 	log logr.Logger,
 ) error {
+	if transferSettings.DaemonSocket != "" {
+		if identity.StartTimeTicks == 0 || identity.Cgroup == "" {
+			captured, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+			if err != nil {
+				return fmt.Errorf("capture host PID %d identity for CUDA helper daemon: %w", pid, err)
+			}
+			identity = captured
+		}
+		daemonStorageDir := storageDir
+		if action == actionLock || action == actionUnlock {
+			daemonStorageDir = ""
+		}
+		err := runDaemonAction(ctx, pid, action, deviceMap, daemonStorageDir, transferSettings, identity, log)
+		if err == nil || !transferSettings.DaemonFallback || !errors.Is(err, errDaemonUnavailable) {
+			return err
+		}
+		log.Info("CUDA helper daemon unavailable before request; using configured one-shot fallback",
+			"socket", transferSettings.DaemonSocket,
+			"pid", pid,
+			"action", action,
+			"error", err,
+		)
+	}
 	return runAction(ctx, pid, action, deviceMap, storageMode, storageDir, transferSettings, log)
 }
 
 func (commandHelperActionRunner) state(ctx context.Context, pid int) (string, error) {
 	return getState(ctx, pid)
+}
+
+func (r identityValidatingRunner) run(
+	ctx context.Context,
+	pid int,
+	action,
+	deviceMap,
+	storageMode,
+	storageDir string,
+	transferSettings types.CUDATransferSettings,
+	_ snapshotruntime.ProcessDetails,
+	log logr.Logger,
+) error {
+	expected, ok := r.identities[pid]
+	if !ok {
+		return fmt.Errorf("missing expected process identity for host PID %d", pid)
+	}
+	if err := snapshotruntime.ValidateProcessIdentity(r.procRoot, expected); err != nil {
+		return fmt.Errorf("validate host PID %d immediately before CUDA %s: %w", pid, action, err)
+	}
+	return r.runner.run(ctx, pid, action, deviceMap, storageMode, storageDir, transferSettings, expected, log)
+}
+
+func (r identityValidatingRunner) state(ctx context.Context, pid int) (string, error) {
+	return r.runner.state(ctx, pid)
 }
 
 func getState(ctx context.Context, pid int) (string, error) {

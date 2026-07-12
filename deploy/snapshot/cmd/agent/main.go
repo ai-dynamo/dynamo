@@ -14,6 +14,7 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/controller"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 )
@@ -52,6 +53,10 @@ func main() {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	if err := cuda.WaitForDaemon(ctx, cfg.CUDACheckpoint.DaemonSocketPath); err != nil {
+		fatal(agentLog, err, "CUDA helper daemon did not become ready")
+	}
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,

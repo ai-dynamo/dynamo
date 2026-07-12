@@ -52,6 +52,11 @@ test: fmt vet test-cuda-helper ## Run tests.
 .PHONY: test-cuda-helper
 test-cuda-helper: ## Run GPU-independent CUDA helper manifest, planner, cache, and storage-policy tests.
 	@mkdir -p bin
+	g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+		-o bin/cuda-checkpoint-helper-daemon-protocol-test \
+		cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+		cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
+	bin/cuda-checkpoint-helper-daemon-protocol-test
 	g++ -std=c++20 -O2 -Wall -Wextra -Werror \
 		-o bin/cuda-checkpoint-helper-storage-test \
 		cmd/cuda-checkpoint-helper/storage_manifest.cpp \
