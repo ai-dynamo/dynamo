@@ -1098,8 +1098,8 @@ def test_get_gpu_counts_multinode_multiplies_node_count(
 
     prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts()
 
-    assert prefill_gpu == 2   # single-node: 2 GPUs × 1 node
-    assert decode_gpu == 32   # multinode: 8 GPUs × 4 nodes
+    assert prefill_gpu == 2  # single-node: 2 GPUs × 1 node
+    assert decode_gpu == 32  # multinode: 8 GPUs × 4 nodes
 
 
 # Tests for get_actual_worker_counts

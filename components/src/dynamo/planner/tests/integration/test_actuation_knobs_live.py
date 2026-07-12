@@ -546,9 +546,9 @@ class TestApplyPowerAnnotationsLive:
                 ).metadata.annotations
                 or {}
             ).get(POWER_ANNOTATION_KEY)
-            assert after is None, (
-                f"Expected {POWER_ANNOTATION_KEY} removed on {pod_name}, got {after!r}"
-            )
+            assert (
+                after is None
+            ), f"Expected {POWER_ANNOTATION_KEY} removed on {pod_name}, got {after!r}"
         finally:
             connector.get_component_pods = original_get_component_pods  # type: ignore[assignment]
             if original is not None:
