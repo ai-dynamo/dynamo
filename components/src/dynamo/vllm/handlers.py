@@ -97,6 +97,7 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_FINAL_REQUEST_OUTPUT_KIND = RequestOutputKind.FINAL_ONLY
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -719,6 +720,7 @@ def build_sampling_params(
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None = None,
     enable_rl: bool = False,
+    disaggregation_mode: DisaggregationMode | None = None,
 ) -> SamplingParams:
     """
     Build SamplingParams from a PreprocessedRequest (internal protocol format).
@@ -730,6 +732,9 @@ def build_sampling_params(
             ``generation_config.json`` (vLLM ``ModelConfig.get_diff_sampling_param``).
             Used for non-RL/chat clients that want the model's recommended
             sampling defaults applied transparently.
+        disaggregation_mode: Worker topology. FINAL_ONLY is safe only for an
+            aggregated worker; decode workers need an early output to release
+            their deferred-abort guard after KV transfer.
 
     Returns:
         SamplingParams configured from the request
@@ -844,11 +849,26 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
-    # Dynamo's internal token path consumes disjoint token deltas. This mirrors
-    # the SGLang integration and lets vLLM's stream_interval gate reduce backend
-    # bridge pressure before chunks cross into Dynamo.
+    # The frontend always consumes a stream internally, even when it folds the
+    # external response. For a known non-streaming client, let vLLM return one
+    # final token batch and avoid constructing a Python RequestOutput per decode
+    # step. Textual and visible-token stops remain on DELTA because Dynamo, not
+    # vLLM, enforces those conditions incrementally. A missing signal means an
+    # older frontend or an unknown/disaggregated worker, so retain the legacy
+    # DELTA behavior during rolling updates and for deferred-abort safety.
+    stop_conditions = request.get("stop_conditions", {}) or {}
+    client_streaming = output_options.get("client_streaming")
+    needs_incremental_stops = bool(stop_conditions.get("stop")) or bool(
+        stop_conditions.get("stop_token_ids_visible")
+    )
     sampling_params.detokenize = False
-    sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
+    sampling_params.output_kind = (
+        _FINAL_REQUEST_OUTPUT_KIND
+        if disaggregation_mode == DisaggregationMode.AGGREGATED
+        and client_streaming is False
+        and not needs_incremental_stops
+        else _DELTA_REQUEST_OUTPUT_KIND
+    )
 
     return sampling_params
 
@@ -2719,7 +2739,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if raw_routed_experts is not None:
                         raw_routed_experts_by_output[output_idx] = raw_routed_experts
 
-                    # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
+                    # vLLM DELTA and FINAL_ONLY outputs align token_ids/logprobs
+                    # to the returned chunk.
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
                     log_probs, top_logprobs = self._extract_logprobs(
                         output, 0, tokenizer=tokenizer
@@ -2926,6 +2947,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.default_sampling_params,
             self.model_max_len,
             enable_rl=self.config.enable_rl,
+            disaggregation_mode=self.config.disaggregation_mode,
         )
 
         if kv_params is not None:
@@ -3254,6 +3276,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             self.default_sampling_params,
             self.model_max_len,
             enable_rl=self.config.enable_rl,
+            disaggregation_mode=self.config.disaggregation_mode,
         )
 
         # One protocol instance per request; carries per-request state

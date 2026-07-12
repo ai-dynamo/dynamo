@@ -93,24 +93,89 @@ async def _collect_handler_chunks(responses):
     return chunks, handler
 
 
-def test_build_sampling_params_forces_delta_token_mode():
+def _build_sampling_params(
+    output_options=None,
+    stop_conditions=None,
+    disaggregation_mode=DisaggregationMode.AGGREGATED,
+):
     request = {
         "token_ids": [1, 2, 3],
         "sampling_options": {"output_kind": RequestOutputKind.CUMULATIVE},
-        "stop_conditions": {},
-        "output_options": {},
+        "stop_conditions": stop_conditions or {},
+        "output_options": output_options or {},
     }
 
-    sampling_params = build_sampling_params(
+    return build_sampling_params(
         request,
         default_sampling_params={
             "detokenize": True,
             "output_kind": RequestOutputKind.CUMULATIVE,
         },
+        disaggregation_mode=disaggregation_mode,
     )
+
+
+@pytest.mark.parametrize("client_streaming", [True, None])
+def test_build_sampling_params_uses_delta_for_streaming_or_legacy_frontend(
+    client_streaming,
+):
+    output_options = (
+        {} if client_streaming is None else {"client_streaming": client_streaming}
+    )
+    sampling_params = _build_sampling_params(output_options=output_options)
 
     assert sampling_params.detokenize is False
     assert sampling_params.output_kind == RequestOutputKind.DELTA
+
+
+def test_build_sampling_params_uses_final_only_for_nonstreaming_client():
+    sampling_params = _build_sampling_params(output_options={"client_streaming": False})
+
+    assert sampling_params.detokenize is False
+    assert sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
+
+
+@pytest.mark.parametrize(
+    "disaggregation_mode",
+    [None, DisaggregationMode.PREFILL, DisaggregationMode.DECODE],
+)
+def test_build_sampling_params_keeps_delta_outside_aggregated_mode(
+    disaggregation_mode,
+):
+    sampling_params = _build_sampling_params(
+        output_options={"client_streaming": False},
+        disaggregation_mode=disaggregation_mode,
+    )
+
+    assert sampling_params.output_kind == RequestOutputKind.DELTA
+
+
+@pytest.mark.parametrize(
+    "stop_conditions",
+    [
+        {"stop": ["stop here"]},
+        {"stop_token_ids_visible": [42]},
+    ],
+)
+def test_build_sampling_params_keeps_delta_for_frontend_enforced_stops(
+    stop_conditions,
+):
+    sampling_params = _build_sampling_params(
+        output_options={"client_streaming": False},
+        stop_conditions=stop_conditions,
+    )
+
+    assert sampling_params.output_kind == RequestOutputKind.DELTA
+
+
+def test_build_sampling_params_allows_final_only_for_hidden_stop_tokens():
+    sampling_params = _build_sampling_params(
+        output_options={"client_streaming": False},
+        stop_conditions={"stop_token_ids_hidden": [42]},
+    )
+
+    assert sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
+    assert 42 in sampling_params.stop_token_ids
 
 
 @pytest.mark.asyncio
@@ -217,6 +282,44 @@ async def test_generate_tokens_reads_delta_aligned_logprobs_from_zero_offset():
 
 
 @pytest.mark.asyncio
+async def test_generate_tokens_accepts_final_only_multi_choice_output():
+    first_logprobs = [
+        {7: SimpleNamespace(logprob=-0.7, rank=1, decoded_token="a")},
+        {8: SimpleNamespace(logprob=-0.8, rank=1, decoded_token="b")},
+    ]
+    responses = [
+        _request_output(
+            [
+                _output(
+                    [7, 8],
+                    index=0,
+                    finish_reason="length",
+                    logprobs=first_logprobs,
+                ),
+                _output([9], index=1, finish_reason="stop"),
+            ],
+            prompt_token_ids=[10, 11],
+        )
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses)
+
+    assert [(chunk["index"], chunk["token_ids"]) for chunk in chunks] == [
+        (0, [7, 8]),
+        (1, [9]),
+    ]
+    assert chunks[0]["log_probs"] == [-0.7, -0.8]
+    assert chunks[0]["finish_reason"] == "length"
+    assert chunks[1]["finish_reason"] == "stop"
+    assert chunks[-1]["completion_usage"] == {
+        "prompt_tokens": 2,
+        "completion_tokens": 3,
+        "total_tokens": 5,
+        "prompt_tokens_details": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
     first_logprobs = [
         {7: SimpleNamespace(logprob=-0.7, rank=1, decoded_token="a")},
@@ -250,7 +353,7 @@ async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
         (1, {"cached_tokens": 1}),
     ],
 )
-async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage(
+async def test_unified_llm_engine_accepts_final_only_output_and_counts_usage(
     num_cached_tokens,
     expected_prompt_tokens_details,
 ):
@@ -288,14 +391,14 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage(
                 "token_ids": [10, 11],
                 "sampling_options": {},
                 "stop_conditions": {},
-                "output_options": {},
+                "output_options": {"client_streaming": False},
             },
             _FakeContext(),
         )
     ]
 
     sampling_params = engine.engine_client.calls[0][0][1]
-    assert sampling_params.output_kind == RequestOutputKind.DELTA
+    assert sampling_params.output_kind == RequestOutputKind.FINAL_ONLY
     assert [chunk["token_ids"] for chunk in chunks] == [[1], [2, 3]]
     assert chunks[-1]["completion_usage"] == {
         "prompt_tokens": 2,

@@ -10,6 +10,7 @@ use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
 use crate::http::service::metadata::extract_metadata_from_grpc;
+use crate::preprocessor::CLIENT_STREAMING_CONTEXT_KEY;
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
@@ -65,7 +66,8 @@ pub async fn completion_response_stream(
     };
     let metadata = extract_metadata_from_grpc(metadata)
         .map_err(|err| Status::invalid_argument(err.to_string()))?;
-    let request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
+    let mut request = Context::with_id_and_metadata(request, request_id.clone(), metadata);
+    request.insert(CLIENT_STREAMING_CONTEXT_KEY, streaming);
     let context = request.context();
 
     // create the connection handles

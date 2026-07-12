@@ -46,7 +46,7 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
-use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
+use crate::preprocessor::{CLIENT_STREAMING_CONTEXT_KEY, PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
     agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
@@ -2315,6 +2315,7 @@ async fn responses(
         });
 
     let mut request = context.map(|mut _req| chat_request);
+    request.insert(CLIENT_STREAMING_CONTEXT_KEY, streaming);
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }

@@ -247,6 +247,14 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
+pub(crate) const CLIENT_STREAMING_CONTEXT_KEY: &str = "dynamo.llm.client_streaming";
+
+fn client_streaming_from_context(context: &PipelineContext<()>, fallback: bool) -> bool {
+    context
+        .get::<bool>(CLIENT_STREAMING_CONTEXT_KEY)
+        .map(|streaming| *streaming)
+        .unwrap_or(fallback)
+}
 
 fn attach_agent_context_from_context(
     request: &mut PreprocessedRequest,
@@ -3211,6 +3219,7 @@ impl
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
+        let client_streaming = client_streaming_from_context(&context, original_stream_flag);
 
         // Build request payload handle (None if request trace is disabled / not eligible).
         // The handle snapshots the pristine request and its arrival time here;
@@ -3254,6 +3263,7 @@ impl
         let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
+        common_request.output_options.client_streaming = Some(client_streaming);
         attach_agent_context_from_context(&mut common_request, &context);
 
         let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
@@ -3402,6 +3412,7 @@ impl
 
         // Preserve original streaming flag
         let original_stream_flag = request.inner.stream.unwrap_or(false);
+        let client_streaming = client_streaming_from_context(&context, original_stream_flag);
 
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses
@@ -3442,6 +3453,7 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        common_request.output_options.client_streaming = Some(client_streaming);
         attach_agent_context_from_context(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -3623,6 +3635,16 @@ mod tests {
     use super::*;
     use crate::protocols::common::preprocessor::MultimodalData;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+
+    #[test]
+    fn test_client_streaming_context_overrides_internal_stream_flag() {
+        let mut context = PipelineContext::new(());
+        assert!(client_streaming_from_context(&context, true));
+        assert!(!client_streaming_from_context(&context, false));
+
+        context.insert(CLIENT_STREAMING_CONTEXT_KEY, false);
+        assert!(!client_streaming_from_context(&context, true));
+    }
 
     fn url_entry(u: &str) -> MultimodalData {
         MultimodalData::Url(url::Url::parse(u).unwrap())

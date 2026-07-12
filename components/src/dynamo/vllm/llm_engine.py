@@ -434,6 +434,7 @@ class VllmLLMEngine(LLMEngine):
             self._default_sampling_params,
             self._model_max_len,
             enable_rl=self.enable_rl,
+            disaggregation_mode=self.disaggregation_mode,
         )
 
         # vLLM's KV transfer is internal to NixlConnector
@@ -558,7 +559,8 @@ class VllmLLMEngine(LLMEngine):
                     "token_ids": token_ids,
                 }
 
-                # `build_sampling_params` forces DELTA output → offset 0.
+                # DELTA and FINAL_ONLY outputs both align token_ids/logprobs
+                # to the returned chunk, so extraction starts at offset 0.
                 # `fallback_to_first_on_missing=True` matches legacy
                 # vLLM handler: always emit when vLLM returned a dict.
                 (

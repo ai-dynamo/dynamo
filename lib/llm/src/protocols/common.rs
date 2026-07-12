@@ -535,6 +535,14 @@ impl SamplingOptions {
 /// Collection of options that control what information the inference engine returns in the response.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct OutputOptions {
+    /// Whether the original client request asked for a streaming response.
+    ///
+    /// Dynamo may stream internally even when the external response is folded
+    /// into one object. Backends can use this signal to avoid constructing
+    /// incremental output for non-streaming clients. `None` preserves the
+    /// legacy behavior for mixed-version frontend/worker deployments.
+    pub client_streaming: Option<bool>,
+
     /// Number of log probabilities to return per output token.
     /// Note that the implementation follows the OpenAI API: The return
     /// result includes the log probabilities on the `logprobs` most likely
@@ -722,6 +730,23 @@ impl From<CompletionContext> for PromptType {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn test_output_options_client_streaming_is_backward_compatible() {
+        let legacy: OutputOptions = serde_json::from_value(serde_json::json!({
+            "logprobs": 2
+        }))
+        .unwrap();
+        assert_eq!(legacy.client_streaming, None);
+
+        for client_streaming in [true, false] {
+            let options: OutputOptions = serde_json::from_value(serde_json::json!({
+                "client_streaming": client_streaming
+            }))
+            .unwrap();
+            assert_eq!(options.client_streaming, Some(client_streaming));
+        }
+    }
 
     #[test]
     fn test_completion_context_new() {

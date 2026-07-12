@@ -37,6 +37,7 @@ use super::{
     },
     service_v2,
 };
+use crate::preprocessor::CLIENT_STREAMING_CONTEXT_KEY;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
@@ -337,7 +338,8 @@ async fn anthropic_messages(
             .or_insert(serde_json::Value::Bool(false));
     }
 
-    let request = context.map(|_req| chat_request);
+    let mut request = context.map(|_req| chat_request);
+    request.insert(CLIENT_STREAMING_CONTEXT_KEY, streaming);
 
     // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
     // streaming gate (required/named + structural-tag stay on the v1 finalize path).

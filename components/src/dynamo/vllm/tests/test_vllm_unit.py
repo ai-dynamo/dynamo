@@ -399,12 +399,18 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
     from dynamo.vllm import llm_engine
 
-    captured: dict[str, bool] = {}
+    captured: dict[str, object] = {}
 
     def fake_build_sampling_params(
-        request, default_sampling_params, model_max_len=None, *, enable_rl=False
+        request,
+        default_sampling_params,
+        model_max_len=None,
+        *,
+        enable_rl=False,
+        disaggregation_mode=None,
     ):
         captured["enable_rl"] = enable_rl
+        captured["disaggregation_mode"] = disaggregation_mode
         return SimpleNamespace(extra_args=None)
 
     async def empty_generation():
@@ -439,6 +445,7 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     asyncio.run(run_generate())
 
     assert captured["enable_rl"] is True
+    assert captured["disaggregation_mode"] == CommonDisaggregationMode.AGGREGATED
 
 
 @pytest.mark.asyncio

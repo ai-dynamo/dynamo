@@ -225,6 +225,7 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
         let return_tokens_as_token_ids = self.get_return_tokens_as_token_ids();
 
         Ok(common::OutputOptions {
+            client_streaming: None,
             logprobs,
             prompt_logprobs,
             skip_special_tokens,
