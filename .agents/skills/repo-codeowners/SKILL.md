@@ -69,6 +69,13 @@ area claims. Nothing ships unowned.
 5. Commit `areas.yaml` and `CODEOWNERS` together (same commit), signed
    (`git commit -s`).
 
+Removals fail differently: deleting a directory never fails coverage (it
+counts files, and a claim matching nothing is not an error), but regeneration
+drops the directory's rule, so the **drift check** fails until the
+regenerated `CODEOWNERS` is committed with the deletion. Run step 4 and
+commit both files. While there, prune the now-dead glob from `areas.yaml`;
+the `build_codeowners.py` report lists globs that no longer match any file.
+
 ## Flow 3: Change review routing
 
 Edit `.github/codeowners/areas.yaml` - move a glob between areas, add a
