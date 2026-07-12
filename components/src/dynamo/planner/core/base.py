@@ -882,16 +882,82 @@ class NativePlannerBase:
         """
         if self.config.advisory:
             return
-        if not self.config.enable_power_awareness:
-            return
         connector = self.connector
         if not isinstance(connector, KubernetesConnector):
             return
-
         if not (self.require_prefill or self.require_decode):
+            return
+        if not self.config.enable_power_awareness:
+            await asyncio.to_thread(self._run_power_annotation_removal, connector)
             return
 
         await asyncio.to_thread(self._run_power_annotation_sweep, connector)
+
+    def _run_power_annotation_removal(self, connector: KubernetesConnector) -> None:
+        """Remove planner-owned power annotations from surviving worker pods.
+
+        Called when power awareness is disabled so that pods previously
+        annotated by the planner are cleaned up.  The Power Agent observes the
+        missing key and releases the GPU cap through its normal release path.
+        """
+        try:
+            deployment = connector.kube_api.get_graph_deployment(
+                connector.graph_deployment_name
+            )
+            defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+            prefill_name = defaults.prefill_worker_k8s_name if defaults else None
+            decode_name = None
+            if defaults is not None:
+                if self.config.mode == "agg":
+                    decode_name = (
+                        getattr(defaults, "agg_worker_k8s_name", None)
+                        or defaults.decode_worker_k8s_name
+                    )
+                else:
+                    decode_name = defaults.decode_worker_k8s_name
+
+            pods_to_clean: list = []
+            if self.require_prefill:
+                pods_to_clean.extend(
+                    connector.get_component_pods(
+                        SubComponentType.PREFILL,
+                        deployment=deployment,
+                        component_name=prefill_name,
+                    )
+                )
+            if self.require_decode:
+                pods_to_clean.extend(
+                    connector.get_component_pods(
+                        SubComponentType.DECODE,
+                        deployment=deployment,
+                        component_name=decode_name,
+                    )
+                )
+        except (ApiException, DynamoGraphDeploymentNotFoundError) as e:
+            logger.warning(
+                "Power-annotation removal skipped: failed to read DGD or list "
+                "worker pods (%s); retrying on the next sweep.",
+                e,
+            )
+            return
+
+        for pod in pods_to_clean:
+            if (pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY) is None:
+                continue
+            try:
+                connector.kube_api.remove_pod_annotation(
+                    pod.metadata.name, POWER_ANNOTATION_KEY
+                )
+                logger.info(
+                    "Removed power annotation from pod %s",
+                    pod.metadata.name,
+                )
+            except ApiException as e:
+                logger.warning(
+                    "Failed to remove power annotation from pod %s: %s",
+                    pod.metadata.name,
+                    e,
+                )
 
     def _run_power_annotation_sweep(self, connector: KubernetesConnector) -> None:
         """Blocking power-annotation reconcile sweep (runs off the event loop).
@@ -1033,17 +1099,20 @@ class NativePlannerBase:
     ) -> bool:
         """Decide whether to run a power-annotation sweep this tick.
 
+        Gates both the enabled write sweep and the disabled removal sweep.
         Throttles steady-state sweeps to at most one per
         ``power_annotation_interval_seconds`` (a sweep costs a DGD read + a pod
         list per managed component, so per-tick sweeps multiply apiserver
         load). A scale-up (re)opens a force window of one interval during which
         every tick sweeps, so freshly-created pods are annotated without waiting
-        out the throttle. Updates the sweep bookkeeping as a side effect when it
-        returns True.
+        out the throttle. When power awareness is disabled the scale-up force
+        window is skipped (no new pods are being annotated), but the normal
+        throttle still fires so stale annotations are removed on the interval.
+        Updates the sweep bookkeeping as a side effect when it returns True.
         """
-        if not self.config.enable_power_awareness or self.config.advisory:
+        if self.config.advisory:
             return False
-        if self._scaling_up(effects):
+        if self.config.enable_power_awareness and self._scaling_up(effects):
             self._force_power_annotations_until_s = (
                 now_s + self.config.power_annotation_interval_seconds
             )

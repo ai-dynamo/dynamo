@@ -737,12 +737,13 @@ class TestPowerAwareDcgmQueries:
             # using it would silently match nothing once attribution works.
             assert 'exported_namespace="kube-namespace"' in query_str
             # exported_pod (not bare `pod`) is the workload pod label.
-            # The operator emits `<dgd>-<replica-idx>-<service-key-lc>-<hash>`
-            # so the regex must accept the `-<digits>-` segment.  The hyphen
-            # in "my-dgd" is re.escape'd to `\-`, then the backslash is
-            # doubled by _quote_label_value for the PromQL string literal.
-            assert r'exported_pod=~"^my\\-dgd-[0-9]+-.*"' in query_str
-            # The old broken regex must not appear.
+            # The numeric-index segment is optional so both Grove/LWS names
+            # (<dgd>-<idx>-<component>-<hash>) and standard Deployment names
+            # (<dgd>-<component>-<rs-hash>-<pod-hash>) are matched.  The
+            # hyphen in "my-dgd" is re.escape'd to `\-`, then the backslash
+            # is doubled by _quote_label_value for the PromQL string literal.
+            assert r'exported_pod=~"^my\\-dgd-(?:[0-9]+-)?.*"' in query_str
+            # The old narrower regex must not appear.
             assert "(prefill|decode|agg|frontend)" not in query_str
 
     def test_get_total_dgd_power_escapes_dgd_name_in_regex(self):
@@ -761,14 +762,14 @@ class TestPowerAwareDcgmQueries:
             mock_query.return_value = []
             client.get_total_dgd_power(k8s_namespace="ns", dgd_name="my.dgd")
             query_str = mock_query.call_args[0][0]
-            assert r'exported_pod=~"^my\\.dgd-[0-9]+-.*"' in query_str
+            assert r'exported_pod=~"^my\\.dgd-(?:[0-9]+-)?.*"' in query_str
 
         # Plain alphanumeric name: escaping must be a no-op (no stray backslashes).
         with patch.object(client.prom, "custom_query") as mock_query:
             mock_query.return_value = []
             client.get_total_dgd_power(k8s_namespace="ns", dgd_name="qwen3quickstart")
             query_str = mock_query.call_args[0][0]
-            assert 'exported_pod=~"^qwen3quickstart-[0-9]+-.*"' in query_str
+            assert 'exported_pod=~"^qwen3quickstart-(?:[0-9]+-)?.*"' in query_str
 
     def test_get_total_dgd_power_returns_none_on_empty(self):
         client = self._client()
@@ -805,3 +806,34 @@ class TestPowerAwareDcgmQueries:
             # No bare `pod=~` pattern should leak in.
             assert "{pod=~" not in query_str
             assert ",pod=~" not in query_str
+
+    def test_get_total_dgd_power_covers_both_pod_naming_shapes(self):
+        """The selector regex matches both Grove/LWS and standard Deployment pods.
+
+        Grove/LWS:  <dgd>-<replica-index>-<component>-<hash>
+        Standard:   <dgd>-<component>-<rs-hash>-<pod-hash>
+
+        The numeric-index segment is optional (``(?:[0-9]+-)?``) so both shapes
+        are included.  The test verifies the regex as a Python re pattern because
+        PromQL regex semantics are the same for this subset.
+        """
+        import re as _re
+
+        client = self._client()
+        with patch.object(client.prom, "custom_query") as mock_query:
+            mock_query.return_value = []
+            client.get_total_dgd_power(k8s_namespace="ns", dgd_name="my-dgd")
+            query_str = mock_query.call_args[0][0]
+            assert r'exported_pod=~"^my\\-dgd-(?:[0-9]+-)?.*"' in query_str
+
+        # Validate the regex itself against both naming shapes.
+        selector = _re.compile(r"^my\-dgd-(?:[0-9]+-)?.*")
+        assert selector.match(
+            "my-dgd-0-vllmworker-86nvj"
+        ), "Grove/LWS indexed name must match"
+        assert selector.match(
+            "my-dgd-vllmdecodeworker-865f84c49-6q7s5"
+        ), "Standard Deployment name must match"
+        assert not selector.match(
+            "other-dgd-0-vllmworker-abc"
+        ), "Different DGD must not match"

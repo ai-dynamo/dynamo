@@ -120,11 +120,12 @@ def any_worker_pod(kube_api: KubernetesAPI):
     """
     label_selector = f"nvidia.com/dynamo-graph-deployment-name={_DGD_NAME}"
     pods = kube_api.list_pods_by_label(label_selector)
+    _GPU_WORKER_TYPES = {"worker", "prefill", "decode"}
     worker_pods = [
         p
         for p in pods
         if (p.metadata.labels or {}).get("nvidia.com/dynamo-component-type")
-        != "frontend"
+        in _GPU_WORKER_TYPES
     ]
     if not worker_pods:
         pytest.skip(f"No worker pods found for DGD {_DGD_NAME!r}")
@@ -281,7 +282,7 @@ class TestPostBusyThresholdLive:
         # MODEL_NAME override, otherwise resolve from the live DGD and let a
         # PlannerError surface rather than masking it with a default.
         model = os.environ.get("MODEL_NAME") or connector.get_model_name(
-            require_prefill=False, require_decode=False
+            require_prefill=False, require_decode=True
         )
 
         # Resolve the frontend HTTP port from the live pod spec instead of
@@ -432,7 +433,9 @@ class TestApplyPowerAnnotationsLive:
         # the orchestrator dispatches a real patch_pod_annotation call.
         original_get_component_pods = connector.get_component_pods
 
-        def _stubbed_get_component_pods(sub_component_type, deployment=None):
+        def _stubbed_get_component_pods(
+            sub_component_type, deployment=None, component_name=None
+        ):
             from dynamo.planner.config.defaults import SubComponentType as _Sct
 
             if sub_component_type == _Sct.DECODE:
@@ -471,46 +474,78 @@ class TestApplyPowerAnnotationsLive:
                 )
 
     @pytest.mark.asyncio
-    async def test_orchestration_skips_when_power_awareness_disabled(
+    async def test_orchestration_removes_annotation_when_disabled(
         self,
+        kube_api: KubernetesAPI,
         connector: KubernetesConnector,
         any_worker_pod,
         core_api,
     ):
-        """With enable_power_awareness=False the orchestrator must be a no-op."""
+        """Disabling power awareness must remove the planner annotation from pods."""
         from dynamo.planner.core.base import NativePlannerBase
 
         pod_name = any_worker_pod.metadata.name
-        before = (
-            core_api.read_namespaced_pod(
-                name=pod_name, namespace=_K8S_NAMESPACE
-            ).metadata.annotations
-            or {}
-        ).get(POWER_ANNOTATION_KEY)
+        original = (any_worker_pod.metadata.annotations or {}).get(POWER_ANNOTATION_KEY)
+        sentinel = "888"
+        if original == sentinel:
+            sentinel = "777"
+
+        # Set a known annotation so the removal path has something to clean up.
+        kube_api.patch_pod_annotation(pod_name, POWER_ANNOTATION_KEY, sentinel)
+        # Re-read so the stub returns a pod object whose metadata includes the key.
+        annotated_pod = core_api.read_namespaced_pod(
+            name=pod_name, namespace=_K8S_NAMESPACE
+        )
+
+        original_get_component_pods = connector.get_component_pods
+
+        def _stubbed_get_component_pods(
+            sub_component_type, deployment=None, component_name=None
+        ):
+            from dynamo.planner.config.defaults import SubComponentType as _Sct
+
+            if sub_component_type == _Sct.DECODE:
+                return [annotated_pod]
+            return []
+
+        connector.get_component_pods = _stubbed_get_component_pods  # type: ignore[assignment]
 
         class _OffConfig:
             advisory = False
             enable_power_awareness = False
             prefill_engine_gpu_power_limit = 999
             decode_engine_gpu_power_limit = 999
+            backend = None
+            mode = "disagg"
 
         adapter = object.__new__(NativePlannerBase)
         adapter.config = _OffConfig()
         adapter.connector = connector
-        adapter.require_prefill = True
+        adapter.require_prefill = False
         adapter.require_decode = True
 
-        await adapter._apply_power_annotations()
+        try:
+            await adapter._apply_power_annotations()
 
-        after = (
-            core_api.read_namespaced_pod(
-                name=pod_name, namespace=_K8S_NAMESPACE
-            ).metadata.annotations
-            or {}
-        ).get(POWER_ANNOTATION_KEY)
-        assert (
-            before == after
-        ), "Pod annotation changed despite enable_power_awareness=False"
+            after = (
+                core_api.read_namespaced_pod(
+                    name=pod_name, namespace=_K8S_NAMESPACE
+                ).metadata.annotations
+                or {}
+            ).get(POWER_ANNOTATION_KEY)
+            assert after is None, (
+                f"Expected {POWER_ANNOTATION_KEY} removed on {pod_name}, got {after!r}"
+            )
+        finally:
+            connector.get_component_pods = original_get_component_pods  # type: ignore[assignment]
+            if original is not None:
+                kube_api.patch_pod_annotation(pod_name, POWER_ANNOTATION_KEY, original)
+            else:
+                core_api.patch_namespaced_pod(
+                    name=pod_name,
+                    namespace=_K8S_NAMESPACE,
+                    body={"metadata": {"annotations": {POWER_ANNOTATION_KEY: None}}},
+                )
 
 
 # ---------------------------------------------------------------------------

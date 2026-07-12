@@ -539,15 +539,23 @@ class PrometheusAPIClient:
         (the workload pod name).  The bare ``namespace`` and ``pod`` labels
         identify the DCGM exporter pod itself, not the workload.
 
-        The pod-name regex matches the operator's pod-name format
-        ``<dgd_name>-<replica-index>-<service-key-lowercase>-<hash>``
-        (e.g. ``qwen3-quickstart-0-vllmworker-86nvj``).  ``dgd_name`` needs
-        two escaping layers because it is a regex embedded in a PromQL quoted
-        string: ``re.escape`` for the regex layer (a DGD name may contain a
-        ``.``), then ``_quote_label_value`` to escape the resulting
-        backslashes for the surrounding PromQL string literal.
+        The pod-name regex matches both operator pod-name formats:
+        - Grove/LWS: ``<dgd_name>-<replica-index>-<service-key-lc>-<hash>``
+          (e.g. ``qwen3-quickstart-0-vllmworker-86nvj``)
+        - Standard DCD/Deployment: ``<dgd_name>-<component>-<rs-hash>-<pod-hash>``
+          (e.g. ``vllm-disagg-planner-vllmdecodeworker-865f84c49-6q7s5``)
+
+        The numeric-index segment is made optional (``(?:[0-9]+-)?``) so both
+        shapes match.  ``dgd_name`` needs two escaping layers because it is a
+        regex embedded in a PromQL quoted string: ``re.escape`` for the regex
+        layer (a DGD name may contain a ``.``), then ``_quote_label_value`` to
+        escape the resulting backslashes for the surrounding PromQL string
+        literal.
+
+        Note: long DGD names truncated by Grove (PCS prefix) will not match
+        either shape and are a Phase-3 follow-up item.
         """
-        pod_name_regex = f"^{re.escape(dgd_name)}-[0-9]+-.*"
+        pod_name_regex = f"^{re.escape(dgd_name)}-(?:[0-9]+-)?.*"
         try:
             result = self.prom.custom_query(
                 f"sum(DCGM_FI_DEV_POWER_USAGE{{"

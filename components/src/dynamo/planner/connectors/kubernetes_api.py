@@ -303,6 +303,20 @@ class KubernetesAPI:
             body={"metadata": {"annotations": {key: value}}},
         )
 
+    def remove_pod_annotation(self, pod_name: str, key: str) -> None:
+        """Remove a single annotation key from a named pod via JSON merge patch.
+
+        Setting the key to null in a JSON merge patch is the only way to
+        delete an annotation key (a regular PATCH with a missing key is a
+        no-op).  Used by the power-annotation disable/rollback path so the
+        Power Agent can observe the missing key and release the GPU cap.
+        """
+        self.core_api.patch_namespaced_pod(
+            name=pod_name,
+            namespace=self.current_namespace,
+            body={"metadata": {"annotations": {key: None}}},
+        )
+
     def list_pods_by_label(self, label_selector: str) -> list:
         """List all pods in the current namespace matching label_selector.
 

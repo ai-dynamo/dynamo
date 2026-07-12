@@ -55,6 +55,7 @@ def mock_kube_api():
     api.is_deployment_ready = Mock(return_value=True)
     api.list_pods_by_label = Mock(return_value=[])
     api.patch_pod_annotation = Mock()
+    api.remove_pod_annotation = Mock()
     api.wait_for_graph_deployment_ready = AsyncMock()
     return api
 
@@ -320,23 +321,46 @@ class TestApplyPowerAnnotations:
         assert mock_kube_api.list_pods_by_label.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_skips_entirely_when_power_awareness_disabled(
+    async def test_removes_stale_annotation_when_power_awareness_disabled(
         self, connector, mock_kube_api
     ):
-        """enable_power_awareness=False must be a hard no-op."""
-        pod = _mock_pod("worker-0")
+        """enable_power_awareness=False must remove the annotation from pods that have it."""
+        pod = _mock_pod("worker-0", annotation_value="300")
         connector.get_component_pods = Mock(return_value=[pod])
 
         planner = _bare_planner(
             connector,
             _power_config(enable=False),
-            require_prefill=True,
-            require_decode=False,
+            require_prefill=False,
+            require_decode=True,
         )
         await planner._apply_power_annotations()
 
-        connector.get_component_pods.assert_not_called()
+        connector.get_component_pods.assert_called_once()
         mock_kube_api.patch_pod_annotation.assert_not_called()
+        mock_kube_api.remove_pod_annotation.assert_called_once_with(
+            "worker-0", POWER_ANNOTATION_KEY
+        )
+
+    @pytest.mark.asyncio
+    async def test_skips_removal_when_no_annotation_and_disabled(
+        self, connector, mock_kube_api
+    ):
+        """Disabled cleanup must not issue unnecessary PATCH when pod has no annotation."""
+        pod = _mock_pod("worker-0")  # no annotation
+        connector.get_component_pods = Mock(return_value=[pod])
+
+        planner = _bare_planner(
+            connector,
+            _power_config(enable=False),
+            require_prefill=False,
+            require_decode=True,
+        )
+        await planner._apply_power_annotations()
+
+        connector.get_component_pods.assert_called_once()
+        mock_kube_api.patch_pod_annotation.assert_not_called()
+        mock_kube_api.remove_pod_annotation.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_advisory_mode_skips_patch(self, connector, mock_kube_api):
@@ -1051,9 +1075,22 @@ class TestPowerAnnotationSweepThrottle:
         scale_up = PlannerEffects(scale_to=ScalingDecision(num_prefill=4))
         assert not planner._should_sweep_power_annotations(5000.0, scale_up)
 
-    def test_disabled_never_sweeps(self):
+    def test_disabled_sweeps_on_throttle_for_removal(self):
+        """Disabled mode still sweeps on the normal throttle to remove stale annotations."""
         planner = _throttle_planner(_throttle_config(interval=60.0, enable=False))
-        assert not planner._should_sweep_power_annotations(5000.0, PlannerEffects())
+        # First call with elapsed time — throttle fires so the removal sweep runs.
+        assert planner._should_sweep_power_annotations(5000.0, PlannerEffects())
+        # Within the interval — throttled, no unnecessary removal attempt.
+        assert not planner._should_sweep_power_annotations(5030.0, PlannerEffects())
+
+    def test_disabled_scale_up_does_not_open_force_window(self):
+        """A scale-up decision must not extend the force window when disabled."""
+        planner = _throttle_planner(_throttle_config(interval=60.0, enable=False))
+        planner._should_sweep_power_annotations(1000.0, PlannerEffects())
+        scale_up = PlannerEffects(scale_to=ScalingDecision(num_prefill=4))
+        # Inside throttle but with a scale-up — disabled, so no force window opened.
+        assert not planner._should_sweep_power_annotations(1010.0, scale_up)
+        assert planner._force_power_annotations_until_s == 0.0
 
     def test_scale_up_uses_cached_counts_not_psm(self):
         # Cached worker_counts present -> _scaling_up must read them, NOT the

@@ -181,6 +181,24 @@ class Service(BaseModel):
                 f"GPU count must be an integer."
             ) from err
 
+    def get_node_count(self) -> int:
+        """Return multinode.nodeCount from the component spec, defaulting to 1.
+
+        The operator CRD defines total GPUs as nodeCount × per-pod GPU request.
+        Single-node components either omit the field or set it to 1.
+        """
+        return int(self.service.get("multinode", {}).get("nodeCount", 1))
+
+    def get_total_gpu_count(self) -> int:
+        """Return total GPUs consumed by one replica: get_gpu_count() × get_node_count().
+
+        For single-node components this equals get_gpu_count(). For multinode
+        components the operator allocates nodeCount pods per replica each
+        carrying the same per-pod GPU request, so power projection must
+        multiply both factors.
+        """
+        return self.get_gpu_count() * self.get_node_count()
+
 
 def get_component_from_type_or_name(
     deployment: dict,
