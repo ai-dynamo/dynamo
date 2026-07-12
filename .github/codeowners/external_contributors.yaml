@@ -41,4 +41,22 @@
 #     areas:
 #       - router
 
-contributors: []
+contributors:
+  - name: Alec Flowers
+    github: alec-flowers
+    level: maintainer
+    affiliation: NVIDIA
+    areas:
+      - docs
+  - name: Kristen Kelleher
+    github: kmkelle-nv
+    level: maintainer
+    affiliation: NVIDIA
+    areas:
+      - docs
+  - name: Neelay Shah
+    github: nnshah1
+    level: maintainer
+    affiliation: NVIDIA
+    areas:
+      - docs
