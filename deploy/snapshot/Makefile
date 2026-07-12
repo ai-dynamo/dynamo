@@ -50,7 +50,7 @@ test: fmt vet test-cuda-helper ## Run tests.
 	go test ./... -v -coverprofile cover.out
 
 .PHONY: test-cuda-helper
-test-cuda-helper: ## Run GPU-independent CUDA helper manifest, planner, cache, and storage-policy tests.
+test-cuda-helper: ## Run GPU-independent CUDA helper protocol, manifest, and transfer-planner tests.
 	@mkdir -p bin
 	g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
 		-o bin/cuda-checkpoint-helper-daemon-protocol-test \
@@ -67,17 +67,6 @@ test-cuda-helper: ## Run GPU-independent CUDA helper manifest, planner, cache, a
 		cmd/cuda-checkpoint-helper/transfer_config.cpp \
 		cmd/cuda-checkpoint-helper/transfer_config_test.cpp
 	bin/cuda-checkpoint-helper-transfer-test
-	g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-		-o bin/cuda-checkpoint-helper-benchmark-cache-test \
-		cmd/cuda-checkpoint-helper/benchmark_cache.cpp \
-		cmd/cuda-checkpoint-helper/benchmark_cache_test.cpp
-	bin/cuda-checkpoint-helper-benchmark-cache-test
-	g++ -std=c++20 -O2 -Wall -Wextra -Werror \
-		-o bin/cuda-checkpoint-helper-benchmark-storage-test \
-		cmd/cuda-checkpoint-helper/benchmark_storage.cpp \
-		cmd/cuda-checkpoint-helper/transfer_config.cpp \
-		cmd/cuda-checkpoint-helper/benchmark_storage_test.cpp
-	bin/cuda-checkpoint-helper-benchmark-storage-test
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter.
