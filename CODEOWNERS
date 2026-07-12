@@ -118,14 +118,14 @@
 /dynamo.code-workspace                                                                        @ai-dynamo/dynamo-ops-codeowners
 /.pre-commit-config.yaml                                                                      @ai-dynamo/dynamo-ops-codeowners
 
-# === docs  (@ai-dynamo/dynamo-docs-codeowners @alec-flowers @kmkelle-nv @nnshah1) ===
-/docs/                                                                                        @ai-dynamo/dynamo-docs-codeowners @alec-flowers @kmkelle-nv @nnshah1
-/fern/                                                                                        @ai-dynamo/dynamo-docs-codeowners @alec-flowers @kmkelle-nv @nnshah1
-/README.md                                                                                    @ai-dynamo/dynamo-docs-codeowners @alec-flowers @kmkelle-nv @nnshah1
-/README.zh-CN.md                                                                              @ai-dynamo/dynamo-docs-codeowners @alec-flowers @kmkelle-nv @nnshah1
-/examples/README.md                                                                           @ai-dynamo/dynamo-docs-codeowners @alec-flowers @kmkelle-nv @nnshah1
-/components/README.md                                                                         @ai-dynamo/dynamo-docs-codeowners @alec-flowers @kmkelle-nv @nnshah1
-/examples/__init__.py                                                                         @ai-dynamo/dynamo-docs-codeowners @alec-flowers @kmkelle-nv @nnshah1
+# === docs  (@ai-dynamo/dynamo-docs-codeowners) ===
+/docs/                                                                                        @ai-dynamo/dynamo-docs-codeowners
+/fern/                                                                                        @ai-dynamo/dynamo-docs-codeowners
+/README.md                                                                                    @ai-dynamo/dynamo-docs-codeowners
+/README.zh-CN.md                                                                              @ai-dynamo/dynamo-docs-codeowners
+/examples/README.md                                                                           @ai-dynamo/dynamo-docs-codeowners
+/components/README.md                                                                         @ai-dynamo/dynamo-docs-codeowners
+/examples/__init__.py                                                                         @ai-dynamo/dynamo-docs-codeowners
 
 # === process  (@ai-dynamo/dynamo-process-codeowners) ===
 /.ai/                                                                                         @ai-dynamo/dynamo-process-codeowners
@@ -253,7 +253,7 @@
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
 /.agents/                                                                                     @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
-/docs/agents/                                                                                 @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners @alec-flowers @kmkelle-nv @nnshah1
+/docs/agents/                                                                                 @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /tests/deploy/                                                                                @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /benchmarks/router/                                                                           @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /deploy/power-agent/                                                                          @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners
@@ -271,8 +271,8 @@
 /lib/llm/src/fpm_publisher.rs                                                                 @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/src/kvbm_offload/                                                                 @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kvbm-logical/src/metrics/                                                                @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
-/docs/backends/sglang/agents.md                                                               @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners @alec-flowers @kmkelle-nv @nnshah1
-/docs/digest/agentic-inference/                                                               @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners @alec-flowers @kmkelle-nv @nnshah1
+/docs/backends/sglang/agents.md                                                               @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
+/docs/digest/agentic-inference/                                                               @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/llm/src/protocols/agents.rs                                                              @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/runtime/src/health_check.rs                                                              @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/omni/                                                             @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
