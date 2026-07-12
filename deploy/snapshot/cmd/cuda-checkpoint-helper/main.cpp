@@ -51,7 +51,8 @@ RequestShutdown(int)
   shutdown_requested = 1;
   if (shutdown_write_fd >= 0) {
     const unsigned char wake = 1;
-    (void)write(shutdown_write_fd, &wake, sizeof(wake));
+    const ssize_t written = write(shutdown_write_fd, &wake, sizeof(wake));
+    (void)written;
   }
 }
 
@@ -727,7 +728,8 @@ RunDaemonOperation(const daemon_protocol::Request& request, RetainedContexts* co
       } else if (request.action == daemon_protocol::Action::kLock) {
         response.cuda_status = cuCheckpointProcessLock(request.pid, 0);
       } else {
-        response.cuda_status = cuCheckpointProcessUnlock(request.pid);
+        CUcheckpointUnlockArgs args{};
+        response.cuda_status = cuCheckpointProcessUnlock(request.pid, &args);
       }
     } else {
       transfer::TransferOptions options{
@@ -1011,7 +1013,8 @@ RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
   }
   shutdown_write_fd = -1;
   const unsigned char wake = 1;
-  (void)write(shutdown_pipe[1], &wake, sizeof(wake));
+  const ssize_t written = write(shutdown_pipe[1], &wake, sizeof(wake));
+  (void)written;
   health_thread.join();
   close(shutdown_pipe[0]);
   close(shutdown_pipe[1]);
