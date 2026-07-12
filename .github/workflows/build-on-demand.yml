@@ -12,50 +12,15 @@ on:
       build_vllm:
         description: 'Build and push vllm image, tagged with branch name'
         type: boolean
-        default: true
+        default: false
       build_vllm_placeholder:
         description: 'Build and push the experimental vLLM snapshot placeholder'
         type: boolean
-        default: true
+        default: false
       build_snapshot_agent:
         description: 'Build and push the matching snapshot agent'
         type: boolean
-        default: true
-      vllm_git_url:
-        description: 'Exact vLLM overlay repository'
-        type: string
-        default: 'https://github.com/galletas1712/vllm.git'
-      vllm_git_ref:
-        description: 'Exact vLLM overlay branch'
-        type: string
-        default: 'schwinns/snapshot-gms-nightly-8e981630-fi0615-20260712'
-      vllm_git_sha:
-        description: 'Exact vLLM overlay commit'
-        type: string
-        default: 'c764a139c99a1c1e9ba18f2f210054017aab1a33'
-      flashinfer_git_url:
-        description: 'Exact FlashInfer repository'
-        type: string
-        default: 'https://github.com/galletas1712/flashinfer'
-      flashinfer_git_ref:
-        description: 'Exact FlashInfer ref'
-        type: string
-        default: 'c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b'
-      flashinfer_git_sha:
-        description: 'Exact FlashInfer commit'
-        type: string
-        default: 'c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b'
-      vllm_install_mode:
-        description: 'vLLM installation mode'
-        type: choice
-        options:
-          - auto
-          - python-overlay
-        default: python-overlay
-      vllm_runtime_base_image:
-        description: 'Exact upstream vLLM runtime image'
-        type: string
-        default: 'vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e'
+        default: false
       build_sglang:
         description: 'Build and push sglang image, tagged with branch name'
         type: boolean
@@ -67,7 +32,7 @@ on:
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
-        default: true
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -97,13 +62,18 @@ jobs:
 
   vllm-base-sbom:
     name: Capture exact vLLM nightly baseline
-    if: inputs.build_vllm || inputs.build_vllm_placeholder
+    if: inputs.build_vllm_placeholder
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.12'
+          architecture: x64
       - name: Verify immutable vLLM base
         shell: bash
         env:
@@ -126,7 +96,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m venv "${RUNNER_TEMP}/sbom-venv"
-          "${RUNNER_TEMP}/sbom-venv/bin/pip" install 'PyYAML==6.0.3'
+          cat > "${RUNNER_TEMP}/sbom-requirements.txt" <<'EOF'
+          PyYAML==6.0.3 \
+              --hash=sha256:ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc
+          EOF
+          "${RUNNER_TEMP}/sbom-venv/bin/pip" install \
+            --only-binary=:all: \
+            --require-hashes \
+            --requirement "${RUNNER_TEMP}/sbom-requirements.txt"
           echo "${RUNNER_TEMP}/sbom-venv/bin" >> "${GITHUB_PATH}"
           curl --fail --location --silent --show-error \
             --output "${RUNNER_TEMP}/syft.tar.gz" \
@@ -162,28 +139,38 @@ jobs:
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [init, vllm-base-sbom]
-    if: inputs.build_vllm || inputs.build_vllm_placeholder
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        (inputs.build_vllm || inputs.build_vllm_placeholder) &&
+        needs.init.result == 'success' &&
+        (
+          needs.vllm-base-sbom.result == 'success' ||
+          needs.vllm-base-sbom.result == 'skipped'
+        )
+      }}
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+      platform: ${{ inputs.build_vllm_placeholder && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 90 || 60 }}
-      build_only: true
-      image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
-      baseline_sbom_artifact: vllm-nightly-f2ac3378-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: ${{ inputs.build_vllm_placeholder && 90 || 60 }}
+      build_only: ${{ inputs.build_vllm_placeholder }}
+      image_tag_suffix: ${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}
+      baseline_sbom_artifact: ${{ inputs.build_vllm_placeholder && format('vllm-nightly-f2ac3378-amd64-{0}-{1}', github.run_id, github.run_attempt) || '' }}
       extra_build_args: |
-        BASELINE_SBOM_FILE=vllm-openai@f2ac3378
-        FLASHINFER_GIT_URL=${{ inputs.flashinfer_git_url }}
-        FLASHINFER_GIT_REF=${{ inputs.flashinfer_git_ref }}
-        FLASHINFER_GIT_SHA=${{ inputs.flashinfer_git_sha }}
-        VLLM_GIT_URL=${{ inputs.vllm_git_url }}
-        VLLM_GIT_REF=${{ inputs.vllm_git_ref }}
-        VLLM_GIT_SHA=${{ inputs.vllm_git_sha }}
-        VLLM_INSTALL_MODE=${{ inputs.build_vllm_placeholder && 'python-overlay' || inputs.vllm_install_mode }}
-        VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
+        ${{ inputs.build_vllm_placeholder && 'BASELINE_SBOM_FILE=vllm-openai@f2ac3378' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'FLASHINFER_GIT_URL=https://github.com/galletas1712/flashinfer' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'FLASHINFER_GIT_REF=c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'FLASHINFER_GIT_SHA=c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_GIT_URL=https://github.com/galletas1712/vllm.git' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_GIT_REF=schwinns/snapshot-gms-nightly-8e981630-fi0615-20260712' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_GIT_SHA=c764a139c99a1c1e9ba18f2f210054017aab1a33' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_INSTALL_MODE=python-overlay' || '' }}
+        ${{ inputs.build_vllm_placeholder && 'VLLM_RUNTIME_BASE_IMAGE=vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e' || '' }}
     secrets: inherit
 
   sglang-build:
@@ -223,7 +210,7 @@ jobs:
       cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
-      image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
+      image_tag_suffix: ${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}
     secrets: inherit
 
   sglang-copy-to-acr:
@@ -358,7 +345,7 @@ jobs:
         run: |
           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator-run-${{ github.run_id }}-${{ github.run_attempt }}"
+          DEFAULT_TAG="${{ github.sha }}-operator${{ inputs.build_vllm_placeholder && format('-run-{0}-{1}', github.run_id, github.run_attempt) || '' }}"
           BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-operator"
           IMAGE_URIS=(
             "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
