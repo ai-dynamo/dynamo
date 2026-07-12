@@ -109,6 +109,11 @@ on:
         required: false
         type: string
         default: ''
+      baseline_sbom_artifact:
+        description: 'Artifact containing a run-specific baseline SBOM to add to the build context'
+        required: false
+        type: string
+        default: ''
       compliance_only:
         description: |
           Run ONLY the compliance extract + verify (and artifact upload),
@@ -192,6 +197,12 @@ jobs:
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           lfs: true
+      - name: Download run-specific baseline SBOM
+        if: inputs.baseline_sbom_artifact != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: ${{ inputs.baseline_sbom_artifact }}
+          path: container/compliance/base_sboms
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -482,7 +493,7 @@ jobs:
           arch: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
       - name: Build and Push Test Image
-        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.compliance_only && !inputs.build_only && inputs.target != 'dev' && inputs.target != 'frontend' }}
         shell: bash
         run: |
           PUSH_ARGS=""

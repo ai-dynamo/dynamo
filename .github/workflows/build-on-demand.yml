@@ -3,13 +3,59 @@
 
 name: Build On Demand
 
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
       build_vllm:
         description: 'Build and push vllm image, tagged with branch name'
         type: boolean
-        default: false
+        default: true
+      build_vllm_placeholder:
+        description: 'Build and push the experimental vLLM snapshot placeholder'
+        type: boolean
+        default: true
+      build_snapshot_agent:
+        description: 'Build and push the matching snapshot agent'
+        type: boolean
+        default: true
+      vllm_git_url:
+        description: 'Exact vLLM overlay repository'
+        type: string
+        default: 'https://github.com/galletas1712/vllm.git'
+      vllm_git_ref:
+        description: 'Exact vLLM overlay branch'
+        type: string
+        default: 'schwinns/snapshot-gms-nightly-8e981630-fi0615-20260712'
+      vllm_git_sha:
+        description: 'Exact vLLM overlay commit'
+        type: string
+        default: 'c764a139c99a1c1e9ba18f2f210054017aab1a33'
+      flashinfer_git_url:
+        description: 'Exact FlashInfer repository'
+        type: string
+        default: 'https://github.com/galletas1712/flashinfer'
+      flashinfer_git_ref:
+        description: 'Exact FlashInfer ref'
+        type: string
+        default: 'c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b'
+      flashinfer_git_sha:
+        description: 'Exact FlashInfer commit'
+        type: string
+        default: 'c64cc4a8c44a5bfb494a40ae2f1ba210080a9d6b'
+      vllm_install_mode:
+        description: 'vLLM installation mode'
+        type: choice
+        options:
+          - auto
+          - python-overlay
+        default: python-overlay
+      vllm_runtime_base_image:
+        description: 'Exact upstream vLLM runtime image'
+        type: string
+        default: 'vllm/vllm-openai@sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e'
       build_sglang:
         description: 'Build and push sglang image, tagged with branch name'
         type: boolean
@@ -21,7 +67,7 @@ on:
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
-        default: false
+        default: true
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -49,18 +95,95 @@ jobs:
   # FRAMEWORK PIPELINES (build-only)
   # ============================================================================
 
+  vllm-base-sbom:
+    name: Capture exact vLLM nightly baseline
+    if: inputs.build_vllm || inputs.build_vllm_placeholder
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Verify immutable vLLM base
+        shell: bash
+        env:
+          BASE_IMAGE: vllm/vllm-openai:nightly-8e981630c9336233ca9de91452f68918bddbc4e2
+          EXPECTED_INDEX_DIGEST: sha256:f2ac337893360e23462249c3897e1c92dc8ba8a1ebbc3dd15c4ac931e957438e
+          EXPECTED_AMD64_DIGEST: sha256:39e8d18a3b41e382f1955a3241326ec0fe61615fd51c7eef836fe606c0bfb887
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect --raw "${BASE_IMAGE}" > "${RUNNER_TEMP}/index.json"
+          actual_index="sha256:$(sha256sum "${RUNNER_TEMP}/index.json" | awk '{print $1}')"
+          actual_amd64="$(
+            jq -er '.manifests[]
+              | select(.platform.os == "linux" and .platform.architecture == "amd64")
+              | .digest' "${RUNNER_TEMP}/index.json"
+          )"
+          test "${actual_index}" = "${EXPECTED_INDEX_DIGEST}"
+          test "${actual_amd64}" = "${EXPECTED_AMD64_DIGEST}"
+      - name: Install pinned SBOM capture tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/sbom-venv"
+          "${RUNNER_TEMP}/sbom-venv/bin/pip" install 'PyYAML==6.0.3'
+          echo "${RUNNER_TEMP}/sbom-venv/bin" >> "${GITHUB_PATH}"
+          curl --fail --location --silent --show-error \
+            --output "${RUNNER_TEMP}/syft.tar.gz" \
+            https://github.com/anchore/syft/releases/download/v1.46.0/syft_1.46.0_linux_amd64.tar.gz
+          echo "d654f678b709eb53c393d38519d5ed7d2e57205529404018614cfefa0fb2b5ca  ${RUNNER_TEMP}/syft.tar.gz" \
+            | sha256sum --check
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "${RUNNER_TEMP}/syft.tar.gz" -C "${RUNNER_TEMP}/bin" syft
+          echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
+      - name: Capture deterministic amd64 baseline
+        shell: bash
+        env:
+          BASE_IMAGE: vllm/vllm-openai:nightly-8e981630c9336233ca9de91452f68918bddbc4e2
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/baseline"
+          printf '{"entries":[]}\n' > "${RUNNER_TEMP}/baseline-manifest.json"
+          python3 container/compliance/base_sboms/capture_baseline_sbom.py \
+            --from "${BASE_IMAGE}" \
+            --baseline "${BASE_IMAGE}" \
+            --platform linux/amd64 \
+            --corpus-dir "${RUNNER_TEMP}/baseline" \
+            --manifest "${RUNNER_TEMP}/baseline-manifest.json"
+          test -s "${RUNNER_TEMP}/baseline/vllm-openai@f2ac3378-amd64.cdx.json"
+      - name: Upload exact vLLM baseline
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: vllm-nightly-f2ac3378-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/baseline/vllm-openai@f2ac3378-amd64.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [init]
-    if: inputs.build_vllm
+    needs: [init, vllm-base-sbom]
+    if: inputs.build_vllm || inputs.build_vllm_placeholder
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: 60
+      build_timeout_minutes: ${{ (inputs.build_vllm_placeholder || inputs.vllm_install_mode == 'python-overlay') && 90 || 60 }}
+      build_only: true
+      image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
+      baseline_sbom_artifact: vllm-nightly-f2ac3378-amd64-${{ github.run_id }}-${{ github.run_attempt }}
+      extra_build_args: |
+        BASELINE_SBOM_FILE=vllm-openai@f2ac3378
+        FLASHINFER_GIT_URL=${{ inputs.flashinfer_git_url }}
+        FLASHINFER_GIT_REF=${{ inputs.flashinfer_git_ref }}
+        FLASHINFER_GIT_SHA=${{ inputs.flashinfer_git_sha }}
+        VLLM_GIT_URL=${{ inputs.vllm_git_url }}
+        VLLM_GIT_REF=${{ inputs.vllm_git_ref }}
+        VLLM_GIT_SHA=${{ inputs.vllm_git_sha }}
+        VLLM_INSTALL_MODE=${{ inputs.build_vllm_placeholder && 'python-overlay' || inputs.vllm_install_mode }}
+        VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
     secrets: inherit
 
   sglang-build:
@@ -100,6 +223,7 @@ jobs:
       cuda_version: '["13.0"]'
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
+      image_tag_suffix: ${{ format('-run-{0}-{1}', github.run_id, github.run_attempt) }}
     secrets: inherit
 
   sglang-copy-to-acr:
@@ -125,12 +249,86 @@ jobs:
     secrets: inherit
 
   # ============================================================================
+  # SNAPSHOT (build-only)
+  # ============================================================================
+
+  snapshot-agent:
+    name: Snapshot Agent
+    needs: [init]
+    if: inputs.build_snapshot_agent || inputs.build_vllm_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: agent
+          image_tag: ${{ github.sha }}-snapshot-agent-run-${{ github.run_id }}-${{ github.run_attempt }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent-run-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-snapshot-agent
+          extra_build_args: |
+            CRIU_REPO=https://github.com/galletas1712/criu.git
+            CRIU_REF=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+            CRIU_SHA=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+            CUDA_CHECKPOINT_REPO=https://github.com/NVIDIA/cuda-checkpoint.git
+            CUDA_CHECKPOINT_REF=00d5cce84c628088d6caa203fc4af40c1538b6f7
+            CUDA_CHECKPOINT_SHA=00d5cce84c628088d6caa203fc4af40c1538b6f7
+
+  snapshot-placeholder-vllm:
+    name: vLLM Snapshot Placeholder
+    needs: [init, vllm-copy-to-acr]
+    if: inputs.build_vllm_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push vLLM snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder-run-${{ github.run_id }}-${{ github.run_attempt }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder-run-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.init.outputs.sanitized_ref_name }}-vllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime-run-${{ github.run_id }}-${{ github.run_attempt }}
+            BASE_IMAGE_USER=dynamo
+            CRIU_REPO=https://github.com/galletas1712/criu.git
+            CRIU_REF=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+            CRIU_SHA=3dd2420c16e54fb7cd08b3e511d3a8bfb03cd001
+            CUDA_CHECKPOINT_REPO=https://github.com/NVIDIA/cuda-checkpoint.git
+            CUDA_CHECKPOINT_REF=00d5cce84c628088d6caa203fc4af40c1538b6f7
+            CUDA_CHECKPOINT_SHA=00d5cce84c628088d6caa203fc4af40c1538b6f7
+
+  # ============================================================================
   # OPERATOR (build-only)
   # ============================================================================
 
   operator:
     needs: [init]
-    if: inputs.build_operator
+    if: inputs.build_operator || inputs.build_vllm_placeholder
     name: Operator
     runs-on: prod-default-v2
     env:
@@ -160,7 +358,7 @@ jobs:
         run: |
           ECR_DEFAULT_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          DEFAULT_TAG="${{ github.sha }}-operator"
+          DEFAULT_TAG="${{ github.sha }}-operator-run-${{ github.run_id }}-${{ github.run_attempt }}"
           BRANCH_TAG="${{ needs.init.outputs.sanitized_ref_name }}-operator"
           IMAGE_URIS=(
             "${ECR_DEFAULT_IMAGE_BASE}:${DEFAULT_TAG}"
@@ -194,7 +392,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs: [init, vllm-base-sbom, vllm-build, vllm-copy-to-acr, sglang-build, sglang-copy-to-acr, trtllm-build, trtllm-copy-to-acr, snapshot-agent, snapshot-placeholder-vllm, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

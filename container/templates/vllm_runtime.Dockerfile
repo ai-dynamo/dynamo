@@ -8,11 +8,20 @@
 ##################################
 
 {% if platform == "multi" %}
+{% if device == "cuda" %}
+FROM --platform=linux/amd64 ${VLLM_RUNTIME_BASE_IMAGE} AS vllm_runtime_amd64
+FROM --platform=linux/arm64 ${VLLM_RUNTIME_BASE_IMAGE} AS vllm_runtime_arm64
+{% else %}
 FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_amd64
 FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_arm64
+{% endif %}
 FROM vllm_runtime_${TARGETARCH} AS pre_runtime
 {% else %}
+{% if device == "cuda" %}
+FROM ${VLLM_RUNTIME_BASE_IMAGE} AS pre_runtime
+{% else %}
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+{% endif %}
 {% endif %}
 
 ARG PYTHON_VERSION
@@ -22,6 +31,14 @@ ARG VLLM_OMNI_REF
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
+ARG FLASHINFER_GIT_URL
+ARG FLASHINFER_GIT_REF
+ARG FLASHINFER_GIT_SHA
+ARG VLLM_GIT_URL
+ARG VLLM_GIT_REF
+ARG VLLM_GIT_SHA
+ARG VLLM_INSTALL_MODE=auto
+ARG VLLM_RUNTIME_BASE_IMAGE
 {% endif %}
 ARG MODELEXPRESS_VERSION
 
@@ -71,6 +88,18 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+
+{% if device == "cuda" %}
+COPY --chmod=755 container/deps/vllm/install_nightly_overlay.sh /usr/local/bin/install_nightly_overlay
+COPY --chmod=644 container/deps/vllm/validate_nightly_overlay.py /usr/local/lib/validate_nightly_overlay.py
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    case "${VLLM_INSTALL_MODE}" in \
+        auto) ;; \
+        python-overlay) install_nightly_overlay ;; \
+        *) echo "Unsupported VLLM_INSTALL_MODE: ${VLLM_INSTALL_MODE}" >&2; exit 1 ;; \
+    esac
+{% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
 # Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
@@ -269,6 +298,17 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt
+
+{% if device == "cuda" %}
+RUN set -eux; \
+    case "${VLLM_INSTALL_MODE}" in \
+        auto) ;; \
+        python-overlay) python3 /usr/local/lib/validate_nightly_overlay.py validate ;; \
+        *) echo "Unsupported VLLM_INSTALL_MODE: ${VLLM_INSTALL_MODE}" >&2; exit 1 ;; \
+    esac; \
+    rm -f /usr/local/bin/install_nightly_overlay \
+        /usr/local/lib/validate_nightly_overlay.py
+{% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale
