@@ -226,7 +226,7 @@ The contribution process depends on the size and scope of your change. Even when
 
 5. **Trigger CI Tests** — For external contributors, a maintainer must comment `/ok to test COMMIT-ID` to run the full CI suite, where `COMMIT-ID` is the short SHA of your latest commit. Fix any failing tests before requesting human review.
 
-6. **Request Review** — Add the person who approved your issue as a reviewer. Check [CODEOWNERS](https://github.com/ai-dynamo/dynamo/blob/main/CODEOWNERS) for required approvers based on files modified.
+6. **Request Review** — Add the person who approved your issue as a reviewer. The teams that own the areas your PR touches are auto-requested when the PR opens; preview them with `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`. If the `codeowners` check fails because your PR adds a directory no area claims, add a one-line claim under the owning area in [`.github/codeowners/areas.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/areas.yaml), regenerate, and commit both files (see the [CODEOWNERS README](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/README.md)). Contributors who sustain ownership of an area can be added as area-scoped code owners via [`external_contributors.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/external_contributors.yaml) and appear in [CONTRIBUTORS.md](https://github.com/ai-dynamo/dynamo/blob/main/CONTRIBUTORS.md).
 
 > [!IMPORTANT]
 > **AI-Generated Code:** While we encourage using AI tools, you must fully understand every change in your PR. Inability to explain submitted code will result in rejection.
