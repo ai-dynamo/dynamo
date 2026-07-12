@@ -10,7 +10,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 func main() {
@@ -19,51 +18,30 @@ func main() {
 
 	checkpointPath := flag.String("checkpoint-path", "", "Path to checkpoint directory")
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
-	cudaTransferBufferCount := flag.Int(
-		"cuda-transfer-buffer-count",
-		types.DefaultCUDATransferBufferCount,
-		"Pinned transfer buffer count per CUDA device",
-	)
-	cudaTransferChunkBytes := flag.Uint64(
-		"cuda-transfer-chunk-bytes",
-		types.DefaultCUDATransferChunkBytes,
-		"Pinned transfer chunk size in bytes",
-	)
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
-	deferCUDA := flag.Bool("defer-cuda", false, "Return restored CUDA process identities without restoring CUDA")
-	checkDeferCUDACapability := flag.Bool(
-		"check-defer-cuda-capability",
+	checkHostCUDARestoreCapability := flag.Bool(
+		"check-host-cuda-restore-capability",
 		false,
-		"Report support for host-side deferred CUDA restore and exit",
+		"Report support for mandatory host-side CUDA restore and exit",
 	)
 	flag.Parse()
 
-	if *checkDeferCUDACapability {
+	if *checkHostCUDARestoreCapability {
 		if flag.NArg() != 0 {
-			fatal(log, nil, "--check-defer-cuda-capability takes no arguments")
+			fatal(log, nil, "--check-host-cuda-restore-capability takes no arguments")
 		}
-		_, _ = os.Stdout.WriteString("defer-cuda-v1\n")
+		_, _ = os.Stdout.WriteString("host-cuda-restore-v1\n")
 		return
 	}
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
-	transferSettings := types.CUDATransferSettings{
-		BufferCount: *cudaTransferBufferCount,
-		ChunkBytes:  *cudaTransferChunkBytes,
-	}
-	if err := transferSettings.Validate(); err != nil {
-		fatal(log, err, "invalid CUDA transfer settings")
-	}
-
 	opts := executor.RestoreOptions{
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,
-		CUDATransfer:   transferSettings,
 		CgroupRoot:     *cgroupRoot,
 		TargetPodIP:    *targetPodIP,
-		DeferCUDA:      *deferCUDA,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

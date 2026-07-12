@@ -19,25 +19,39 @@ type restoreFakeRuntime struct {
 	resolveByPodHit bool
 }
 
-func TestExecNSRestoreRejectsInvalidCUDATransferSettings(t *testing.T) {
-	_, err := execNSRestore(
-		context.Background(),
-		testr.New(t),
-		RestoreRequest{
-			ContainerCheckpointLocation: "/checkpoints/example",
-			NSRestorePath:               "/usr/local/bin/nsrestore",
-			CUDATransfer: types.CUDATransferSettings{
-				BufferCount: 9,
-				ChunkBytes:  types.DefaultCUDATransferChunkBytes,
-			},
-		},
-		&types.RestoreContainerSnapshot{
-			CheckpointPath: "/host/checkpoints/example",
-			PlaceholderPID: 1,
-		},
+func TestInspectRestoreRejectsUnsupportedPOSIXBeforeResolvingPlaceholder(t *testing.T) {
+	checkpointDir := t.TempDir()
+	manifest := types.NewCheckpointManifest(
+		"checkpoint-posix",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "", nil),
+		types.OverlayManifest{},
 	)
-	if err == nil || !strings.Contains(err.Error(), "invalid CUDA transfer settings") {
-		t.Fatalf("execNSRestore() error = %v, want transfer validation error", err)
+	manifest.CUDA = types.NewCUDAManifest(
+		[]int{456}, []string{"GPU-aaa"}, types.CUDAStorageModePOSIX,
+	)
+	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	oldValidate := validateCUDARestoreBackend
+	validateCUDARestoreBackend = func(context.Context, string) error {
+		return errors.New("CustomStorage unavailable")
+	}
+	t.Cleanup(func() { validateCUDARestoreBackend = oldValidate })
+
+	rt := &restoreFakeRuntime{}
+	_, err := inspectRestore(
+		context.Background(),
+		rt,
+		testr.New(t),
+		RestoreRequest{CheckpointID: "checkpoint-posix", CheckpointLocation: checkpointDir},
+	)
+	if err == nil || !strings.Contains(err.Error(), "unavailable before restore") {
+		t.Fatalf("inspectRestore() error = %v, want early POSIX capability rejection", err)
+	}
+	if rt.resolvedID != "" || rt.resolveByPodHit {
+		t.Fatal("placeholder resolution occurred before POSIX capability rejection")
 	}
 }
 

@@ -36,10 +36,6 @@ inputs:
     description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
     required: false
     default: /checkpoints
-  cuda_checkpoint_storage_mode:
-    description: 'CUDA checkpoint storage mode (legacy or posix)'
-    required: false
-    default: legacy
   cuda_checkpoint_transfer_buffer_count:
     description: 'Pinned transfer slots per CUDA device'
     required: false
@@ -73,7 +69,6 @@ runs:
         STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
         STORAGE_PVC_ACCESS_MODE: ${{ inputs.storage_pvc_access_mode }}
         STORAGE_BASE_PATH: ${{ inputs.storage_base_path }}
-        CUDA_CHECKPOINT_STORAGE_MODE: ${{ inputs.cuda_checkpoint_storage_mode }}
         CUDA_CHECKPOINT_TRANSFER_BUFFER_COUNT: ${{ inputs.cuda_checkpoint_transfer_buffer_count }}
         CUDA_CHECKPOINT_TRANSFER_CHUNK_BYTES: ${{ inputs.cuda_checkpoint_transfer_chunk_bytes }}
       run: |
@@ -103,7 +98,6 @@ runs:
           --set storage.pvc.basePath="${STORAGE_BASE_PATH}" \
           --set storage.pvc.create=false \
           --set storage.pvc.size="${STORAGE_SIZE}" \
-          --set config.cudaCheckpoint.storageMode="${CUDA_CHECKPOINT_STORAGE_MODE}" \
           --set config.cudaCheckpoint.transferBufferCount="${CUDA_CHECKPOINT_TRANSFER_BUFFER_COUNT}" \
           --set config.cudaCheckpoint.transferChunkBytes="${CUDA_CHECKPOINT_TRANSFER_CHUNK_BYTES}" \
           --debug

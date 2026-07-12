@@ -32,6 +32,8 @@ TestRequest(Action action)
 {
   return Request{
       .action = action,
+      .backend =
+          action == Action::kHealth ? Backend::kUnspecified : Backend::kPosix,
       .pid = 123,
       .transfer_buffer_count =
           action == Action::kCheckpoint || action == Action::kRestore ? 2U : 0U,
@@ -76,6 +78,7 @@ TestProtocol()
   assert(ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
   assert(
       parsed.pid == request.pid && parsed.storage_dir == request.storage_dir &&
+      parsed.backend == Backend::kPosix &&
       parsed.expected_start_time_ticks == request.expected_start_time_ticks &&
       parsed.expected_cgroup == request.expected_cgroup);
 
@@ -101,6 +104,15 @@ TestProtocol()
     assert(ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
     assert(parsed.action == action);
   }
+
+  request = TestRequest(Action::kCheckpoint);
+  request.backend = Backend::kRegular;
+  request.transfer_buffer_count = 0;
+  request.transfer_chunk_bytes = 0;
+  request.storage_dir.clear();
+  assert(EncodeRequest(request, &encoded, &error));
+  assert(ParseRequest(encoded.data(), encoded.size(), &parsed, &error));
+  assert(parsed.backend == Backend::kRegular && parsed.storage_dir.empty());
 }
 
 void
@@ -161,13 +173,30 @@ TestExecutionIdentityAndFatalControlFlow()
 void
 TestHealthStates()
 {
+  OperationHealth regular_operation(std::chrono::seconds(1));
+  regular_operation.MarkReady(false);
+  HealthSnapshot regular_snapshot = regular_operation.Snapshot();
+  assert(
+      regular_snapshot.ready && regular_snapshot.healthy &&
+      !regular_snapshot.custom_storage_available);
+  Response regular_response = HealthResponse(regular_operation);
+  assert(
+      regular_response.cuda_status == 0 &&
+      (regular_response.flags & kResponseCapabilityDeferredCUDA) != 0 &&
+      (regular_response.flags & kResponseCapabilityCustomStorage) == 0);
+
   OperationHealth no_operation(std::chrono::seconds(1));
   HealthSnapshot snapshot = no_operation.Snapshot();
   assert(!snapshot.ready && !snapshot.busy && !snapshot.healthy);
 
-  no_operation.MarkReady();
+  no_operation.MarkReady(true);
   snapshot = no_operation.Snapshot();
-  assert(snapshot.ready && !snapshot.busy && snapshot.healthy);
+  assert(snapshot.ready && !snapshot.busy && snapshot.healthy &&
+         snapshot.custom_storage_available);
+  Response response = HealthResponse(no_operation);
+  assert(
+      (response.flags & kResponseCapabilityDeferredCUDA) != 0 &&
+      (response.flags & kResponseCapabilityCustomStorage) != 0);
 
   no_operation.Begin(Action::kCheckpoint, 123);
   snapshot = no_operation.Snapshot();

@@ -80,7 +80,14 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	// Phase 2: Configure CRIU options and build checkpoint manifest
-	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
+	cudaStorageMode := types.CUDAStorageModeLegacy
+	if len(state.CUDAHostPIDs) > 0 {
+		cudaStorageMode, err = cuda.SelectCheckpointBackend(ctx)
+		if err != nil {
+			return fmt.Errorf("select CUDA checkpoint backend: %w", err)
+		}
+	}
+	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, cudaStorageMode)
 	if err != nil {
 		return err
 	}
@@ -236,6 +243,7 @@ func configureCheckpoint(
 	req CheckpointRequest,
 	cfg *types.AgentConfig,
 	checkpointDir string,
+	cudaStorageMode string,
 ) (*criurpc.CriuOpts, *types.CheckpointManifest, error) {
 	criuOpts, err := criu.BuildDumpOptions(state, &cfg.CRIU, checkpointDir, log)
 	if err != nil {
@@ -249,7 +257,7 @@ func configureCheckpoint(
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDANSPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs, cfg.CUDACheckpoint.StorageMode)
+		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs, cudaStorageMode)
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {

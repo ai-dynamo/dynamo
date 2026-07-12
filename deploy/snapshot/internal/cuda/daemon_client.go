@@ -22,7 +22,7 @@ import (
 
 const (
 	daemonProtocolMagic   = uint32(0x50484344)
-	daemonProtocolVersion = uint16(3)
+	daemonProtocolVersion = uint16(4)
 	daemonRequestHeader   = 48
 	daemonResponseHeader  = 24
 	daemonMaxRequest      = 64 * 1024
@@ -35,19 +35,22 @@ const (
 	daemonActionLock       = uint16(3)
 	daemonActionUnlock     = uint16(4)
 
-	daemonResponseFatal          = uint32(1 << 0)
-	daemonCapabilityDeferredCUDA = uint32(1 << 1)
-	daemonHealthWait             = 30 * time.Second
-	daemonHealthRetryInterval    = 100 * time.Millisecond
+	daemonResponseFatal           = uint32(1 << 0)
+	daemonCapabilityDeferredCUDA  = uint32(1 << 1)
+	daemonCapabilityCustomStorage = uint32(1 << 2)
+	daemonHealthWait              = 30 * time.Second
+	daemonHealthRetryInterval     = 100 * time.Millisecond
 )
 
 var errDaemonUnavailable = errors.New("CUDA helper daemon unavailable")
 var errDaemonFatal = errors.New("CUDA helper daemon entered fatal state")
+var daemonSocketPath = types.CUDAHelperSocketPath
 
 func daemonRequest(
 	pid int,
 	action,
 	deviceMap,
+	storageMode,
 	storageDir string,
 	transfer types.CUDATransferSettings,
 	identity snapshotruntime.ProcessDetails,
@@ -68,20 +71,43 @@ func daemonRequest(
 		return nil, fmt.Errorf("action %q is not supported by CUDA helper daemon", action)
 	}
 	health := daemonAction == daemonActionHealth
+	var backend uint16
+	switch storageMode {
+	case "":
+	case types.CUDAStorageModeLegacy:
+		backend = 1
+	case types.CUDAStorageModePOSIX:
+		backend = 2
+	default:
+		return nil, fmt.Errorf("unsupported CUDA checkpoint backend %q", storageMode)
+	}
 	if health {
 		pid = 0
 		identity = snapshotruntime.ProcessDetails{}
+		if backend != 0 {
+			return nil, errors.New("CUDA helper daemon health request has a backend")
+		}
 	} else if pid <= 0 || identity.OutermostPID != pid || identity.StartTimeTicks == 0 ||
 		identity.Cgroup == "" || len(identity.Cgroup) > daemonMaxCgroup {
 		return nil, errors.New("invalid CUDA helper daemon process identity")
 	}
 	if daemonAction == daemonActionLock || daemonAction == daemonActionUnlock {
-		if deviceMap != "" || storageDir != "" {
+		if backend == 0 || deviceMap != "" || storageDir != "" {
 			return nil, errors.New("CUDA helper daemon lock/unlock request has transfer arguments")
 		}
 		transfer = types.CUDATransferSettings{}
-	} else if !health && (storageDir == "" || storageDir[0] != '/') {
-		return nil, errors.New("invalid CUDA helper daemon storage directory")
+	} else if !health {
+		if backend == 0 {
+			return nil, errors.New("CUDA helper daemon checkpoint/restore request has no backend")
+		}
+		if backend == 1 {
+			if storageDir != "" {
+				return nil, errors.New("regular CUDA helper request has a storage directory")
+			}
+			transfer = types.CUDATransferSettings{}
+		} else if storageDir == "" || storageDir[0] != '/' {
+			return nil, errors.New("invalid CUDA helper daemon POSIX storage directory")
+		}
 	}
 	if len(deviceMap)+len(storageDir)+len(identity.Cgroup) > daemonMaxRequest-daemonRequestHeader {
 		return nil, errors.New("CUDA helper daemon request is too large")
@@ -91,6 +117,7 @@ func daemonRequest(
 	binary.LittleEndian.PutUint16(packet[4:6], daemonProtocolVersion)
 	binary.LittleEndian.PutUint16(packet[6:8], daemonRequestHeader)
 	binary.LittleEndian.PutUint16(packet[8:10], daemonAction)
+	binary.LittleEndian.PutUint16(packet[10:12], backend)
 	binary.LittleEndian.PutUint32(packet[12:16], uint32(pid))
 	binary.LittleEndian.PutUint32(packet[16:20], uint32(transfer.BufferCount))
 	binary.LittleEndian.PutUint64(packet[20:28], transfer.ChunkBytes)
@@ -114,7 +141,7 @@ func parseDaemonResponse(packet []byte) (int32, uint32, string, string, error) {
 		return 0, 0, "", "", errors.New("invalid CUDA helper daemon response header")
 	}
 	flags := binary.LittleEndian.Uint32(packet[12:16])
-	if flags & ^(daemonResponseFatal|daemonCapabilityDeferredCUDA) != 0 {
+	if flags & ^(daemonResponseFatal|daemonCapabilityDeferredCUDA|daemonCapabilityCustomStorage) != 0 {
 		return 0, 0, "", "", errors.New("invalid CUDA helper daemon response flags")
 	}
 	outputSize := int(binary.LittleEndian.Uint32(packet[16:20]))
@@ -172,16 +199,17 @@ func runDaemonAction(
 	pid int,
 	action,
 	deviceMap,
+	storageMode,
 	storageDir string,
 	transfer types.CUDATransferSettings,
 	identity snapshotruntime.ProcessDetails,
 	log logr.Logger,
 ) error {
-	packet, err := daemonRequest(pid, action, deviceMap, storageDir, transfer, identity)
+	packet, err := daemonRequest(pid, action, deviceMap, storageMode, storageDir, transfer, identity)
 	if err != nil {
 		return err
 	}
-	status, flags, stdout, stderr, rpcWall, err := daemonRPC(ctx, transfer.DaemonSocket, packet)
+	status, flags, stdout, stderr, rpcWall, err := daemonRPC(ctx, daemonSocketPath, packet)
 	if err != nil {
 		return err
 	}
@@ -198,6 +226,16 @@ func runDaemonAction(
 		log.V(1).Info("CUDA helper daemon action succeeded",
 			"pid", pid,
 			"action", action,
+			"daemon_rpc_wall_duration", rpcWall,
+			"output", output,
+		)
+		return nil
+	}
+	if storageMode == types.CUDAStorageModeLegacy {
+		log.V(1).Info("CUDA helper daemon action succeeded",
+			"pid", pid,
+			"action", action,
+			"backend", storageMode,
 			"daemon_rpc_wall_duration", rpcWall,
 			"output", output,
 		)
@@ -220,41 +258,71 @@ func runDaemonAction(
 	return nil
 }
 
-func daemonHealthy(ctx context.Context, socket string) error {
-	packet, err := daemonRequest(0, "", "", "", types.CUDATransferSettings{}, snapshotruntime.ProcessDetails{})
+func daemonCapabilities(ctx context.Context) (uint32, error) {
+	packet, err := daemonRequest(0, "", "", "", "", types.CUDATransferSettings{}, snapshotruntime.ProcessDetails{})
 	if err != nil {
-		return err
+		return 0, err
 	}
-	status, flags, _, stderr, _, err := daemonRPC(ctx, socket+".health", packet)
+	status, flags, _, stderr, _, err := daemonRPC(ctx, daemonSocketPath+".health", packet)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if status != 0 || flags&daemonCapabilityDeferredCUDA == 0 {
-		return fmt.Errorf("CUDA helper daemon health/capability check failed: status=%d flags=%#x error=%s",
+		return 0, fmt.Errorf("CUDA helper daemon health/capability check failed: status=%d flags=%#x error=%s",
 			status, flags, stderr)
 	}
-	return nil
+	return flags, nil
+}
+
+// SelectCheckpointBackend chooses one backend for an entire checkpoint before
+// any CUDA process is locked.
+func SelectCheckpointBackend(ctx context.Context) (string, error) {
+	flags, err := daemonCapabilities(ctx)
+	if err != nil {
+		return "", err
+	}
+	if flags&daemonCapabilityCustomStorage != 0 {
+		return types.CUDAStorageModePOSIX, nil
+	}
+	return types.CUDAStorageModeLegacy, nil
+}
+
+// ValidateRestoreBackend rejects unsupported artifacts before rootfs or CRIU
+// restore changes the placeholder.
+func ValidateRestoreBackend(ctx context.Context, backend string) error {
+	flags, err := daemonCapabilities(ctx)
+	if err != nil {
+		return err
+	}
+	switch backend {
+	case types.CUDAStorageModeLegacy:
+		return nil
+	case types.CUDAStorageModePOSIX:
+		if flags&daemonCapabilityCustomStorage == 0 {
+			return errors.New("CUDA POSIX CustomStorage artifact requires daemon CustomStorage capability")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported CUDA checkpoint backend %q", backend)
+	}
 }
 
 // WaitForDaemon waits for a protocol-level health and deferred-CUDA capability response.
-func WaitForDaemon(ctx context.Context, socket string) error {
-	if socket == "" {
-		return nil
-	}
+func WaitForDaemon(ctx context.Context) error {
 	waitCtx, cancel := context.WithTimeout(ctx, daemonHealthWait)
 	defer cancel()
 	ticker := time.NewTicker(daemonHealthRetryInterval)
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		if err := daemonHealthy(waitCtx, socket); err == nil {
+		if _, err := daemonCapabilities(waitCtx); err == nil {
 			return nil
 		} else {
 			lastErr = err
 		}
 		select {
 		case <-waitCtx.Done():
-			return fmt.Errorf("wait for CUDA helper daemon at %s: %w (last error: %v)", socket, waitCtx.Err(), lastErr)
+			return fmt.Errorf("wait for CUDA helper daemon at %s: %w (last error: %v)", daemonSocketPath, waitCtx.Err(), lastErr)
 		case <-ticker.C:
 		}
 	}

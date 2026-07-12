@@ -110,7 +110,6 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=snapshot -o wide
 | `daemonset.image.repository` | Snapshot-agent image repository | `nvcr.io/nvidia/ai-dynamo/snapshot-agent` |
 | `daemonset.image.tag` | Snapshot-agent image tag | `1.0.0` |
 | `daemonset.imagePullSecrets` | Image pull secrets for the agent | `[{name: ngc-secret}]` |
-| `config.cudaCheckpoint.storageMode` | CUDA checkpoint storage mode (`legacy` or NIXL-backed `posix`) | `legacy` |
 | `config.cudaCheckpoint.transferBufferCount` | Integral numeric count of pinned pipeline slots per CUDA device for POSIX custom storage (1–8) | `1` |
 | `config.cudaCheckpoint.transferChunkBytes` | Integral numeric bytes per pinned POSIX custom-storage slot (1–256 MiB, 4096-byte aligned) | `67108864` |
 | `runtime.type` | CRI backend: `containerd` or `crio` | `containerd` |

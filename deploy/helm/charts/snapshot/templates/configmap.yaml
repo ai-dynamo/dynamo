@@ -6,40 +6,30 @@ kind: ConfigMap
 {{- if ne .Values.storage.type "pvc" }}
 {{- fail (printf "snapshot.storage.type=%q is not supported yet; only pvc is currently implemented" .Values.storage.type) }}
 {{- end }}
-{{- if and .Values.config.cudaCheckpoint.daemon.enabled (ne .Values.config.cudaCheckpoint.storageMode "posix") }}
-{{- fail "snapshot.config.cudaCheckpoint.daemon.enabled requires storageMode=posix" }}
-{{- end }}
-{{- $daemonSocket := .Values.config.cudaCheckpoint.daemon.socketPath }}
 {{- $helperDir := "/run/cuda-checkpoint-helper" }}
-{{- if and .Values.config.cudaCheckpoint.daemon.enabled (or (ne ($daemonSocket | clean) $daemonSocket) (ne ($daemonSocket | dir) $helperDir) (gt (len $daemonSocket) 100) (not (regexMatch "^/run/cuda-checkpoint-helper/[A-Za-z0-9._-]+$" $daemonSocket))) }}
-{{- fail "snapshot.config.cudaCheckpoint.daemon.socketPath must be a clean path under /run/cuda-checkpoint-helper and at most 100 bytes" }}
-{{- end }}
 {{- $basePath := .Values.storage.pvc.basePath | clean }}
 {{- $runtimeSocket := include "snapshot.runtimeSocket" . }}
 {{- $runtimeDir := $runtimeSocket | dir | clean }}
 {{- $baseOverlapsHelper := or (eq $basePath "/") (eq $basePath $helperDir) (hasPrefix (printf "%s/" $helperDir) $basePath) (hasPrefix (printf "%s/" $basePath) $helperDir) }}
 {{- $runtimeOverlapsHelper := or (eq $runtimeDir "/") (eq $runtimeDir $helperDir) (hasPrefix (printf "%s/" $helperDir) $runtimeDir) (hasPrefix (printf "%s/" $runtimeDir) $helperDir) }}
-{{- if and .Values.config.cudaCheckpoint.daemon.enabled (ne ($runtimeSocket | clean) $runtimeSocket) }}
-{{- fail "snapshot.runtime.socketPath must be a clean path when CUDA helper daemon mode is enabled" }}
+{{- if ne ($runtimeSocket | clean) $runtimeSocket }}
+{{- fail "snapshot.runtime.socketPath must be a clean path" }}
 {{- end }}
-{{- if and .Values.config.cudaCheckpoint.daemon.enabled (eq .Values.storage.accessMode "agentMount") $baseOverlapsHelper }}
-{{- fail "snapshot.storage.pvc.basePath must not overlap /run/cuda-checkpoint-helper in agentMount daemon mode" }}
+{{- if and (eq .Values.storage.accessMode "agentMount") $baseOverlapsHelper }}
+{{- fail "snapshot.storage.pvc.basePath must not overlap /run/cuda-checkpoint-helper in agentMount mode" }}
 {{- end }}
-{{- if and .Values.config.cudaCheckpoint.daemon.enabled $runtimeOverlapsHelper }}
-{{- fail "snapshot.runtime.socketPath directory must not overlap /run/cuda-checkpoint-helper in daemon mode" }}
+{{- if $runtimeOverlapsHelper }}
+{{- fail "snapshot.runtime.socketPath directory must not overlap /run/cuda-checkpoint-helper" }}
 {{- end }}
 {{- $maxOperationSecondsValue := .Values.config.cudaCheckpoint.daemon.maxOperationSeconds }}
-{{- if and .Values.config.cudaCheckpoint.daemon.enabled (not (or (kindIs "int" $maxOperationSecondsValue) (kindIs "int64" $maxOperationSecondsValue) (and (kindIs "float64" $maxOperationSecondsValue) (eq $maxOperationSecondsValue (floor $maxOperationSecondsValue))))) }}
+{{- if not (or (kindIs "int" $maxOperationSecondsValue) (kindIs "int64" $maxOperationSecondsValue) (and (kindIs "float64" $maxOperationSecondsValue) (eq $maxOperationSecondsValue (floor $maxOperationSecondsValue)))) }}
 {{- fail "snapshot.config.cudaCheckpoint.daemon.maxOperationSeconds must be an integral numeric value" }}
 {{- end }}
-{{- if and .Values.config.cudaCheckpoint.daemon.enabled (lt (int64 $maxOperationSecondsValue) 1) }}
+{{- if lt (int64 $maxOperationSecondsValue) 1 }}
 {{- fail "snapshot.config.cudaCheckpoint.daemon.maxOperationSeconds must be greater than zero" }}
 {{- end }}
 {{- if not (has .Values.storage.accessMode (list "agentMount" "podMount")) }}
 {{- fail (printf "snapshot.storage.accessMode=%q is not supported; expected agentMount or podMount" .Values.storage.accessMode) }}
-{{- end }}
-{{- if not (has .Values.config.cudaCheckpoint.storageMode (list "legacy" "posix")) }}
-{{- fail (printf "snapshot.config.cudaCheckpoint.storageMode=%q is not supported; expected legacy or posix" .Values.config.cudaCheckpoint.storageMode) }}
 {{- end }}
 {{/* Helm decodes values such as 2.0 as float64, so check integrality before normalizing to an integer. */}}
 {{- $transferBufferCountValue := .Values.config.cudaCheckpoint.transferBufferCount }}
@@ -76,11 +66,8 @@ data:
       {{- end }}
 
     cudaCheckpoint:
-      storageMode: {{ .Values.config.cudaCheckpoint.storageMode | quote }}
       transferBufferCount: {{ $transferBufferCount }}
       transferChunkBytes: {{ $transferChunkBytes }}
-      daemonSocketPath: {{ ternary .Values.config.cudaCheckpoint.daemon.socketPath "" .Values.config.cudaCheckpoint.daemon.enabled | quote }}
-      daemonFallback: {{ .Values.config.cudaCheckpoint.daemon.fallback }}
 
     overlay:
       exclusions: {{ toYaml .Values.config.overlay.exclusions | nindent 8 }}

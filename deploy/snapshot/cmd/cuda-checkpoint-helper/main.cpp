@@ -4,7 +4,6 @@
  */
 
 #include <cuda.h>
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -197,19 +196,10 @@ PrintUsage(FILE* stream)
   return std::fprintf(
              stream,
              "Usage:\n"
-             "  cuda-checkpoint-helper --get-state --pid <pid>\n"
              "  cuda-checkpoint-helper --get-restore-tid --pid <pid>\n"
-             "  cuda-checkpoint-helper --action lock|checkpoint|restore|unlock --pid <pid> "
-             "[--timeout <ms>] [--device-map <uuids>] "
-             "[--storage-mode posix --storage-dir <absolute-directory> "
-             "--transfer-buffer-count <count> --transfer-chunk-bytes <bytes>]\n"
              "  cuda-checkpoint-helper --daemon --socket <absolute-socket-path> "
              "[--max-operation-seconds <seconds>]\n"
-             "  cuda-checkpoint-helper --health --socket <absolute-socket-path>\n"
-             "\n"
-             "POSIX transfer defaults: --transfer-buffer-count %zu "
-             "--transfer-chunk-bytes %zu\n",
-             transfer::kDefaultBufferCount, transfer::kDefaultChunkBytes) < 0
+             "  cuda-checkpoint-helper --health --socket <absolute-socket-path>\n") < 0
              ? 1
              : 0;
 }
@@ -242,18 +232,6 @@ ParsePID(const char* value, int* pid_out)
     return false;
   }
   *pid_out = static_cast<int>(pid);
-  return true;
-}
-
-bool
-ParseTimeout(const char* value, unsigned int* timeout_out)
-{
-  char* end = nullptr;
-  unsigned long timeout = std::strtoul(value, &end, 10);
-  if (value[0] == '\0' || end == nullptr || *end != '\0' || timeout > UINT_MAX) {
-    return false;
-  }
-  *timeout_out = static_cast<unsigned int>(timeout);
   return true;
 }
 
@@ -323,31 +301,6 @@ DeviceUUID(CUdevice device, std::string* uuid_out)
   return CUDA_SUCCESS;
 }
 
-const char*
-ProcessStateString(CUprocessState state)
-{
-  switch (state) {
-    case CU_PROCESS_STATE_RUNNING:
-      return "running";
-    case CU_PROCESS_STATE_LOCKED:
-      return "locked";
-    case CU_PROCESS_STATE_CHECKPOINTED:
-      return "checkpointed";
-    case CU_PROCESS_STATE_FAILED:
-      return "failed";
-    default:
-      return "unknown";
-  }
-}
-
-cuda_checkpoint_compat::OperationCompleteFn
-ResolveOperationComplete()
-{
-  dlerror();
-  void* symbol = dlsym(RTLD_DEFAULT, "cuCheckpointOperationComplete");
-  return dlerror() == nullptr ? reinterpret_cast<cuda_checkpoint_compat::OperationCompleteFn>(symbol) : nullptr;
-}
-
 struct CustomStorageResult {
   CUresult status = CUDA_SUCCESS;
   daemon_protocol::OperationState operation;
@@ -357,14 +310,12 @@ CustomStorageResult
 DoCustomStorage(
     int pid, bool checkpoint, const std::string& device_map, const std::filesystem::path& storage_dir,
     const transfer::TransferOptions& transfer_options, Clock::time_point helper_main_start,
-    RetainedContexts* daemon_contexts = nullptr, const daemon_protocol::Request* daemon_request = nullptr)
+    cuda_checkpoint_compat::OperationCompleteFn operation_complete,
+    RetainedContexts* daemon_contexts, const daemon_protocol::Request* daemon_request)
 {
   const auto custom_storage_start = Clock::now();
-  const auto symbol_resolution_start = Clock::now();
-  cuda_checkpoint_compat::OperationCompleteFn operation_complete = ResolveOperationComplete();
-  const double symbol_resolution_seconds = SecondsSince(symbol_resolution_start);
   if (operation_complete == nullptr) {
-    std::fprintf(stderr, "CUDA custom storage unavailable: cuCheckpointOperationComplete symbol not found\n");
+    std::fprintf(stderr, "CUDA custom storage unavailable\n");
     return {CUDA_ERROR_NOT_SUPPORTED, {}};
   }
   const auto storage_directory_start = Clock::now();
@@ -659,7 +610,7 @@ DoCustomStorage(
       "\"timing_scope\":\"monotonic_wall;totals_contain_subphases;"
       "service_seconds_are_cross_worker_sums_and_may_overlap\","
       "\"helper_main_to_telemetry_seconds\":%.6f,\"custom_storage_total_seconds\":%.6f,"
-      "\"symbol_resolution_seconds\":%.6f,\"storage_directory_validation_seconds\":%.6f,"
+      "\"storage_directory_validation_seconds\":%.6f,"
       "\"cuda_init_seconds\":%.6f,\"cuda_device_count\":%d,\"device_enumeration_seconds\":%.6f,"
       "\"primary_context_retain_seconds\":%.6f,\"manifest_validation_seconds\":%.6f,"
       "\"device_map_preparation_seconds\":%.6f,\"cuda_process_api_seconds\":%.6f,"
@@ -672,7 +623,7 @@ DoCustomStorage(
       transfer_options.buffer_count, transfer_options.chunk_bytes, pinned_bytes, setup_service_seconds,
       pipeline_service_seconds, storage_service_seconds, cuda_wait_service_seconds, fsync_service_seconds,
       cleanup_service_seconds, helper_main_to_telemetry_seconds, custom_storage_total_seconds,
-      symbol_resolution_seconds, storage_directory_validation_seconds, cuda_init_seconds, cuda_device_count,
+      storage_directory_validation_seconds, cuda_init_seconds, cuda_device_count,
       device_enumeration_seconds, primary_context_retain_seconds, manifest_validation_seconds,
       device_map_preparation_seconds, cuda_process_api_seconds, metadata_job_construction_seconds,
       worker_orchestration_seconds, post_transfer_validation_seconds, cuda_operation_complete_seconds,
@@ -689,6 +640,13 @@ DoCustomStorage(
     return {primary_context_release_status, operation};
   }
   return {CUDA_SUCCESS, operation};
+}
+
+CUresult
+DoRegularCheckpoint(int pid)
+{
+  CUcheckpointCheckpointArgs args{};
+  return cuCheckpointProcessCheckpoint(pid, &args);
 }
 
 CUresult
@@ -720,7 +678,9 @@ ReadCapturedFile(FILE* file, std::string* output)
 }
 
 daemon_protocol::Response
-RunDaemonOperation(const daemon_protocol::Request& request, RetainedContexts* contexts)
+RunDaemonOperation(
+    const daemon_protocol::Request& request, RetainedContexts* contexts,
+    cuda_checkpoint_compat::OperationCompleteFn operation_complete)
 {
   daemon_protocol::Response response;
   FILE* output_file = std::tmpfile();
@@ -745,7 +705,14 @@ RunDaemonOperation(const daemon_protocol::Request& request, RetainedContexts* co
     response.flags = daemon_protocol::kResponseFatal;
     response.error = "failed to redirect daemon operation output";
   } else {
-    if (request.action == daemon_protocol::Action::kLock ||
+    if (request.backend == daemon_protocol::Backend::kPosix &&
+        operation_complete == nullptr) {
+      response.cuda_status = CUDA_ERROR_NOT_SUPPORTED;
+      std::fprintf(
+          stderr,
+          "CUDA POSIX CustomStorage backend requested but cuCheckpointOperationComplete "
+          "is unavailable through cuGetProcAddress for CUDA API 13.4\n");
+    } else if (request.action == daemon_protocol::Action::kLock ||
         request.action == daemon_protocol::Action::kUnlock) {
       std::string identity_error;
       if (!daemon_protocol::ValidateProcessIdentity(request, "/host/proc", &identity_error)) {
@@ -759,6 +726,18 @@ RunDaemonOperation(const daemon_protocol::Request& request, RetainedContexts* co
         CUcheckpointUnlockArgs args{};
         response.cuda_status = cuCheckpointProcessUnlock(request.pid, &args);
       }
+    } else if (request.backend == daemon_protocol::Backend::kRegular) {
+      std::string identity_error;
+      if (!daemon_protocol::ValidateProcessIdentity(request, "/host/proc", &identity_error)) {
+        response.cuda_status = CUDA_ERROR_INVALID_VALUE;
+        std::fprintf(
+            stderr, "process identity changed immediately before regular CUDA %s: %s\n",
+            daemon_protocol::ActionName(request.action), identity_error.c_str());
+      } else if (request.action == daemon_protocol::Action::kCheckpoint) {
+        response.cuda_status = DoRegularCheckpoint(request.pid);
+      } else {
+        response.cuda_status = DoLegacyRestore(request.pid, request.device_map);
+      }
     } else {
       transfer::TransferOptions options{
           .buffer_count = request.transfer_buffer_count,
@@ -771,7 +750,7 @@ RunDaemonOperation(const daemon_protocol::Request& request, RetainedContexts* co
       } else {
         const CustomStorageResult result = DoCustomStorage(
             request.pid, request.action == daemon_protocol::Action::kCheckpoint, request.device_map,
-            request.storage_dir, options, Clock::now(), contexts, &request);
+            request.storage_dir, options, Clock::now(), operation_complete, contexts, &request);
         response.cuda_status = result.status;
         if (result.operation.fatal()) {
           response.flags |= daemon_protocol::kResponseFatal;
@@ -946,6 +925,11 @@ RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
     PrintCudaError(status);
     return 1;
   }
+  int driver_version = 0;
+  (void)cuDriverGetVersion(&driver_version);
+  bool custom_storage_available = false;
+  const cuda_checkpoint_compat::OperationCompleteFn operation_complete =
+      cuda_checkpoint_compat::ResolveOperationComplete(&custom_storage_available);
 
   daemon_protocol::OwnedUnixSocket operation_socket;
   daemon_protocol::OwnedUnixSocket health_socket;
@@ -960,7 +944,7 @@ RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
   }
   daemon_protocol::OperationHealth operation_health{
       std::chrono::seconds(max_operation_seconds)};
-  operation_health.MarkReady();
+  operation_health.MarkReady(custom_storage_available);
   daemon_protocol::ShutdownSignalOwner::ShutdownResult shutdown_result;
   daemon_protocol::ShutdownSignalOwner::ShutdownResult health_shutdown_result;
   std::atomic<bool> health_thread_failed{false};
@@ -991,8 +975,10 @@ RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
           stdout,
           "{\"event\":\"cuda_checkpoint_daemon_ready\",\"schema_version\":1,\"cuda_init_seconds\":%.6f,"
           "\"cuda_device_count\":%d,\"device_enumeration_seconds\":%.6f,"
-          "\"primary_context_retain_seconds\":%.6f}\n",
-          init_seconds, device_count, enumeration_seconds, retain_seconds);
+          "\"primary_context_retain_seconds\":%.6f,\"cuda_driver_version\":%d,"
+          "\"custom_storage_available\":%s}\n",
+          init_seconds, device_count, enumeration_seconds, retain_seconds, driver_version,
+          custom_storage_available ? "true" : "false");
       std::fflush(stdout);
 
       std::vector<unsigned char> packet(daemon_protocol::kMaxRequestSize + 1);
@@ -1035,8 +1021,8 @@ RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
           operation_health.Begin(request.action, request.pid);
           daemon_fatal = !daemon_protocol::ExecuteValidated(
               request, "/host/proc",
-              [&contexts](const daemon_protocol::Request& validated) {
-                return RunDaemonOperation(validated, &contexts);
+              [&contexts, operation_complete](const daemon_protocol::Request& validated) {
+                return RunDaemonOperation(validated, &contexts, operation_complete);
               },
               &response);
           operation_health.End();
@@ -1102,31 +1088,20 @@ RunDaemon(const std::string& socket_path, uint64_t max_operation_seconds)
 int
 main(int argc, char** argv)
 {
-  const auto helper_main_start = Clock::now();
-  std::string action;
-  std::string device_map;
-  std::string storage_mode = "legacy";
-  std::string storage_dir;
   int pid = 0;
   bool have_pid = false;
-  bool get_state = false;
   bool get_restore_tid = false;
   bool daemon = false;
   bool health = false;
   std::string socket_path;
   uint64_t max_operation_seconds = 6 * 60 * 60;
-  unsigned int timeout_ms = 0;
-  transfer::TransferOptions transfer_options;
-  bool transfer_options_set = false;
 
   if (argc == 1) {
     return PrintUsageError();
   }
   for (int index = 1; index < argc; ++index) {
     std::string argument = argv[index];
-    if (argument == "--get-state") {
-      get_state = true;
-    } else if (argument == "--daemon") {
+    if (argument == "--daemon") {
       daemon = true;
     } else if (argument == "--health") {
       health = true;
@@ -1137,26 +1112,8 @@ main(int argc, char** argv)
         ParsePositiveSeconds(argv[index], &max_operation_seconds)) {
     } else if (argument == "--get-restore-tid") {
       get_restore_tid = true;
-    } else if (argument == "--action" && ++index < argc) {
-      action = argv[index];
     } else if ((argument == "--pid" || argument == "-p") && ++index < argc && ParsePID(argv[index], &pid)) {
       have_pid = true;
-    } else if (
-        (argument == "--timeout" || argument == "-t") && ++index < argc && ParseTimeout(argv[index], &timeout_ms)) {
-    } else if ((argument == "--device-map" || argument == "-d") && ++index < argc) {
-      device_map = argv[index];
-    } else if (argument == "--storage-mode" && ++index < argc) {
-      storage_mode = argv[index];
-    } else if (argument == "--storage-dir" && ++index < argc) {
-      storage_dir = argv[index];
-    } else if (
-        argument == "--transfer-buffer-count" && ++index < argc &&
-        transfer::ParseSize(argv[index], &transfer_options.buffer_count)) {
-      transfer_options_set = true;
-    } else if (
-        argument == "--transfer-chunk-bytes" && ++index < argc &&
-        transfer::ParseSize(argv[index], &transfer_options.chunk_bytes)) {
-      transfer_options_set = true;
     } else if (argument == "--help" || argument == "-h") {
       return PrintUsage(stdout);
     } else {
@@ -1165,85 +1122,23 @@ main(int argc, char** argv)
   }
 
   if (daemon || health) {
-    if (static_cast<int>(daemon) + static_cast<int>(health) != 1 || socket_path.empty() || have_pid || get_state ||
-        get_restore_tid || !action.empty() || storage_mode != "legacy" || !storage_dir.empty() ||
-        !device_map.empty() || timeout_ms != 0 || transfer_options_set ||
+    if (static_cast<int>(daemon) + static_cast<int>(health) != 1 || socket_path.empty() || have_pid ||
+        get_restore_tid ||
         (health && max_operation_seconds != 6 * 60 * 60)) {
       return PrintUsageError();
     }
     return daemon ? RunDaemon(socket_path, max_operation_seconds) : RunHealthClient(socket_path);
   }
 
-  if (static_cast<int>(get_state) + static_cast<int>(get_restore_tid) + static_cast<int>(!action.empty()) != 1 ||
-      !have_pid || (storage_mode != "legacy" && storage_mode != "posix") ||
-      ((storage_mode == "posix") != !storage_dir.empty())) {
-    return PrintUsageError();
-  }
-  std::string transfer_error;
-  if (!transfer::ValidateTransferOptions(transfer_options, &transfer_error)) {
-    std::fprintf(stderr, "invalid transfer configuration: %s\n", transfer_error.c_str());
-    return 1;
-  }
-  if (transfer_options_set && storage_mode != "posix") {
+  if (!get_restore_tid || !have_pid) {
     return PrintUsageError();
   }
 
-  CUresult status = CUDA_SUCCESS;
-  if (get_state) {
-    if (timeout_ms != 0 || !device_map.empty() || storage_mode != "legacy") {
-      return PrintUsageError();
-    }
-    CUprocessState state;
-    status = cuCheckpointProcessGetState(pid, &state);
-    if (status == CUDA_SUCCESS) {
-      return std::fprintf(stdout, "%s\n", ProcessStateString(state)) < 0 ? 1 : 0;
-    }
-  } else if (get_restore_tid) {
-    if (timeout_ms != 0 || !device_map.empty() || storage_mode != "legacy") {
-      return PrintUsageError();
-    }
-    int tid = 0;
-    status = cuCheckpointProcessGetRestoreThreadId(pid, &tid);
-    if (status == CUDA_SUCCESS) {
-      return std::fprintf(stdout, "%d\n", tid) < 0 ? 1 : 0;
-    }
-  } else if (action == "lock") {
-    if (!device_map.empty() || storage_mode != "legacy") {
-      return PrintUsageError();
-    }
-    CUcheckpointLockArgs args{};
-    args.timeoutMs = timeout_ms;
-    status = cuCheckpointProcessLock(pid, &args);
-  } else if (action == "checkpoint") {
-    if (timeout_ms != 0 || !device_map.empty()) {
-      return PrintUsageError();
-    }
-    if (storage_mode == "posix") {
-      status = DoCustomStorage(pid, true, "", storage_dir, transfer_options, helper_main_start).status;
-    } else {
-      CUcheckpointCheckpointArgs args{};
-      status = cuCheckpointProcessCheckpoint(pid, &args);
-    }
-  } else if (action == "restore") {
-    if (timeout_ms != 0) {
-      return PrintUsageError();
-    }
-    status = storage_mode == "posix"
-                 ? DoCustomStorage(pid, false, device_map, storage_dir, transfer_options, helper_main_start).status
-                                     : DoLegacyRestore(pid, device_map);
-  } else if (action == "unlock") {
-    if (timeout_ms != 0 || !device_map.empty() || storage_mode != "legacy") {
-      return PrintUsageError();
-    }
-    CUcheckpointUnlockArgs args{};
-    status = cuCheckpointProcessUnlock(pid, &args);
-  } else {
-    return PrintUsageError();
-  }
-
+  int tid = 0;
+  const CUresult status = cuCheckpointProcessGetRestoreThreadId(pid, &tid);
   if (status != CUDA_SUCCESS) {
     PrintCudaError(status);
     return 1;
   }
-  return 0;
+  return std::fprintf(stdout, "%d\n", tid) < 0 ? 1 : 0;
 }

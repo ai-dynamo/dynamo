@@ -3,10 +3,8 @@ package cuda
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -38,7 +36,6 @@ type helperActionRunner interface {
 		snapshotruntime.ProcessDetails,
 		logr.Logger,
 	) error
-	state(context.Context, int) (string, error)
 }
 
 type commandHelperActionRunner struct{}
@@ -174,34 +171,17 @@ func (commandHelperActionRunner) run(
 	identity snapshotruntime.ProcessDetails,
 	log logr.Logger,
 ) error {
-	if transferSettings.DaemonSocket != "" {
-		if identity.StartTimeTicks == 0 || identity.Cgroup == "" {
-			captured, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
-			if err != nil {
-				return fmt.Errorf("capture host PID %d identity for CUDA helper daemon: %w", pid, err)
-			}
-			identity = captured
+	if identity.StartTimeTicks == 0 || identity.Cgroup == "" {
+		captured, err := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+		if err != nil {
+			return fmt.Errorf("capture host PID %d identity for CUDA helper daemon: %w", pid, err)
 		}
-		daemonStorageDir := storageDir
-		if action == actionLock || action == actionUnlock {
-			daemonStorageDir = ""
-		}
-		err := runDaemonAction(ctx, pid, action, deviceMap, daemonStorageDir, transferSettings, identity, log)
-		if err == nil || !transferSettings.DaemonFallback || !errors.Is(err, errDaemonUnavailable) {
-			return err
-		}
-		log.Info("CUDA helper daemon unavailable before request; using configured one-shot fallback",
-			"socket", transferSettings.DaemonSocket,
-			"pid", pid,
-			"action", action,
-			"error", err,
-		)
+		identity = captured
 	}
-	return runAction(ctx, pid, action, deviceMap, storageMode, storageDir, transferSettings, log)
-}
-
-func (commandHelperActionRunner) state(ctx context.Context, pid int) (string, error) {
-	return getState(ctx, pid)
+	if action == actionLock || action == actionUnlock || storageMode == types.CUDAStorageModeLegacy {
+		storageDir = ""
+	}
+	return runDaemonAction(ctx, pid, action, deviceMap, storageMode, storageDir, transferSettings, identity, log)
 }
 
 func (r identityValidatingRunner) run(
@@ -223,85 +203,4 @@ func (r identityValidatingRunner) run(
 		return fmt.Errorf("validate host PID %d immediately before CUDA %s: %w", pid, action, err)
 	}
 	return r.runner.run(ctx, pid, action, deviceMap, storageMode, storageDir, transferSettings, expected, log)
-}
-
-func (r identityValidatingRunner) state(ctx context.Context, pid int) (string, error) {
-	return r.runner.state(ctx, pid)
-}
-
-func getState(ctx context.Context, pid int) (string, error) {
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, "--get-state", "--pid", strconv.Itoa(pid))
-	output, err := cmd.CombinedOutput()
-	state := strings.TrimSpace(string(output))
-	if err != nil {
-		return "", fmt.Errorf("cuda-checkpoint-helper --get-state failed for pid %d: %w (output: %s)", pid, err, state)
-	}
-	if state == "" {
-		return "", fmt.Errorf("cuda-checkpoint-helper --get-state returned empty state for pid %d", pid)
-	}
-	return state, nil
-}
-
-func helperActionArgs(pid int, action, deviceMap, storageMode, storageDir string, transferSettings types.CUDATransferSettings) []string {
-	args := []string{"--action", action, "--pid", strconv.Itoa(pid)}
-	if action == actionRestore && deviceMap != "" {
-		args = append(args, "--device-map", deviceMap)
-	}
-	if storageMode == "posix" {
-		args = append(
-			args,
-			"--storage-mode", storageMode,
-			"--storage-dir", storageDir,
-			"--transfer-buffer-count", strconv.Itoa(transferSettings.BufferCount),
-			"--transfer-chunk-bytes", strconv.FormatUint(transferSettings.ChunkBytes, 10),
-		)
-	}
-	return args
-}
-
-func runAction(ctx context.Context, pid int, action, deviceMap, storageMode, storageDir string, transferSettings types.CUDATransferSettings, log logr.Logger) error {
-	args := helperActionArgs(pid, action, deviceMap, storageMode, storageDir, transferSettings)
-	cmd := exec.CommandContext(ctx, cudaCheckpointHelperBinary, args...)
-	details := snapshotruntime.ProcessDetails{
-		ObservedPID:   pid,
-		OutermostPID:  pid,
-		InnermostPID:  pid,
-		NamespacePIDs: []int{pid},
-	}
-	if process, err := snapshotruntime.ReadProcessDetails("/proc", pid); err == nil {
-		details = process
-	}
-	start := time.Now()
-	output, err := cmd.CombinedOutput()
-	duration := time.Since(start)
-	out := strings.TrimSpace(string(output))
-	if err != nil {
-		log.Error(err, "cuda-checkpoint-helper command failed",
-			"pid", pid,
-			"outermost_pid", details.OutermostPID,
-			"innermost_pid", details.InnermostPID,
-			"cmdline", details.Cmdline,
-			"action", action,
-			"duration", duration,
-			"output", out,
-		)
-		return fmt.Errorf("cuda-checkpoint-helper %v failed for pid %d after %s: %w (output: %s)", args, pid, duration, err, out)
-	}
-	if storageMode == "posix" && (action == actionCheckpoint || action == actionRestore) {
-		telemetry := parseCustomStorageTelemetry(out, duration)
-		log.Info("CUDA custom-storage transfer succeeded",
-			customStorageSuccessLogValues(pid, action, duration, out, telemetry)...,
-		)
-		return nil
-	}
-	log.V(1).Info("cuda-checkpoint-helper command succeeded",
-		"pid", pid,
-		"outermost_pid", details.OutermostPID,
-		"innermost_pid", details.InnermostPID,
-		"cmdline", details.Cmdline,
-		"action", action,
-		"duration", duration,
-		"output", out,
-	)
-	return nil
 }

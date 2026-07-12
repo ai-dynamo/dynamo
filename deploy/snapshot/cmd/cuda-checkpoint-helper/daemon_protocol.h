@@ -19,7 +19,7 @@
 namespace cuda_checkpoint_daemon {
 
 constexpr uint32_t kMagic = 0x50484344;  // "DCHP" in little-endian.
-constexpr uint16_t kVersion = 3;
+constexpr uint16_t kVersion = 4;
 constexpr size_t kRequestHeaderSize = 48;
 constexpr size_t kResponseHeaderSize = 24;
 constexpr size_t kMaxRequestSize = 64 * 1024;
@@ -28,6 +28,7 @@ constexpr size_t kMaxCgroupSize = 4096;
 
 constexpr uint32_t kResponseFatal = 1U << 0;
 constexpr uint32_t kResponseCapabilityDeferredCUDA = 1U << 1;
+constexpr uint32_t kResponseCapabilityCustomStorage = 1U << 2;
 
 enum class Action : uint16_t {
   kHealth = 0,
@@ -37,8 +38,15 @@ enum class Action : uint16_t {
   kUnlock = 4,
 };
 
+enum class Backend : uint16_t {
+  kUnspecified = 0,
+  kRegular = 1,
+  kPosix = 2,
+};
+
 struct Request {
   Action action = Action::kHealth;
+  Backend backend = Backend::kUnspecified;
   uint32_t pid = 0;
   uint32_t transfer_buffer_count = 0;
   uint64_t transfer_chunk_bytes = 0;
@@ -71,13 +79,14 @@ struct HealthSnapshot {
   uint64_t elapsed_seconds = 0;
   uint64_t seconds_since_progress = 0;
   uint64_t deadline_seconds = 0;
+  bool custom_storage_available = false;
 };
 
 class OperationHealth {
  public:
   explicit OperationHealth(std::chrono::seconds max_operation_duration);
 
-  void MarkReady();
+  void MarkReady(bool custom_storage_available);
   void Begin(Action action, uint32_t pid);
   void Progress();
   void End();
@@ -89,6 +98,7 @@ class OperationHealth {
   const std::chrono::seconds max_operation_duration_;
   mutable std::mutex mutex_;
   bool ready_ = false;
+  bool custom_storage_available_ = false;
   bool busy_ = false;
   Action action_ = Action::kHealth;
   uint32_t pid_ = 0;

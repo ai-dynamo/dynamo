@@ -5,83 +5,78 @@
 set -euo pipefail
 
 chart_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+rendered="$(helm template snapshot "${chart_dir}")"
 
-disabled="$(helm template snapshot-daemon-disabled "${chart_dir}")"
-if grep -q 'name: cuda-checkpoint-helper' <<<"${disabled}"; then
-  echo "helper sidecar rendered while disabled" >&2
-  exit 1
-fi
+container_mounts_socket() {
+  local wanted_container="$1"
+  awk -v wanted_container="${wanted_container}" '
+    /^      containers:$/ {
+      in_containers = 1
+      next
+    }
+    in_containers && /^      [^ ]/ {
+      in_containers = 0
+    }
+    in_containers && /^        - name: / {
+      container = $0
+      sub(/^        - name: /, "", container)
+      in_mounts = 0
+      next
+    }
+    container == wanted_container && /^          volumeMounts:$/ {
+      in_mounts = 1
+      next
+    }
+    in_mounts && /^          [^ ]/ {
+      in_mounts = 0
+    }
+    in_mounts && /^            - name: / {
+      socket_mount = $0 == "            - name: cuda-helper-socket"
+      next
+    }
+    in_mounts && socket_mount && /^              mountPath: "\/run\/cuda-checkpoint-helper"$/ {
+      found_mount = 1
+    }
+    END {
+      exit !found_mount
+    }
+  ' <<<"${rendered}"
+}
 
-for collision in \
-  'storage.pvc.basePath=/' \
-  'storage.pvc.basePath=/run' \
-  'storage.pvc.basePath=/run/cuda-checkpoint-helper' \
-  'storage.pvc.basePath=/run/cuda-checkpoint-helper/checkpoints' \
-  'runtime.socketPath=/run/cuda-checkpoint-helper/runtime.sock' \
-  'runtime.socketPath=/run/runtime.sock'; do
-  if helm template invalid-collision "${chart_dir}" \
-    --set config.cudaCheckpoint.storageMode=posix \
-    --set config.cudaCheckpoint.daemon.enabled=true \
-    --set-string "${collision}" >/dev/null 2>&1; then
-    echo "daemon mode unexpectedly accepted overlapping path: ${collision}" >&2
-    exit 1
-  fi
-done
-
-helm template clean-paths "${chart_dir}" \
-  --set config.cudaCheckpoint.storageMode=posix \
-  --set config.cudaCheckpoint.daemon.enabled=true \
-  --set-string storage.pvc.basePath=/checkpoints \
-  --set-string runtime.socketPath=/var/run/containerd/containerd.sock >/dev/null
-
-helm template pod-mount-no-agent-collision "${chart_dir}" \
-  --set config.cudaCheckpoint.storageMode=posix \
-  --set config.cudaCheckpoint.daemon.enabled=true \
-  --set storage.accessMode=podMount \
-  --set-string storage.pvc.basePath=/run/cuda-checkpoint-helper/checkpoints >/dev/null
-
-for invalid_socket in \
-  /helper.sock \
-  /host/proc/helper.sock \
-  /run/cuda-checkpoint-helper/../helper.sock \
-  "/run/cuda-checkpoint-helper/$(printf 'x%.0s' {1..100}).sock"; do
-  if helm template invalid-socket "${chart_dir}" \
-    --set config.cudaCheckpoint.storageMode=posix \
-    --set config.cudaCheckpoint.daemon.enabled=true \
-    --set-string config.cudaCheckpoint.daemon.socketPath="${invalid_socket}" >/dev/null 2>&1; then
-    echo "daemon mode unexpectedly accepted socket path: ${invalid_socket}" >&2
-    exit 1
-  fi
-done
-
-enabled="$(
-  helm template snapshot-daemon-enabled "${chart_dir}" \
-    --set config.cudaCheckpoint.storageMode=posix \
-    --set config.cudaCheckpoint.daemon.enabled=true
-)"
 for expected in \
   'name: cuda-checkpoint-helper' \
-  'emptyDir: {}' \
+  '/usr/local/bin/cuda-checkpoint-helper' \
   '/run/cuda-checkpoint-helper/helper.sock' \
-  'startupProbe:' \
-  'readinessProbe:' \
-  'livenessProbe:' \
-  '"21600"' \
-  'cpu: 250m' \
-  'image: "nvcr.io/nvidia/ai-dynamo/snapshot-agent:1.2.1"' \
-  'daemonSocketPath: "/run/cuda-checkpoint-helper/helper.sock"'; do
-  if ! grep -Fq "${expected}" <<<"${enabled}"; then
-    echo "enabled helper render missing: ${expected}" >&2
+  'name: cuda-helper-socket' \
+  'emptyDir: {}'; do
+  if ! grep -qF "${expected}" <<<"${rendered}"; then
+    echo "always-on CUDA helper rendering is missing: ${expected}" >&2
     exit 1
   fi
 done
-if [[ "$(grep -c 'name: cuda-helper-socket' <<<"${enabled}")" -lt 3 ]]; then
-  echo "shared socket volume is not mounted by both containers" >&2
-  exit 1
-fi
 
-if helm template invalid-daemon "${chart_dir}" \
-  --set config.cudaCheckpoint.daemon.enabled=true >/dev/null 2>&1; then
-  echo "daemon mode unexpectedly accepted legacy CUDA storage" >&2
-  exit 1
-fi
+for container in agent cuda-checkpoint-helper; do
+  if ! container_mounts_socket "${container}"; then
+    echo "cuda-helper-socket is not mounted by ${container}" >&2
+    exit 1
+  fi
+done
+
+for removed in storageMode daemonSocketPath daemonFallback; do
+  if grep -q "${removed}" <<<"${rendered}"; then
+    echo "obsolete CUDA helper configuration was rendered: ${removed}" >&2
+    exit 1
+  fi
+done
+
+for invalid_path in \
+  / \
+  /run \
+  /run/cuda-checkpoint-helper \
+  /run/cuda-checkpoint-helper/checkpoints; do
+  if helm template snapshot "${chart_dir}" \
+    --set-string storage.pvc.basePath="${invalid_path}" >/dev/null 2>&1; then
+    echo "agent-mounted storage unexpectedly overlaps helper path: ${invalid_path}" >&2
+    exit 1
+  fi
+done

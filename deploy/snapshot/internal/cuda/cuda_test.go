@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -24,62 +23,6 @@ import (
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
-
-func TestHelperActionArgs(t *testing.T) {
-	defaultTransfer := types.CUDATransferSettings{
-		BufferCount: types.DefaultCUDATransferBufferCount,
-		ChunkBytes:  types.DefaultCUDATransferChunkBytes,
-	}
-
-	tests := []struct {
-		name string
-		got  []string
-		want []string
-	}{
-		{
-			name: "legacy checkpoint unchanged",
-			got:  helperActionArgs(42, actionCheckpoint, "", "legacy", "/ignored", defaultTransfer),
-			want: []string{"--action", "checkpoint", "--pid", "42"},
-		},
-		{
-			name: "posix checkpoint",
-			got: helperActionArgs(
-				42,
-				actionCheckpoint,
-				"",
-				"posix",
-				"/checkpoints/cuda-custom-storage/process-0000",
-				types.CUDATransferSettings{BufferCount: 4, ChunkBytes: 32 * 1024 * 1024},
-			),
-			want: []string{
-				"--action", "checkpoint", "--pid", "42",
-				"--storage-mode", "posix",
-				"--storage-dir", "/checkpoints/cuda-custom-storage/process-0000",
-				"--transfer-buffer-count", "4",
-				"--transfer-chunk-bytes", "33554432",
-			},
-		},
-		{
-			name: "posix restore with map",
-			got:  helperActionArgs(84, actionRestore, "GPU-a=GPU-b", "posix", "/checkpoints/cuda-custom-storage/process-0001", defaultTransfer),
-			want: []string{
-				"--action", "restore", "--pid", "84",
-				"--device-map", "GPU-a=GPU-b",
-				"--storage-mode", "posix",
-				"--storage-dir", "/checkpoints/cuda-custom-storage/process-0001",
-				"--transfer-buffer-count", "1",
-				"--transfer-chunk-bytes", "67108864",
-			},
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if !reflect.DeepEqual(test.got, test.want) {
-				t.Fatalf("helper args = %#v, want %#v", test.got, test.want)
-			}
-		})
-	}
-}
 
 func TestCustomStorageProcessDir(t *testing.T) {
 	got := customStorageProcessDir("/checkpoints/tmp/staged", 7)
@@ -216,8 +159,6 @@ type recordingHelperActionRunner struct {
 	calls      []helperActionCall
 	failAction string
 	failPID    int
-	stateValue string
-	stateCalls int
 }
 
 func (r *recordingHelperActionRunner) run(
@@ -242,14 +183,6 @@ func (r *recordingHelperActionRunner) run(
 		return errors.New("injected helper failure")
 	}
 	return nil
-}
-
-func (r *recordingHelperActionRunner) state(context.Context, int) (string, error) {
-	r.stateCalls++
-	if r.stateValue != "" {
-		return r.stateValue, nil
-	}
-	return "", errors.New("unexpected state query")
 }
 
 func TestRestoreAndUnlockProcessTreeRestoresAllBeforeFirstUnlock(t *testing.T) {
@@ -357,16 +290,14 @@ func TestRestoreAndUnlockProcessTreeRestoreFailureSkipsAllUnlocks(t *testing.T) 
 	}
 }
 
-func TestDaemonUnlockFailureDoesNotTrustNumericPIDState(t *testing.T) {
+func TestDaemonUnlockFailureIsReturned(t *testing.T) {
 	runner := &recordingHelperActionRunner{
 		failAction: actionUnlock,
 		failPID:    11,
-		stateValue: "running",
 	}
 	settings := types.CUDATransferSettings{
-		BufferCount:  1,
-		ChunkBytes:   64 * 1024 * 1024,
-		DaemonSocket: "/run/cuda-checkpoint-helper/helper.sock",
+		BufferCount: 1,
+		ChunkBytes:  64 * 1024 * 1024,
 	}
 	_, err := restoreAndUnlockProcessTree(
 		context.Background(), []int{11}, "", types.CUDAStorageModePOSIX,
@@ -374,9 +305,6 @@ func TestDaemonUnlockFailureDoesNotTrustNumericPIDState(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("restoreAndUnlockProcessTree() masked daemon unlock failure")
-	}
-	if runner.stateCalls != 0 {
-		t.Fatalf("daemon unlock failure queried numeric PID state %d times", runner.stateCalls)
 	}
 }
 

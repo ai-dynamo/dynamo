@@ -38,6 +38,8 @@ type RestoreRequest struct {
 	Clientset                   kubernetes.Interface
 }
 
+var validateCUDARestoreBackend = cuda.ValidateRestoreBackend
+
 // Restore performs external restore for the given request.
 // Returns the namespace-relative PID of the restored process.
 // The DaemonSet side inspects the placeholder and launches nsrestore,
@@ -156,6 +158,16 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}
+	cudaStorageMode := types.CUDAStorageModeLegacy
+	if !m.CUDA.IsEmpty() {
+		cudaStorageMode, err = m.CUDA.EffectiveStorageMode()
+		if err != nil {
+			return nil, fmt.Errorf("invalid CUDA artifact metadata: %w", err)
+		}
+		if err := validateCUDARestoreBackend(ctx, cudaStorageMode); err != nil {
+			return nil, fmt.Errorf("CUDA artifact backend %q is unavailable before restore: %w", cudaStorageMode, err)
+		}
+	}
 
 	containerName := req.ContainerName
 	if containerName == "" {
@@ -212,15 +224,13 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}
 
 	return &types.RestoreContainerSnapshot{
-		CheckpointPath: checkpointPath,
-		PlaceholderPID: placeholderPID,
-		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
-		CgroupRoot:     cgroupRoot,
-		CUDADeviceMap:  cudaDeviceMap,
-		CUDAStorageMode: func() string {
-			mode, _ := m.CUDA.EffectiveStorageMode()
-			return mode
-		}(),
+		CheckpointPath:  checkpointPath,
+		PlaceholderPID:  placeholderPID,
+		TargetRoot:      fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
+		CgroupRoot:      cgroupRoot,
+		CUDADeviceMap:   cudaDeviceMap,
+		CUDAStorageMode: cudaStorageMode,
+		HasCUDA:         !m.CUDA.IsEmpty(),
 	}, nil
 }
 
@@ -234,31 +244,29 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
-	cudaTransfer := req.CUDATransfer.WithDefaults()
-	if err := cudaTransfer.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid CUDA transfer settings: %w", err)
-	}
 	nsenterPrefix := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
 		"-m", "-u", "-i", "-n", "-p", "--",
 	}
-	deferCUDA := snap.CUDAStorageMode == types.CUDAStorageModePOSIX && cudaTransfer.DaemonSocket != ""
-	if deferCUDA {
-		capabilityArgs := append(append([]string{}, nsenterPrefix...), req.NSRestorePath, "--check-defer-cuda-capability")
+	if snap.HasCUDA {
+		capabilityArgs := append(
+			append([]string{}, nsenterPrefix...),
+			req.NSRestorePath, "--check-host-cuda-restore-capability",
+		)
 		output, err := exec.CommandContext(ctx, "nsenter", capabilityArgs...).CombinedOutput()
 		capability := strings.TrimSpace(string(output))
 		if err != nil {
 			return nil, fmt.Errorf(
-				"placeholder nsrestore does not support deferred CUDA restore; use a placeholder image built with this snapshot-agent version: %w (output: %s)",
-				err,
+				"placeholder nsrestore does not support mandatory host CUDA restore; use a matching placeholder image (output: %q): %w",
 				capability,
+				err,
 			)
 		}
-		if capability != "defer-cuda-v1" {
+		if capability != "host-cuda-restore-v1" {
 			return nil, fmt.Errorf(
-				"placeholder nsrestore does not support deferred CUDA restore; use a placeholder image built with this snapshot-agent version (capability response: %q)",
+				"placeholder nsrestore does not support mandatory host CUDA restore; use a matching placeholder image (capability response: %q)",
 				capability,
 			)
 		}
@@ -270,21 +278,12 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
-	args = append(
-		args,
-		"--cuda-transfer-buffer-count", strconv.Itoa(cudaTransfer.BufferCount),
-		"--cuda-transfer-chunk-bytes", strconv.FormatUint(cudaTransfer.ChunkBytes, 10),
-	)
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
 	}
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
-	if deferCUDA {
-		args = append(args, "--defer-cuda")
-	}
-
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()

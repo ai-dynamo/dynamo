@@ -182,7 +182,7 @@ RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper
     -L/usr/local/cuda/lib64/stubs \
     -L/usr/local/lib \
     -Wl,-rpath,/usr/local/lib \
-    -lnixl -lnixl_build -lcuda -ldl
+    -lnixl -lnixl_build -lcuda
 
 RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
       -o /cuda-checkpoint-helper-daemon-protocol-test \

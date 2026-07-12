@@ -132,9 +132,6 @@ type CUDAManifest struct {
 }
 
 func NewCUDAManifest(pids []int, sourceGPUUUIDs []string, storageMode string) CUDAManifest {
-	if storageMode == CUDAStorageModeLegacy {
-		storageMode = ""
-	}
 	return CUDAManifest{
 		PIDs:           append([]int(nil), pids...),
 		SourceGPUUUIDs: append([]string(nil), sourceGPUUUIDs...),

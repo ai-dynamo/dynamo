@@ -57,6 +57,19 @@ using OperationCompleteFn = CUresult(CUDAAPI*)(OperationHandle);
 
 #endif
 
+inline OperationCompleteFn
+ResolveOperationComplete(bool* available)
+{
+  void* symbol = nullptr;
+  CUdriverProcAddressQueryResult query_status = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+  const CUresult status = cuGetProcAddress(
+      "cuCheckpointOperationComplete", &symbol, 13040,
+      CU_GET_PROC_ADDRESS_DEFAULT, &query_status);
+  *available = status == CUDA_SUCCESS && symbol != nullptr &&
+               query_status == CU_GET_PROC_ADDRESS_SUCCESS;
+  return *available ? reinterpret_cast<OperationCompleteFn>(symbol) : nullptr;
+}
+
 inline CUcheckpointCheckpointArgs*
 NativeArgs(CheckpointArgs* args)
 {

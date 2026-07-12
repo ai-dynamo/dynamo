@@ -129,10 +129,7 @@ ParseRequest(const unsigned char* data, size_t size, Request* request, std::stri
     return false;
   }
   const auto action = static_cast<Action>(ReadU16(data + 8));
-  if (ReadU16(data + 10) != 0) {
-    *error = "request reserved field is nonzero";
-    return false;
-  }
+  const auto backend = static_cast<Backend>(ReadU16(data + 10));
   if (action != Action::kHealth && action != Action::kCheckpoint && action != Action::kRestore &&
       action != Action::kLock && action != Action::kUnlock) {
     *error = "invalid request action";
@@ -149,6 +146,7 @@ ParseRequest(const unsigned char* data, size_t size, Request* request, std::stri
   }
   Request parsed;
   parsed.action = action;
+  parsed.backend = backend;
   parsed.pid = ReadU32(data + 12);
   parsed.transfer_buffer_count = ReadU32(data + 16);
   parsed.transfer_chunk_bytes = ReadU64(data + 20);
@@ -162,7 +160,8 @@ ParseRequest(const unsigned char* data, size_t size, Request* request, std::stri
     return false;
   }
   if (action == Action::kHealth) {
-    if (parsed.pid != 0 || parsed.transfer_buffer_count != 0 || parsed.transfer_chunk_bytes != 0 ||
+    if (parsed.backend != Backend::kUnspecified || parsed.pid != 0 ||
+        parsed.transfer_buffer_count != 0 || parsed.transfer_chunk_bytes != 0 ||
         parsed.expected_start_time_ticks != 0 || !parsed.device_map.empty() || !parsed.storage_dir.empty() ||
         !parsed.expected_cgroup.empty()) {
       *error = "health request has arguments";
@@ -173,17 +172,33 @@ ParseRequest(const unsigned char* data, size_t size, Request* request, std::stri
     *error = "invalid operation arguments";
     return false;
   } else if (action == Action::kLock || action == Action::kUnlock) {
-    if (parsed.transfer_buffer_count != 0 || parsed.transfer_chunk_bytes != 0 ||
+    if ((parsed.backend != Backend::kRegular && parsed.backend != Backend::kPosix) ||
+        parsed.transfer_buffer_count != 0 || parsed.transfer_chunk_bytes != 0 ||
         !parsed.device_map.empty() || !parsed.storage_dir.empty()) {
       *error = "lock/unlock request has transfer arguments";
       return false;
     }
-  } else if (
-      parsed.transfer_buffer_count == 0 || parsed.transfer_chunk_bytes == 0 ||
-      parsed.storage_dir.empty() || parsed.storage_dir.front() != '/' ||
-      (action == Action::kCheckpoint && !parsed.device_map.empty())) {
-    *error = "invalid transfer operation arguments";
-    return false;
+  } else {
+    if (backend != Backend::kRegular && backend != Backend::kPosix) {
+      *error = "checkpoint/restore request has invalid backend";
+      return false;
+    }
+    if (action == Action::kCheckpoint && !parsed.device_map.empty()) {
+      *error = "checkpoint request has a device map";
+      return false;
+    }
+    if (backend == Backend::kRegular) {
+      if (parsed.transfer_buffer_count != 0 || parsed.transfer_chunk_bytes != 0 ||
+          !parsed.storage_dir.empty()) {
+        *error = "regular backend request has custom-storage arguments";
+        return false;
+      }
+    } else if (
+        parsed.transfer_buffer_count == 0 || parsed.transfer_chunk_bytes == 0 ||
+        parsed.storage_dir.empty() || parsed.storage_dir.front() != '/') {
+      *error = "POSIX backend request has invalid transfer arguments";
+      return false;
+    }
   }
   *request = std::move(parsed);
   return true;
@@ -206,6 +221,7 @@ EncodeRequest(const Request& request, std::vector<unsigned char>* data, std::str
   WriteU16(data, 4, kVersion);
   WriteU16(data, 6, kRequestHeaderSize);
   WriteU16(data, 8, static_cast<uint16_t>(request.action));
+  WriteU16(data, 10, static_cast<uint16_t>(request.backend));
   WriteU32(data, 12, request.pid);
   WriteU32(data, 16, request.transfer_buffer_count);
   WriteU64(data, 20, request.transfer_chunk_bytes);
@@ -235,7 +251,8 @@ ParseResponse(const unsigned char* data, size_t size, Response* response, std::s
     return false;
   }
   const uint32_t flags = ReadU32(data + 12);
-  if ((flags & ~(kResponseFatal | kResponseCapabilityDeferredCUDA)) != 0) {
+  if ((flags & ~(kResponseFatal | kResponseCapabilityDeferredCUDA |
+                 kResponseCapabilityCustomStorage)) != 0) {
     *error = "invalid response flags";
     return false;
   }
@@ -372,10 +389,11 @@ OperationHealth::OperationHealth(std::chrono::seconds max_operation_duration)
 }
 
 void
-OperationHealth::MarkReady()
+OperationHealth::MarkReady(bool custom_storage_available)
 {
   std::lock_guard<std::mutex> lock(mutex_);
   ready_ = true;
+  custom_storage_available_ = custom_storage_available;
 }
 
 void
@@ -420,6 +438,7 @@ OperationHealth::Snapshot() const
       .action = action_,
       .pid = pid_,
       .deadline_seconds = static_cast<uint64_t>(max_operation_duration_.count()),
+      .custom_storage_available = custom_storage_available_,
   };
   if (busy_) {
     snapshot.elapsed_seconds = DurationSeconds(started_, now);
@@ -437,6 +456,9 @@ HealthResponse(const OperationHealth& health)
   response.cuda_status = snapshot.healthy ? 0 : 1;
   if (snapshot.ready) {
     response.flags = kResponseCapabilityDeferredCUDA;
+    if (snapshot.custom_storage_available) {
+      response.flags |= kResponseCapabilityCustomStorage;
+    }
   }
   std::ostringstream output;
   output << "{\"ready\":" << (snapshot.ready ? "true" : "false")
@@ -446,7 +468,9 @@ HealthResponse(const OperationHealth& health)
          << ",\"pid\":" << snapshot.pid
          << ",\"elapsed_seconds\":" << snapshot.elapsed_seconds
          << ",\"seconds_since_progress\":" << snapshot.seconds_since_progress
-         << ",\"deadline_seconds\":" << snapshot.deadline_seconds << "}\n";
+         << ",\"deadline_seconds\":" << snapshot.deadline_seconds
+         << ",\"custom_storage_available\":"
+         << (snapshot.custom_storage_available ? "true" : "false") << "}\n";
   response.output = output.str();
   if (!snapshot.healthy) {
     response.error = snapshot.ready ? "operation exceeded watchdog deadline" : "daemon is not ready";

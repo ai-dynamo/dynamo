@@ -38,4 +38,5 @@ type RestoreContainerSnapshot struct {
 	CgroupRoot      string
 	CUDADeviceMap   string
 	CUDAStorageMode string
+	HasCUDA         bool
 }

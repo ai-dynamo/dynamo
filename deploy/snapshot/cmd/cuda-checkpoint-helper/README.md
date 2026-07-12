@@ -80,9 +80,9 @@ runs. The additional monotonic wall-clock fields are:
   immediately before the JSON write.
 - `custom_storage_total_seconds`: `DoCustomStorage` entry through that same
   instant.
-- `symbol_resolution_seconds` and
-  `storage_directory_validation_seconds`: operation-complete `dlsym` lookup
-  and storage directory preparation or validation.
+- `storage_directory_validation_seconds`: storage directory preparation or
+  validation. CustomStorage capability is resolved once at daemon startup via
+  `cuGetProcAddress` for CUDA API 13.4.
 - `cuda_init_seconds`, `cuda_device_count`,
   `device_enumeration_seconds`, and `primary_context_retain_seconds`: CUDA
   initialization, count discovery, and aggregate device lookup/context retain.
@@ -109,15 +109,12 @@ runs. The additional monotonic wall-clock fields are:
 
 Totals contain subphases and must not be added to them. Worker service fields
 are sums across workers and can overlap each other in wall time. The
-`timing_scope` JSON field records these rules. On the Go side,
-the stable `duration` field and its `helper_process_wall_duration` alias wrap
-`CombinedOutput`,
-`helper_main_to_telemetry_duration` mirrors the emitted helper interval, and
-`helper_process_overhead_duration` is their nonnegative difference. The
-derived fields are emitted only when the expected timing value is present,
-finite, nonnegative, and consistent with the process wall duration. Otherwise,
-the log retains the raw wall duration and reports `helper_telemetry_status`
-plus `helper_telemetry_error`.
+`timing_scope` JSON field records these rules. On the Go side, daemon RPC wall
+duration is compared with `helper_main_to_telemetry_duration`. Derived fields
+are emitted only when the expected timing value is present, finite,
+nonnegative, and consistent with the RPC wall duration. Otherwise, the log
+retains the raw wall duration and reports `helper_telemetry_status` plus
+`helper_telemetry_error`.
 
 Restore runs require an explicit cache interpretation:
 

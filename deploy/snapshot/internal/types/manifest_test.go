@@ -3,6 +3,7 @@ package types
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
@@ -116,6 +117,38 @@ func TestCUDAManifestEffectiveStorageMode(t *testing.T) {
 				t.Fatalf("EffectiveStorageMode() = %q, %v, want %q, nil", got, err, test.want)
 			}
 		})
+	}
+}
+
+func TestRegularCUDAManifestRoundTripPersistsLegacy(t *testing.T) {
+	dir := t.TempDir()
+	original := NewCheckpointManifest(
+		"regular-checkpoint",
+		CRIUDumpManifest{},
+		SourcePodManifest{},
+		OverlayManifest{},
+	)
+	original.CUDA = NewCUDAManifest(
+		[]int{42}, []string{"GPU-aaa"}, CUDAStorageModeLegacy,
+	)
+	if err := WriteManifest(dir, original); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, manifestFilename))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(content), "storageMode: legacy\n") {
+		t.Fatalf("new regular manifest does not explicitly persist legacy storage mode:\n%s", content)
+	}
+
+	loaded, err := ReadManifest(dir)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	mode, err := loaded.CUDA.EffectiveStorageMode()
+	if err != nil || mode != CUDAStorageModeLegacy {
+		t.Fatalf("EffectiveStorageMode() = %q, %v, want %q, nil", mode, err, CUDAStorageModeLegacy)
 	}
 }
 

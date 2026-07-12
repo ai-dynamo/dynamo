@@ -318,10 +318,9 @@ func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, er
 }
 
 // FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
-// Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
-// --get-state, because --get-state incorrectly matches coordinator processes like
-// cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// don't hold CUDA contexts themselves.
+// Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) to avoid
+// false positives from coordinator processes like cuda-checkpoint --launch-job,
+// which share a /proc namespace with CUDA processes but don't hold CUDA contexts.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {
@@ -431,7 +430,7 @@ func lockAndCheckpointProcessTree(
 	start := time.Now()
 	for _, pid := range cudaPIDs {
 		if err := runner.run(
-			ctx, pid, actionLock, "", "", "", transferSettings, snapshotruntime.ProcessDetails{}, log,
+			ctx, pid, actionLock, "", storageMode, "", transferSettings, snapshotruntime.ProcessDetails{}, log,
 		); err != nil {
 			timings.TotalDuration = time.Since(start)
 			return timings, err
@@ -439,7 +438,10 @@ func lockAndCheckpointProcessTree(
 	}
 
 	for index, pid := range cudaPIDs {
-		processDir := customStorageProcessDir(checkpointDir, index)
+		processDir := ""
+		if storageMode == types.CUDAStorageModePOSIX {
+			processDir = customStorageProcessDir(checkpointDir, index)
+		}
 		if err := runner.run(
 			ctx, pid, actionCheckpoint, "", storageMode, processDir, transferSettings,
 			snapshotruntime.ProcessDetails{}, log,
@@ -489,7 +491,10 @@ func restoreAndUnlockProcessTree(
 
 	start := time.Now()
 	for index, pid := range cudaPIDs {
-		processDir := customStorageProcessDir(checkpointDir, index)
+		processDir := ""
+		if storageMode == types.CUDAStorageModePOSIX {
+			processDir = customStorageProcessDir(checkpointDir, index)
+		}
 		if err := runner.run(
 			ctx, pid, actionRestore, deviceMap, storageMode, processDir, transferSettings,
 			snapshotruntime.ProcessDetails{}, log,
@@ -501,17 +506,9 @@ func restoreAndUnlockProcessTree(
 
 	for _, pid := range cudaPIDs {
 		if err := runner.run(
-			ctx, pid, actionUnlock, "", "", "", transferSettings, snapshotruntime.ProcessDetails{}, log,
+			ctx, pid, actionUnlock, "", storageMode, "", transferSettings, snapshotruntime.ProcessDetails{}, log,
 		); err != nil {
 			timings.TotalDuration = time.Since(start)
-			if transferSettings.DaemonSocket != "" {
-				return timings, err
-			}
-			state, stateErr := runner.state(ctx, pid)
-			if stateErr == nil && state == "running" {
-				log.Info("cuda-checkpoint-helper unlock returned error but process is already running", "pid", pid)
-				continue
-			}
 			return timings, err
 		}
 	}

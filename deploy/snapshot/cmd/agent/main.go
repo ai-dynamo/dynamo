@@ -54,7 +54,7 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	if err := cuda.WaitForDaemon(ctx, cfg.CUDACheckpoint.DaemonSocketPath); err != nil {
+	if err := cuda.WaitForDaemon(ctx); err != nil {
 		fatal(agentLog, err, "CUDA helper daemon did not become ready")
 	}
 

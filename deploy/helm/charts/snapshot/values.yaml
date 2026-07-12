@@ -160,9 +160,6 @@ rbac:
 # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
   cudaCheckpoint:
-    # CUDA GPU-memory storage implementation. legacy preserves the CUDA driver
-    # host-memory path; posix opts into CUDA 13.4 custom storage backed by NIXL.
-    storageMode: legacy
     # Pinned transfer slots per CUDA device. Slots add pipeline depth, not
     # worker threads. Use an integral numeric value from 1 through 8; Helm
     # normalizes exact integral forms such as 2.0 to 2. The default preserves
@@ -173,13 +170,9 @@ config:
     # normalized to integer output. Pinned use is approximately active GPUs *
     # transferBufferCount * transferChunkBytes.
     transferChunkBytes: 67108864
-    # Persistent helper is opt-in. It retains all visible CUDA primary
-    # contexts once in a sidecar and serves bounded local socket requests.
+    # The persistent helper retains all visible CUDA primary contexts once in
+    # a sidecar and serves bounded local socket requests.
     daemon:
-      enabled: false
-      socketPath: /run/cuda-checkpoint-helper/helper.sock
-      # Only falls back when connecting fails before a request is sent.
-      fallback: false
       # Busy operations remain healthy until this conservative watchdog
       # deadline. Increase it for transfers expected to exceed six hours.
       maxOperationSeconds: 21600

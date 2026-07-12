@@ -10,7 +10,6 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -19,10 +18,8 @@ import (
 type RestoreOptions struct {
 	CheckpointPath string
 	CUDADeviceMap  string
-	CUDATransfer   types.CUDATransferSettings
 	CgroupRoot     string
 	TargetPodIP    string
-	DeferCUDA      bool
 }
 
 type RestoreInNamespaceResult struct {
@@ -36,10 +33,6 @@ type RestoreInNamespaceResult struct {
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
 func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logger) (*RestoreInNamespaceResult, error) {
 	restoreStart := time.Now()
-	opts.CUDATransfer = opts.CUDATransfer.WithDefaults()
-	if err := opts.CUDATransfer.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid CUDA transfer settings: %w", err)
-	}
 	log.Info("Starting nsrestore workflow",
 		"checkpoint_path", opts.CheckpointPath,
 		"has_cuda_map", opts.CUDADeviceMap != "",
@@ -168,10 +161,6 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	// CUDA restore — remap checkpoint-time innermost namespace PIDs onto the
 	// current visible restored PIDs before invoking cuda-checkpoint.
 	if !m.CUDA.IsEmpty() {
-		cudaStorageMode, err := m.CUDA.EffectiveStorageMode()
-		if err != nil {
-			return nil, 0, err
-		}
 		restorePIDs, err := snapshotruntime.ResolveManifestPIDsToObservedPIDs(processes, int(restoredPID), m.CUDA.PIDs)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to resolve restored CUDA PIDs: %w", err)
@@ -181,30 +170,15 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		if opts.DeferCUDA {
-			for _, pid := range restorePIDs {
-				process, err := snapshotruntime.ReadProcessDetails("/proc", pid)
-				if err != nil {
-					return nil, 0, fmt.Errorf("capture restored CUDA process identity for PID %d: %w", pid, err)
-				}
-				if process.StartTimeTicks == 0 || process.Cgroup == "" {
-					return nil, 0, fmt.Errorf("capture restored CUDA process identity for PID %d: incomplete proc identity", pid)
-				}
-				timings.deferredCUDAProcesses = append(timings.deferredCUDAProcesses, process)
-			}
-		} else {
-			_, err = cuda.RestoreAndUnlockProcessTree(
-				ctx,
-				restorePIDs,
-				opts.CUDADeviceMap,
-				cudaStorageMode,
-				opts.CheckpointPath,
-				opts.CUDATransfer,
-				log,
-			)
+		for _, pid := range restorePIDs {
+			process, err := snapshotruntime.ReadProcessDetails("/proc", pid)
 			if err != nil {
-				return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
+				return nil, 0, fmt.Errorf("capture restored CUDA process identity for PID %d: %w", pid, err)
 			}
+			if process.StartTimeTicks == 0 || process.Cgroup == "" {
+				return nil, 0, fmt.Errorf("capture restored CUDA process identity for PID %d: incomplete proc identity", pid)
+			}
+			timings.deferredCUDAProcesses = append(timings.deferredCUDAProcesses, process)
 		}
 	}
 	timings.cudaDuration = time.Since(cudaStart)
