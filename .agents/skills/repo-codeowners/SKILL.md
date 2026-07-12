@@ -1,6 +1,6 @@
 ---
 name: repo-codeowners
-description: Work with Dynamo's generated CODEOWNERS - find out who reviews a change, fix a failing codeowners CI check, change review routing, or grant an external contributor area-scoped ownership. Use when the codeowners check fails on a PR, a new directory is unclaimed, someone asks who reviews a path or PR, review routing needs to change, or a contributor should be added as a code owner.
+description: Works with Dynamo's generated CODEOWNERS - finds out who reviews a change, fixes a failing codeowners CI check, changes review routing, or grants an external contributor area-scoped ownership. Use when the codeowners check fails on a PR, a new directory is unclaimed, someone asks who reviews a path or PR, review routing needs to change, or a contributor should be added as a code owner.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -74,8 +74,9 @@ area claims. Nothing ships unowned.
 Edit `.github/codeowners/areas.yaml` - move a glob between areas, add a
 `shared:` entry (multi-team co-ownership; any one team's approval satisfies
 the gate), or adjust `classify` rules. Then regenerate exactly as in Flow 2
-step 4 and commit both files. Routing changes are owned by the process team,
-which is auto-requested on the PR.
+step 4 and commit both files. A routing PR auto-requests the ops team (which
+owns `.github/codeowners/`) and the process team (which owns the generated
+root `CODEOWNERS`); either review covers its half.
 
 ## Flow 4: Grant an external contributor area-scoped ownership
 
