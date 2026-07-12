@@ -136,8 +136,9 @@ cargo fmt --all && cargo clippy --workspace
 - Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
   routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
   coverage and `CODEOWNERS`↔`areas.yaml` drift. See
-  `.github/codeowners/README.md` (use `who_owns.py --changed` to check who
-  reviews your PR; `--people` expands teams to members for org members).
+  `.github/codeowners/README.md`. To check who reviews your PR:
+  `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`
+  (`--people` expands teams to members for org members).
   If the `codeowners` check fails after adding a new directory, claim it with
   one line under the owning area in `areas.yaml`, regenerate, and commit both
   files together. External contributors earn area-scoped co-ownership via
