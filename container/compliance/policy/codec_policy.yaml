@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Media-codec allowlist gate — consumed by container/compliance/scan_codecs.py.
+#
+# We ship an in-tree ffmpeg built to a narrow media-codec set (see
+# wheel_builder.Dockerfile). This gate keeps the finished image aligned with
+# that: it fails the image BUILD if a media-codec library/binary appears outside
+# our in-tree allowlist (allow_paths) or a reasoned exception — catching a distro
+# libav*, a wheel-bundled libavcodec, libx264/265, or a stray/imageio-bundled
+# ffmpeg that slipped in via a base-image or dependency bump. See OPS-7665 for
+# background and the exception rationale.
+#
+# Filesystem-first because bundled codec .so files don't appear as SBOM
+# components; deny_components adds a supplementary SBOM version floor.
+#
+# Keep this in sync with the wheel_builder.Dockerfile ffmpeg allowlist and the
+# vllm/sglang media-library cleanup. New third-party bundled media libraries must
+# be either removed or added to `exceptions` with a reason + owner — never
+# silently allowlisted.
+
+# Filesystem globs (matched against absolute paths under the scan root) for
+# media-codec libraries / binaries that must not ship. libav*/libsw* are matched
+# wholesale and re-permitted only for our in-tree copy via allow_paths, so any
+# THIRD-PARTY bundled libavcodec (distro, a vendored wheel) is caught.
+deny_globs:
+  - "**/libx264.so*"
+  - "**/libx265.so*"
+  - "**/libfdk-aac.so*"
+  - "**/libavcodec.so*"
+  - "**/libavcodec-*.so*"
+  - "**/libavdevice.so*"
+  - "**/libavdevice-*.so*"
+  - "**/libavformat.so*"
+  - "**/libavformat-*.so*"
+  - "**/libavfilter.so*"
+  - "**/libavfilter-*.so*"
+  - "**/libavutil.so*"
+  - "**/libavutil-*.so*"
+  - "**/libswscale.so*"
+  - "**/libswscale-*.so*"
+  - "**/libswresample.so*"
+  - "**/libswresample-*.so*"
+  - "**/libpostproc.so*"
+  # Standalone ffmpeg/ffprobe CLIs (e.g. a distro /usr/bin/ffmpeg). Our own copy
+  # at /usr/local/bin/ffmpeg is re-permitted by allow_paths below.
+  - "**/bin/ffmpeg"
+  - "**/bin/ffprobe"
+  # GPL prebuilt ffmpeg binary that imageio-ffmpeg bundles under site-packages.
+  - "**/imageio_ffmpeg/binaries/ffmpeg-*"
+
+# CycloneDX component gate (only applied when --sbom is passed). `min_fixed_version`
+# flags any version strictly below a known-good floor; kept current with upstream
+# ffmpeg maintenance releases.
+deny_components:
+  - name: ffmpeg
+    min_fixed_version: "8.1.2"
+  - name: x264
+  - name: x265
+  - name: fdk-aac
+
+# Absolute-path prefixes whose media libraries are OUR in-tree ffmpeg, built with
+# the narrow decoder/encoder allowlist in wheel_builder.Dockerfile. Matches here
+# are reported as ALLOWED and never fail the build.
+allow_paths:
+  - "/usr/local/lib/libav"
+  - "/usr/local/lib/libsw"
+  - "/usr/local/lib/libpostproc"
+  - "/usr/local/bin/ffmpeg"
+  - "/usr/local/src/ffmpeg"   # retained source tree (kept for legal reasons)
+
+# Explicit third-party exceptions: LOGGED in the report but do NOT fail the build.
+# Every entry must carry a reason and an owner so the waiver is auditable.
+exceptions:
+  - glob: "**/nvidia/dali/.libs/libav*"
+    reason: >-
+      NVIDIA DALI (nvidia-dali-cuda130) bundles its own libav* for its video
+      reader. It is owned and handled by its own component team and tracked
+      separately (OPS-7665) rather than gated here.
+    owner: DALI
