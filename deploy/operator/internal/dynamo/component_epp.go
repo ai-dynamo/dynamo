@@ -92,10 +92,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Value: "true",
 		},
 		{
-			// Match the Rust EPP's documented default (info). debug/trace here
-			// streams continuously to the container log, which consumes node
-			// ephemeral storage and can contribute to DiskPressure eviction.
-			// Override per deployment via extraPodSpec if verbose logs are needed.
 			Name:  "RUST_LOG",
 			Value: "info",
 		},
