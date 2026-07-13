@@ -124,7 +124,7 @@ def disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(
     vllm_config: Any,
 ) -> None:
     """Disable HMA before vLLM builds KV cache groups for incompatible PdConnector children."""
-    kv_cfg = vllm_config.kv_transfer_config
+    kv_cfg = getattr(vllm_config, "kv_transfer_config", None)
     if kv_cfg is None or kv_cfg.kv_connector != "PdConnector":
         return
 
