@@ -296,8 +296,12 @@ def test_request_cancellation_vllm_aggregated(
                 logger.info(f"Testing {description.lower()}...")
 
                 # Send the request (non-blocking)
+                # 2096 is an empirically chosen repro size that still exercises
+                # cancellation while avoiding the XPU crash seen with 16384 tokens.
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, request_type
+                    frontend.frontend_port,
+                    request_type,
+                    max_tokens=2096,
                 )
 
                 # Poll for "Decode Request ID" pattern (vLLM v2 pattern)
