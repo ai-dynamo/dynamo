@@ -208,10 +208,12 @@ impl LLMEngine for VllmBackend {
             .map_err(|e| cannot_connect(format!("failed to resolve handshake port: {e:#}")))?;
 
         let managed_config = {
-            // vLLM 0.24 into_config takes 7 positional args; name them so a future
+            // vLLM 0.25 into_config takes 9 positional args; name them so a future
             // value/signature change can't silently land in the wrong slot.
             let max_model_len: Option<u32> = None; // let vLLM auto-fit from KV profiling
             let max_logprobs: Option<i32> = None;
+            let profiler_config: Option<String> = None;
+            let reasoning_parser: Option<&str> = None;
             let language_model_only = false;
             let disable_log_stats = false; // keep stats on (mirrors with_log_stats(true) below)
             let shutdown_timeout: u64 = 0; // NOTE: 0 = abort in-flight requests on shutdown
@@ -219,6 +221,8 @@ impl LLMEngine for VllmBackend {
                 self.model.clone(),
                 max_model_len,
                 max_logprobs,
+                profiler_config,
+                reasoning_parser,
                 language_model_only,
                 disable_log_stats,
                 shutdown_timeout,
