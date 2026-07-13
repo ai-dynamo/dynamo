@@ -41,16 +41,17 @@ print_launch_banner "Launching SGLang Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HT
 
 python3 -m dynamo.frontend &
 
-# --grpc-port enables the native Rust gRPC server alongside SGLang's HTTP API;
-# --enable-sidecar starts Dynamo against that listener.
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
+# --grpc-port enables the native Rust gRPC server alongside SGLang's HTTP API.
 python3 -m sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_HTTP_PORT" \
     --grpc-port "$SGLANG_GRPC_PORT" \
-    --enable-sidecar \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
+
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
+    dynamo-sglang-sidecar \
+    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
 
 wait_any_exit
