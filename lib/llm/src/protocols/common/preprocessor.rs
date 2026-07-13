@@ -456,7 +456,7 @@ mod tests {
             .unwrap();
         let hint = RouterHint {
             source_control_endpoint: "tcp://127.0.0.1:23280".to_string(),
-            kv_block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
+            block_hashes: vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(22)],
         };
 
         req.attach_router_hint(&hint).unwrap();
@@ -468,7 +468,7 @@ mod tests {
             "tcp://127.0.0.1:23280"
         );
         assert_eq!(
-            extra_args[ROUTER_HINT_EXTRA_ARGS_KEY]["kv_block_hashes"],
+            extra_args[ROUTER_HINT_EXTRA_ARGS_KEY]["block_hashes"],
             serde_json::json!([11, 22])
         );
     }

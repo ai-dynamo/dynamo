@@ -401,7 +401,7 @@ impl LowerTierIndexer {
         owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
 
         Some(RouterHintRootCandidates {
-            kv_block_hashes: chain,
+            block_hashes: chain,
             owner_prefix_blocks,
         })
     }
@@ -988,7 +988,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            candidates.kv_block_hashes,
+            candidates.block_hashes,
             vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),

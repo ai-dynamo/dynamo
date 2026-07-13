@@ -415,14 +415,14 @@ where
         }
         let candidates = candidates?;
 
-        let (kv_block_hashes, source_control_endpoint) = {
+        let (block_hashes, source_control_endpoint) = {
             let configs = self.workers_with_configs.borrow();
             let target_config = configs.get(&target.worker_id)?;
             if !target_config.supports_router_hints() {
                 return None;
             }
 
-            let (source, kv_block_hashes) = candidates.best_source(|worker| {
+            let (source, block_hashes) = candidates.best_source(|worker| {
                 worker != target
                     && configs.get(&worker.worker_id).is_some_and(|config| {
                         config.router_hint_source_control_endpoint().is_some()
@@ -432,16 +432,16 @@ where
                 .get(&source.worker_id)?
                 .router_hint_source_control_endpoint()?
                 .to_string();
-            (kv_block_hashes, source_control_endpoint)
+            (block_hashes, source_control_endpoint)
         };
 
-        if kv_block_hashes.is_empty() {
+        if block_hashes.is_empty() {
             return None;
         }
 
         Some(RouterHint {
             source_control_endpoint,
-            kv_block_hashes,
+            block_hashes,
         })
     }
 

@@ -1099,6 +1099,30 @@ async def test_health_check_aggregated_returns_canary():
     assert payload["token_ids"]
 
 
+def test_build_sampling_params_adapts_router_hint_to_remote_g2_plan():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    router_hint = {
+        "source_control_endpoint": "tcp://127.0.0.1:23280",
+        "block_hashes": [11, 22],
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "extra_args": {"router_hint": router_hint},
+    }
+
+    sp = build_sampling_params(request, default_sampling_params={})
+
+    assert sp.extra_args == {
+        "kv_transfer_params": {
+            "remote_g2_plan": router_hint,
+        }
+    }
+
+
 def test_build_sampling_params_maps_max_thinking_tokens():
     from dynamo.vllm.handlers import build_sampling_params
 

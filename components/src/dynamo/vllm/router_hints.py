@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from dynamo.common.constants import (
@@ -46,5 +47,6 @@ def enable_router_hint_support(runtime_config: Any, engine_args: Any) -> None:
     control_endpoint = _router_hint_source_control_endpoint(engine_args)
     if control_endpoint is not None:
         runtime_config.set_engine_specific(
-            ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY, control_endpoint
+            ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
+            json.dumps(control_endpoint),
         )

@@ -836,6 +836,30 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
+    if isinstance(extra_args, dict):
+        router_hint = extra_args.get("router_hint")
+        if isinstance(router_hint, dict):
+            source_control_endpoint = router_hint.get("source_control_endpoint")
+            block_hashes = router_hint.get("block_hashes")
+            if (
+                isinstance(source_control_endpoint, str)
+                and source_control_endpoint
+                and isinstance(block_hashes, list)
+                and block_hashes
+            ):
+                if sampling_params.extra_args is None:
+                    sampling_params.extra_args = {}
+                kv_transfer_params = sampling_params.extra_args.setdefault(
+                    "kv_transfer_params", {}
+                )
+                if isinstance(kv_transfer_params, dict):
+                    # Compatibility shim: current vLLM KVCC consumes the router
+                    # hint as a remote-G2 plan under kv_transfer_params.
+                    kv_transfer_params["remote_g2_plan"] = {
+                        "source_control_endpoint": source_control_endpoint,
+                        "block_hashes": block_hashes,
+                    }
+
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
     # bridge pressure before chunks cross into Dynamo.

@@ -20,14 +20,14 @@ pub const ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY: &str =
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouterHint {
     pub source_control_endpoint: String,
-    /// Root-aligned source-side KV block hashes. `kv_block_hashes[i]`
+    /// Root-aligned source-side KV block hashes. `block_hashes[i]`
     /// corresponds to request block `i`; the target decides which suffix to fetch.
-    pub kv_block_hashes: Vec<ExternalSequenceBlockHash>,
+    pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouterHintRootCandidates {
-    pub kv_block_hashes: Vec<ExternalSequenceBlockHash>,
+    pub block_hashes: Vec<ExternalSequenceBlockHash>,
     pub owner_prefix_blocks: Vec<(WorkerWithDpRank, usize)>,
 }
 
@@ -50,7 +50,7 @@ impl RouterHintRootCandidates {
                     .then_with(|| right_worker.cmp(left_worker))
             })?;
 
-        Some((source, self.kv_block_hashes.get(..prefix_blocks)?.to_vec()))
+        Some((source, self.block_hashes.get(..prefix_blocks)?.to_vec()))
     }
 }
 
@@ -64,7 +64,7 @@ mod tests {
         let worker_b = WorkerWithDpRank::new(8, 0);
         let excluded = WorkerWithDpRank::new(9, 0);
         let candidates = RouterHintRootCandidates {
-            kv_block_hashes: vec![
+            block_hashes: vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102),
                 ExternalSequenceBlockHash(103),
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn best_source_fails_closed_on_invalid_prefix_length() {
         let candidates = RouterHintRootCandidates {
-            kv_block_hashes: vec![ExternalSequenceBlockHash(101)],
+            block_hashes: vec![ExternalSequenceBlockHash(101)],
             owner_prefix_blocks: vec![(WorkerWithDpRank::new(7, 0), 2)],
         };
 
