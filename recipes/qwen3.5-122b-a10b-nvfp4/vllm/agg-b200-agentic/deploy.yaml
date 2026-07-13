@@ -1,0 +1,167 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3.5-122B-A10B-NVFP4 — aggregated, 1x B200 per worker (TP1), agentic workload.
+#
+# At TP1 the 122B-A10B (10B active) MoE fits one B200, so aggregation avoids all
+# cross-GPU KV transfer. Scale out by raising the worker `replicas` behind the
+# KV-aware router — each worker publishes KV-cache events (see --kv-events-config)
+# so the router sends each request to the replica that already holds its prefix.
+#
+# NOTE: speculative decoding (MTP) is intentionally NOT enabled. On this hybrid
+# DeltaNet arch, MTP + prefix caching forces mamba_cache_mode='align', whose
+# conv-state copy path crashes under real concurrent traffic (vLLM issue #38898 /
+# PR #40454; NVBug 6442165). Do not add --speculative-config.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-122b-agg-b200-agentic
+  labels:
+    app.kubernetes.io/name: qwen35-122b-agg-b200-agentic
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - kv
+                - --router-kv-events
+                - --kv-cache-block-size
+                - "64"
+                - --http-port
+                - "8000"
+                - --trust-remote-code
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-rc.7
+              resources: {}
+      replicas: 1
+
+    - name: agg
+      type: worker
+      sharedMemorySize: 20Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          containers:
+            - name: main
+              args:
+                - --model=nvidia/Qwen3.5-122B-A10B-NVFP4
+                - --served-model-name=Qwen/Qwen3.5-122B-A10B
+                - --trust-remote-code
+                - --tensor-parallel-size=1
+                - --quantization=modelopt_fp4
+                - --kv-cache-dtype=fp8
+                - --moe-backend=flashinfer_trtllm
+                - --mamba-ssm-cache-dtype=float16
+                - --no-disable-hybrid-kv-cache-manager
+                - --enable-prefix-caching
+                - --block-size=64
+                - --max-num-seqs=32
+                - --max-num-batched-tokens=16384
+                - --gpu-memory-utilization=0.9
+                # Publish KV-cache events so the frontend's KV-aware router
+                # (--router-kv-events) routes each request to the replica already
+                # holding its prefix. REQUIRED once replicas > 1 — without it,
+                # multi-replica routing degrades toward round-robin and the
+                # 90%-reuse throughput advantage is lost.
+                - --kv-events-config={"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}
+                # --max-model-len omitted on purpose -> uses the model default
+                # (262144). It is a length cap, not a throughput lever: the KV
+                # pool is sized by --gpu-memory-utilization, so capping length
+                # costs nothing and only drops long-tail requests.
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CONFIG_ROOT
+                  value: /tmp/vllm-config
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: VLLM_WORKER_MULTIPROC_METHOD
+                  value: spawn
+                # Hybrid (DeltaNet linear-attn + MoE + full-attn) SSM cache knobs.
+                - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+                  value: "0"
+                - name: VLLM_SSM_CONV_STATE_LAYOUT
+                  value: DS
+                - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
+                  value: "1"
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-rc.7
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                  memory: "48Gi"
+                limits:
+                  nvidia.com/gpu: "1"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
+                # flashinfer writes JIT cubins here at first run; the image path
+                # is read-only, so back it with a writable emptyDir.
+                - mountPath: /usr/local/lib/python3.12/dist-packages/flashinfer_cubin/cubins/flashinfer
+                  name: fi-cubins
+              workingDir: /workspace/
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: fi-cubins
+              emptyDir:
+                medium: Memory
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1

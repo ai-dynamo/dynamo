@@ -1,0 +1,315 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Qwen3.5-122B-A10B-NVFP4 — disaggregated 1P2D (no MTP), 1x B200 per worker (TP1).
+#
+# Prefill/decode split with NIXL KV transfer over InfiniBand. 1 prefill : 2 decode
+# with a larger decode batch (--max-num-seqs 128).
+#
+# NOTE — no MTP: speculative decoding is intentionally absent. Disaggregation
+# needs DS conv-state layout (NIXL's 3-read Mamba transfer), but MTP + prefix
+# caching forces mamba_cache_mode='align', which is unimplemented for DS
+# (vLLM issue #38898 / PR #40454; NVBug 6442165). MTP + disagg crashes the decode
+# EngineCore under real concurrent traffic — the two are mutually exclusive here.
+#
+# Requires GPU-local RDMA NICs exposed to pods (e.g. an `rdma/ib` device plugin
+# giving each worker its topology-local NIC).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qwen35-122b-disagg-b200-agentic-config
+  labels:
+    app.kubernetes.io/name: qwen35-122b-disagg-b200-agentic
+    app.kubernetes.io/part-of: dynamo
+data:
+  kv-transfer-config: |-
+    {
+      "kv_connector": "NixlConnector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": { "num_threads": 8 }
+    }
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen35-122b-disagg-b200-agentic
+  labels:
+    app.kubernetes.io/name: qwen35-122b-disagg-b200-agentic
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              command:
+                - python3
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - kv
+                - --router-kv-events
+                - --kv-cache-block-size
+                - "64"
+                - --http-port
+                - "8000"
+                - --trust-remote-code
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-rc.7
+              resources: {}
+      replicas: 1
+
+    - name: prefill
+      type: prefill
+      sharedMemorySize: 20Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          containers:
+            - name: main
+              args:
+                - --model=nvidia/Qwen3.5-122B-A10B-NVFP4
+                - --served-model-name=Qwen/Qwen3.5-122B-A10B
+                - --trust-remote-code
+                - --tensor-parallel-size=1
+                - --quantization=modelopt_fp4
+                - --kv-cache-dtype=fp8
+                - --moe-backend=flashinfer_trtllm
+                - --mamba-ssm-cache-dtype=float16
+                - --no-disable-hybrid-kv-cache-manager
+                - --enable-prefix-caching
+                - --block-size=64
+                - --max-num-seqs=32
+                - --max-num-batched-tokens=16384
+                - --gpu-memory-utilization=0.9
+                - --disaggregation-mode=prefill
+                - --kv-transfer-config=$(KV_TRANSFER_CONFIG)
+                - --kv-events-config={"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CONFIG_ROOT
+                  value: /tmp/vllm-config
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: VLLM_WORKER_MULTIPROC_METHOD
+                  value: spawn
+                - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+                  value: "0"
+                - name: VLLM_SSM_CONV_STATE_LAYOUT
+                  value: DS
+                - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
+                  value: "1"
+                - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
+                  value: "0"
+                # Force GPU-local RDMA (rc_mlx5 IB) and skip the cuda_ipc slow path.
+                - name: UCX_TLS
+                  value: "^cuda_ipc"
+                - name: UCX_RNDV_SCHEME
+                  value: get_zcopy
+                - name: UCX_MAX_RNDV_RAILS
+                  value: "4"
+                - name: NCCL_IB_DISABLE
+                  value: "0"
+                - name: KV_TRANSFER_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: qwen35-122b-disagg-b200-agentic-config
+                      key: kv-transfer-config
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-rc.7
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                  rdma/ib: "1"
+                  memory: "48Gi"
+                limits:
+                  nvidia.com/gpu: "1"
+                  rdma/ib: "1"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
+                - mountPath: /usr/local/lib/python3.12/dist-packages/flashinfer_cubin/cubins/flashinfer
+                  name: fi-cubins
+              workingDir: /workspace/
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: fi-cubins
+              emptyDir:
+                medium: Memory
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 1
+
+    - name: decode
+      type: decode
+      sharedMemorySize: 20Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          containers:
+            - name: main
+              args:
+                - --model=nvidia/Qwen3.5-122B-A10B-NVFP4
+                - --served-model-name=Qwen/Qwen3.5-122B-A10B
+                - --trust-remote-code
+                - --tensor-parallel-size=1
+                - --quantization=modelopt_fp4
+                - --kv-cache-dtype=fp8
+                - --moe-backend=flashinfer_trtllm
+                - --mamba-ssm-cache-dtype=float16
+                - --no-disable-hybrid-kv-cache-manager
+                - --enable-prefix-caching
+                - --block-size=64
+                # Larger decode batch than prefill: spends 1P2D's interactivity
+                # surplus for throughput — the best no-MTP disagg point measured
+                # on the real mooncake trace (~1,112 tok/s/GPU at the SLA knee).
+                - --max-num-seqs=128
+                - --max-num-batched-tokens=16384
+                - --gpu-memory-utilization=0.9
+                - --disaggregation-mode=decode
+                - --kv-transfer-config=$(KV_TRANSFER_CONFIG)
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+                - name: VLLM_CONFIG_ROOT
+                  value: /tmp/vllm-config
+                - name: VLLM_CACHE_ROOT
+                  value: /tmp/vllm-cache
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: VLLM_WORKER_MULTIPROC_METHOD
+                  value: spawn
+                - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+                  value: "0"
+                - name: VLLM_SSM_CONV_STATE_LAYOUT
+                  value: DS
+                - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
+                  value: "1"
+                - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
+                  value: "0"
+                - name: UCX_TLS
+                  value: "^cuda_ipc"
+                - name: UCX_RNDV_SCHEME
+                  value: get_zcopy
+                - name: UCX_MAX_RNDV_RAILS
+                  value: "4"
+                - name: NCCL_IB_DISABLE
+                  value: "0"
+                - name: KV_TRANSFER_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: qwen35-122b-disagg-b200-agentic-config
+                      key: kv-transfer-config
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-rc.7
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                  rdma/ib: "1"
+                  memory: "48Gi"
+                limits:
+                  nvidia.com/gpu: "1"
+                  rdma/ib: "1"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              volumeMounts:
+                - mountPath: /model-cache
+                  name: model-cache
+                - mountPath: /usr/local/lib/python3.12/dist-packages/flashinfer_cubin/cubins/flashinfer
+                  name: fi-cubins
+              workingDir: /workspace/
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: fi-cubins
+              emptyDir:
+                medium: Memory
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+      replicas: 2
