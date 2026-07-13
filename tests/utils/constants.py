@@ -32,6 +32,21 @@ class DefaultPort(IntEnum):
     SYSTEM2 = 8082
 
 
+class DynamoPortRange(IntEnum):
+    """Disjoint port bases for Dynamo CI allocations.
+
+    These bases are intentionally spaced far enough apart to leave headroom
+    for the allocator's 500-port random start offset plus sequential retries,
+    so concurrent host-network test containers can allocate independently
+    without colliding across serve, router, NIXL, and FPM workloads.
+    """
+
+    SERVE = 24000
+    NIXL = 25500
+    ROUTER = 27000
+    FPM = 28500
+
+
 # Env-driven defaults for specific test groups
 # Allows overriding via environment variables
 ROUTER_MODEL_NAME = os.environ.get("ROUTER_MODEL_NAME", QWEN)

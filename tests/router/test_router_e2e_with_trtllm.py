@@ -19,7 +19,7 @@ from tests.router.e2e_harness import (
     run_router_decisions_test,
 )
 from tests.router.helper import generate_random_suffix
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DynamoPortRange, DefaultPort
 from tests.utils.gpu_args import build_trtllm_override_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
@@ -118,7 +118,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
         # Dynamically allocate unique system ports (one per worker) to avoid
         # conflicts when tests run in parallel via pytest-xdist.
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
         request.addfinalizer(lambda: deallocate_ports(self._system_ports))
 
         if trtllm_args is None:

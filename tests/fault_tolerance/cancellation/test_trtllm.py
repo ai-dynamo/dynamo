@@ -25,7 +25,7 @@ from tests.fault_tolerance.cancellation.utils import (
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import DynamoPortRange, FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -61,7 +61,7 @@ class DynamoWorkerProcess(ManagedProcess):
             mode: One of "prefill_and_decode", "prefill", "decode"
         """
         # Allocate system port for this worker
-        system_port = allocate_port(9100)
+        system_port = allocate_port(DynamoPortRange.SERVE.value)
         self.system_port = system_port
         self.frontend_port = frontend_port
 
