@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("vllm.v1.engine.async_llm")
 pytest.importorskip("vllm.usage.usage_lib")
 
+from dynamo.common.constants import DisaggregationMode  # noqa: E402
 from dynamo.vllm.handlers import VllmEnginePauseController  # noqa: E402
 from dynamo.vllm.llm_engine import VllmLLMEngine  # noqa: E402
 
@@ -31,6 +32,7 @@ def _make_engine(include_scale: bool = False) -> VllmLLMEngine:
         resume_generation=AsyncMock(),
         start_profile=AsyncMock(),
         stop_profile=AsyncMock(),
+        reset_prefix_cache=AsyncMock(return_value=True),
     )
     if include_scale:
         engine_client.scale_elastic_ep = AsyncMock()
@@ -43,14 +45,83 @@ def _make_engine(include_scale: bool = False) -> VllmLLMEngine:
     return engine
 
 
-@pytest.mark.asyncio
-async def test_engine_controls_expose_vllm_management_capabilities():
-    controls = _make_engine().supported_controls()
+@pytest.mark.parametrize(
+    "mode",
+    [
+        DisaggregationMode.AGGREGATED,
+        DisaggregationMode.PREFILL,
+        DisaggregationMode.DECODE,
+    ],
+)
+def test_engine_controls_expose_vllm_management_capabilities(mode):
+    engine = _make_engine()
+    engine.disaggregation_mode = mode
+    controls = engine.supported_controls()
 
-    assert controls == {"start_profile", "stop_profile", "sleep", "wake_up"}
+    assert controls == {
+        "start_profile",
+        "stop_profile",
+        "sleep",
+        "wake_up",
+        "clear_kv_blocks",
+    }
 
     scaled_controls = _make_engine(include_scale=True).supported_controls()
     assert "scale_elastic_ep" in scaled_controls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset_result", [True, None])
+async def test_clear_kv_blocks_resets_prefix_and_connector_cache(reset_result):
+    engine = _make_engine()
+    engine.engine_client.reset_prefix_cache.return_value = reset_result
+
+    result = await engine.engine_control("clear_kv_blocks", {})
+
+    assert result == {"status": "success", "message": "KV cache cleared"}
+    engine.engine_client.reset_prefix_cache.assert_awaited_once_with(
+        reset_connector=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_reset_failure():
+    engine = _make_engine()
+    engine.engine_client.reset_prefix_cache.return_value = False
+
+    result = await engine.engine_control("clear_kv_blocks", {"ignored": True})
+
+    assert result == {"status": "error", "message": "KV cache reset failed"}
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_engine_exception():
+    engine = _make_engine()
+    engine.engine_client.reset_prefix_cache.side_effect = RuntimeError("cache busy")
+
+    result = await engine.engine_control("clear_kv_blocks", {})
+
+    assert result == {"status": "error", "message": "cache busy"}
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_unavailable_engine():
+    engine = _make_engine()
+    engine.engine_client = None
+
+    result = await engine.engine_control("clear_kv_blocks", {})
+
+    assert result == {"status": "error", "message": "Engine is not running"}
+
+
+@pytest.mark.asyncio
+async def test_unsupported_engine_control_retains_error_contract():
+    result = await _make_engine().engine_control("not_supported", {})
+
+    assert result == {
+        "status": "error",
+        "message": "unsupported engine control: not_supported",
+    }
 
 
 @pytest.mark.asyncio
