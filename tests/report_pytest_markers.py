@@ -243,6 +243,7 @@ STUB_MODULES = [
     "vllm.tool_parsers.qwen3_engine_tool_parser",
     "vllm.utils",
     "vllm.utils.async_utils",
+    "vllm.utils.func_utils",
     "vllm.utils.hashing",
     "vllm.utils.system_utils",
     "vllm.v1",
