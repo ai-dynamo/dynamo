@@ -96,6 +96,7 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 			if err != nil {
 				return false, "", nil, fmt.Errorf("failed to check component %q (pcsg/%s): %w", componentName, resourceName, err)
 			}
+			componentStatus.RuntimeNamespace = dgd.GetDynamoNamespaceForComponent(component)
 			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("pcsg/%s: %s", resourceName, reason))
@@ -105,6 +106,7 @@ func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client 
 			if err != nil {
 				return false, "", nil, fmt.Errorf("failed to check component %q (podclique/%s): %w", componentName, resourceName, err)
 			}
+			componentStatus.RuntimeNamespace = dgd.GetDynamoNamespaceForComponent(component)
 			componentStatuses[componentName] = componentStatus
 			if !ok {
 				notReadyComponents = append(notReadyComponents, fmt.Sprintf("podclique/%s: %s", resourceName, reason))
@@ -266,25 +268,40 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	return true, "", serviceStatus, nil
 }
 
-// specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint
-// to a Grove TopologyConstraint, extracting only the PackDomain.
+// specToGroveTopologyConstraint converts a deployment-level topology constraint
+// to the current Grove API shape.
 func specToGroveTopologyConstraint(tc *v1beta1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
-	if tc == nil || tc.PackDomain == "" {
+	if tc == nil {
 		return nil
 	}
-	return &grovev1alpha1.TopologyConstraint{
-		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
-	}
+	return groveTopologyConstraint(tc.ClusterTopologyName, tc.PackDomain)
 }
 
-// toGroveTopologyConstraint converts a service-level TopologyConstraint
-// to a Grove TopologyConstraint.
-func toGroveTopologyConstraint(tc *v1beta1.TopologyConstraint) *grovev1alpha1.TopologyConstraint {
+// toGroveTopologyConstraint converts a component-level topology constraint to
+// the current Grove API shape. Components inherit topologyName from a
+// constrained PodCliqueSet. When the deployment has no packing constraint,
+// there is no parent Grove constraint to inherit from, so each constrained
+// component carries the deployment's topologyName explicitly.
+func toGroveTopologyConstraint(tc *v1beta1.TopologyConstraint, deploymentTC *v1beta1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {
 	if tc == nil || tc.PackDomain == "" {
 		return nil
 	}
+	topologyName := ""
+	if deploymentTC != nil && deploymentTC.PackDomain == "" {
+		topologyName = deploymentTC.ClusterTopologyName
+	}
+	return groveTopologyConstraint(topologyName, tc.PackDomain)
+}
+
+func groveTopologyConstraint(topologyName string, packDomain v1beta1.TopologyDomain) *grovev1alpha1.TopologyConstraint {
+	if packDomain == "" {
+		return nil
+	}
 	return &grovev1alpha1.TopologyConstraint{
-		PackDomain: grovev1alpha1.TopologyDomain(tc.PackDomain),
+		TopologyName: topologyName,
+		Pack: &grovev1alpha1.TopologyPackConstraint{
+			RequiredDomain: grovev1alpha1.TopologyDomain(packDomain),
+		},
 	}
 }
 

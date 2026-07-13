@@ -24,7 +24,7 @@ const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ScopedReplicaEvent {
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub block_size: u32,
     pub event: ActiveSequenceEvent,
 }
@@ -105,7 +105,7 @@ pub(crate) struct ScopedSequencePublisher {
 #[derive(Clone)]
 struct ScopedReplicaPublisher {
     model_name: Arc<str>,
-    tenant_id: Arc<str>,
+    routing_group: Arc<str>,
     block_size: u32,
     tx: ReplicaEventSender,
 }
@@ -117,14 +117,14 @@ impl ScopedSequencePublisher {
 
     pub(crate) fn enabled(
         model_name: Arc<str>,
-        tenant_id: Arc<str>,
+        routing_group: Arc<str>,
         block_size: u32,
         tx: ReplicaEventSender,
     ) -> Self {
         Self {
             replica: Some(ScopedReplicaPublisher {
                 model_name,
-                tenant_id,
+                routing_group,
                 block_size,
                 tx,
             }),
@@ -142,7 +142,7 @@ impl SequencePublisher for ScopedSequencePublisher {
         };
         let envelope = ScopedReplicaEvent {
             model_name: replica.model_name.to_string(),
-            tenant_id: replica.tenant_id.to_string(),
+            routing_group: replica.routing_group.to_string(),
             block_size: replica.block_size,
             event: event.clone(),
         };
@@ -151,7 +151,7 @@ impl SequencePublisher for ScopedSequencePublisher {
             Err(mpsc::error::TrySendError::Full(event)) => {
                 tracing::trace!(
                     model_name = %event.model_name,
-                    tenant_id = %event.tenant_id,
+                    routing_group = %event.routing_group,
                     request_id = %event.event.request_id,
                     "Replica publisher channel full; dropping event"
                 );
@@ -241,7 +241,7 @@ pub(crate) fn setup_replica_sync(
 pub(crate) fn setup_scoped_replica_sync(
     config: Option<&ReplicaSyncConfig>,
     model_name: &str,
-    tenant_id: &str,
+    routing_group: &str,
     block_size: u32,
 ) -> ScopedReplicaSync {
     let Some(config) = config else {
@@ -257,7 +257,7 @@ pub(crate) fn setup_scoped_replica_sync(
     ScopedReplicaSync {
         publisher: ScopedSequencePublisher::enabled(
             Arc::from(model_name),
-            Arc::from(tenant_id),
+            Arc::from(routing_group),
             block_size,
             config.outbound_tx.clone(),
         ),
@@ -535,7 +535,7 @@ mod tests {
     fn event() -> ScopedReplicaEvent {
         ScopedReplicaEvent {
             model_name: "model".to_string(),
-            tenant_id: "tenant".to_string(),
+            routing_group: "group".to_string(),
             block_size: 16,
             event: ActiveSequenceEvent {
                 request_id: "request".to_string(),
@@ -569,11 +569,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn replica_event_wire_schema_uses_routing_group() {
+        let payload = rmp_serde::to_vec_named(&event()).unwrap();
+        let value: serde_json::Value = rmp_serde::from_slice(&payload).unwrap();
+
+        assert_eq!(value["routing_group"], "group");
+        assert!(value.get("tenant_id").is_none());
+
+        let decoded: ScopedReplicaEvent = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(decoded.routing_group, "group");
+    }
+
+    #[test]
+    fn legacy_replica_event_wire_schema_is_rejected() {
+        let legacy = serde_json::json!({
+            "model_name": "model",
+            "tenant_id": "tenant",
+            "block_size": 16,
+            "event": event().event,
+        });
+        let payload = rmp_serde::to_vec_named(&legacy).unwrap();
+
+        assert!(rmp_serde::from_slice::<ScopedReplicaEvent>(&payload).is_err());
+    }
+
     #[tokio::test]
     async fn scoped_publisher_drops_when_outbound_channel_is_full() {
         let (tx, mut rx) = mpsc::channel(1);
         let publisher =
-            ScopedSequencePublisher::enabled(Arc::from("model"), Arc::from("tenant"), 16, tx);
+            ScopedSequencePublisher::enabled(Arc::from("model"), Arc::from("group"), 16, tx);
         let event = event().event;
 
         publisher.publish_event(&event).await.unwrap();
@@ -653,7 +678,7 @@ mod tests {
                 dispatch_registry_b.dispatch_replica_event(event)
             })
             .unwrap();
-        let key = TrackerKey::new("model".to_string(), Some("tenant".to_string()));
+        let key = TrackerKey::new("model".to_string(), Some("group".to_string()));
         registry_a.register(key.clone(), 1, 16, 0, 1).unwrap();
         registry_b.register(key.clone(), 1, 16, 0, 1).unwrap();
         let worker = WorkerWithDpRank::new(1, 0);
