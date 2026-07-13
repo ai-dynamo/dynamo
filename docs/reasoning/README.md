@@ -50,7 +50,7 @@ require the opening tag to be present in the model output.
 |---|---|---|---|---|
 | `kimi_k25` | Kimi K2.5 / Kimi K2.6 format-compatible thinking models | Dynamo-only | Yes | `<think>...</think>` with force-reasoning |
 | `kimi` | Kimi K2 Instruct / Thinking with Unicode delimiters | Dynamo-only | No | `◁think▷...◁/think▷` |
-| `minimax_m2` | MiniMax M2 / M2.1 / M2.7 | vLLM: `minimax_m2` | Yes | `<think>...</think>` with force-reasoning |
+| `minimax_m2` | MiniMax M2 / M2.5 / M2.7 | vLLM: `minimax_m2` | Yes | `<think>...</think>` with force-reasoning |
 | `minimax_m3` | MiniMax M3 | vLLM: `minimax_m3` | No | `<mm:think>...</mm:think>`; recovers a prompt-prefilled opener |
 | `minimax_append_think` | MiniMax M2 / M2.1 | Dynamo-only | No | Deprecated. Legacy pass-through with an implicit `<think>` opener; use `minimax_m2` for MiniMax M2 tool-calling deployments |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseek-v4` | No | `<think>...</think>`. Aliases: `deepseek-v4`, `deepseekv4` |
