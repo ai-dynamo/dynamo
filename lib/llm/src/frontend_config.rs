@@ -13,6 +13,20 @@ use dynamo_runtime::config::{
     environment_names::llm::{self as env_llm, metrics as env_metrics},
 };
 
+fn engine_api_enabled_from_env() -> bool {
+    if std::env::var_os(env_llm::DYN_ENABLE_ENGINE_API).is_some() {
+        return env_is_truthy(env_llm::DYN_ENABLE_ENGINE_API);
+    }
+    if std::env::var_os(env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE).is_some() {
+        tracing::warn!(
+            legacy = env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE,
+            replacement = env_llm::DYN_ENABLE_ENGINE_API,
+            "deprecated engine API environment variable is in use"
+        );
+    }
+    env_is_truthy(env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE)
+}
+
 /// Metrics naming controls for frontend-owned services.
 ///
 /// Contains the optional metric name prefix resolved from `--metrics-prefix` or
@@ -143,9 +157,10 @@ impl Default for StreamingDispatchConfig {
 /// the frontend CLI/env contract. `EntrypointArgs` builds this from flat Python
 /// kwargs, `LocalModel` carries it, and `HttpServiceConfig` installs it into
 /// request-handler state.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontendApiConfig {
     anthropic: AnthropicApiConfig,
+    engine_api_enabled: bool,
     streaming_dispatch: StreamingDispatchConfig,
 }
 
@@ -153,6 +168,7 @@ impl FrontendApiConfig {
     pub fn new(anthropic: AnthropicApiConfig, streaming_dispatch: StreamingDispatchConfig) -> Self {
         Self {
             anthropic,
+            engine_api_enabled: false,
             streaming_dispatch,
         }
     }
@@ -163,8 +179,25 @@ impl FrontendApiConfig {
         enable_streaming_tool_dispatch: bool,
         enable_streaming_reasoning_dispatch: bool,
     ) -> Self {
+        Self::from_flags_with_engine_apis(
+            enable_anthropic_api,
+            strip_anthropic_preamble,
+            false,
+            enable_streaming_tool_dispatch,
+            enable_streaming_reasoning_dispatch,
+        )
+    }
+
+    pub fn from_flags_with_engine_apis(
+        enable_anthropic_api: bool,
+        strip_anthropic_preamble: bool,
+        enable_engine_apis: bool,
+        enable_streaming_tool_dispatch: bool,
+        enable_streaming_reasoning_dispatch: bool,
+    ) -> Self {
         Self {
             anthropic: AnthropicApiConfig::new(enable_anthropic_api, strip_anthropic_preamble),
+            engine_api_enabled: enable_engine_apis,
             streaming_dispatch: StreamingDispatchConfig::new(
                 enable_streaming_tool_dispatch,
                 enable_streaming_reasoning_dispatch,
@@ -178,8 +211,25 @@ impl FrontendApiConfig {
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
     ) -> Option<Self> {
+        Self::from_optional_flags_with_engine_apis(
+            enable_anthropic_api,
+            strip_anthropic_preamble,
+            None,
+            enable_streaming_tool_dispatch,
+            enable_streaming_reasoning_dispatch,
+        )
+    }
+
+    pub fn from_optional_flags_with_engine_apis(
+        enable_anthropic_api: Option<bool>,
+        strip_anthropic_preamble: Option<bool>,
+        enable_engine_apis: Option<bool>,
+        enable_streaming_tool_dispatch: Option<bool>,
+        enable_streaming_reasoning_dispatch: Option<bool>,
+    ) -> Option<Self> {
         if enable_anthropic_api.is_none()
             && strip_anthropic_preamble.is_none()
+            && enable_engine_apis.is_none()
             && enable_streaming_tool_dispatch.is_none()
             && enable_streaming_reasoning_dispatch.is_none()
         {
@@ -187,9 +237,10 @@ impl FrontendApiConfig {
         }
 
         let defaults = Self::default();
-        Some(Self::from_flags(
+        Some(Self::from_flags_with_engine_apis(
             enable_anthropic_api.unwrap_or_else(|| defaults.anthropic().enabled()),
             strip_anthropic_preamble.unwrap_or_else(|| defaults.anthropic().strip_preamble()),
+            enable_engine_apis.unwrap_or_else(|| defaults.engine_api_enabled()),
             enable_streaming_tool_dispatch
                 .unwrap_or_else(|| defaults.streaming_dispatch().tool_dispatch()),
             enable_streaming_reasoning_dispatch
@@ -205,12 +256,30 @@ impl FrontendApiConfig {
         &mut self.anthropic
     }
 
+    pub fn engine_api_enabled(&self) -> bool {
+        self.engine_api_enabled
+    }
+
+    pub fn set_engine_api_enabled(&mut self, enabled: bool) {
+        self.engine_api_enabled = enabled;
+    }
+
     pub fn streaming_dispatch(&self) -> &StreamingDispatchConfig {
         &self.streaming_dispatch
     }
 
     pub fn streaming_dispatch_mut(&mut self) -> &mut StreamingDispatchConfig {
         &mut self.streaming_dispatch
+    }
+}
+
+impl Default for FrontendApiConfig {
+    fn default() -> Self {
+        Self {
+            anthropic: AnthropicApiConfig::default(),
+            engine_api_enabled: engine_api_enabled_from_env(),
+            streaming_dispatch: StreamingDispatchConfig::default(),
+        }
     }
 }
 
@@ -227,8 +296,9 @@ mod tests {
 
     #[test]
     fn optional_flags_preserve_explicit_false_values() {
-        let config = FrontendApiConfig::from_optional_flags(
+        let config = FrontendApiConfig::from_optional_flags_with_engine_apis(
             Some(false),
+            Some(true),
             Some(true),
             Some(false),
             Some(true),
@@ -237,6 +307,7 @@ mod tests {
 
         assert!(!config.anthropic().enabled());
         assert!(config.anthropic().strip_preamble());
+        assert!(config.engine_api_enabled());
         assert!(!config.streaming_dispatch().tool_dispatch());
         assert!(config.streaming_dispatch().reasoning_dispatch());
     }
@@ -247,19 +318,46 @@ mod tests {
             [
                 (env_llm::DYN_ENABLE_ANTHROPIC_API, Some("1")),
                 (env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE, Some("1")),
+                (env_llm::DYN_ENABLE_ENGINE_API, Some("1")),
                 (env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH, Some("1")),
                 (env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH, Some("1")),
             ],
             || {
-                let config =
-                    FrontendApiConfig::from_optional_flags(Some(false), None, None, Some(false))
-                        .expect("partial flags should produce a config");
+                let config = FrontendApiConfig::from_optional_flags_with_engine_apis(
+                    Some(false),
+                    None,
+                    None,
+                    None,
+                    Some(false),
+                )
+                .expect("partial flags should produce a config");
 
                 assert!(!config.anthropic().enabled());
                 assert!(config.anthropic().strip_preamble());
+                assert!(config.engine_api_enabled());
                 assert!(config.streaming_dispatch().tool_dispatch());
                 assert!(!config.streaming_dispatch().reasoning_dispatch());
             },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn legacy_generate_env_enables_generic_engine_api_unless_replaced() {
+        temp_env::with_vars(
+            [
+                (env_llm::DYN_ENABLE_ENGINE_API, None::<&str>),
+                (env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE, Some("1")),
+            ],
+            || assert!(FrontendApiConfig::default().engine_api_enabled()),
+        );
+
+        temp_env::with_vars(
+            [
+                (env_llm::DYN_ENABLE_ENGINE_API, Some("0")),
+                (env_llm::DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE, Some("1")),
+            ],
+            || assert!(!FrontendApiConfig::default().engine_api_enabled()),
         );
     }
 }

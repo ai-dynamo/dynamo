@@ -5,7 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.capacity import (
+    ENGINE_GENERATE_ENDPOINT,
+    ENGINE_GENERATE_PROTOCOL_VERSION,
+    ENGINE_GENERATE_PROTOCOL_VERSION_KEY,
+    advertise_engine_generate_capability,
+    get_metrics_model_name,
+    get_spec_decode_runtime_data,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -70,3 +77,21 @@ def test_spec_decode_runtime_data_ignores_invalid_nextn(speculative_config):
     vllm_config = SimpleNamespace(speculative_config=None)
 
     assert get_spec_decode_runtime_data(config, vllm_config) is None
+
+
+def test_engine_generate_capability_advertises_only_implemented_protocol():
+    class RuntimeConfig:
+        def __init__(self):
+            self.values = {}
+
+        def set_engine_specific(self, key, value):
+            self.values[key] = value
+
+    runtime_config = RuntimeConfig()
+    advertise_engine_generate_capability(runtime_config)
+
+    assert runtime_config.values == {
+        ENGINE_GENERATE_PROTOCOL_VERSION_KEY: str(ENGINE_GENERATE_PROTOCOL_VERSION)
+    }
+    assert ENGINE_GENERATE_ENDPOINT == "engine_generate_v1"
+    assert "engine_generate" not in runtime_config.values

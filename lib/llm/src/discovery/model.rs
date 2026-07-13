@@ -20,12 +20,12 @@ use crate::protocols::openai::ParsingOptions;
 use crate::types::{
     RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
+    inference::generate::GenerateStreamingEngine,
     openai::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
-        videos::OpenAIVideosStreamingEngine,
+        images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -185,6 +185,13 @@ impl Model {
             .any(|entry| entry.value().has_chat_engine())
     }
 
+    /// Check if any WorkerSet has an engine-native generate engine.
+    pub fn has_generate_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_generate_engine())
+    }
+
     /// Check if any WorkerSet has a completions engine.
     pub fn has_completions_engine(&self) -> bool {
         self.worker_sets
@@ -232,13 +239,6 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_realtime_engine())
-    }
-
-    /// Check if any WorkerSet has a generate engine.
-    pub fn has_generate_engine(&self) -> bool {
-        self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_generate_engine())
     }
 
     // -- Model serving readiness --
@@ -583,8 +583,12 @@ impl Model {
     }
 
     pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
-        self.select_worker_set_with(|ws| ws.generate_engine.clone())
-            .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+        self.select_worker_set_with(|ws| {
+            ws.has_available_generate_engine()
+                .then(|| ws.generate_engine.clone())
+                .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
@@ -607,17 +611,6 @@ impl Model {
         .ok_or_else(|| self.engine_error(self.has_completions_engine()))
     }
 
-    pub fn get_generate_engine_with_parsing(
-        &self,
-    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| {
-            ws.generate_engine
-                .clone()
-                .map(|e| (e, ws.parsing_options()))
-        })
-        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
-    }
-
     // -- Worker monitoring (aggregated across WorkerSets) --
 
     /// Get load threshold config from the first WorkerSet that has a monitor.
@@ -636,8 +629,55 @@ impl Model {
                     result = Some(monitor.load_threshold_config());
                 }
             }
+            if let Some(ref monitor) = entry.value().engine_generate_worker_monitor {
+                if let Some(cfg) = config {
+                    monitor.set_load_threshold_config(cfg);
+                }
+                if result.is_none() {
+                    result = Some(monitor.load_threshold_config());
+                }
+            }
         }
         result
+    }
+
+    pub(crate) fn refresh_prefill_routers_for_namespace(
+        &self,
+        namespace: &str,
+        engine_generate: bool,
+        endpoint: dynamo_runtime::component::Endpoint,
+    ) -> bool {
+        let mut refreshed = false;
+        for entry in self.worker_sets.iter() {
+            let worker_set = entry.value();
+            if worker_set.namespace() != namespace {
+                continue;
+            }
+            let router = if engine_generate {
+                worker_set.engine_generate_prefill_router.as_ref()
+            } else {
+                worker_set.prefill_router.as_ref()
+            };
+            if let Some(router) = router {
+                refreshed |= router.refresh_activation_endpoint(endpoint.clone());
+            }
+        }
+        refreshed
+    }
+
+    pub(crate) fn deactivate_prefill_routers_for_namespace(&self, namespace: &str) {
+        for entry in self.worker_sets.iter() {
+            let worker_set = entry.value();
+            if worker_set.namespace() != namespace {
+                continue;
+            }
+            if let Some(router) = &worker_set.prefill_router {
+                router.deactivate();
+            }
+            if let Some(router) = &worker_set.engine_generate_prefill_router {
+                router.deactivate();
+            }
+        }
     }
 
     /// Total worker count across all WorkerSets.

@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::AtomicU8;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU8, AtomicU64};
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
@@ -33,9 +33,17 @@ use crate::{
 
 mod activation;
 mod admission;
+#[cfg(test)]
+mod admission_tests;
+mod bootstrap;
+mod metadata;
 mod query;
 
+use crate::protocols::inference::generate::MAX_GENERATE_CHOICES;
 use admission::InnerPrefillRouter;
+use bootstrap::AbortOnDrop;
+#[cfg(test)]
+use bootstrap::BOOTSTRAP_PREFILL_COMPLETION_TIMEOUT;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -84,6 +92,7 @@ enum PrefillOutcome {
     Bootstrap {
         bootstrap_info: BootstrapInfo,
         worker_id: u64,
+        completion: Option<AbortOnDrop<Result<PrefillCompletion, PrefillError>>>,
     },
     Completed {
         result: PrefillResult,
@@ -123,9 +132,15 @@ struct PrefillCompletion {
 /// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
 /// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
-    prefill_router: OnceLock<InnerPrefillRouter>,
+    prefill_router: RwLock<Option<InnerPrefillRouter>>,
     model_manager: Arc<ModelManager>,
-    endpoint_id: OnceLock<EndpointId>,
+    endpoint_id: RwLock<Option<EndpointId>>,
+    activation_updates: tokio::sync::mpsc::UnboundedSender<dynamo_runtime::component::Endpoint>,
+    activation_generation: AtomicU64,
+    #[cfg(test)]
+    activation_attempts: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    activation_failures_remaining: std::sync::atomic::AtomicUsize,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
@@ -134,6 +149,13 @@ pub struct PrefillRouter {
     model_name: String,
     /// Namespace (used for logging / lifecycle messages).
     namespace: String,
+    /// Optional request-plane alias. Model metadata still comes from the
+    /// activated primary endpoint, while routing is restricted to instances
+    /// serving this exact alias.
+    routing_endpoint_name: Option<String>,
+    /// Normal prefill routing may fall back to aggregated service before a
+    /// prefill peer appears. A versioned P/D contract must fail closed instead.
+    passthrough_when_unavailable: bool,
     is_eagle: bool,
     /// Initialization and worker availability state.
     lifecycle: AtomicU8,
@@ -173,6 +195,9 @@ impl
         // deactivated (all prefill workers died), route directly to the backend. Model admission
         // remains gated by the registered worker topology before the request reaches this stage.
         if self.lifecycle_state() != PrefillLifecycleState::Active {
+            if !self.passthrough_when_unavailable {
+                return Err(anyhow::anyhow!(PrefillError::NotActivated));
+            }
             return next.generate(context.map(|_| req)).await;
         }
 
@@ -207,6 +232,7 @@ impl
         }
 
         let tracker = prefill_req.tracker.clone();
+        let expected_generate_choices = generate_expected_choices(&prefill_req)?;
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
         if let Some(session_affinity) = session_affinity {
@@ -217,7 +243,9 @@ impl
         }
         let router = self
             .prefill_router
-            .get()
+            .read()
+            .expect("prefill router lock poisoned")
+            .clone()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
@@ -227,14 +255,27 @@ impl
                 .await?;
             let topology_constraints = prepared.topology_constraints;
             let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
-                self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
+                let completion = self.spawn_prefill_task(
+                    prefill_stream,
+                    tracker,
+                    prefill_phase_barrier,
+                    expected_generate_choices,
+                );
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
                     worker_id: prepared.worker_id,
+                    completion: expected_generate_choices
+                        .is_some()
+                        .then(|| AbortOnDrop::new(completion)),
                 }
             } else {
                 drop(prefill_phase_barrier);
-                let completion = Self::consume_prefill_stream(prefill_stream, tracker).await?;
+                let completion = Self::consume_prefill_stream(
+                    prefill_stream,
+                    tracker,
+                    expected_generate_choices,
+                )
+                .await?;
                 PrefillOutcome::Completed {
                     result: completion.result,
                     worker_id: prepared.worker_id,
@@ -283,13 +324,16 @@ impl
         }
 
         let mut decode_req = req;
+        let mut bootstrap_completion = None;
         match outcome {
             PrefillOutcome::Bootstrap {
                 bootstrap_info,
                 worker_id,
+                completion,
             } => {
                 decode_req.bootstrap_info = Some(bootstrap_info);
                 decode_req.routing_mut().prefill_worker_id = Some(worker_id);
+                bootstrap_completion = completion;
             }
             PrefillOutcome::Completed {
                 result,
@@ -312,8 +356,39 @@ impl
         let existing_override = decode_req.router_config_override.take();
         decode_req.router_config_override = Some(build_decode_router_override(existing_override));
 
-        next.generate(context.map(|_| decode_req)).await
+        let decode_stream = next.generate(context.map(|_| decode_req)).await?;
+        Ok(match bootstrap_completion {
+            Some(completion) => Self::attach_bootstrap_generate_metadata(decode_stream, completion),
+            None => decode_stream,
+        })
     }
+}
+
+fn generate_expected_choices(request: &PreprocessedRequest) -> Result<Option<u32>, PrefillError> {
+    let Some(generate_request) = request.generate_request.as_ref() else {
+        return Ok(None);
+    };
+    let choices = match generate_request.sampling_params.get("n") {
+        None => 1,
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                PrefillError::PrefillError(
+                    "Generate sampling parameter n must be an unsigned 32-bit integer".to_string(),
+                    None,
+                )
+            })?,
+    };
+    if choices == 0 || choices > MAX_GENERATE_CHOICES {
+        return Err(PrefillError::PrefillError(
+            format!(
+                "Generate prefill choice count must be between 1 and {MAX_GENERATE_CHOICES}, got {choices}"
+            ),
+            None,
+        ));
+    }
+    Ok(Some(choices))
 }
 
 impl PrefillRouter {
@@ -323,11 +398,16 @@ impl PrefillRouter {
         target: AffinityTarget,
     ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
-        let endpoint_id = self.endpoint_id.get();
+        let endpoint_id = self
+            .endpoint_id
+            .read()
+            .expect("prefill endpoint lock poisoned")
+            .clone();
         let topology_constraints =
-            self.preflight_kv_transfer_constraints(endpoint_id, worker_id)?;
+            self.preflight_kv_transfer_constraints(endpoint_id.as_ref(), worker_id)?;
 
         let bootstrap_info = endpoint_id
+            .as_ref()
             .and_then(|endpoint_id| {
                 self.model_manager
                     .get_disaggregated_endpoint(endpoint_id, worker_id)
@@ -424,6 +504,8 @@ fn merge_decode_topology_constraints(
 mod tests {
     use super::*;
     use dynamo_kv_router::config::RouterConfigOverride;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use serde_json::json;
     use std::collections::{HashMap, HashSet};
 
     use crate::protocols::common::preprocessor::{PreprocessedRequest, RoutingHints};
@@ -490,6 +572,36 @@ mod tests {
             .unwrap()
     }
 
+    fn request_with_generate_n(n: Option<serde_json::Value>) -> PreprocessedRequest {
+        let mut request = request_with_constraints(None);
+        let mut sampling_params = serde_json::Map::new();
+        if let Some(n) = n {
+            sampling_params.insert("n".to_string(), n);
+        }
+        request.generate_request =
+            Some(serde_json::from_value(json!({"sampling_params": sampling_params})).unwrap());
+        request
+    }
+
+    #[test]
+    fn generate_prefill_choice_count_uses_request_n_and_safe_bounds() {
+        assert_eq!(
+            generate_expected_choices(&request_with_constraints(None)).unwrap(),
+            None
+        );
+        assert_eq!(
+            generate_expected_choices(&request_with_generate_n(None)).unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            generate_expected_choices(&request_with_generate_n(Some(json!(3)))).unwrap(),
+            Some(3)
+        );
+        for invalid in [json!(0), json!(4097), json!(-1), json!("two")] {
+            assert!(generate_expected_choices(&request_with_generate_n(Some(invalid))).is_err());
+        }
+    }
+
     #[test]
     fn merge_decode_topology_constraints_creates_and_preserves_constraints() {
         for (mut request, expect_user_constraints) in [
@@ -551,6 +663,126 @@ mod tests {
         assert!(!router.is_deactivated());
     }
 
+    #[tokio::test]
+    async fn versioned_prefill_is_fail_closed_before_activation() {
+        let (activation_tx, activation_rx) = tokio::sync::oneshot::channel();
+        let router = PrefillRouter::new_for_endpoint_name(
+            activation_rx,
+            Arc::new(crate::discovery::ModelManager::new()),
+            RouterMode::RoundRobin,
+            16,
+            Some(dynamo_kv_router::config::KvRouterConfig::default()),
+            None,
+            Some(30),
+            "model".to_string(),
+            "namespace".to_string(),
+            false,
+            None,
+            "engine_generate_prefill_v1".to_string(),
+        );
+
+        assert!(!router.passthrough_when_unavailable);
+        assert!(!router.is_available());
+        let router_weak = Arc::downgrade(&router);
+        drop(router);
+        tokio::task::yield_now().await;
+        assert!(
+            router_weak.upgrade().is_none(),
+            "the activation watcher must not keep the router alive"
+        );
+        drop(activation_tx);
+    }
+
+    #[tokio::test]
+    async fn versioned_prefill_follows_live_alias_membership_and_refreshes_identity() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let namespace = distributed
+            .namespace("versioned_prefill_lifecycle".to_string())
+            .unwrap();
+        let first_component = namespace.component("prefill-a".to_string()).unwrap();
+        let first_primary = first_component.endpoint("generate");
+        let first_alias = first_component.endpoint("engine_generate_prefill_v1");
+        let (activation_tx, activation_rx) = tokio::sync::oneshot::channel();
+        let router = PrefillRouter::new_for_endpoint_name(
+            activation_rx,
+            Arc::new(crate::discovery::ModelManager::new()),
+            RouterMode::RoundRobin,
+            16,
+            Some(dynamo_kv_router::config::KvRouterConfig::default()),
+            None,
+            Some(30),
+            "model".to_string(),
+            "versioned_prefill_lifecycle".to_string(),
+            false,
+            None,
+            "engine_generate_prefill_v1".to_string(),
+        );
+        router.fail_next_activation_for_test();
+        activation_tx.send(first_primary).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !router.is_activated() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            router
+                .activation_attempts
+                .load(std::sync::atomic::Ordering::Acquire)
+                >= 2,
+            "a transient activation failure must be retried"
+        );
+        assert!(
+            !router.is_available(),
+            "primary alone must not open the route"
+        );
+
+        first_alias.register_endpoint_instance().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !router.is_available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        first_alias.unregister_endpoint_instance().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while router.is_available() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let second_component = namespace.component("prefill-b".to_string()).unwrap();
+        let second_primary = second_component.endpoint("generate");
+        let second_alias = second_component.endpoint("engine_generate_prefill_v1");
+        second_alias.register_endpoint_instance().await.unwrap();
+        assert!(router.refresh_activation_endpoint(second_primary));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !router.is_available()
+                || router
+                    .endpoint_id
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .is_none_or(|id| id.component != "prefill-b")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        runtime.shutdown();
+    }
+
     #[test]
     fn active_state_is_tracked() {
         let router = make_test_router();
@@ -580,27 +812,14 @@ mod tests {
     }
 
     #[test]
-    fn pending_router_latches_worker_availability_transitions() {
+    fn availability_watch_can_reopen_a_deactivated_router() {
         let router = make_test_router();
         router.deactivate();
         assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
 
-        router.reactivate();
-        router.reactivate();
+        router.set_alias_availability(true);
 
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Pending);
-    }
-
-    #[test]
-    fn activation_does_not_overwrite_latched_deactivation() {
-        let router = make_test_router();
-        router.deactivate();
-
-        assert_eq!(
-            router.complete_activation(),
-            PrefillLifecycleState::Unavailable
-        );
-        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Unavailable);
+        assert_eq!(router.lifecycle_state(), PrefillLifecycleState::Active);
     }
 
     #[test]

@@ -141,6 +141,37 @@ async def test_rejects_media_when_multimodal_is_disabled():
         )
 
 
+def test_rejects_engine_generate_features_when_multimodal_is_disabled():
+    processor = _processor(enabled=False)
+
+    with pytest.raises(ValueError, match="--enable-multimodal"):
+        processor.validate_multimodal_request(
+            {
+                "token_ids": [1, 2],
+                "generate_request": {
+                    "features": {
+                        "mm_hashes": {"image": ["image-hash"]},
+                    }
+                },
+            }
+        )
+
+
+def test_accepts_engine_generate_features_when_multimodal_is_enabled():
+    processor = _processor(enabled=True)
+
+    processor.validate_multimodal_request(
+        {
+            "token_ids": [1, 2],
+            "generate_request": {
+                "features": {
+                    "mm_hashes": {"image": ["image-hash"]},
+                }
+            },
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_decode_cannot_hide_disabled_media_with_expanded_tokens():
     processor = _processor(

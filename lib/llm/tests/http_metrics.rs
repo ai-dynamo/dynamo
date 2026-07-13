@@ -653,6 +653,7 @@ mod integration_tests {
             None,
             None,
             service.state().metrics_clone(),
+            service.state().engine_api_enabled(),
         );
         // Start watching for model registrations via discovery interface
         let discovery = distributed_runtime.discovery();

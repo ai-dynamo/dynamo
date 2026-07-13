@@ -249,7 +249,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
         } else {
             None
         };
+        let explicit = self.direct_target(explicit_target(&request, phase)?, phase)?;
         if !self.direct && session_id.is_none() {
+            if let Some(target) = explicit {
+                let ((tracker, target), stream) = self
+                    .inner
+                    .direct_within_prepared(
+                        request,
+                        target.worker_id,
+                        None,
+                        move |request, worker_id| {
+                            Ok(Self::prepare_resolved_target(request, target, worker_id))
+                        },
+                    )
+                    .await?;
+                Self::record_target(tracker.as_deref(), target);
+                return Ok(stream);
+            }
             let ((tracker, target), stream) = self
                 .inner
                 .select_and_dispatch(request, |request, worker_id| {
@@ -265,7 +281,6 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
             Self::record_target(tracker.as_deref(), target);
             return Ok(stream);
         }
-        let explicit = self.direct_target(explicit_target(&request, phase)?, phase)?;
         let Some(session_id) = session_id else {
             let Some(target) = explicit else {
                 return Err(invalid_argument(format!(
@@ -681,6 +696,37 @@ mod tests {
             assert_eq!(tracker.decode_worker_id(), None);
         }
 
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn non_direct_request_rejects_unavailable_explicit_alias_target() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("versioned_alias_explicit_target".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("engine_generate_v1".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let available = client.wait_for_instances().await.unwrap()[0].id();
+        let missing = available.wrapping_add(1);
+        let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let router = SessionAffinityPushRouter::new(inner, None, false).unwrap();
+
+        let error = router
+            .generate(Context::new(request(Some(missing), false)))
+            .await
+            .expect_err("an explicit target outside the alias set must fail closed");
+
+        assert!(error.to_string().contains(&missing.to_string()));
         runtime.shutdown();
     }
 

@@ -32,10 +32,12 @@ impl PrefillRouter {
         }
         let prefill_router = self
             .prefill_router
-            .get()
+            .read()
+            .expect("prefill router lock poisoned")
+            .clone()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
 
-        match prefill_router {
+        match &prefill_router {
             InnerPrefillRouter::KvRouter(router) => {
                 let outcome = router
                     .chooser
@@ -81,7 +83,12 @@ impl PrefillRouter {
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        if let Some(InnerPrefillRouter::KvRouter(router)) = self.prefill_router.get() {
+        if let Some(InnerPrefillRouter::KvRouter(router)) = self
+            .prefill_router
+            .read()
+            .expect("prefill router lock poisoned")
+            .as_ref()
+        {
             router.chooser.register_workers(worker_ids);
         }
     }

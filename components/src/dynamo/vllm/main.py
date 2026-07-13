@@ -52,6 +52,7 @@ from . import envs
 from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
+    advertise_engine_generate_capability,
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
@@ -667,6 +668,8 @@ async def register_vllm_model(
     """
     runtime_config = ModelRuntimeConfig()
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    if model_input == ModelInput.Tokens:
+        advertise_engine_generate_capability(runtime_config)
 
     # Get runtime configuration from vLLM engine
     logging.info(

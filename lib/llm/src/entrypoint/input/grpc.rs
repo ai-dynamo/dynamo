@@ -151,6 +151,7 @@ async fn run_watcher(
         None,
         prefill_load_estimator,
         metrics,
+        false,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);

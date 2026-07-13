@@ -14,6 +14,7 @@ pub mod agents;
 pub mod anthropic;
 pub mod codec;
 pub mod common;
+pub mod inference;
 pub mod openai;
 pub mod tensor;
 pub(crate) mod unified;

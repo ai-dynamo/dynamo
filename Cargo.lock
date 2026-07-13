@@ -2591,6 +2591,7 @@ dependencies = [
  "modelexpress-common",
  "moka",
  "ndarray 0.16.1",
+ "ndarray-npy",
  "nix 0.26.4",
  "nixl-sys",
  "object_store",

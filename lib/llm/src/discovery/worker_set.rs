@@ -16,12 +16,13 @@ use crate::{
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
+        inference::generate::GenerateStreamingEngine,
         openai::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -54,13 +55,21 @@ pub struct WorkerSet {
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
 
+    /// Load monitor scoped to workers serving the versioned Generate alias.
+    pub(crate) engine_generate_worker_monitor: Option<KvWorkerMonitor>,
+
     /// Prefill router for disaggregated serving. Stored here so the watcher can
-    /// deactivate it when all prefill workers die, and reactivate when they rejoin.
+    /// deactivate it when all prefill workers die; its endpoint watch reopens
+    /// it only after a compatible worker rejoins.
     pub(crate) prefill_router: Option<Arc<PrefillRouter>>,
 
     /// Optional multimodal encoder hop. Stored for discovery-driven
     /// deactivation/reactivation when Encode workers leave or rejoin.
     pub(crate) encoder_router: Option<Arc<EncoderRouter>>,
+
+    /// Fail-closed prefill router scoped to the versioned Generate prefill
+    /// alias. Present only for disaggregated decode WorkerSets.
+    pub(crate) engine_generate_prefill_router: Option<Arc<PrefillRouter>>,
 
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
@@ -84,8 +93,10 @@ impl WorkerSet {
             generate_engine: None,
             kv_router: None,
             worker_monitor: None,
+            engine_generate_worker_monitor: None,
             prefill_router: None,
             encoder_router: None,
+            engine_generate_prefill_router: None,
             instance_count_rx: None,
         }
     }
@@ -138,9 +149,20 @@ impl WorkerSet {
         self.generate_engine.is_some()
     }
 
+    /// A P/D Generate engine is available only after a protocol-compatible
+    /// prefill endpoint activates. Aggregated engines have no such router and
+    /// are immediately available.
+    pub fn has_available_generate_engine(&self) -> bool {
+        self.generate_engine.is_some()
+            && self
+                .engine_generate_prefill_router
+                .as_ref()
+                .is_none_or(|router| router.is_available())
+    }
+
     /// Whether this set has any decode engine (chat or completions)
     pub fn has_decode_engine(&self) -> bool {
-        self.has_chat_engine() || self.has_completions_engine()
+        self.has_chat_engine() || self.has_completions_engine() || self.has_generate_engine()
     }
 
     /// Whether this set has any engine capable of producing output for an
@@ -149,6 +171,7 @@ impl WorkerSet {
     /// new modalities don't need to be added in multiple readiness predicates.
     pub fn has_any_serving_engine(&self) -> bool {
         self.has_chat_engine()
+            || self.has_generate_engine()
             || self.has_completions_engine()
             || self.has_embeddings_engine()
             || self.has_images_engine()
@@ -156,7 +179,6 @@ impl WorkerSet {
             || self.has_videos_engine()
             || self.has_audios_engine()
             || self.has_realtime_engine()
-            || self.has_generate_engine()
     }
 
     /// Whether this set tracks an Encode worker. Encode WorkerSets carry
@@ -215,8 +237,6 @@ impl WorkerSet {
 mod tests {
     use super::*;
     use crate::model_card::ModelDeploymentCard;
-    use crate::protocols::common::llm_backend::LLMEngineOutput;
-    use crate::protocols::common::preprocessor::PreprocessedRequest;
     use crate::types::Annotated;
     use crate::types::generic::tensor::{NvCreateTensorRequest, NvCreateTensorResponse};
     use crate::types::openai::audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest};
@@ -316,6 +336,15 @@ mod tests {
             "chat"
         );
         check!(
+            generate_engine,
+            has_generate_engine,
+            StubEngine::<
+                crate::protocols::inference::generate::GenerateRequest,
+                crate::protocols::common::llm_backend::LLMEngineOutput,
+            >::new(),
+            "generate"
+        );
+        check!(
             completions_engine,
             has_completions_engine,
             StubEngine::<NvCreateCompletionRequest, NvCreateCompletionResponse>::new(),
@@ -357,12 +386,26 @@ mod tests {
             Arc::new(crate::engines::EchoBidirectionalEngine),
             "realtime"
         );
-        check!(
-            generate_engine,
-            has_generate_engine,
-            StubEngine::<PreprocessedRequest, LLMEngineOutput>::new(),
-            "generate"
+    }
+
+    #[test]
+    fn versioned_prefill_must_activate_before_generate_is_available() {
+        let mut ws = make_worker_set("ns1", "abc123");
+        ws.generate_engine = Some(StubEngine::<
+            crate::protocols::inference::generate::GenerateRequest,
+            crate::protocols::common::llm_backend::LLMEngineOutput,
+        >::new());
+        let router = PrefillRouter::disabled(
+            Arc::new(crate::discovery::ModelManager::new()),
+            dynamo_runtime::pipeline::RouterMode::Random,
+            None,
         );
+        ws.engine_generate_prefill_router = Some(router.clone());
+
+        assert!(!ws.has_available_generate_engine());
+
+        router.mark_active_for_test();
+        assert!(ws.has_available_generate_engine());
     }
 
     #[test]

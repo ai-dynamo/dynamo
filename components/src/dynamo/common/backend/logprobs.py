@@ -60,6 +60,7 @@ def extract_from_completion_output(
     *,
     fallback_to_first_on_missing: bool = False,
     include_bytes: bool = False,
+    preserve_missing_rows: bool = False,
 ) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]]]:
     """Extract logprobs from a vLLM/TRT-LLM-shaped CompletionOutput.
 
@@ -69,12 +70,17 @@ def extract_from_completion_output(
     falls back to the first dict entry when the selected token is
     absent (TRT-LLM corner case). ``include_bytes`` adds a UTF-8 byte
     array per top entry (matches the vLLM/OpenAI shape).
+    ``preserve_missing_rows`` emits the vLLM TITO sentinel ``-9999.0``
+    and an empty candidate list when a row is absent or does not contain
+    the sampled token. This keeps the arrays positionally aligned without
+    treating another token's probability as the sampled token's value.
 
-    Returns ``(None, None)`` when nothing was extracted, or when any
-    selected-token logprob is missing in the slice — the Rust response
-    builder zips ``log_probs`` / ``top_logprobs`` against ``token_ids``
-    by position, so emitting a shorter array would misalign every later
-    token. Bail on the whole chunk instead.
+    Returns ``(None, None)`` when nothing was extracted. Unless
+    ``preserve_missing_rows`` is enabled, it also returns ``(None, None)``
+    when any selected-token logprob is missing in the slice: the Rust
+    response builder zips ``log_probs`` / ``top_logprobs`` against
+    ``token_ids`` by position, so emitting a shorter array would misalign
+    every later token.
     """
     if getattr(output, "logprobs", None) is None:
         return None, None
@@ -100,11 +106,19 @@ def extract_from_completion_output(
 
     for token_idx, token_logprobs_dict in enumerate(new_logprobs):
         if token_logprobs_dict is None:
+            if preserve_missing_rows:
+                log_probs.append(-9999.0)
+                top_logprobs.append([])
+                continue
             return None, None
 
         actual_token_id = new_token_ids[token_idx]
         selected = token_logprobs_dict.get(actual_token_id)
         if selected is None:
+            if preserve_missing_rows:
+                log_probs.append(-9999.0)
+                top_logprobs.append([])
+                continue
             if not fallback_to_first_on_missing:
                 return None, None
             selected = next(iter(token_logprobs_dict.values()), None)

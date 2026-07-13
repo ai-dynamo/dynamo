@@ -23,12 +23,14 @@ use crate::{
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::{
         llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
-        preprocessor::MultimodalData,
+        preprocessor::{MultimodalData, RoutingHints},
     },
+    protocols::inference::generate::{GENERATE_ROUTING_HINTS_CONTEXT_KEY, GenerateRequest},
     request_template::RequestTemplate,
     session_affinity::SessionAffinityPushRouter,
     types::{
         Annotated,
+        inference::generate::GenerateStreamingEngine,
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             OpenAIChatCompletionsStreamingEngine,
@@ -40,9 +42,9 @@ use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
-    engine::{AsyncEngineStream, Data},
+    engine::{AsyncEngine, AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
+        Context, Error, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
         SegmentSource, ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
@@ -53,20 +55,28 @@ fn multimodal_cache_key_from_url(url: &str) -> String {
 }
 
 fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<String> {
-    let Some(items) = request
+    let mut keys = request
+        .generate_request
+        .as_ref()
+        .and_then(|request| request.features.as_ref())
+        .into_iter()
+        .flat_map(|features| features.mm_hashes.values())
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if let Some(items) = request
         .multi_modal_data
         .as_ref()
         .and_then(|media| media.get("image_url"))
-    else {
-        return Vec::new();
-    };
-
-    let mut keys = Vec::with_capacity(items.len());
-    for item in items {
-        match item {
-            MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
-            MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
-            MultimodalData::Decoded(_) => {}
+    {
+        keys.reserve(items.len());
+        for item in items {
+            match item {
+                MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
+                MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
+                MultimodalData::Decoded(_) => {}
+            }
         }
     }
     keys.sort();
@@ -82,6 +92,64 @@ pub struct PreprocessedRouting {
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     prefill_router: Arc<PrefillRouter>,
     encoder_router: Arc<EncoderRouter>,
+}
+
+struct GenerateRouterAdapter {
+    inner: ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
+    lora_name: Option<String>,
+}
+
+#[dynamo_runtime::pipeline::async_trait]
+impl AsyncEngine<SingleIn<GenerateRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for GenerateRouterAdapter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<GenerateRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let lora_name = self.lora_name.clone();
+        let routing = request
+            .get::<RoutingHints>(GENERATE_ROUTING_HINTS_CONTEXT_KEY)
+            .ok()
+            .map(|routing| routing.as_ref().clone());
+        let request = request
+            .try_map(move |generate| preprocessed_generate_request(generate, lora_name, routing))?;
+        self.inner.generate(request).await
+    }
+}
+
+fn preprocessed_generate_request(
+    generate: GenerateRequest,
+    lora_name: Option<String>,
+    routing: Option<RoutingHints>,
+) -> anyhow::Result<PreprocessedRequest> {
+    generate.validate()?;
+    let model = generate
+        .model
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("generate request model must be resolved before routing"))?;
+    let expected_output_tokens = generate.sampling_params.max_tokens;
+    let routing_priority = generate.priority.saturating_neg();
+    let cache_namespace = generate.cache_salt.clone();
+    let (token_ids, generate_request) = generate.into_worker_parts()?;
+
+    let mut routing = routing.unwrap_or_default();
+    routing.expected_output_tokens = expected_output_tokens;
+    routing.lora_name = lora_name;
+    routing.cache_namespace = cache_namespace;
+    routing.priority_jump = Some(routing_priority.max(0) as f64);
+    routing.priority = Some(routing_priority);
+
+    PreprocessedRequest::builder()
+        .model(model)
+        .token_ids(token_ids)
+        .generate_request(Some(generate_request))
+        .stop_conditions(Default::default())
+        .sampling_options(Default::default())
+        .output_options(Default::default())
+        .routing(Some(routing))
+        .build()
+        .map_err(anyhow::Error::from)
 }
 
 pub struct PreparedEngine {
@@ -244,6 +312,65 @@ pub async fn build_preprocessed_routing(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
+    build_preprocessed_routing_inner(
+        client,
+        model_manager,
+        router_mode,
+        worker_monitor,
+        chooser,
+        prefill_chooser,
+        encoder_chooser,
+        enable_multimodal_cache_indexer,
+        session_affinity_ttl_secs,
+        true,
+    )
+    .await
+}
+
+/// Build a dynamic route before a compatible worker exists.
+///
+/// Used only by versioned protocol endpoints: an empty route returns
+/// unavailable, then becomes live when a capable worker advertises that exact
+/// endpoint. It must not be used with a shared backwards-compatible endpoint.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_preprocessed_routing_allow_empty(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter>>,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    enable_multimodal_cache_indexer: bool,
+    session_affinity_ttl_secs: Option<u64>,
+) -> anyhow::Result<PreprocessedRouting> {
+    build_preprocessed_routing_inner(
+        client,
+        model_manager,
+        router_mode,
+        worker_monitor,
+        chooser,
+        prefill_chooser,
+        None,
+        enable_multimodal_cache_indexer,
+        session_affinity_ttl_secs,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_preprocessed_routing_inner(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    worker_monitor: Option<KvWorkerMonitor>,
+    chooser: Option<Arc<KvRouter>>,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
+    encoder_chooser: Option<Arc<EncoderRouter>>,
+    enable_multimodal_cache_indexer: bool,
+    session_affinity_ttl_secs: Option<u64>,
+    wait_for_initial_workers: bool,
+) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
@@ -253,10 +380,11 @@ pub async fn build_preprocessed_routing(
         session_affinity_ttl_secs.is_some(),
     )?;
 
-    let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
-
-    wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+    if wait_for_initial_workers {
+        let min_initial_workers = min_initial_workers_from_env()?;
+        wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+    }
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
         && matches!(router_mode, RouterMode::DeviceAwareWeighted)
@@ -334,6 +462,7 @@ pub async fn prepare_engine(
                 None,
                 prefill_load_estimator,
                 metrics,
+                local_model.engine_api_enabled(),
             );
             if !local_model.path().as_os_str().is_empty() {
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
@@ -459,6 +588,25 @@ where
 }
 
 impl PreprocessedRouting {
+    /// Build the engine-native token generation path on the same migration,
+    /// prefill, and worker-routing pipeline used by normal token requests.
+    pub fn build_generate_pipeline(
+        &self,
+        card: &ModelDeploymentCard,
+        migration_limit: u32,
+        migration_max_seq_len: Option<u32>,
+        metrics: Arc<Metrics>,
+    ) -> anyhow::Result<GenerateStreamingEngine> {
+        let inner = self.build_preprocessed_pipeline(
+            card,
+            migration_limit,
+            migration_max_seq_len,
+            metrics,
+        )?;
+        let lora_name = card.lora.as_ref().map(|lora| lora.name.clone());
+        Ok(Arc::new(GenerateRouterAdapter { inner, lora_name }))
+    }
+
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,
@@ -543,6 +691,72 @@ impl PreprocessedRouting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generate_adapter_builds_lossless_payload_and_private_routing_hints() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "request_id": "request-1",
+            "model": "test-model",
+            "token_ids": [11, 22, 33],
+            "sampling_params": {
+                "max_tokens": 17,
+                "seed": null
+            },
+            "priority": -4,
+            "future_extension": {"enabled": true}
+        }))
+        .unwrap();
+
+        let preprocessed = preprocessed_generate_request(
+            request.clone(),
+            Some("adapter-a".into()),
+            Some(RoutingHints {
+                dp_rank: Some(6),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(preprocessed.model, "test-model");
+        assert_eq!(preprocessed.token_ids, vec![11, 22, 33]);
+        let serialized = serde_json::to_value(&preprocessed).unwrap();
+        assert_eq!(serialized["token_ids"], serde_json::json!([11, 22, 33]));
+        assert!(serialized["generate_request"].get("token_ids").is_none());
+        assert_eq!(
+            serialized["generate_request"]["sampling_params"]["seed"],
+            serde_json::Value::Null
+        );
+        let routing = preprocessed.routing.unwrap();
+        assert_eq!(routing.dp_rank, Some(6));
+        assert_eq!(routing.cache_namespace, None);
+        assert_eq!(routing.priority_jump, Some(4.0));
+        assert_eq!(routing.priority, Some(4));
+        assert_eq!(routing.expected_output_tokens, Some(17));
+        assert_eq!(routing.lora_name.as_deref(), Some("adapter-a"));
+    }
+
+    #[test]
+    fn generate_adapter_keeps_native_min_priority_in_worker_envelope() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "token_ids": [11],
+            "sampling_params": {},
+            "cache_salt": "tenant-a",
+            "priority": i32::MIN
+        }))
+        .unwrap();
+
+        let preprocessed = preprocessed_generate_request(request, None, None).unwrap();
+        let routing = preprocessed.routing.as_ref().unwrap();
+        assert_eq!(routing.cache_namespace.as_deref(), Some("tenant-a"));
+        assert_eq!(routing.priority, Some(i32::MAX));
+        assert_eq!(routing.priority_jump, Some(i32::MAX as f64));
+
+        let serialized = serde_json::to_value(preprocessed).unwrap();
+        assert_eq!(
+            serialized["generate_request"]["priority"],
+            serde_json::json!(i32::MIN)
+        );
+    }
 
     #[test]
     fn test_validate_router_mode_for_lora() {

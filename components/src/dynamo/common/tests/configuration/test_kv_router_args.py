@@ -545,6 +545,28 @@ def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
     assert "deprecated and ignored" in caplog.text
 
 
+def test_legacy_generate_env_enables_generic_engine_api(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ENABLE_ENGINE_API", raising=False)
+    monkeypatch.setenv("DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE", "true")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+
+    assert config.enable_engine_apis is True
+
+
+def test_generic_engine_api_env_takes_precedence_over_legacy(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ENABLE_ENGINE_API", "false")
+    monkeypatch.setenv("DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE", "true")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+
+    assert config.enable_engine_apis is False
+
+
 def test_admission_control_cli_flag_warns_and_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

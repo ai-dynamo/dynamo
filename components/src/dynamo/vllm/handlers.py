@@ -6,7 +6,6 @@ import base64
 import importlib
 import inspect
 import logging
-import math
 import os
 import struct
 import tempfile
@@ -86,6 +85,8 @@ from dynamo.vllm.kv_connector_protocols import (
 
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .engine_generate import EngineGenerateRequest
+from .engine_generate import merge_kv_transfer_params as _merge_kv_transfer_params
 from .engine_monitor import VllmEngineMonitor
 from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
 from .multimodal_utils.embed_assembler import build_mixed_embeds
@@ -97,6 +98,18 @@ from .multimodal_utils.request_processor import (
     VllmMultimodalRequestProcessor,
 )
 from .multimodal_utils.vision_encoder_backend import VisionEncoderBackend
+from .pause_controller import VllmEnginePauseController
+from .response_adapters import (
+    GenerationResponseContext,
+    LegacyResponseAdapter,
+    ResponseAdapter,
+)
+from .response_adapters import build_completion_usage as _build_completion_usage
+from .response_adapters import finite_logprob as _finite_logprob
+from .response_adapters import serialize_prompt_logprobs as _serialize_prompt_logprobs
+from .response_adapters import (
+    serialize_vllm_routed_experts as _serialize_vllm_routed_experts,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -304,150 +317,6 @@ async def _deferred_abort_guard(
             finally:
                 if registry is not None:
                     registry.pop(request_id, None)
-
-
-class VllmEnginePauseController:
-    def __init__(self, engine_client: Any):
-        self._engine_client = engine_client
-        self._is_paused = False
-        self._generation_paused = False
-
-    @property
-    def is_paused(self) -> bool:
-        return self._is_paused
-
-    @property
-    def needs_resume_recovery(self) -> bool:
-        return self._generation_paused
-
-    async def pause(self, *args: object) -> bool:
-        if self._is_paused or self._generation_paused:
-            return False
-
-        level = args[0] if args else None
-        await self._engine_client.pause_generation()
-        self._generation_paused = True
-        try:
-            if level is None:
-                await self._engine_client.sleep()
-            else:
-                await self._engine_client.sleep(level)
-        except Exception:
-            try:
-                await self._engine_client.resume_generation()
-                self._generation_paused = False
-            except Exception:
-                logger.exception(
-                    "Failed to resume generation after native vLLM sleep failure"
-                )
-            raise
-        self._is_paused = True
-        return True
-
-    async def resume(self, tags: list[str] | None = None) -> bool:
-        if not self._is_paused and not self._generation_paused:
-            return False
-
-        if self._is_paused:
-            if tags is None:
-                await self._engine_client.wake_up()
-            else:
-                await self._engine_client.wake_up(tags)
-        if self._generation_paused:
-            await self._engine_client.resume_generation()
-            self._generation_paused = False
-        return True
-
-    def mark_resumed(self) -> None:
-        self._is_paused = False
-        self._generation_paused = False
-
-
-# Helpers for nvext response fields requested through `nvext.extra_fields`.
-
-
-# Logprobs can be -inf (log of probability 0) for masked/disallowed tokens (e.g.
-# via bad_words_token_ids / allowed_token_ids) or full-vocab prompt logprobs.
-# JSON has no inf/nan, so pythonize -> serde_json rewrites them to `null`, which
-# then fails typed deserialization on the Rust side and SILENTLY DROPS the whole
-# logprobs payload. Clamp non-finite logprobs to a large finite-negative
-# sentinel so the value survives transport while still meaning "effectively
-# impossible".
-_MIN_FINITE_LOGPROB = -1e30
-
-
-def _finite_logprob(value: Any) -> float:
-    lp = float(value)
-    return lp if math.isfinite(lp) else _MIN_FINITE_LOGPROB
-
-
-def _serialize_prompt_logprobs(
-    raw_prompt_logprobs: list,
-) -> list:
-    """Convert vLLM's ``RequestOutput.prompt_logprobs`` into the dict shape
-    expected by Dynamo's Rust ``PromptLogprobEntry`` (serde deserialization).
-
-    vLLM shape: ``list[dict[int, Logprob] | None]`` where ``Logprob`` has
-    ``.logprob``, ``.rank``, ``.decoded_token`` attributes.
-
-    Output shape: ``list[dict[str, {"logprob": float, ...}] | None]``.
-    Workers carry it under ``engine_data.prompt_logprobs`` so the Rust
-    postprocessor can surface it on ``NvExtResponse.prompt_logprobs`` without
-    changing the public ``LLMEngineOutput`` struct shape.
-
-    NOTE: token_id keys are emitted as **strings** (not ints) so that
-    pythonize → serde → JSON survives the worker→frontend transport. JSON
-    object keys are required to be strings; ``HashMap<u32, _>`` on the Rust
-    side deserializes string keys via ``u32::from_str``. Emitting int keys
-    here causes the chunk to be silently dropped on pythonize → JSON, which
-    surfaces as ``"Stream ended before generation completed"`` on the
-    frontend (worker emits cleanly, frontend never sees ``complete_final``).
-    """
-    result: list = []
-    for entry in raw_prompt_logprobs:
-        if entry is None:
-            result.append(None)
-        else:
-            converted: Dict[str, Dict[str, Any]] = {}
-            for token_id, logprob_obj in entry.items():
-                try:
-                    key = str(int(token_id))
-                except (TypeError, ValueError):
-                    # vLLM only emits int token-id keys; skip a non-int key
-                    # rather than aborting the whole prompt_logprobs payload.
-                    continue
-                lp_dict: Dict[str, Any] = {
-                    "logprob": _finite_logprob(logprob_obj.logprob),
-                }
-                rank = getattr(logprob_obj, "rank", None)
-                if rank is not None:
-                    lp_dict["rank"] = int(rank)
-                decoded = getattr(logprob_obj, "decoded_token", None)
-                if decoded is not None:
-                    lp_dict["decoded_token"] = decoded
-                converted[key] = lp_dict
-            result.append(converted)
-    return result
-
-
-def _attach_prompt_logprobs_engine_data(
-    tok: Dict[str, Any], prompt_logprobs: list
-) -> None:
-    engine_data = tok.setdefault("engine_data", {})
-    if isinstance(engine_data, dict):
-        engine_data["prompt_logprobs"] = prompt_logprobs
-
-
-def _attach_routed_experts_engine_data(
-    tok: Dict[str, Any], routed_experts: Dict[str, Any]
-) -> None:
-    # routed_experts rides the engine's opaque engine_data passthrough (surfaced
-    # by the Rust postprocessor as nvext.routed_experts); disaggregated_params
-    # stays KV-transfer only. Merge via setdefault so we don't clobber any
-    # prompt_logprobs already attached to engine_data on the final chunk.
-    engine_data = tok.setdefault("engine_data", {})
-    if isinstance(engine_data, dict):
-        engine_data["routed_experts"] = routed_experts
 
 
 def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
@@ -691,35 +560,6 @@ def _accumulate_engine_data(
     tok["engine_data"] = engine_data
 
 
-def _serialize_routed_experts(
-    routed_experts: Any, start: int = 0
-) -> Optional[Dict[str, Any]]:
-    if routed_experts is None:
-        return None
-
-    shape = getattr(routed_experts, "shape", None)
-    tobytes = getattr(routed_experts, "tobytes", None)
-    if shape is None or not callable(tobytes):
-        logger.warning(
-            "Unable to serialize routed_experts of type %s",
-            type(routed_experts).__name__,
-        )
-        return None
-
-    return {
-        # base64, matching vLLM-native encoding.
-        "data": base64.b64encode(tobytes()).decode("ascii"),
-        "shape": [int(dim) for dim in shape],
-        # Row offset of the first returned routing entry within the full
-        # sequence (= SamplingParams.routed_experts_prompt_start; vLLM trims the
-        # leading prompt rows). Lets the RL consumer align the completion.
-        "start": int(start),
-        # Encode dtype so the consumer decodes the raw bytes with the right
-        # element type instead of assuming a fixed width.
-        "dtype": str(getattr(routed_experts, "dtype", "")),
-    }
-
-
 def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
@@ -745,6 +585,12 @@ def build_sampling_params(
     keep generation_config defaults for Gateway/backward-compatible traffic.
     Stop-token defaults from the model config are still applied later.
     """
+    engine_request = EngineGenerateRequest.from_request(request)
+    if engine_request is not None:
+        return engine_request.build_sampling_params(
+            default_sampling_params, model_max_len, None
+        )
+
     if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.
         sampling_params = SamplingParams()
@@ -1044,6 +890,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
+        additional_generate_endpoints: tuple[Any, ...] = (),
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
@@ -1055,6 +902,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.kv_publishers: list[KvEventPublisher] | None = None
         self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
+        self.additional_generate_endpoints = additional_generate_endpoints
         self.config = config
         self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
@@ -1066,7 +914,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
         # Guard lock-map access in case handlers are invoked from multiple threads.
         self._lora_load_locks_guard = threading.Lock()
-        self._paused: bool = False
         self._weight_version: str = "initial"
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
@@ -1167,6 +1014,48 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             config.model,
         )
 
+    def _routing_endpoints(self) -> tuple[Any, ...]:
+        primary = (
+            (self.generate_endpoint,) if self.generate_endpoint is not None else ()
+        )
+        return (*primary, *getattr(self, "additional_generate_endpoints", ()))
+
+    async def _set_routing_endpoints_published(self, published: bool) -> None:
+        endpoints = self._routing_endpoints()
+        if not endpoints:
+            self._pause_controller.mark_routing_publication(published)
+            return
+        method_name = (
+            "register_endpoint_instance"
+            if published
+            else "unregister_endpoint_instance"
+        )
+        results = await asyncio.gather(
+            *(getattr(endpoint, method_name)() for endpoint in endpoints),
+            return_exceptions=True,
+        )
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            action = "publish" if published else "unpublish"
+            details = "; ".join(str(failure) for failure in failures)
+            raise RuntimeError(
+                f"failed to {action} {len(failures)} of {len(endpoints)} routing endpoints: {details}"
+            )
+        self._pause_controller.mark_routing_publication(published)
+
+    async def _fail_closed_routing_endpoints(self) -> None:
+        try:
+            await self._set_routing_endpoints_published(False)
+        except Exception as error:
+            logger.error(
+                "Failed to converge routing endpoints to unpublished: %s", error
+            )
+        self._pause_controller.mark_routing_publication_failed()
+
+    async def _latch_indeterminate_weight_state(self, message: str) -> None:
+        self._pause_controller.mark_fatal(message)
+        await self._fail_closed_routing_endpoints()
+
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
         logger.error(f"vLLM EngineDeadError: {e}")
         logger.warning("Initiating Dynamo Runtime shutdown.")
@@ -1244,25 +1133,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         level = body.get("level", 1)
         async with self._pause_lock:
+            if self._pause_controller.fatal_error is not None:
+                await self._fail_closed_routing_endpoints()
+                return {
+                    "status": "error",
+                    "message": (
+                        "engine state is indeterminate and requires restart: "
+                        f"{self._pause_controller.fatal_error}"
+                    ),
+                }
+            if self._pause_controller.needs_sleep_recovery:
+                return {
+                    "status": "error",
+                    "message": "wake_up required before retrying sleep",
+                }
             if self._pause_controller.is_paused:
                 return {
                     "status": "ok",
                     "message": "Engine already sleeping",
                 }
-            if self._pause_controller.needs_resume_recovery:
-                return {
-                    "status": "error",
-                    "message": "wake_up required before retrying sleep",
-                }
 
-            unregistered = False
+            if self._pause_controller.publication_recovery_needed:
+                try:
+                    await self._set_routing_endpoints_published(True)
+                except Exception as error:
+                    logger.error(
+                        "Failed to repair routing endpoint publication: %s", error
+                    )
+                    return {"status": "error", "message": str(error)}
+
             try:
                 # Step 1: Unregister endpoint instance before memory transitions.
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.unregister_endpoint_instance()
-                    unregistered = True
+                if self._routing_endpoints():
+                    # If any call fails, the outer rollback reconciles every
+                    # endpoint because the remote outcome of the failed call is
+                    # unknown.
+                    await self._set_routing_endpoints_published(False)
                     logger.info(
-                        "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
+                        "[Sleep] Unregistered routing endpoints from discovery - worker removed from routing pools"
                     )
 
                 # Step 2: Abort in-flight requests and wait for them to drain so
@@ -1277,26 +1185,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "status": "ok",
                     "message": f"Engine slept (level={level})",
                 }
-            except Exception as e:
+            except BaseException as e:
                 logger.error(f"Failed to sleep engine: {e}")
                 # If pause rolled back cleanly the engine is serving-safe again,
                 # but discovery still shows us unregistered and wake_up will
                 # early-return. Re-register so the worker rejoins the routing pool.
-                if (
-                    unregistered
-                    and not self._pause_controller.is_paused
-                    and not self._pause_controller.needs_resume_recovery
-                    and self.generate_endpoint is not None
-                ):
+                if self._routing_endpoints() and self._pause_controller.can_serve:
                     try:
-                        await self.generate_endpoint.register_endpoint_instance()
+                        await self._set_routing_endpoints_published(True)
                         logger.info(
-                            "[Sleep] Re-registered endpoint after failed sleep rollback"
+                            "[Sleep] Re-registered routing endpoints after failed sleep rollback"
                         )
                     except Exception as reg_err:
+                        await self._fail_closed_routing_endpoints()
                         logger.error(
                             f"Failed to re-register endpoint after sleep failure: {reg_err}"
                         )
+                if not isinstance(e, Exception):
+                    raise
                 return {"status": "error", "message": str(e)}
 
     async def scale_elastic_ep(self, body: dict) -> dict:
@@ -1427,23 +1333,51 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         tags = body.get("tags")
         async with self._pause_lock:
-            needs_recovery = self._pause_controller.needs_resume_recovery
-            if not self._pause_controller.is_paused and not needs_recovery:
-                return {"status": "ok", "message": "Engine already awake"}
+            if self._pause_controller.fatal_error is not None:
+                await self._fail_closed_routing_endpoints()
+                return {
+                    "status": "error",
+                    "message": (
+                        "engine state is indeterminate and requires restart: "
+                        f"{self._pause_controller.fatal_error}"
+                    ),
+                }
+            has_sleep_state = self._pause_controller.has_sleep_state
+            publication_needs_recovery = (
+                self._pause_controller.publication_recovery_needed
+            )
+            if not has_sleep_state and not publication_needs_recovery:
+                message = (
+                    "Engine awake; generation remains RL-paused"
+                    if self._pause_controller.is_rl_paused
+                    else "Engine already awake"
+                )
+                return {"status": "ok", "message": message}
 
             try:
                 # Step 1: Wake engine first - must be ready before accepting requests
-                await self._pause_controller.resume(tags)
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
+                if has_sleep_state:
+                    await self._pause_controller.resume(tags)
+                if self._routing_endpoints() and self._pause_controller.can_serve:
+                    try:
+                        await self._set_routing_endpoints_published(True)
+                    except Exception:
+                        # Never leave only the primary or versioned alias visible.
+                        # Fail closed and let a subsequent wake retry the complete
+                        # publication transaction.
+                        await self._fail_closed_routing_endpoints()
+                        raise
                     logger.info(
-                        "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
+                        "[Wake] Re-registered routing endpoints to discovery - worker added back to routing pools"
                     )
-                self._pause_controller.mark_resumed()
 
                 return {
                     "status": "ok",
-                    "message": "Engine woke",
+                    "message": (
+                        "Engine woke; generation remains RL-paused"
+                        if self._pause_controller.is_rl_paused
+                        else "Engine woke"
+                    ),
                 }
             except Exception as e:
                 logger.error(f"Failed to wake up engine: {e}")
@@ -1512,7 +1446,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        mode = body.get("mode", "keep")
+        mode = body.get("mode", "wait")
         clear_cache = bool(body.get("clear_cache", False))
         if mode not in ("keep", "wait", "abort"):
             return {
@@ -1521,21 +1455,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             }
         async with self._pause_lock:
             try:
-                try:
-                    await self.engine_client.pause_generation(
-                        mode=mode, clear_cache=clear_cache
-                    )
-                except TypeError:
-                    await self.engine_client.pause_generation()
-                    if clear_cache:
-                        await self.engine_client.reset_prefix_cache()
-                self._paused = True
+                changed = await self._pause_controller.pause_generation(
+                    mode=mode, clear_cache=clear_cache
+                )
                 logger.info(
                     f"[RL] Engine paused (mode={mode}, clear_cache={clear_cache})"
                 )
                 return {
                     "status": "ok",
-                    "message": "Engine paused",
+                    "message": "Engine paused" if changed else "Engine already paused",
                     "mode": mode,
                     "clear_cache": clear_cache,
                 }
@@ -1559,10 +1487,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # mutating weights (dynamo-ops).
         async with self._pause_lock:
             try:
-                await self.engine_client.resume_generation()
-                self._paused = False
+                changed = await self._pause_controller.resume_generation()
+                if (
+                    self._pause_controller.can_serve
+                    and self._routing_endpoints()
+                    and (
+                        not self._pause_controller.routing_endpoints_published
+                        or self._pause_controller.publication_recovery_needed
+                    )
+                ):
+                    try:
+                        await self._set_routing_endpoints_published(True)
+                    except Exception:
+                        await self._fail_closed_routing_endpoints()
+                        raise
                 logger.info("[RL] Engine resumed")
-                return {"status": "ok", "message": "Engine resumed"}
+                return {
+                    "status": "ok",
+                    "message": "Engine resumed"
+                    if changed
+                    else "Engine already resumed",
+                }
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
@@ -1582,7 +1527,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # weight-update / pause / resume mutating engine cache state.
         async with self._pause_lock:
             try:
-                await self.engine_client.reset_prefix_cache()
+                reset_successful = await self.engine_client.reset_prefix_cache(
+                    reset_connector=True
+                )
+                if reset_successful is not True:
+                    raise RuntimeError(
+                        "prefix/KV/connector cache reset did not complete"
+                    )
                 logger.debug("[RL] Prefix cache flushed")
                 return {"status": "ok", "message": "Cache flushed"}
             except EngineDeadError as e:
@@ -1657,13 +1608,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Hold _pause_lock across the paused-state check and the weight RPC so a
         # concurrent resume cannot re-enable generation mid-update (dynamo-ops).
         async with self._pause_lock:
-            if not getattr(self, "_paused", False):
+            if self._pause_controller.fatal_error is not None:
+                return {
+                    "status": "error",
+                    "message": (
+                        "engine state is indeterminate and requires restart: "
+                        f"{self._pause_controller.fatal_error}"
+                    ),
+                }
+            if not self._pause_controller.is_rl_paused:
                 return {
                     "status": "error",
                     "message": (
                         "Worker must be paused via pause_generation() before "
                         "updating weights. Call pause_generation() first, then "
                         "update, then resume_generation()."
+                    ),
+                }
+            if not self._pause_controller.is_rl_drained:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Weight updates that invalidate cache require a drained "
+                        "pause (mode='wait' or mode='abort')."
                     ),
                 }
             path = body.get("model_path")
@@ -1676,20 +1643,32 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if rpc == "reload_weights"
                 else {"weight_path": path}
             )
+            mutation_dispatched = False
             try:
+                mutation_dispatched = True
                 await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 # Weights changed: any prefix/KV cache computed under the old
                 # weights is now stale and must not be reused. Invalidate it
                 # while still holding _pause_lock (generation is paused).
-                await self.engine_client.reset_prefix_cache()
+                reset_successful = await self.engine_client.reset_prefix_cache(
+                    reset_connector=True
+                )
+                if reset_successful is not True:
+                    raise RuntimeError(
+                        "prefix/KV/connector cache reset failed after weight update"
+                    )
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
                 )
                 return {"status": "ok", "version": version}
-            except EngineDeadError as e:
-                self._shutdown_on_engine_dead(e)
-            except Exception as e:
+            except BaseException as e:
+                if mutation_dispatched:
+                    await self._latch_indeterminate_weight_state(str(e))
+                if isinstance(e, EngineDeadError):
+                    self._shutdown_on_engine_dead(e)
+                if not isinstance(e, Exception):
+                    raise
                 logger.error(f"[RL] update_weights_from_disk failed: {e}")
                 return {"status": "error", "message": str(e)}
 
@@ -1714,22 +1693,43 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "'reset_prefix_cache' must be a boolean",
             }
-        if allow_unpaused and reset_prefix_cache:
+        if allow_unpaused:
             return {
                 "status": "error",
                 "message": (
-                    "Unpaused weight updates cannot reset the prefix cache. "
-                    "Set 'reset_prefix_cache' to false or pause generation first."
+                    "Unpaused weight updates are unsafe. Pause generation with "
+                    "mode='wait' or mode='abort' before updating weights."
                 ),
             }
+        if not reset_prefix_cache:
+            return {
+                "status": "error",
+                "message": "Weight updates require prefix/KV/connector cache reset",
+            }
         async with self._pause_lock:
-            if not self._paused and not allow_unpaused:
+            if self._pause_controller.fatal_error is not None:
+                return {
+                    "status": "error",
+                    "message": (
+                        "engine state is indeterminate and requires restart: "
+                        f"{self._pause_controller.fatal_error}"
+                    ),
+                }
+            if not self._pause_controller.is_rl_paused:
                 return {
                     "status": "error",
                     "message": (
                         "Worker must be paused via pause_generation() before "
                         "updating weights. Call pause_generation() first, then "
                         "update, then resume_generation()."
+                    ),
+                }
+            if not self._pause_controller.is_rl_drained:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Weight updates that invalidate cache require a drained "
+                        "pause (mode='wait' or mode='abort')."
                     ),
                 }
             version = body.get("weight_version", "unknown")
@@ -1739,21 +1739,32 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for k, v in body.items()
                 if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
             }
+            mutation_dispatched = False
             try:
+                mutation_dispatched = True
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
-                if reset_prefix_cache:
-                    # Weights changed: stale prefix/KV cache must be invalidated
-                    # before resume so it is not reused under the new weights.
-                    await self.engine_client.reset_prefix_cache()
+                # Weights changed: stale prefix/KV cache must be invalidated
+                # before resume so it is not reused under the new weights.
+                reset_successful = await self.engine_client.reset_prefix_cache(
+                    reset_connector=True
+                )
+                if reset_successful is not True:
+                    raise RuntimeError(
+                        "prefix/KV/connector cache reset failed after weight update"
+                    )
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
                     f"(version={version}, rpc={rpc})"
                 )
                 return {"status": "ok", "version": version}
-            except EngineDeadError as e:
-                self._shutdown_on_engine_dead(e)
-            except Exception as e:
+            except BaseException as e:
+                if mutation_dispatched:
+                    await self._latch_indeterminate_weight_state(str(e))
+                if isinstance(e, EngineDeadError):
+                    self._shutdown_on_engine_dead(e)
+                if not isinstance(e, Exception):
+                    raise
                 logger.error(f"[RL] update_weights_from_distributed failed: {e}")
                 return {"status": "error", "message": str(e)}
 
@@ -1944,11 +1955,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if temp_dir is not None:
             self.temp_dirs.append(temp_dir)
 
-    def _to_local_dp_rank(self, dp_rank: int | None) -> int | None:
+    def _to_local_dp_rank(
+        self, dp_rank: int | None, *, strict: bool = False
+    ) -> int | None:
         """Convert global DP rank to local DP rank based on engine config."""
         if dp_rank is None:
             return None
         if dp_rank < self.dp_range[0] or dp_rank >= self.dp_range[0] + self.dp_range[1]:
+            if strict:
+                raise ValueError(
+                    f"Target DP rank {dp_rank} is outside this worker's range "
+                    f"[{self.dp_range[0]}, {self.dp_range[0] + self.dp_range[1]})"
+                )
             logger.warning(
                 f"Received DP rank {dp_rank} is out of range [{self.dp_range[0]} - {self.dp_range[0] + self.dp_range[1]}), fallback to vLLM internal DP selection"
             )
@@ -2615,51 +2633,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         embedding_sequence_length: int | None = None,
         completion_token_counts: dict[int, int] | None = None,
     ) -> Dict[str, Any]:
-        """
-        Build completion usage statistics.
-
-        Args:
-            request_output: vLLM RequestOutput object
-            embedding_sequence_length: If using prompt embeddings, the sequence length
-                                     extracted from the embeddings tensor shape
-            completion_token_counts: Optional cumulative generated-token counts by
-                                     output index. DELTA-mode streams need this
-                                     because the final vLLM chunk is not cumulative.
-
-        Returns:
-            Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
-        """
-        # Determine prompt token count:
-        # - For embeddings: use embedding_sequence_length from tensor shape
-        # - For normal text: use len(prompt_token_ids)
-        if embedding_sequence_length is not None:
-            prompt_tokens = embedding_sequence_length
-        elif request_output.prompt_token_ids:
-            prompt_tokens = len(request_output.prompt_token_ids)
-        else:
-            prompt_tokens = None
-
-        if completion_token_counts is not None:
-            completion_tokens = sum(completion_token_counts.values())
-        else:
-            completion_tokens = sum(
-                len(output.token_ids) for output in request_output.outputs
-            )
-
-        return {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": (
-                prompt_tokens + completion_tokens if prompt_tokens is not None else None
-            ),
-            "prompt_tokens_details": build_prompt_tokens_details(
-                getattr(request_output, "num_cached_tokens", None)
-            ),
-        }
+        return _build_completion_usage(
+            request_output,
+            embedding_sequence_length,
+            completion_token_counts,
+        )
 
     @staticmethod
     def _extract_logprobs(
-        output, num_output_tokens_so_far: int, tokenizer=None
+        output,
+        num_output_tokens_so_far: int,
+        tokenizer=None,
+        *,
+        preserve_missing_rows: bool = False,
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
         # Legacy vLLM handler always emits when vLLM returned a dict.
         return _shared_logprobs.extract_from_completion_output(
@@ -2668,6 +2654,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             tokenizer=tokenizer,
             fallback_to_first_on_missing=True,
             include_bytes=True,
+            preserve_missing_rows=preserve_missing_rows,
         )
 
     @staticmethod
@@ -2716,6 +2703,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        response_adapter: ResponseAdapter = LegacyResponseAdapter(),
+        prefill_generate_metadata: dict[str, Any] | None = None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -2746,6 +2735,21 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # carries None. Capture the first non-None payload and attach it to
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
+            kv_transfer_params: Any = None
+            prefill_prompt_logprobs = (
+                prefill_generate_metadata.get("prompt_logprobs")
+                if isinstance(prefill_generate_metadata, dict)
+                else None
+            )
+            prefill_routed_experts_by_choice = (
+                prefill_generate_metadata.get("routed_experts_by_choice", {})
+                if isinstance(prefill_generate_metadata, dict)
+                else {}
+            )
+            if not isinstance(prefill_routed_experts_by_choice, dict):
+                raise ValueError(
+                    "prefill generate_metadata.routed_experts_by_choice must be an object"
+                )
             async for res in gen:
                 # res is vllm's RequestOutput
                 if (
@@ -2755,6 +2759,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     prompt_logprobs_payload = _serialize_prompt_logprobs(
                         res.prompt_logprobs
                     )
+                if getattr(res, "kv_transfer_params", None) is not None:
+                    kv_transfer_params = res.kv_transfer_params
 
                 if not res.outputs:
                     self._log_with_lora_context(
@@ -2808,7 +2814,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
                     log_probs, top_logprobs = self._extract_logprobs(
-                        output, 0, tokenizer=tokenizer
+                        output,
+                        0,
+                        tokenizer=tokenizer,
+                        preserve_missing_rows=(
+                            response_adapter.preserve_missing_logprob_rows
+                        ),
                     )
                     if log_probs is not None:
                         out["log_probs"] = log_probs
@@ -2817,35 +2828,28 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
+
+                    response_adapter.adapt(
+                        out,
+                        GenerationResponseContext(
                             request_output=res,
+                            output_index=output_idx,
+                            finished=bool(finish_reason),
+                            sampling_params=sampling_params,
                             embedding_sequence_length=embedding_sequence_length,
                             completion_token_counts=total_output_tokens_by_index,
-                        )
-                        if prompt_logprobs_payload is not None:
-                            _attach_prompt_logprobs_engine_data(
-                                out, prompt_logprobs_payload
-                            )
-                        # Emit the EFFECTIVE trim offset: clamp the requested
-                        # routed_experts_prompt_start to the prompt length. vLLM
-                        # clamps the returned routing rows the same way, so an
-                        # out-of-range request (e.g. start=999 on a 100-token
-                        # prompt) would otherwise publish a `start` the consumer
-                        # cannot align to the (clamped) tensor.
-                        raw_start = int(
-                            getattr(sampling_params, "routed_experts_prompt_start", 0)
-                            or 0
-                        )
-                        prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
-                        effective_start = min(raw_start, prompt_len)
-                        routed_experts = _serialize_routed_experts(
-                            raw_routed_experts_by_output.get(output_idx),
-                            start=effective_start,
-                        )
-                        if routed_experts is not None:
-                            _attach_routed_experts_engine_data(out, routed_experts)
+                            prompt_logprobs=prompt_logprobs_payload,
+                            routed_experts=raw_routed_experts_by_output.get(output_idx),
+                            kv_transfer_params=kv_transfer_params,
+                            prefill_prompt_logprobs=prefill_prompt_logprobs,
+                            prefill_routed_experts=(
+                                prefill_routed_experts_by_choice.get(str(output_idx))
+                                or prefill_routed_experts_by_choice.get(output_idx)
+                            ),
+                        ),
+                    )
+
+                    if finish_reason:
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -2879,6 +2883,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
+        additional_generate_endpoints: tuple[Any, ...] = (),
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
@@ -2893,6 +2898,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             model_config=model_config,
             enable_multimodal=enable_multimodal,
             generate_endpoint=generate_endpoint,
+            additional_generate_endpoints=additional_generate_endpoints,
             use_vllm_tokenizer=use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=enable_frontend_decoding,
@@ -3014,6 +3020,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
+        engine_request = EngineGenerateRequest.from_request(request)
         # Firstly extract disaggregated params from prefill result if available
         prefill_result = request.get("prefill_result")
         if prefill_result and isinstance(prefill_result, dict):
@@ -3080,7 +3087,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # branches without spelling out the full union.
         prompt: Any
         with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
-            if pre_rendered is not None:
+            if engine_request is not None:
+                prompt = engine_request.build_prompt()
+                embedding_sequence_length = None
+                error = None
+            elif pre_rendered is not None:
                 # pre_rendered is a MultiModalInput dict with "type": "multimodal".
                 # The engine's InputProcessor.process_inputs() will see the "type"
                 # key and skip the HF processor entirely.
@@ -3124,22 +3135,37 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
 
         # Build sampling params from request
-        sampling_params = build_sampling_params(
-            request,
-            self.default_sampling_params,
-            self.model_max_len,
-            enable_rl=self.config.enable_rl,
+        sampling_params = (
+            engine_request.build_sampling_params(
+                self.default_sampling_params,
+                self.model_max_len,
+                self.engine_client.vllm_config.scheduler_config.max_num_seqs,
+            )
+            if engine_request is not None
+            else build_sampling_params(
+                request,
+                self.default_sampling_params,
+                self.model_max_len,
+                enable_rl=self.config.enable_rl,
+            )
         )
 
         if kv_params is not None:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = kv_params
+            sampling_params.extra_args[
+                "kv_transfer_params"
+            ] = _merge_kv_transfer_params(
+                sampling_params.extra_args.get("kv_transfer_params"), kv_params
+            )
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
         prefill_prompt_tokens_details = (
             prefill_result.get("prompt_tokens_details") if prefill_result else None
+        )
+        prefill_generate_metadata = (
+            prefill_result.get("generate_metadata") if prefill_result else None
         )
 
         # Extract LoRA request if present
@@ -3154,8 +3180,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"Decode request {request_id} has no LoRA specified (model: {model_name})"
             )
         routing = request.get("routing") or {}
-        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        dp_rank = self._to_local_dp_rank(
+            routing.get("dp_rank"), strict=engine_request is not None
+        )
+        priority = (
+            engine_request.priority(routing)
+            if engine_request is not None
+            else -int(routing.get("priority", 0))
+        )
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
@@ -3208,6 +3240,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        response_adapter=(
+                            engine_request.response_adapter()
+                            if engine_request is not None
+                            else LegacyResponseAdapter()
+                        ),
+                        prefill_generate_metadata=prefill_generate_metadata,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3292,14 +3330,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        async with _deferred_abort_guard(
-            self.engine_client,
-            request_id,
-            is_decode_only,
-            self._deferred_aborts,
-            self._shutdown_on_engine_dead,
-        ) as abort_guard, self._abort_monitor(
-            context, request_id, abort_guard=abort_guard
+        async with (
+            _deferred_abort_guard(
+                self.engine_client,
+                request_id,
+                is_decode_only,
+                self._deferred_aborts,
+                self._shutdown_on_engine_dead,
+            ) as abort_guard,
+            self._abort_monitor(context, request_id, abort_guard=abort_guard),
         ):
             try:
                 gen = self.engine_client.generate(
@@ -3381,6 +3420,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         model_config: ModelConfig | None = None,
         enable_multimodal: bool = False,
         generate_endpoint=None,
+        additional_generate_endpoints: tuple[Any, ...] = (),
         use_vllm_tokenizer: bool = False,
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
@@ -3395,6 +3435,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             model_config=model_config,
             enable_multimodal=enable_multimodal,
             generate_endpoint=generate_endpoint,
+            additional_generate_endpoints=additional_generate_endpoints,
             use_vllm_tokenizer=use_vllm_tokenizer,
             shutdown_event=shutdown_event,
             enable_frontend_decoding=enable_frontend_decoding,
@@ -3425,6 +3466,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def _generate_token_mode(self, request, context, request_id):
         """Generate prefill using internal protocol format (token-in-token-out)."""
+        engine_request = EngineGenerateRequest.from_request(request)
         prepared_input = await self._multimodal_request_processor.prepare_input(
             request,
             request_id,
@@ -3435,14 +3477,20 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         multi_modal_data = prepared_input.multi_modal_data
         mm_processor_kwargs = prepared_input.mm_processor_kwargs
 
-        # Build prompt from request (handles both prompt_embeds and token_ids)
-        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
-            request,
-            request_id,
-            multi_modal_data,
-            log_prefix="Prefill ",
-            mm_processor_kwargs=mm_processor_kwargs,
-        )
+        # Engine-native requests already contain the vLLM prompt representation.
+        # Only legacy requests need Dynamo's generic prompt construction.
+        if engine_request is not None:
+            prompt = engine_request.build_prompt()
+            embedding_sequence_length = None
+            error = None
+        else:
+            prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+                request,
+                request_id,
+                multi_modal_data,
+                log_prefix="Prefill ",
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
         if error is not None:
             # Prefill errors need disaggregated_params field
             error["disaggregated_params"] = None
@@ -3452,11 +3500,19 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         _apply_nvext_cache_salt(request, prompt)
 
         # Build sampling params from request using shared utility
-        sampling_params = build_sampling_params(
-            request,
-            self.default_sampling_params,
-            self.model_max_len,
-            enable_rl=self.config.enable_rl,
+        sampling_params = (
+            engine_request.build_sampling_params(
+                self.default_sampling_params,
+                self.model_max_len,
+                self.engine_client.vllm_config.scheduler_config.max_num_seqs,
+            )
+            if engine_request is not None
+            else build_sampling_params(
+                request,
+                self.default_sampling_params,
+                self.model_max_len,
+                enable_rl=self.config.enable_rl,
+            )
         )
 
         # One protocol instance per request; carries per-request state
@@ -3466,9 +3522,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
-        sampling_params.extra_args[
-            "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+        sampling_params.extra_args["kv_transfer_params"] = _merge_kv_transfer_params(
+            sampling_params.extra_args.get("kv_transfer_params"),
+            kv_protocol.prefill_request_kv_transfer_params(),
+        )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -3487,8 +3544,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         routing = request.get("routing") or {}
-        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        dp_rank = self._to_local_dp_rank(
+            routing.get("prefill_dp_rank", routing.get("dp_rank")),
+            strict=engine_request is not None,
+        )
+        priority = (
+            engine_request.priority(routing)
+            if engine_request is not None
+            else -int(routing.get("priority", 0))
+        )
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
@@ -3518,10 +3582,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             async for res in gen:
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
-                token_ids = res.outputs[0].token_ids if res.outputs else []
-
-                # For prefill worker, only one res will be generated,
-                # so we can always build embedding params here without conditionals
+                # Build handoff state for each vLLM response snapshot. Generate
+                # requests may expose several choice outputs for the same prompt.
                 embedding_params = (
                     self._multimodal_request_processor.build_prefill_handoff(
                         multi_modal_data=multi_modal_data,
@@ -3530,30 +3592,51 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     )
                 )
 
-                output: Dict[str, Any] = {
-                    "token_ids": list(token_ids),
-                    "disaggregated_params": self._build_disaggregated_params(
-                        kv_protocol.decode_request_kv_transfer_params(res),
-                        embedding_params,
-                    ),
-                    "completion_usage": BaseWorkerHandler._build_completion_usage(
-                        request_output=res,
-                        embedding_sequence_length=embedding_sequence_length,
-                    ),
-                }
+                response_outputs = res.outputs or [None]
+                if engine_request is None:
+                    response_outputs = response_outputs[:1]
+                for choice in response_outputs:
+                    token_ids = (
+                        list(choice.token_ids or []) if choice is not None else []
+                    )
+                    output: Dict[str, Any] = {
+                        "token_ids": token_ids,
+                        "disaggregated_params": self._build_disaggregated_params(
+                            kv_protocol.decode_request_kv_transfer_params(res),
+                            embedding_params,
+                        ),
+                        "completion_usage": BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
+                        ),
+                    }
+                    if engine_request is not None:
+                        output["index"] = int(getattr(choice, "index", 0) or 0)
+                        metadata: Dict[str, Any] = {}
+                        if getattr(res, "prompt_logprobs", None) is not None:
+                            metadata["prompt_logprobs"] = _serialize_prompt_logprobs(
+                                res.prompt_logprobs
+                            )
+                        routed_experts = _serialize_vllm_routed_experts(
+                            getattr(choice, "routed_experts", None)
+                        )
+                        if routed_experts is not None:
+                            metadata["routed_experts"] = routed_experts
+                        if metadata:
+                            output["generate_metadata"] = metadata
 
-                # Log prefill completion with LoRA info
-                self._log_with_lora_context(
-                    "Prefill completed for request {request_id}{lora_info}: "
-                    "generated {token_count} token(s), has_kv_params={has_kv_params}",
-                    request_id,
-                    lora_request,
-                    level="info" if lora_request else "debug",
-                    token_count=len(token_ids),
-                    has_kv_params=res.kv_transfer_params is not None,
-                )
+                    # Log prefill completion with LoRA info
+                    self._log_with_lora_context(
+                        "Prefill completed for request {request_id}{lora_info}: "
+                        "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                        request_id,
+                        lora_request,
+                        level="info" if lora_request else "debug",
+                        token_count=len(token_ids),
+                        has_kv_params=res.kv_transfer_params is not None,
+                    )
 
-                yield output
+                    yield output
 
     def _build_disaggregated_params(
         self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None

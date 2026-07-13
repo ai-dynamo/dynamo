@@ -126,7 +126,7 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
 }
 
 /// Classify error for metrics based on status code and message
-fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
+pub(super) fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
     match code {
         StatusCode::BAD_REQUEST => {
             // 400
@@ -149,7 +149,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 }
 
 /// Extract ErrorType from ErrorResponse for metrics
-fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
+pub(super) fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     classify_error_for_metrics(response.0, &response.1.message)
 }
 

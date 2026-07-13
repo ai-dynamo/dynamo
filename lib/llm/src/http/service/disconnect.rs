@@ -236,19 +236,35 @@ fn monitor_for_disconnects_with_timeout(
                             yield event;
                         }
                         Some(Err(err)) => {
-                            // Mark error as internal since it's a streaming error
-                            inflight_guard.mark_error(ErrorType::Internal);
+                            let was_rejected = crate::http::service::metrics::request_was_rejected(&err);
+                            let sanitized = if was_rejected {
+                                SanitizedError::Overloaded
+                            } else if crate::http::service::metrics::request_was_unavailable(&err) {
+                                SanitizedError::Unavailable
+                            } else if crate::http::service::metrics::request_was_cancelled(&err) {
+                                SanitizedError::Cancelled
+                            } else {
+                                SanitizedError::Internal
+                            };
+                            let error_type = super::openai::classify_error_for_metrics(
+                                sanitized.status(),
+                                &sanitized.to_string(),
+                            );
+                            inflight_guard.mark_engine_error(error_type, was_rejected);
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
-                            tracing::error!("Streaming error: {err}");
+                            if sanitized.log_as_error() {
+                                tracing::error!("Streaming error: {err}");
+                            } else {
+                                tracing::debug!("Streaming request cancelled: {err}");
+                            }
                             // Emit a structured OpenAI-style error frame + `data: [DONE]`
                             // so naive `data:`-line parsers see both the error and a
                             // stream terminator. Body derived from SanitizedError so
                             // the sanitized message + status live in one place.
-                            let sanitized = SanitizedError::Internal;
                             let err_json = serde_json::json!({
                                 "error": {
                                     "message": sanitized.to_string(),
@@ -276,6 +292,7 @@ fn monitor_for_disconnects_with_timeout(
                 _ = &mut stopped => {
                     // Mark as cancelled when context is stopped (client disconnect or timeout)
                     inflight_guard.mark_error(ErrorType::Cancelled);
+                    stream_handle.disarm();
                     // Token counts (input_tokens, output_tokens) are recorded on
                     // the enclosing span by ResponseMetricCollector::Drop.
                     tracing::warn!(
@@ -287,6 +304,16 @@ fn monitor_for_disconnects_with_timeout(
                         elapsed_ms = %inflight_guard.elapsed_ms(),
                         "request cancelled"
                     );
+                    let sanitized = SanitizedError::Cancelled;
+                    let err_json = serde_json::json!({
+                        "error": {
+                            "message": sanitized.to_string(),
+                            "type": sanitized.openai_type_slug(),
+                            "code": sanitized.status().as_u16(),
+                        }
+                    });
+                    yield Event::default().data(err_json.to_string());
+                    yield Event::default().data("[DONE]");
                     break;
                 }
                 // Circuit breaker for zombie backend workers: if the backend holds a live TCP
@@ -455,7 +482,7 @@ mod tests {
     fn generate_cancellation_labels() -> CancellationLabels {
         CancellationLabels {
             model: "test-model".to_string(),
-            endpoint: Endpoint::Generate.to_string(),
+            endpoint: "generate".to_string(),
             request_type: "unary".to_string(),
         }
     }

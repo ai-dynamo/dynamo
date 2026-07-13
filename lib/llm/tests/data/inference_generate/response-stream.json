@@ -1,0 +1,27 @@
+{
+  "request_id": "generate-fixture",
+  "choices": [
+    {
+      "index": 0,
+      "token_ids": [55],
+      "logprobs": {
+        "content": [
+          {
+            "token": "token_id:55",
+            "logprob": -0.1,
+            "bytes": null,
+            "top_logprobs": [{"token": "token_id:55", "logprob": -0.1, "bytes": null}]
+          }
+        ]
+      },
+      "finish_reason": null,
+      "routed_experts": null
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 4,
+    "completion_tokens": 1,
+    "total_tokens": 5,
+    "prompt_tokens_details": null
+  }
+}

@@ -1255,13 +1255,13 @@ class VllmLLMEngine(LLMEngine):
             return {"status": "error", "message": "engine is not initialized"}
 
         async with self._pause_lock:
-            if controller.is_paused:
-                return {"status": "ok", "message": "Engine already sleeping"}
-            if controller.needs_resume_recovery:
+            if controller.needs_sleep_recovery:
                 return {
                     "status": "error",
                     "message": "wake_up required before retrying sleep",
                 }
+            if controller.is_paused:
+                return {"status": "ok", "message": "Engine already sleeping"}
             try:
                 if not await controller.pause(level):
                     return {"status": "ok", "message": "Engine already sleeping"}
@@ -1278,12 +1278,10 @@ class VllmLLMEngine(LLMEngine):
             return {"status": "error", "message": "engine is not initialized"}
 
         async with self._pause_lock:
-            needs_recovery = controller.needs_resume_recovery
-            if not controller.is_paused and not needs_recovery:
+            if not controller.has_sleep_state:
                 return {"status": "ok", "message": "Engine already awake"}
             try:
                 await controller.resume(tags)
-                controller.mark_resumed()
                 return {"status": "ok", "message": "Engine woke"}
             except Exception as e:
                 logger.error("Failed to wake up engine: %s", e)

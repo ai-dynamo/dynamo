@@ -30,6 +30,7 @@ from . import __version__
 
 _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
+_LEGACY_ENGINE_API_ENV = "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE"
 
 
 def validate_model_name(value: str) -> str:
@@ -78,6 +79,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
+    enable_engine_apis: bool
     strip_anthropic_preamble: bool
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
@@ -396,6 +398,17 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
                 "from the system prompt. Saves tokens and improves prompt caching."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-engine-apis",
+            env_var="DYN_ENABLE_ENGINE_API",
+            default=env_or_default(_LEGACY_ENGINE_API_ENV, False),
+            help=(
+                "[EXPERIMENTAL] Enable engine-native HTTP APIs, including "
+                "POST /inference/v1/generate. "
+                f"{_LEGACY_ENGINE_API_ENV} is a deprecated environment alias."
             ),
         )
         add_negatable_bool_argument(

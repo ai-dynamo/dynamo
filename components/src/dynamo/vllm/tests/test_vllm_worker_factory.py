@@ -5,15 +5,19 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.worker_endpoints import WorkerEndpointSet
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
+    _engine_generate_endpoint_path,
+    _engine_generate_prefill_endpoint_path,
     _wait_and_load_benchmark,
 )
 
@@ -44,6 +48,81 @@ def _make_config(**overrides) -> Mock:
     }
     defaults.update(overrides)
     return Mock(**defaults)
+
+
+def test_engine_generate_uses_versioned_per_instance_endpoint() -> None:
+    config = _make_config(namespace="rollout", component="backend")
+
+    assert (
+        _engine_generate_endpoint_path(config) == "rollout.backend.engine_generate_v1"
+    )
+
+
+def test_engine_generate_prefill_uses_independent_versioned_endpoint() -> None:
+    config = _make_config(namespace="rollout", component="prefill")
+
+    assert (
+        _engine_generate_prefill_endpoint_path(config)
+        == "rollout.prefill.engine_generate_prefill_v1"
+    )
+
+
+def test_decode_endpoint_set_owns_publication_and_shutdown_membership() -> None:
+    runtime = Mock()
+    runtime.endpoint.side_effect = lambda path: path
+    config = SimpleNamespace(
+        namespace="dyn",
+        component="decode",
+        endpoint="generate",
+        use_vllm_tokenizer=False,
+        enable_rl=True,
+        engine_args=SimpleNamespace(enable_lora=True),
+    )
+
+    endpoints = WorkerEndpointSet.decode(
+        runtime,
+        config,
+        versioned_path="dyn.decode.engine_generate_v1",
+    )
+
+    assert endpoints.routing_endpoints == (
+        "dyn.decode.generate",
+        "dyn.decode.engine_generate_v1",
+    )
+    assert endpoints.handler_args == {
+        "generate_endpoint": "dyn.decode.generate",
+        "additional_generate_endpoints": ("dyn.decode.engine_generate_v1",),
+    }
+    shutdown: list = []
+    endpoints.bind_shutdown(shutdown)
+    assert shutdown == list(endpoints.shutdown_members)
+    assert "dyn.decode.rl" in shutdown
+    assert "dyn.decode.load_lora" in shutdown
+
+
+def test_prefill_endpoint_set_declares_prefill_alias_without_lora_controls() -> None:
+    runtime = Mock()
+    runtime.endpoint.side_effect = lambda path: path
+    config = SimpleNamespace(
+        namespace="dyn",
+        component="prefill",
+        endpoint="generate",
+        enable_rl=False,
+        engine_args=SimpleNamespace(enable_lora=True),
+    )
+
+    endpoints = WorkerEndpointSet.prefill(
+        runtime,
+        config,
+        versioned_path="dyn.prefill.engine_generate_prefill_v1",
+    )
+
+    assert endpoints.routing_endpoints == (
+        "dyn.prefill.generate",
+        "dyn.prefill.engine_generate_prefill_v1",
+    )
+    assert endpoints.rl is None
+    assert endpoints.lora == ()
 
 
 @pytest.mark.asyncio
@@ -282,9 +361,10 @@ class TestPrefillRegistrationContract:
 
         # embedding_cache_manager=None skips register_embedding_cache_metrics.
         mock_handler = Mock(embedding_cache_manager=None)
+        handler_factory = Mock(return_value=mock_handler)
         monkeypatch.setattr(
             "dynamo.vllm.worker_factory.PrefillWorkerHandler",
-            Mock(return_value=mock_handler),
+            handler_factory,
         )
 
         async def _noop(*_args, **_kwargs) -> None:
@@ -327,3 +407,14 @@ class TestPrefillRegistrationContract:
         if route_to_encoder:
             expected_needs_set.append(WorkerType.Encode)
         assert captured["needs"] == [expected_needs_set]
+
+        versioned_prefill_endpoint = next(
+            call.args[0]
+            for call in runtime.endpoint.call_args_list
+            if call.args[0].endswith(".engine_generate_prefill_v1")
+        )
+        assert versioned_prefill_endpoint == "dyn.prefill.engine_generate_prefill_v1"
+        handler_kwargs = handler_factory.call_args.kwargs
+        assert handler_kwargs["additional_generate_endpoints"] == (
+            runtime.endpoint.return_value,
+        )

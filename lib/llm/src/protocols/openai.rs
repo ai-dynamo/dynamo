@@ -18,7 +18,6 @@ pub mod common_ext;
 pub mod completions;
 pub(crate) mod delta_common;
 pub mod embeddings;
-pub mod generate;
 pub mod images;
 pub mod models;
 pub mod responses;

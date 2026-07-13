@@ -176,6 +176,33 @@ def test_extract_completion_bails_when_any_selected_token_missing():
     assert top_logprobs is None
 
 
+@pytest.mark.parametrize(
+    "missing_row",
+    [
+        None,
+        {99: _logprob(-0.8, decoded="x")},
+    ],
+)
+def test_extract_completion_can_preserve_missing_rows(missing_row):
+    output = SimpleNamespace(
+        token_ids=[7, 8],
+        logprobs=[
+            {7: _logprob(-0.7, decoded="a")},
+            missing_row,
+        ],
+    )
+
+    log_probs, top_logprobs = extract_from_completion_output(
+        output,
+        0,
+        preserve_missing_rows=True,
+    )
+
+    assert log_probs == [-0.7, -9999.0]
+    assert [entry["token_id"] for entry in top_logprobs[0]] == [7]
+    assert top_logprobs[1] == []
+
+
 def test_extract_completion_uses_tokenizer_when_decoded_missing():
     class FakeTok:
         def decode(self, ids):

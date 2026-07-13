@@ -288,7 +288,6 @@ struct StateFlags {
     realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
-    generate_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -305,7 +304,6 @@ impl StateFlags {
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
-            EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -338,9 +336,6 @@ impl StateFlags {
             EndpointType::AnthropicMessages => self
                 .anthropic_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
-            EndpointType::Generate => self
-                .generate_endpoints_enabled
-                .store(enabled, Ordering::Relaxed),
         }
     }
 }
@@ -368,7 +363,6 @@ impl State {
                 realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
-                generate_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
@@ -458,6 +452,11 @@ impl State {
         self.frontend_api_config.anthropic().enabled()
     }
 
+    /// Returns true when experimental engine-native HTTP APIs are enabled.
+    pub fn engine_api_enabled(&self) -> bool {
+        self.frontend_api_config.engine_api_enabled()
+    }
+
     /// Returns true if streaming tool call dispatch is enabled.
     ///
     /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
@@ -493,8 +492,6 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
-    /// Resolved startup gate for the vLLM-compatible Generate API.
-    generate_api_enabled: bool,
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
@@ -535,14 +532,6 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
-
-    /// Experimental engine-native APIs (currently the token-in/token-out
-    /// `Generate` endpoint `POST /inference/v1/generate`). **Disabled by
-    /// default** — a deployment opts into this endpoint via this builder flag
-    /// or the `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` env var. When disabled
-    /// the route is not mounted, so a request gets a 404.
-    #[builder(default = "false")]
-    enable_engine_apis: bool,
 
     /// API behavior config retained in HTTP state for route and streaming decisions.
     #[builder(default)]
@@ -617,10 +606,6 @@ impl HttpService {
 
     pub fn anthropic_api_enabled(&self) -> bool {
         self.state().anthropic_api_enabled()
-    }
-
-    pub fn generate_api_enabled(&self) -> bool {
-        self.generate_api_enabled
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -883,19 +868,12 @@ static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
-/// Environment variable to enable the experimental vLLM-compatible
-/// `/inference/v1/generate` endpoint. Truthy value opts in; disabled by default.
-pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
-    "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE";
-
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
-        let generate_endpoint_enabled =
-            config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -941,9 +919,6 @@ impl HttpServiceConfigBuilder {
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
         );
-        state
-            .flags
-            .set(&EndpointType::Generate, generate_endpoint_enabled);
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -1042,7 +1017,6 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             &config.request_template,
             anthropic_endpoints_enabled,
-            generate_endpoint_enabled,
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1109,7 +1083,6 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
-            generate_api_enabled: generate_endpoint_enabled,
             rl_router,
             rl_port: config.rl_port,
         })
@@ -1130,6 +1103,13 @@ impl HttpServiceConfigBuilder {
             .get_or_insert_with(FrontendApiConfig::default)
             .anthropic_mut()
             .set_enabled(enabled);
+        self
+    }
+
+    pub fn enable_engine_apis(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_engine_api_enabled(enabled);
         self
     }
 
@@ -1161,9 +1141,11 @@ impl HttpServiceConfigBuilder {
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
-        enable_generate_endpoint: bool,
     ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
         let mut routes = Vec::new();
+        if state.engine_api_enabled() {
+            routes.push(super::inference_generate::router(state.clone()));
+        }
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
             state.clone(),
@@ -1204,13 +1186,6 @@ impl HttpServiceConfigBuilder {
                 EndpointType::AnthropicMessages,
                 (anthropic_docs, anthropic_route),
             );
-        }
-
-        if enable_generate_endpoint {
-            tracing::warn!("The vLLM-compatible /inference/v1/generate API is experimental.");
-            let (generate_docs, generate_route) =
-                super::generate::generate_router(state.clone(), None);
-            endpoint_routes.insert(EndpointType::Generate, (generate_docs, generate_route));
         }
 
         for endpoint_type in EndpointType::all() {
@@ -1450,6 +1425,36 @@ mod tests {
         });
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn engine_generate_route_is_registered_only_when_enabled() {
+        use crate::protocols::inference::generate::GENERATE_PATH;
+        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_ENGINE_API;
+
+        temp_env::with_var_unset(DYN_ENABLE_ENGINE_API, || {
+            let disabled = HttpService::builder()
+                .enable_engine_apis(false)
+                .build()
+                .unwrap();
+            assert!(!disabled.state.engine_api_enabled());
+            assert!(
+                !disabled
+                    .route_docs()
+                    .iter()
+                    .any(|route| route.path == GENERATE_PATH)
+            );
+
+            let enabled = HttpService::builder()
+                .enable_engine_apis(true)
+                .build()
+                .unwrap();
+            assert!(enabled.state.engine_api_enabled());
+            assert!(enabled.route_docs().iter().any(|route| {
+                route.method == axum::http::Method::POST && route.path == GENERATE_PATH
+            }));
+        });
+    }
+
     /// `DYN_DISABLE_FRONTEND_NVEXT` is the env-var mirror of the builder
     /// flag. Unset -> builder default wins (on). Falsey strings -> on.
     /// Truthy strings (`1` / `true` / `yes` / `on`, case-insensitive) ->
@@ -1495,26 +1500,6 @@ mod tests {
                 !svc.state.nvext_enabled(),
                 "builder=false wins even if disable is unset"
             );
-        });
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn generate_api_enabled_reports_resolved_startup_gate() {
-        temp_env::with_var_unset(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
-            let disabled = HttpService::builder().build().unwrap();
-            assert!(!disabled.generate_api_enabled());
-
-            let enabled = HttpService::builder()
-                .enable_engine_apis(true)
-                .build()
-                .unwrap();
-            assert!(enabled.generate_api_enabled());
-        });
-
-        temp_env::with_var(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1"), || {
-            let enabled = HttpService::builder().build().unwrap();
-            assert!(enabled.generate_api_enabled());
         });
     }
 }
