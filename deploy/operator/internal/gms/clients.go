@@ -37,6 +37,6 @@ func ToAlphaSpec(src *nvidiacomv1beta1.GPUMemoryServiceSpec) *nvidiacomv1alpha1.
 		return nil
 	}
 	dst := &nvidiacomv1alpha1.GPUMemoryServiceSpec{}
-	nvidiacomv1alpha1.ConvertToGPUMemoryServiceSpec(src, dst)
+	_ = nvidiacomv1alpha1.Convert_v1beta1_GPUMemoryServiceSpec_To_v1alpha1_GPUMemoryServiceSpec(src, dst, nil)
 	return dst
 }

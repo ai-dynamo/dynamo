@@ -157,6 +157,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// with all standard Dynamo environment variables, health probes, and ports.
 	// This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
 	// +optional
+	// +k8s:conversion-gen=false
 	FrontendSidecar *FrontendSidecarSpec `json:"frontendSidecar,omitempty"`
 
 	// Checkpoint configures container checkpointing for this service.

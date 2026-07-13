@@ -30,15 +30,17 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
-func TestConvertToServiceCheckpointConfigSetsNilIdentity(t *testing.T) {
+func TestConvertComponentCheckpointConfigSetsNilIdentity(t *testing.T) {
 	var got ServiceCheckpointConfig
-	ConvertToServiceCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
+	if err := Convert_v1beta1_ComponentCheckpointConfig_To_v1alpha1_ServiceCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
 		Enabled:       true,
 		Mode:          v1beta1.CheckpointMode("auto"),
 		CheckpointRef: ptr.To("checkpoint"),
-	}, &got)
+	}, &got, nil); err != nil {
+		t.Fatalf("convert checkpoint config: %v", err)
+	}
 	if got.Identity != nil {
-		t.Fatalf("ConvertToServiceCheckpointConfig().Identity = %#v, want nil", got.Identity)
+		t.Fatalf("converted Identity = %#v, want nil", got.Identity)
 	}
 }
 
@@ -58,17 +60,17 @@ func TestConvertFromSharedMemorySpec(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var got v1beta1.DynamoComponentDeploymentSharedSpec
-			if err := ConvertFromDynamoComponentDeploymentSharedSpec(&DynamoComponentDeploymentSharedSpec{SharedMemory: tt.src}, &got, nil, nil, DynamoComponentDeploymentSharedSpecConversionContext{}); err != nil {
-				t.Fatalf("ConvertFromDynamoComponentDeploymentSharedSpec() error = %v", err)
+			if err := Convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec(&DynamoComponentDeploymentSharedSpec{SharedMemory: tt.src}, &got, nil); err != nil {
+				t.Fatalf("shared spec conversion error = %v", err)
 			}
 			if tt.want == "" {
 				if got.SharedMemorySize != nil {
-					t.Fatalf("ConvertFromDynamoComponentDeploymentSharedSpec().SharedMemorySize = %s, want nil", got.SharedMemorySize.String())
+					t.Fatalf("shared spec conversion SharedMemorySize = %s, want nil", got.SharedMemorySize.String())
 				}
 				return
 			}
 			if got.SharedMemorySize == nil || got.SharedMemorySize.String() != tt.want {
-				t.Fatalf("ConvertFromDynamoComponentDeploymentSharedSpec().SharedMemorySize = %v, want %s", got.SharedMemorySize, tt.want)
+				t.Fatalf("shared spec conversion SharedMemorySize = %v, want %s", got.SharedMemorySize, tt.want)
 			}
 		})
 	}

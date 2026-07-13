@@ -188,7 +188,7 @@ func ToAlphaCheckpointConfig(src *v1beta1.ComponentCheckpointConfig) *v1alpha1.S
 		return nil
 	}
 	dst := &v1alpha1.ServiceCheckpointConfig{}
-	v1alpha1.ConvertToServiceCheckpointConfig(src, dst)
+	_ = v1alpha1.Convert_v1beta1_ComponentCheckpointConfig_To_v1alpha1_ServiceCheckpointConfig(src, dst, nil)
 	return dst
 }
 
@@ -199,7 +199,7 @@ func ToAlphaCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity) *v1alpha1.
 		return nil
 	}
 	dst := &v1alpha1.DynamoCheckpointIdentity{}
-	v1alpha1.ConvertToDynamoCheckpointIdentity(src, dst)
+	_ = v1alpha1.Convert_v1beta1_DynamoCheckpointIdentity_To_v1alpha1_DynamoCheckpointIdentity(src, dst, nil)
 	return dst
 }
 

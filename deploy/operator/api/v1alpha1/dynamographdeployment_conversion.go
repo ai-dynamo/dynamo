@@ -39,8 +39,8 @@ import (
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apiconversion "k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -58,14 +58,6 @@ func IsDynamoGraphDeploymentConversionAnnotation(key string) bool {
 	return strings.HasPrefix(key, dgdConversionAnnotationPrefix)
 }
 
-// DynamoGraphDeploymentConversionContext carries DGD-level conversion context
-// that component converters cannot derive from their local inputs.
-// +kubebuilder:object:generate=false
-type DynamoGraphDeploymentConversionContext struct {
-	IncludeOriginSplits bool
-	SaveHubOrigin       bool
-}
-
 // ConvertTo converts this DynamoGraphDeployment (v1alpha1) into the hub
 // version (v1beta1).
 func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
@@ -73,117 +65,7 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeployment but got %T", dstRaw)
 	}
-
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-	var restoredHubSpec *v1beta1.DynamoGraphDeploymentSpec
-	if raw, ok := getAnnFromObj(&dst.ObjectMeta, annDGDSpec); ok && raw != "" {
-		if spec, ok := restoreDGDHubSpec(raw); ok {
-			restoredHubSpec = &spec
-		}
-	}
-	hubOrigin := restoredHubSpec != nil
-	scrubDGDInternalAnnotations(&dst.ObjectMeta)
-
-	ctx := DynamoGraphDeploymentConversionContext{
-		IncludeOriginSplits: !hubOrigin,
-	}
-	var spokeSave DynamoGraphDeploymentSpec
-	if err := ConvertFromDynamoGraphDeploymentSpec(&src.Spec, &dst.Spec, restoredHubSpec, &spokeSave, ctx); err != nil {
-		return err
-	}
-	var statusSave DynamoGraphDeploymentStatus
-	saveDGDAlphaOnlyStatus(&src.Status, &statusSave)
-
-	ConvertFromDynamoGraphDeploymentStatus(&src.Status, &dst.Status)
-	if !dgdAlphaSpecSaveIsZero(&spokeSave) || !dgdAlphaStatusSaveIsZero(&statusSave) {
-		if err := saveDGDSpokeAnnotations(&spokeSave, &statusSave, dst); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// ConvertFromDynamoGraphDeploymentSpec converts the DGD spec from v1alpha1 to
-// v1beta1.
-func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGraphDeploymentSpec, restored *v1beta1.DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, ctx DynamoGraphDeploymentConversionContext) error {
-	// Convert fields represented by both versions from the live source.
-	dst.Annotations = src.Annotations
-	dst.Labels = src.Labels
-	dst.PriorityClassName = src.PriorityClassName
-	dst.BackendFramework = src.BackendFramework
-
-	if src.Restart != nil {
-		dst.Restart = &v1beta1.Restart{}
-		ConvertFromRestart(src.Restart, dst.Restart)
-	}
-	if src.TopologyConstraint != nil {
-		dst.TopologyConstraint = &v1beta1.SpecTopologyConstraint{}
-		ConvertFromSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
-	}
-	if src.Experimental != nil {
-		dst.Experimental = &v1beta1.DynamoGraphDeploymentExperimentalSpec{}
-		ConvertFromDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
-	}
-	dst.Env = src.Envs
-	if save != nil && len(src.PVCs) > 0 {
-		save.PVCs = slices.Clone(src.PVCs)
-	}
-
-	// Restore target-only component leaves from the preserved hub payload.
-	restoredHubComponents := restoredDGDHubComponentsByName(restored)
-
-	// Components: v1alpha1 map -> v1beta1 list. Prefer the preserved hub list
-	// order when it carried non-sorted order information; otherwise sort by
-	// name for deterministic alpha-first output.
-	if len(src.Services) > 0 {
-		names := dgdServiceNamesInEmissionOrder(src.Services, restored)
-		dst.Components = make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
-		for _, name := range names {
-			compSrc := src.Services[name]
-			if compSrc == nil {
-				if save != nil {
-					if save.Services == nil {
-						save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
-					}
-					save.Services[name] = nil
-				}
-				continue
-			}
-			restoredShared := restoredHubComponents[name]
-			var compDst v1beta1.DynamoComponentDeploymentSharedSpec
-			var compSave *DynamoComponentDeploymentSharedSpec
-			if save != nil {
-				compSave = &DynamoComponentDeploymentSharedSpec{}
-			}
-			sharedCtx := DynamoComponentDeploymentSharedSpecConversionContext{
-				IncludeOriginSplits: ctx.IncludeOriginSplits,
-				PodTemplateOrigin:   restoredShared != nil && restoredShared.PodTemplate != nil,
-			}
-			if err := ConvertFromDynamoComponentDeploymentSharedSpec(compSrc, &compDst, restoredShared, compSave, sharedCtx); err != nil {
-				return fmt.Errorf("component %q: %w", name, err)
-			}
-			// In v1alpha1 DGD, the services-map key is the canonical name and
-			// any value in compSrc.ServiceName is treated as legacy/dead by
-			// the reconciler (graph.go materialises DCDs with ServiceName =
-			// map key). Force the v1beta1 ComponentName to the map key so the
-			// +listMapKey=name invariant (and the round-trip identity) hold, and
-			// save the (now redundant) v1alpha1 ServiceName so a mismatched
-			// value still round-trips.
-			compDst.ComponentName = name
-			if save != nil && compSrc.ServiceName != "" && compSrc.ServiceName != name {
-				compSave.ServiceName = compSrc.ServiceName
-			}
-			if save != nil && !sharedAlphaSpecSaveIsZero(compSave) {
-				if save.Services == nil {
-					save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
-				}
-				save.Services[name] = compSave
-			}
-			dst.Components = append(dst.Components, compDst)
-		}
-	}
-
-	return nil
+	return Convert_v1alpha1_DynamoGraphDeployment_To_v1beta1_DynamoGraphDeployment(src, dst, nil)
 }
 
 func saveDGDSpokeAnnotations(specSave *DynamoGraphDeploymentSpec, statusSave *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeployment) error {
@@ -351,11 +233,13 @@ func componentNamesToHub(src *ServiceReplicaStatus) []string {
 	if src == nil {
 		return nil
 	}
-	componentNames := slices.Clone(src.ComponentNames)
-	if len(componentNames) == 0 && src.ComponentName != "" {
-		componentNames = []string{src.ComponentName}
+	if len(src.ComponentNames) > 0 {
+		return src.ComponentNames
 	}
-	return componentNames
+	if src.ComponentName != "" {
+		return []string{src.ComponentName}
+	}
+	return nil
 }
 
 func restoreDGDSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentSpec, *DynamoGraphDeploymentStatus, error) {
@@ -381,99 +265,7 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeployment but got %T", srcRaw)
 	}
-
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-
-	spokeOrigin := hasDGDSpokeAnnotations(&dst.ObjectMeta)
-	restoredSpokeSpec, restoredSpokeStatus, err := restoreDGDSpokeAnnotations(&dst.ObjectMeta)
-	if err != nil {
-		return err
-	}
-	scrubDGDInternalAnnotations(&dst.ObjectMeta)
-
-	ctx := DynamoGraphDeploymentConversionContext{SaveHubOrigin: !spokeOrigin}
-	var hubSave v1beta1.DynamoGraphDeploymentSpec
-	if err := ConvertToDynamoGraphDeploymentSpec(&src.Spec, &dst.Spec, restoredSpokeSpec, &hubSave, ctx); err != nil {
-		return err
-	}
-
-	ConvertToDynamoGraphDeploymentStatus(&src.Status, &dst.Status)
-	restoreDGDAlphaOnlySpecFromSaved(&dst.Spec, restoredSpokeSpec)
-	restoreDGDAlphaOnlyStatusFromSaved(&dst.Status, restoredSpokeStatus)
-	if !dgdHubSpecSaveIsZero(&hubSave) {
-		data, err := marshalDGDHubSpec(&hubSave)
-		if err != nil {
-			return fmt.Errorf("preserve DGD hub spec: %w", err)
-		}
-		setAnnOnObj(&dst.ObjectMeta, annDGDSpec, string(data))
-	}
-	return nil
-}
-
-// ConvertToDynamoGraphDeploymentSpec converts the DGD spec from v1beta1 to
-// v1alpha1.
-func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGraphDeploymentSpec, restored *DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, ctx DynamoGraphDeploymentConversionContext) error {
-	// Convert fields represented by both versions from the live source.
-	dst.Annotations = src.Annotations
-	dst.Labels = src.Labels
-	dst.PriorityClassName = src.PriorityClassName
-	dst.BackendFramework = src.BackendFramework
-
-	if src.Restart != nil {
-		dst.Restart = &Restart{}
-		ConvertToRestart(src.Restart, dst.Restart)
-	}
-	if src.TopologyConstraint != nil {
-		dst.TopologyConstraint = &SpecTopologyConstraint{}
-		ConvertToSpecTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
-	}
-	if src.Experimental != nil {
-		dst.Experimental = &DynamoGraphDeploymentExperimentalSpec{}
-		ConvertToDynamoGraphDeploymentExperimentalSpec(src.Experimental, dst.Experimental)
-	}
-	dst.Envs = src.Env
-
-	if len(src.Components) > 0 {
-		preserveComponentOrder := dgdComponentOrderNeedsPreservation(src.Components)
-		dst.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(src.Components))
-		for i := range src.Components {
-			compSrc := &src.Components[i]
-			// v1beta1 declares +listType=map +listMapKey=name so
-			// the API server normally rejects duplicates, but the
-			// conversion path is also reached from in-memory unit-test
-			// fixtures and other code paths that bypass CRD validation.
-			// Surface duplicates here as a hard error rather than
-			// silently overwriting the earlier entry on map insertion.
-			if _, dup := dst.Services[compSrc.ComponentName]; dup {
-				return fmt.Errorf("duplicate component name %q in spec.components", compSrc.ComponentName)
-			}
-			compDst := &DynamoComponentDeploymentSharedSpec{}
-			var preservedShared *DynamoComponentDeploymentSharedSpec
-			if restored != nil && restored.Services != nil {
-				preservedShared = restored.Services[compSrc.ComponentName]
-			}
-			var compSave *v1beta1.DynamoComponentDeploymentSharedSpec
-			if save != nil {
-				compSave = &v1beta1.DynamoComponentDeploymentSharedSpec{
-					ComponentName: compSrc.ComponentName,
-				}
-			}
-			if err := ConvertToDynamoComponentDeploymentSharedSpec(compSrc, compDst, preservedShared, compSave); err != nil {
-				return fmt.Errorf("component %q: %w", compSrc.ComponentName, err)
-			}
-			// In v1alpha1 the services-map key is the canonical name; the
-			// per-entry ServiceName field is redundant. Keep it empty for
-			// v1beta1-first inputs; restore saved mismatches after the full
-			// spec conversion.
-			compDst.ServiceName = ""
-			dst.Services[compSrc.ComponentName] = compDst
-			if save != nil && (preserveComponentOrder || !dgdHubComponentSaveIsZero(compSave) || ctx.SaveHubOrigin && dgdHubComponentOriginSaveNeeded(compSrc)) {
-				save.Components = append(save.Components, *compSave)
-			}
-		}
-	}
-
-	return nil
+	return Convert_v1beta1_DynamoGraphDeployment_To_v1alpha1_DynamoGraphDeployment(src, dst, nil)
 }
 
 func dgdHubComponentOriginSaveNeeded(src *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
@@ -535,279 +327,358 @@ func scrubDGDInternalAnnotations(obj metav1.Object) {
 	}
 }
 
-// ConvertFromRestart converts the restart spec from v1alpha1 to v1beta1.
-func ConvertFromRestart(src *Restart, dst *v1beta1.Restart) {
-	*dst = v1beta1.Restart{ID: src.ID}
-	if src.Strategy != nil {
-		dst.Strategy = &v1beta1.RestartStrategy{}
-		ConvertFromRestartStrategy(src.Strategy, dst.Strategy)
+// applyDGDToHubPreservation restores hub-only component leaves and collects
+// v1alpha1-only values. It also preserves a prior hub component order; without
+// one, alpha-first output uses deterministic name ordering.
+func applyDGDToHubPreservation(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGraphDeploymentSpec, restored *v1beta1.DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, includeOriginSplits bool) error {
+	if save != nil && len(src.PVCs) > 0 {
+		save.PVCs = slices.Clone(src.PVCs)
 	}
+	if len(src.Services) == 0 {
+		return nil
+	}
+
+	convertedByName := make(map[string]v1beta1.DynamoComponentDeploymentSharedSpec, len(dst.Components))
+	for i := range dst.Components {
+		convertedByName[dst.Components[i].ComponentName] = dst.Components[i]
+	}
+	restoredByName := restoredDGDHubComponentsByName(restored)
+	names := dgdServiceNamesInEmissionOrder(src.Services, restored)
+	components := make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
+	for _, name := range names {
+		service := src.Services[name]
+		if service == nil {
+			if save != nil {
+				if save.Services == nil {
+					save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
+				}
+				save.Services[name] = nil
+			}
+			continue
+		}
+		component, ok := convertedByName[name]
+		if !ok {
+			return fmt.Errorf("converted component %q is missing", name)
+		}
+		if err := restoreSharedHubProjection(service, &component, restoredByName[name]); err != nil {
+			return fmt.Errorf("component %q: %w", name, err)
+		}
+		// In v1alpha1 DGD, the services-map key is the canonical name. A value
+		// in ServiceName is legacy/redundant, so v1beta1 ComponentName must use
+		// the map key to satisfy its listMapKey=name invariant. Preserve a
+		// mismatched ServiceName separately so it can still round-trip.
+		component.ComponentName = name
+		if save != nil {
+			componentSave := &DynamoComponentDeploymentSharedSpec{}
+			saveSharedAlphaOnlySpec(service, componentSave, includeOriginSplits)
+			if service.ServiceName != "" && service.ServiceName != name {
+				componentSave.ServiceName = service.ServiceName
+			}
+			if !sharedAlphaSpecSaveIsZero(componentSave) {
+				if save.Services == nil {
+					save.Services = map[string]*DynamoComponentDeploymentSharedSpec{}
+				}
+				save.Services[name] = componentSave
+			}
+		}
+		components = append(components, component)
+	}
+	dst.Components = components
+	return nil
 }
 
-// ConvertToRestart converts the restart spec from v1beta1 to v1alpha1.
-func ConvertToRestart(src *v1beta1.Restart, dst *Restart) {
-	*dst = Restart{ID: src.ID}
-	if src.Strategy != nil {
-		dst.Strategy = &RestartStrategy{}
-		ConvertToRestartStrategy(src.Strategy, dst.Strategy)
+// applyDGDToAlphaPreservation restores v1alpha1-only component leaves and
+// collects hub-only values, including list order and pod-template origin.
+func applyDGDToAlphaPreservation(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGraphDeploymentSpec, restored *DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, saveHubOrigin bool) error {
+	if len(src.Components) == 0 {
+		return nil
 	}
-}
+	preserveOrder := dgdComponentOrderNeedsPreservation(src.Components)
+	for i := range src.Components {
+		component := &src.Components[i]
+		service := dst.Services[component.ComponentName]
+		if service == nil {
+			return fmt.Errorf("converted component %q is missing", component.ComponentName)
+		}
+		var preservedService *DynamoComponentDeploymentSharedSpec
+		if restored != nil && restored.Services != nil {
+			preservedService = restored.Services[component.ComponentName]
+		}
+		if err := restoreSharedAlphaProjection(component, service, preservedService); err != nil {
+			return fmt.Errorf("component %q: %w", component.ComponentName, err)
+		}
+		service.ServiceName = ""
 
-// ConvertFromRestartStrategy converts the restart strategy from v1alpha1 to
-// v1beta1.
-func ConvertFromRestartStrategy(src *RestartStrategy, dst *v1beta1.RestartStrategy) {
-	*dst = v1beta1.RestartStrategy{
-		Type:  v1beta1.RestartStrategyType(src.Type),
-		Order: slices.Clone(src.Order),
-	}
-}
-
-// ConvertToRestartStrategy converts the restart strategy from v1beta1 to
-// v1alpha1.
-func ConvertToRestartStrategy(src *v1beta1.RestartStrategy, dst *RestartStrategy) {
-	*dst = RestartStrategy{
-		Type:  RestartStrategyType(src.Type),
-		Order: slices.Clone(src.Order),
-	}
-}
-
-// ConvertFromDynamoGraphDeploymentExperimentalSpec converts graph-level
-// experimental config from v1alpha1 to v1beta1.
-func ConvertFromDynamoGraphDeploymentExperimentalSpec(src *DynamoGraphDeploymentExperimentalSpec, dst *v1beta1.DynamoGraphDeploymentExperimentalSpec) {
-	if src.KvTransferPolicy != nil {
-		dst.KvTransferPolicy = &v1beta1.KvTransferPolicy{}
-		ConvertFromKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
-	}
-}
-
-// ConvertToDynamoGraphDeploymentExperimentalSpec converts graph-level
-// experimental config from v1beta1 to v1alpha1.
-func ConvertToDynamoGraphDeploymentExperimentalSpec(src *v1beta1.DynamoGraphDeploymentExperimentalSpec, dst *DynamoGraphDeploymentExperimentalSpec) {
-	if src.KvTransferPolicy != nil {
-		dst.KvTransferPolicy = &KvTransferPolicy{}
-		ConvertToKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
-	}
-}
-
-// ConvertFromKvTransferPolicy converts KV transfer policy from v1alpha1 to
-// v1beta1.
-func ConvertFromKvTransferPolicy(src *KvTransferPolicy, dst *v1beta1.KvTransferPolicy) {
-	*dst = v1beta1.KvTransferPolicy{
-		ClusterTopologyName: src.ClusterTopologyName,
-		LabelKey:            src.LabelKey,
-		Domain:              v1beta1.TopologyDomain(src.Domain),
-		Enforcement:         v1beta1.KvTransferEnforcement(src.Enforcement),
-	}
-	if src.PreferredWeight != nil {
-		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
-	}
-}
-
-// ConvertToKvTransferPolicy converts KV transfer policy from v1beta1 to
-// v1alpha1.
-func ConvertToKvTransferPolicy(src *v1beta1.KvTransferPolicy, dst *KvTransferPolicy) {
-	*dst = KvTransferPolicy{
-		ClusterTopologyName: src.ClusterTopologyName,
-		LabelKey:            src.LabelKey,
-		Domain:              TopologyDomain(src.Domain),
-		Enforcement:         KvTransferEnforcement(src.Enforcement),
-	}
-	if src.PreferredWeight != nil {
-		dst.PreferredWeight = ptr.To(*src.PreferredWeight)
-	}
-}
-
-// ConvertFromSpecTopologyConstraint converts deployment topology constraints
-// from v1alpha1 to v1beta1.
-func ConvertFromSpecTopologyConstraint(src *SpecTopologyConstraint, dst *v1beta1.SpecTopologyConstraint) {
-	*dst = v1beta1.SpecTopologyConstraint{
-		ClusterTopologyName: src.TopologyProfile,
-		PackDomain:          v1beta1.TopologyDomain(src.PackDomain),
-	}
-}
-
-// ConvertToSpecTopologyConstraint converts deployment topology constraints
-// from v1beta1 to v1alpha1.
-func ConvertToSpecTopologyConstraint(src *v1beta1.SpecTopologyConstraint, dst *SpecTopologyConstraint) {
-	*dst = SpecTopologyConstraint{
-		TopologyProfile: src.ClusterTopologyName,
-		PackDomain:      TopologyDomain(src.PackDomain),
-	}
-}
-
-// ConvertFromDynamoGraphDeploymentStatus converts the DGD status from
-// v1alpha1 to v1beta1.
-func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, dst *v1beta1.DynamoGraphDeploymentStatus) {
-	dst.ObservedGeneration = src.ObservedGeneration
-	dst.State = v1beta1.DGDState(src.State)
-	if len(src.Conditions) > 0 {
-		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
-		for _, c := range src.Conditions {
-			dst.Conditions = append(dst.Conditions, *c.DeepCopy())
+		if save != nil {
+			componentSave := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: component.ComponentName}
+			if err := saveSharedHubOnlySpec(component, service, &componentSave); err != nil {
+				return fmt.Errorf("component %q: %w", component.ComponentName, err)
+			}
+			if preserveOrder || !dgdHubComponentSaveIsZero(&componentSave) || saveHubOrigin && dgdHubComponentOriginSaveNeeded(component) {
+				save.Components = append(save.Components, componentSave)
+			}
 		}
 	}
-	if len(src.Services) > 0 {
-		dst.Components = make(map[string]v1beta1.ComponentReplicaStatus, len(src.Services))
-		for k, v := range src.Services {
+	return nil
+}
+
+func Convert_v1alpha1_DynamoGraphDeployment_To_v1beta1_DynamoGraphDeployment(src *DynamoGraphDeployment, dst *v1beta1.DynamoGraphDeployment, s apiconversion.Scope) error {
+	var restoredHubSpec *v1beta1.DynamoGraphDeploymentSpec
+	if raw, ok := getAnnFromObj(&src.ObjectMeta, annDGDSpec); ok && raw != "" {
+		if spec, ok := restoreDGDHubSpec(raw); ok {
+			restoredHubSpec = &spec
+		}
+	}
+	hubOrigin := restoredHubSpec != nil
+
+	var converted v1beta1.DynamoGraphDeployment
+	if err := autoConvert_v1alpha1_DynamoGraphDeployment_To_v1beta1_DynamoGraphDeployment(src, &converted, s); err != nil {
+		return err
+	}
+	converted.ObjectMeta = *src.ObjectMeta.DeepCopy()
+
+	var spokeSave DynamoGraphDeploymentSpec
+	if err := applyDGDToHubPreservation(&src.Spec, &converted.Spec, restoredHubSpec, &spokeSave, !hubOrigin); err != nil {
+		return err
+	}
+	var statusSave DynamoGraphDeploymentStatus
+	saveDGDAlphaOnlyStatus(&src.Status, &statusSave)
+
+	scrubDGDInternalAnnotations(&converted.ObjectMeta)
+	if !dgdAlphaSpecSaveIsZero(&spokeSave) || !dgdAlphaStatusSaveIsZero(&statusSave) {
+		if err := saveDGDSpokeAnnotations(&spokeSave, &statusSave, &converted); err != nil {
+			return err
+		}
+	}
+	*dst = converted
+	return nil
+}
+
+func Convert_v1beta1_DynamoGraphDeployment_To_v1alpha1_DynamoGraphDeployment(src *v1beta1.DynamoGraphDeployment, dst *DynamoGraphDeployment, s apiconversion.Scope) error {
+	spokeOrigin := hasDGDSpokeAnnotations(&src.ObjectMeta)
+	restoredSpokeSpec, restoredSpokeStatus, err := restoreDGDSpokeAnnotations(&src.ObjectMeta)
+	if err != nil {
+		return err
+	}
+
+	var converted DynamoGraphDeployment
+	if err := autoConvert_v1beta1_DynamoGraphDeployment_To_v1alpha1_DynamoGraphDeployment(src, &converted, s); err != nil {
+		return err
+	}
+	converted.ObjectMeta = *src.ObjectMeta.DeepCopy()
+
+	var hubSave v1beta1.DynamoGraphDeploymentSpec
+	if err := applyDGDToAlphaPreservation(&src.Spec, &converted.Spec, restoredSpokeSpec, &hubSave, !spokeOrigin); err != nil {
+		return err
+	}
+
+	restoreDGDAlphaOnlySpecFromSaved(&converted.Spec, restoredSpokeSpec)
+	restoreDGDAlphaOnlyStatusFromSaved(&converted.Status, restoredSpokeStatus)
+	scrubDGDInternalAnnotations(&converted.ObjectMeta)
+	if !dgdHubSpecSaveIsZero(&hubSave) {
+		data, err := marshalDGDHubSpec(&hubSave)
+		if err != nil {
+			return fmt.Errorf("preserve DGD hub spec: %w", err)
+		}
+		setAnnOnObj(&converted.ObjectMeta, annDGDSpec, string(data))
+	}
+	*dst = converted
+	return nil
+}
+
+// Convert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeploymentSpec
+// maps the v1alpha1 services map to the v1beta1 components list. The map key is
+// the canonical component name.
+func Convert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeploymentSpec(in *DynamoGraphDeploymentSpec, out *v1beta1.DynamoGraphDeploymentSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_DynamoGraphDeploymentSpec_To_v1beta1_DynamoGraphDeploymentSpec(in, out, s); err != nil {
+		return err
+	}
+	out.Env = in.Envs
+	if len(in.Services) == 0 {
+		return nil
+	}
+	names := sets.List(sets.KeySet(in.Services))
+	out.Components = make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(names))
+	for _, name := range names {
+		service := in.Services[name]
+		if service == nil {
+			continue
+		}
+		var component v1beta1.DynamoComponentDeploymentSharedSpec
+		if err := Convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec(service, &component, s); err != nil {
+			return fmt.Errorf("component %q: %w", name, err)
+		}
+		component.ComponentName = name
+		out.Components = append(out.Components, component)
+	}
+	return nil
+}
+
+// Convert_v1beta1_DynamoGraphDeploymentSpec_To_v1alpha1_DynamoGraphDeploymentSpec
+// maps the v1beta1 components list to the v1alpha1 services map.
+func Convert_v1beta1_DynamoGraphDeploymentSpec_To_v1alpha1_DynamoGraphDeploymentSpec(in *v1beta1.DynamoGraphDeploymentSpec, out *DynamoGraphDeploymentSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_DynamoGraphDeploymentSpec_To_v1alpha1_DynamoGraphDeploymentSpec(in, out, s); err != nil {
+		return err
+	}
+	out.Envs = in.Env
+	if len(in.Components) == 0 {
+		return nil
+	}
+	out.Services = make(map[string]*DynamoComponentDeploymentSharedSpec, len(in.Components))
+	for i := range in.Components {
+		component := &in.Components[i]
+		// The API server normally rejects duplicates because components is a
+		// list-map. Conversion is also callable on in-memory objects that bypass
+		// CRD validation, so reject duplicates instead of silently overwriting.
+		if _, duplicate := out.Services[component.ComponentName]; duplicate {
+			return fmt.Errorf("duplicate component name %q in spec.components", component.ComponentName)
+		}
+		service := &DynamoComponentDeploymentSharedSpec{}
+		if err := Convert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoComponentDeploymentSharedSpec(component, service, s); err != nil {
+			return fmt.Errorf("component %q: %w", component.ComponentName, err)
+		}
+		// ServiceName is redundant in v1alpha1 DGD; the services-map key is the
+		// canonical name. Saved mismatches are restored at the object level.
+		service.ServiceName = ""
+		out.Services[component.ComponentName] = service
+	}
+	return nil
+}
+
+// Convert_v1alpha1_DynamoGraphDeploymentStatus_To_v1beta1_DynamoGraphDeploymentStatus
+// converts common status fields and maps the Services status map to Components.
+func Convert_v1alpha1_DynamoGraphDeploymentStatus_To_v1beta1_DynamoGraphDeploymentStatus(in *DynamoGraphDeploymentStatus, out *v1beta1.DynamoGraphDeploymentStatus, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_DynamoGraphDeploymentStatus_To_v1beta1_DynamoGraphDeploymentStatus(in, out, s); err != nil {
+		return err
+	}
+	if len(in.Services) > 0 {
+		out.Components = make(map[string]v1beta1.ComponentReplicaStatus, len(in.Services))
+		for name, service := range in.Services {
 			var component v1beta1.ComponentReplicaStatus
-			ConvertFromServiceReplicaStatus(&v, &component)
-			dst.Components[k] = component
+			if err := Convert_v1alpha1_ServiceReplicaStatus_To_v1beta1_ComponentReplicaStatus(&service, &component, s); err != nil {
+				return err
+			}
+			out.Components[name] = component
 		}
 	}
-	if src.Restart != nil {
-		dst.Restart = &v1beta1.RestartStatus{}
-		ConvertFromRestartStatus(src.Restart, dst.Restart)
-	}
-	if len(src.Checkpoints) > 0 {
-		dst.Checkpoints = make(map[string]v1beta1.ComponentCheckpointStatus, len(src.Checkpoints))
-		for k, v := range src.Checkpoints {
-			var checkpoint v1beta1.ComponentCheckpointStatus
-			ConvertFromServiceCheckpointStatus(&v, &checkpoint)
-			dst.Checkpoints[k] = checkpoint
-		}
-	}
-	if src.RollingUpdate != nil {
-		dst.RollingUpdate = &v1beta1.RollingUpdateStatus{}
-		ConvertFromRollingUpdateStatus(src.RollingUpdate, dst.RollingUpdate)
-	}
+	return nil
 }
 
-// ConvertToDynamoGraphDeploymentStatus converts the DGD status from v1beta1 to
-// v1alpha1.
-func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStatus, dst *DynamoGraphDeploymentStatus) {
-	dst.ObservedGeneration = src.ObservedGeneration
-	dst.State = DGDState(src.State)
-	if len(src.Conditions) > 0 {
-		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
-		for _, c := range src.Conditions {
-			dst.Conditions = append(dst.Conditions, *c.DeepCopy())
-		}
+// Convert_v1beta1_DynamoGraphDeploymentStatus_To_v1alpha1_DynamoGraphDeploymentStatus
+// converts common status fields and maps the Components status map to Services.
+func Convert_v1beta1_DynamoGraphDeploymentStatus_To_v1alpha1_DynamoGraphDeploymentStatus(in *v1beta1.DynamoGraphDeploymentStatus, out *DynamoGraphDeploymentStatus, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_DynamoGraphDeploymentStatus_To_v1alpha1_DynamoGraphDeploymentStatus(in, out, s); err != nil {
+		return err
 	}
-	if len(src.Components) > 0 {
-		dst.Services = make(map[string]ServiceReplicaStatus, len(src.Components))
-		for k, v := range src.Components {
+	if len(in.Components) > 0 {
+		out.Services = make(map[string]ServiceReplicaStatus, len(in.Components))
+		for name, component := range in.Components {
 			var service ServiceReplicaStatus
-			ConvertToServiceReplicaStatus(&v, &service)
-			dst.Services[k] = service
+			if err := Convert_v1beta1_ComponentReplicaStatus_To_v1alpha1_ServiceReplicaStatus(&component, &service, s); err != nil {
+				return err
+			}
+			out.Services[name] = service
 		}
 	}
-	if src.Restart != nil {
-		dst.Restart = &RestartStatus{}
-		ConvertToRestartStatus(src.Restart, dst.Restart)
-	}
-	if len(src.Checkpoints) > 0 {
-		dst.Checkpoints = make(map[string]ServiceCheckpointStatus, len(src.Checkpoints))
-		for k, v := range src.Checkpoints {
-			var checkpoint ServiceCheckpointStatus
-			ConvertToServiceCheckpointStatus(&v, &checkpoint)
-			dst.Checkpoints[k] = checkpoint
-		}
-	}
-	if src.RollingUpdate != nil {
-		dst.RollingUpdate = &RollingUpdateStatus{}
-		ConvertToRollingUpdateStatus(src.RollingUpdate, dst.RollingUpdate)
-	}
+	return nil
 }
 
-// ConvertFromRestartStatus converts restart status from v1alpha1 to v1beta1.
-func ConvertFromRestartStatus(src *RestartStatus, dst *v1beta1.RestartStatus) {
-	*dst = v1beta1.RestartStatus{
-		ObservedID: src.ObservedID,
-		Phase:      v1beta1.RestartPhase(src.Phase),
-		InProgress: slices.Clone(src.InProgress),
+// Convert_v1alpha1_ServiceCheckpointStatus_To_v1beta1_ComponentCheckpointStatus
+// converts the checkpoint status renamed from service to component terminology.
+func Convert_v1alpha1_ServiceCheckpointStatus_To_v1beta1_ComponentCheckpointStatus(in *ServiceCheckpointStatus, out *v1beta1.ComponentCheckpointStatus, _ apiconversion.Scope) error {
+	*out = v1beta1.ComponentCheckpointStatus{
+		CheckpointName: in.CheckpointName,
+		CheckpointID:   in.CheckpointID,
+		IdentityHash:   in.IdentityHash,
+		Ready:          in.Ready,
 	}
+	return nil
 }
 
-// ConvertToRestartStatus converts restart status from v1beta1 to v1alpha1.
-func ConvertToRestartStatus(src *v1beta1.RestartStatus, dst *RestartStatus) {
-	*dst = RestartStatus{
-		ObservedID: src.ObservedID,
-		Phase:      RestartPhase(src.Phase),
-		InProgress: slices.Clone(src.InProgress),
+// Convert_v1beta1_ComponentCheckpointStatus_To_v1alpha1_ServiceCheckpointStatus
+// converts the checkpoint status back to service terminology.
+func Convert_v1beta1_ComponentCheckpointStatus_To_v1alpha1_ServiceCheckpointStatus(in *v1beta1.ComponentCheckpointStatus, out *ServiceCheckpointStatus, _ apiconversion.Scope) error {
+	*out = ServiceCheckpointStatus{
+		CheckpointName: in.CheckpointName,
+		CheckpointID:   in.CheckpointID,
+		IdentityHash:   in.IdentityHash,
+		Ready:          in.Ready,
 	}
+	return nil
 }
 
-// ConvertFromServiceCheckpointStatus converts checkpoint status from v1alpha1
-// to v1beta1.
-func ConvertFromServiceCheckpointStatus(src *ServiceCheckpointStatus, dst *v1beta1.ComponentCheckpointStatus) {
-	*dst = v1beta1.ComponentCheckpointStatus{
-		CheckpointName: src.CheckpointName,
-		CheckpointID:   src.CheckpointID,
-		IdentityHash:   src.IdentityHash,
-		Ready:          src.Ready,
+// Convert_v1alpha1_ServiceReplicaStatus_To_v1beta1_ComponentReplicaStatus maps
+// service terminology to component terminology and folds the legacy singular
+// ComponentName into ComponentNames when needed.
+func Convert_v1alpha1_ServiceReplicaStatus_To_v1beta1_ComponentReplicaStatus(in *ServiceReplicaStatus, out *v1beta1.ComponentReplicaStatus, _ apiconversion.Scope) error {
+	*out = v1beta1.ComponentReplicaStatus{
+		ComponentKind:     v1beta1.ComponentKind(in.ComponentKind),
+		ComponentNames:    componentNamesToHub(in),
+		RuntimeNamespace:  in.RuntimeNamespace,
+		Replicas:          in.Replicas,
+		UpdatedReplicas:   in.UpdatedReplicas,
+		ReadyReplicas:     in.ReadyReplicas,
+		AvailableReplicas: in.AvailableReplicas,
 	}
+	return nil
 }
 
-// ConvertToServiceCheckpointStatus converts checkpoint status from v1beta1 to
-// v1alpha1.
-func ConvertToServiceCheckpointStatus(src *v1beta1.ComponentCheckpointStatus, dst *ServiceCheckpointStatus) {
-	*dst = ServiceCheckpointStatus{
-		CheckpointName: src.CheckpointName,
-		CheckpointID:   src.CheckpointID,
-		IdentityHash:   src.IdentityHash,
-		Ready:          src.Ready,
-	}
-}
-
-// ConvertFromRollingUpdateStatus converts rolling-update status from v1alpha1
-// to v1beta1.
-func ConvertFromRollingUpdateStatus(src *RollingUpdateStatus, dst *v1beta1.RollingUpdateStatus) {
-	*dst = v1beta1.RollingUpdateStatus{
-		Phase:             v1beta1.RollingUpdatePhase(src.Phase),
-		StartTime:         src.StartTime.DeepCopy(),
-		EndTime:           src.EndTime.DeepCopy(),
-		UpdatedComponents: slices.Clone(src.UpdatedServices),
-	}
-}
-
-// ConvertToRollingUpdateStatus converts rolling-update status from v1beta1 to
-// v1alpha1.
-func ConvertToRollingUpdateStatus(src *v1beta1.RollingUpdateStatus, dst *RollingUpdateStatus) {
-	*dst = RollingUpdateStatus{
-		Phase:           RollingUpdatePhase(src.Phase),
-		StartTime:       src.StartTime.DeepCopy(),
-		EndTime:         src.EndTime.DeepCopy(),
-		UpdatedServices: slices.Clone(src.UpdatedComponents),
-	}
-}
-
-// ConvertFromServiceReplicaStatus converts replica status from v1alpha1 to
-// v1beta1.
-func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.ComponentReplicaStatus) {
-	*dst = v1beta1.ComponentReplicaStatus{
-		ComponentKind:    v1beta1.ComponentKind(src.ComponentKind),
-		ComponentNames:   componentNamesToHub(src),
-		RuntimeNamespace: src.RuntimeNamespace,
-		Replicas:         src.Replicas,
-		UpdatedReplicas:  src.UpdatedReplicas,
-	}
-	if src.ReadyReplicas != nil {
-		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
-	}
-	if src.AvailableReplicas != nil {
-		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
-	}
-}
-
-// ConvertToServiceReplicaStatus converts replica status from v1beta1 to
-// v1alpha1.
-func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *ServiceReplicaStatus) {
-	componentNames := slices.Clone(src.ComponentNames)
-
-	*dst = ServiceReplicaStatus{
-		ComponentKind:    ComponentKind(src.ComponentKind),
-		ComponentNames:   componentNames,
-		RuntimeNamespace: src.RuntimeNamespace,
-		Replicas:         src.Replicas,
-		UpdatedReplicas:  src.UpdatedReplicas,
+// Convert_v1beta1_ComponentReplicaStatus_To_v1alpha1_ServiceReplicaStatus maps
+// component terminology back to service terminology. The last component name
+// becomes the legacy singular ComponentName.
+func Convert_v1beta1_ComponentReplicaStatus_To_v1alpha1_ServiceReplicaStatus(in *v1beta1.ComponentReplicaStatus, out *ServiceReplicaStatus, _ apiconversion.Scope) error {
+	componentNames := in.ComponentNames
+	*out = ServiceReplicaStatus{
+		ComponentKind:     ComponentKind(in.ComponentKind),
+		ComponentNames:    componentNames,
+		RuntimeNamespace:  in.RuntimeNamespace,
+		Replicas:          in.Replicas,
+		UpdatedReplicas:   in.UpdatedReplicas,
+		ReadyReplicas:     in.ReadyReplicas,
+		AvailableReplicas: in.AvailableReplicas,
 	}
 	if len(componentNames) > 0 {
-		dst.ComponentName = componentNames[len(componentNames)-1]
+		out.ComponentName = componentNames[len(componentNames)-1]
 	}
-	if src.ReadyReplicas != nil {
-		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
+	return nil
+}
+
+// Convert_v1alpha1_RollingUpdateStatus_To_v1beta1_RollingUpdateStatus converts
+// common fields and renames UpdatedServices to UpdatedComponents.
+func Convert_v1alpha1_RollingUpdateStatus_To_v1beta1_RollingUpdateStatus(in *RollingUpdateStatus, out *v1beta1.RollingUpdateStatus, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_RollingUpdateStatus_To_v1beta1_RollingUpdateStatus(in, out, s); err != nil {
+		return err
 	}
-	if src.AvailableReplicas != nil {
-		dst.AvailableReplicas = ptr.To(*src.AvailableReplicas)
+	out.UpdatedComponents = in.UpdatedServices
+	return nil
+}
+
+// Convert_v1beta1_RollingUpdateStatus_To_v1alpha1_RollingUpdateStatus converts
+// common fields and renames UpdatedComponents to UpdatedServices.
+func Convert_v1beta1_RollingUpdateStatus_To_v1alpha1_RollingUpdateStatus(in *v1beta1.RollingUpdateStatus, out *RollingUpdateStatus, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_RollingUpdateStatus_To_v1alpha1_RollingUpdateStatus(in, out, s); err != nil {
+		return err
 	}
+	out.UpdatedServices = in.UpdatedComponents
+	return nil
+}
+
+// Convert_v1alpha1_SpecTopologyConstraint_To_v1beta1_SpecTopologyConstraint
+// converts common fields and renames TopologyProfile to ClusterTopologyName.
+func Convert_v1alpha1_SpecTopologyConstraint_To_v1beta1_SpecTopologyConstraint(in *SpecTopologyConstraint, out *v1beta1.SpecTopologyConstraint, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_SpecTopologyConstraint_To_v1beta1_SpecTopologyConstraint(in, out, s); err != nil {
+		return err
+	}
+	out.ClusterTopologyName = in.TopologyProfile
+	return nil
+}
+
+// Convert_v1beta1_SpecTopologyConstraint_To_v1alpha1_SpecTopologyConstraint
+// converts common fields and renames ClusterTopologyName to TopologyProfile.
+func Convert_v1beta1_SpecTopologyConstraint_To_v1alpha1_SpecTopologyConstraint(in *v1beta1.SpecTopologyConstraint, out *SpecTopologyConstraint, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_SpecTopologyConstraint_To_v1alpha1_SpecTopologyConstraint(in, out, s); err != nil {
+		return err
+	}
+	out.TopologyProfile = in.ClusterTopologyName
+	return nil
 }

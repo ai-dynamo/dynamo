@@ -1288,7 +1288,7 @@ func PCSNameForAlphaDGDServices(dgdName string, services map[string]*v1alpha1.Dy
 		if service != nil {
 			if service.Multinode != nil {
 				component.Multinode = &v1beta1.MultinodeSpec{}
-				v1alpha1.ConvertFromMultinodeSpec(service.Multinode, component.Multinode)
+				_ = v1alpha1.Convert_v1alpha1_MultinodeSpec_To_v1beta1_MultinodeSpec(service.Multinode, component.Multinode, nil)
 			}
 			if service.Replicas != nil {
 				component.Replicas = ptr.To(*service.Replicas)
@@ -1298,14 +1298,14 @@ func PCSNameForAlphaDGDServices(dgdName string, services map[string]*v1alpha1.Dy
 					component.Experimental = &v1beta1.ExperimentalSpec{}
 				}
 				component.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{}
-				v1alpha1.ConvertFromGPUMemoryServiceSpec(service.GPUMemoryService, component.Experimental.GPUMemoryService)
+				_ = v1alpha1.Convert_v1alpha1_GPUMemoryServiceSpec_To_v1beta1_GPUMemoryServiceSpec(service.GPUMemoryService, component.Experimental.GPUMemoryService, nil)
 			}
 			if service.Failover != nil && service.Failover.Enabled {
 				if component.Experimental == nil {
 					component.Experimental = &v1beta1.ExperimentalSpec{}
 				}
 				component.Experimental.Failover = &v1beta1.FailoverSpec{}
-				v1alpha1.ConvertFromFailoverSpec(service.Failover, component.Experimental.Failover)
+				_ = v1alpha1.Convert_v1alpha1_FailoverSpec_To_v1beta1_FailoverSpec(service.Failover, component.Experimental.Failover, nil)
 			}
 		}
 		components = append(components, component)

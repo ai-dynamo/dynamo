@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
@@ -163,5 +164,38 @@ func TestDGDSA_ConvertFrom_TypeError(t *testing.T) {
 	wrong := &v1beta1.DynamoGraphDeployment{}
 	if err := dst.ConvertFrom(wrong); err == nil {
 		t.Fatal("expected error from ConvertFrom on wrong hub type, got nil")
+	}
+}
+
+func TestDGDSA_GeneratedSchemeConversion(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := AddToScheme(scheme); err != nil {
+		t.Fatalf("register v1alpha1 scheme: %v", err)
+	}
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("register v1beta1 scheme: %v", err)
+	}
+
+	src := &DynamoGraphDeploymentScalingAdapter{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "adapter",
+			Annotations: map[string]string{"preserved": "source"},
+		},
+		Spec: DynamoGraphDeploymentScalingAdapterSpec{
+			Replicas: 7,
+			DGDRef: DynamoGraphDeploymentServiceRef{
+				Name:        "graph",
+				ServiceName: "decode",
+			},
+		},
+		Status: DynamoGraphDeploymentScalingAdapterStatus{Replicas: 6, Selector: "component=decode"},
+	}
+	dst := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
+	if err := scheme.Convert(src, dst, nil); err != nil {
+		t.Fatalf("scheme conversion: %v", err)
+	}
+
+	if got, want := dst.Spec.DGDRef.ComponentName, "decode"; got != want {
+		t.Fatalf("componentName = %q, want %q", got, want)
 	}
 }

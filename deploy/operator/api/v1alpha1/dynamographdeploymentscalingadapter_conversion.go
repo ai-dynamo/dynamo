@@ -32,55 +32,46 @@ package v1alpha1
 import (
 	"fmt"
 
-	"sigs.k8s.io/controller-runtime/pkg/conversion"
+	conversion "k8s.io/apimachinery/pkg/conversion"
+	crconversion "sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
 
 // ConvertTo converts this DynamoGraphDeploymentScalingAdapter (v1alpha1) into
 // the hub version (v1beta1).
-func (src *DynamoGraphDeploymentScalingAdapter) ConvertTo(dstRaw conversion.Hub) error {
+func (src *DynamoGraphDeploymentScalingAdapter) ConvertTo(dstRaw crconversion.Hub) error {
 	dst, ok := dstRaw.(*v1beta1.DynamoGraphDeploymentScalingAdapter)
 	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentScalingAdapter but got %T", dstRaw)
 	}
-
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-
-	dst.Spec.Replicas = src.Spec.Replicas
-	dst.Spec.DGDRef = v1beta1.DynamoGraphDeploymentComponentRef{
-		Name:          src.Spec.DGDRef.Name,
-		ComponentName: src.Spec.DGDRef.ServiceName,
-	}
-
-	dst.Status.Replicas = src.Status.Replicas
-	dst.Status.Selector = src.Status.Selector
-	if src.Status.LastScaleTime != nil {
-		dst.Status.LastScaleTime = src.Status.LastScaleTime.DeepCopy()
-	}
-	return nil
+	return Convert_v1alpha1_DynamoGraphDeploymentScalingAdapter_To_v1beta1_DynamoGraphDeploymentScalingAdapter(src, dst, nil)
 }
 
 // ConvertFrom converts from the hub (v1beta1) DynamoGraphDeploymentScalingAdapter
 // into this v1alpha1 instance.
-func (dst *DynamoGraphDeploymentScalingAdapter) ConvertFrom(srcRaw conversion.Hub) error {
+func (dst *DynamoGraphDeploymentScalingAdapter) ConvertFrom(srcRaw crconversion.Hub) error {
 	src, ok := srcRaw.(*v1beta1.DynamoGraphDeploymentScalingAdapter)
 	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentScalingAdapter but got %T", srcRaw)
 	}
+	return Convert_v1beta1_DynamoGraphDeploymentScalingAdapter_To_v1alpha1_DynamoGraphDeploymentScalingAdapter(src, dst, nil)
+}
 
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
+// Convert_v1alpha1_DynamoGraphDeploymentServiceRef_To_v1beta1_DynamoGraphDeploymentComponentRef
+// handles the service-to-component terminology change that conversion-gen
+// cannot infer from field names.
+func Convert_v1alpha1_DynamoGraphDeploymentServiceRef_To_v1beta1_DynamoGraphDeploymentComponentRef(src *DynamoGraphDeploymentServiceRef, dst *v1beta1.DynamoGraphDeploymentComponentRef, _ conversion.Scope) error {
+	dst.Name = src.Name
+	dst.ComponentName = src.ServiceName
+	return nil
+}
 
-	dst.Spec.Replicas = src.Spec.Replicas
-	dst.Spec.DGDRef = DynamoGraphDeploymentServiceRef{
-		Name:        src.Spec.DGDRef.Name,
-		ServiceName: src.Spec.DGDRef.ComponentName,
-	}
-
-	dst.Status.Replicas = src.Status.Replicas
-	dst.Status.Selector = src.Status.Selector
-	if src.Status.LastScaleTime != nil {
-		dst.Status.LastScaleTime = src.Status.LastScaleTime.DeepCopy()
-	}
+// Convert_v1beta1_DynamoGraphDeploymentComponentRef_To_v1alpha1_DynamoGraphDeploymentServiceRef
+// handles the component-to-service terminology change that conversion-gen
+// cannot infer from field names.
+func Convert_v1beta1_DynamoGraphDeploymentComponentRef_To_v1alpha1_DynamoGraphDeploymentServiceRef(src *v1beta1.DynamoGraphDeploymentComponentRef, dst *DynamoGraphDeploymentServiceRef, _ conversion.Scope) error {
+	dst.Name = src.Name
+	dst.ServiceName = src.ComponentName
 	return nil
 }

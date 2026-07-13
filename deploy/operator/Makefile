@@ -281,8 +281,12 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	cp config/rbac/role.yaml $(HELM_MANAGER_RBAC_ROLE)
 
 .PHONY: generate
-generate: controller-gen generate-pydantic ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
+generate: controller-gen generate-conversions generate-pydantic ## Generate API helper code and Pydantic models.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt_" paths="./..."
+
+.PHONY: generate-conversions
+generate-conversions: ## Generate conversions between served Operator API versions.
+	hack/tools/code-generator/generate.sh go
 
 .PHONY: generate-pydantic
 generate-pydantic: ## Generate Python Pydantic models from v1beta1 Go types (requires Python 3 + pydantic)

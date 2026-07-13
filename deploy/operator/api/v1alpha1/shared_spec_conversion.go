@@ -46,6 +46,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apiconversion "k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/utils/ptr"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -126,94 +127,6 @@ func delAnnFromObj(obj metav1.Object, key string) {
 // ---------------------------------------------------------------------------
 // Shared-spec conversion entry points
 // ---------------------------------------------------------------------------
-
-// DynamoComponentDeploymentSharedSpecConversionContext carries shared-spec
-// conversion context that leaf converters cannot derive from local inputs.
-// +kubebuilder:object:generate=false
-type DynamoComponentDeploymentSharedSpecConversionContext struct {
-	IncludeOriginSplits bool
-	PodTemplateOrigin   bool
-}
-
-// ConvertFromDynamoComponentDeploymentSharedSpec converts the shared spec from
-// v1alpha1 to v1beta1.
-func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, restored *v1beta1.DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
-	// ComponentType: v1beta1 promotes the legacy v1alpha1 worker subcomponent
-	// values to first-class component types.
-	dst.ComponentType = sharedComponentTypeToHub(src)
-
-	// v1alpha1 ServiceName <-> v1beta1 ComponentName: the same logical
-	// identifier, renamed at v1beta1 to align with the
-	// `spec.components` rename. For DGD components the caller overrides
-	// dst.ComponentName with the v1alpha1 services-map key (the canonical
-	// source of truth on v1alpha1); for standalone DCDs the caller falls
-	// back to ObjectMeta.Name when src.ServiceName is empty.
-	dst.ComponentName = src.ServiceName
-
-	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
-	dst.Replicas = src.Replicas
-	dst.MinAvailable = src.MinAvailable
-
-	if src.Multinode != nil {
-		dst.Multinode = &v1beta1.MultinodeSpec{}
-		ConvertFromMultinodeSpec(src.Multinode, dst.Multinode)
-	}
-
-	if src.ModelRef != nil {
-		dst.ModelRef = &v1beta1.ModelReference{}
-		ConvertFromModelReference(src.ModelRef, dst.ModelRef)
-	}
-
-	if src.TopologyConstraint != nil {
-		dst.TopologyConstraint = &v1beta1.TopologyConstraint{}
-		ConvertFromTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
-	}
-
-	if src.EPPConfig != nil {
-		dst.EPPConfig = &v1beta1.EPPConfig{}
-		ConvertFromEPPConfig(src.EPPConfig, dst.EPPConfig)
-	}
-
-	// sharedMemory <-> sharedMemorySize (lossy struct flatten).
-	if src.SharedMemory != nil && (src.SharedMemory.Disabled || !src.SharedMemory.Size.IsZero()) {
-		dst.SharedMemorySize = &resource.Quantity{}
-		ConvertFromSharedMemorySpec(src.SharedMemory, dst.SharedMemorySize)
-	}
-
-	// volumeMounts + useAsCompilationCache -> compilationCache (the container
-	// volumeMounts themselves are emitted by buildPodTemplateToHub).
-	for _, vm := range src.VolumeMounts {
-		if vm.UseAsCompilationCache {
-			dst.CompilationCache = &v1beta1.CompilationCacheConfig{
-				PVCName:   vm.Name,
-				MountPath: vm.MountPoint,
-			}
-			break
-		}
-	}
-
-	// scalingAdapter: drop Enabled bool, keep presence semantics.
-	if src.ScalingAdapter != nil && src.ScalingAdapter.Enabled {
-		dst.ScalingAdapter = &v1beta1.ScalingAdapter{}
-		ConvertFromScalingAdapter(src.ScalingAdapter, dst.ScalingAdapter)
-	}
-
-	// experimental block: gpuMemoryService, failover, checkpoint.
-	convertExperimentalToHub(src, dst)
-
-	// Resources + envs + probes + mainContainer -> podTemplate.containers[main].
-	if err := buildPodTemplateToHub(src, dst, ctx); err != nil {
-		return err
-	}
-
-	if err := restoreSharedHubOnlyFields(dst, restored, src); err != nil {
-		return err
-	}
-	if save != nil {
-		saveSharedAlphaOnlySpec(src, save, ctx.IncludeOriginSplits)
-	}
-	return nil
-}
 
 func fillSharedAlphaOnlyFromPreserved(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec, mainContainerPresent bool) {
 	if dst == nil || preserved == nil {
@@ -495,70 +408,6 @@ func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
 	return src != nil && len(src.Annotations) == 0 && len(src.Labels) == 0
 }
 
-// ConvertToDynamoComponentDeploymentSharedSpec converts the shared spec from
-// v1beta1 to v1alpha1.
-func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) error {
-	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
-	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
-	dst.Replicas = src.Replicas
-	dst.MinAvailable = src.MinAvailable
-
-	if src.Multinode != nil {
-		dst.Multinode = &MultinodeSpec{}
-		ConvertToMultinodeSpec(src.Multinode, dst.Multinode)
-	}
-	if src.ModelRef != nil {
-		dst.ModelRef = &ModelReference{}
-		ConvertToModelReference(src.ModelRef, dst.ModelRef)
-	}
-	if src.TopologyConstraint != nil {
-		dst.TopologyConstraint = &TopologyConstraint{}
-		ConvertToTopologyConstraint(src.TopologyConstraint, dst.TopologyConstraint)
-	}
-	if src.EPPConfig != nil {
-		dst.EPPConfig = &EPPConfig{}
-		ConvertToEPPConfig(src.EPPConfig, dst.EPPConfig)
-	}
-
-	dst.ServiceName = src.ComponentName
-
-	// sharedMemorySize -> SharedMemorySpec.
-	if src.SharedMemorySize != nil {
-		dst.SharedMemory = &SharedMemorySpec{}
-		ConvertToSharedMemorySpec(src.SharedMemorySize, dst.SharedMemory)
-	}
-
-	// compilationCache + podTemplate volumeMounts -> VolumeMounts.
-	convertVolumeMountsFromHub(src, dst)
-
-	// experimental -> GPUMemoryService, Failover, Checkpoint.
-	convertExperimentalFromHub(src, dst)
-
-	// scalingAdapter presence -> Enabled=true; annotation -> Enabled=false payload.
-	if src.ScalingAdapter != nil {
-		dst.ScalingAdapter = &ScalingAdapter{}
-		ConvertToScalingAdapter(src.ScalingAdapter, dst.ScalingAdapter)
-	}
-
-	// podTemplate -> mainContainer + extraPodSpec + extraPodMetadata +
-	// Resources + Envs + Probes (+ FrontendSidecar).
-	if err := decomposePodTemplateFromHub(src, dst, restored); err != nil {
-		return err
-	}
-
-	// Restore lossy cache flags before field-origin reconstruction so every
-	// compilation-cache mount is excluded from main-container origin matching.
-	restoreSharedPreservedFlatVolumeMounts(dst, restored, src)
-	fillSharedAlphaOnlyFromPreserved(dst, restored, sharedHasMainContainer(src))
-	pruneEmptyExtraPodSpec(dst, restored)
-	if save != nil {
-		if err := saveSharedHubOnlySpec(src, dst, save); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, converted *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) error {
 	if src == nil || save == nil {
 		return nil
@@ -784,71 +633,6 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 }
 
 // ---------------------------------------------------------------------------
-// Simple shared-spec structs
-// ---------------------------------------------------------------------------
-
-// ConvertFromMultinodeSpec converts multinode settings from v1alpha1 to
-// v1beta1.
-func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
-	*dst = v1beta1.MultinodeSpec{NodeCount: src.NodeCount}
-}
-
-// ConvertToMultinodeSpec converts multinode settings from v1beta1 to
-// v1alpha1.
-func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
-	*dst = MultinodeSpec{NodeCount: src.NodeCount}
-}
-
-// ConvertFromModelReference converts model references from v1alpha1 to
-// v1beta1.
-func ConvertFromModelReference(src *ModelReference, dst *v1beta1.ModelReference) {
-	*dst = v1beta1.ModelReference{
-		Name:     src.Name,
-		Revision: src.Revision,
-	}
-}
-
-// ConvertToModelReference converts model references from v1beta1 to v1alpha1.
-func ConvertToModelReference(src *v1beta1.ModelReference, dst *ModelReference) {
-	*dst = ModelReference{
-		Name:     src.Name,
-		Revision: src.Revision,
-	}
-}
-
-// ConvertFromTopologyConstraint converts component topology constraints from
-// v1alpha1 to v1beta1.
-func ConvertFromTopologyConstraint(src *TopologyConstraint, dst *v1beta1.TopologyConstraint) {
-	*dst = v1beta1.TopologyConstraint{
-		PackDomain: v1beta1.TopologyDomain(src.PackDomain),
-	}
-}
-
-// ConvertToTopologyConstraint converts component topology constraints from
-// v1beta1 to v1alpha1.
-func ConvertToTopologyConstraint(src *v1beta1.TopologyConstraint, dst *TopologyConstraint) {
-	*dst = TopologyConstraint{
-		PackDomain: TopologyDomain(src.PackDomain),
-	}
-}
-
-// ConvertFromEPPConfig converts EPP config from v1alpha1 to v1beta1.
-func ConvertFromEPPConfig(src *EPPConfig, dst *v1beta1.EPPConfig) {
-	*dst = v1beta1.EPPConfig{
-		ConfigMapRef: src.ConfigMapRef.DeepCopy(),
-		Config:       src.Config.DeepCopy(),
-	}
-}
-
-// ConvertToEPPConfig converts EPP config from v1beta1 to v1alpha1.
-func ConvertToEPPConfig(src *v1beta1.EPPConfig, dst *EPPConfig) {
-	*dst = EPPConfig{
-		ConfigMapRef: src.ConfigMapRef.DeepCopy(),
-		Config:       src.Config.DeepCopy(),
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Shared-memory
 // ---------------------------------------------------------------------------
 
@@ -1024,25 +808,17 @@ func mergePreservedCompilationCacheVolumeMounts(preserved, current []VolumeMount
 }
 
 // ---------------------------------------------------------------------------
-// Scaling adapter (Enabled flag removed in v1beta1)
-// ---------------------------------------------------------------------------
-
-// ConvertFromScalingAdapter converts the v1alpha1 scaling adapter marker into
-// the v1beta1 marker. Callers skip disabled adapters before calling.
-func ConvertFromScalingAdapter(src *ScalingAdapter, dst *v1beta1.ScalingAdapter) {
-	*dst = v1beta1.ScalingAdapter{}
-}
-
-// ConvertToScalingAdapter converts the v1beta1 scaling adapter marker into
-// the enabled v1alpha1 marker.
-func ConvertToScalingAdapter(src *v1beta1.ScalingAdapter, dst *ScalingAdapter) {
-	*dst = ScalingAdapter{Enabled: true}
-}
-
-// ---------------------------------------------------------------------------
 // Experimental (gpuMemoryService, failover, checkpoint)
 // ---------------------------------------------------------------------------
 
+// v1alpha1 and v1beta1 use different serialized values for GMS modes:
+//
+//   - v1alpha1: "intraPod", "interPod"
+//   - v1beta1:  "IntraPod", "InterPod"
+//
+// conversion-gen only casts the named string types and would therefore emit
+// values rejected by the target version's CRD schema. Unknown values are kept
+// verbatim so conversion does not silently discard data.
 func gmsModeToV1beta1(mode GPUMemoryServiceMode) v1beta1.GPUMemoryServiceMode {
 	switch mode {
 	case GMSModeIntraPod:
@@ -1065,217 +841,7 @@ func gmsModeFromV1beta1(mode v1beta1.GPUMemoryServiceMode) GPUMemoryServiceMode 
 	}
 }
 
-func checkpointModeToV1beta1(mode CheckpointMode) v1beta1.CheckpointMode {
-	switch mode {
-	case CheckpointModeAuto:
-		return v1beta1.CheckpointModeAuto
-	case CheckpointModeManual:
-		return v1beta1.CheckpointModeManual
-	default:
-		return v1beta1.CheckpointMode(mode)
-	}
-}
-
-func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
-	switch mode {
-	case v1beta1.CheckpointModeAuto:
-		return CheckpointModeAuto
-	case v1beta1.CheckpointModeManual:
-		return CheckpointModeManual
-	default:
-		return CheckpointMode(mode)
-	}
-}
-
-func checkpointStartupPolicyToV1beta1(policy CheckpointStartupPolicy) v1beta1.CheckpointStartupPolicy {
-	switch policy {
-	case CheckpointStartupPolicyImmediate:
-		return v1beta1.CheckpointStartupPolicyImmediate
-	case CheckpointStartupPolicyWaitForCheckpoint:
-		return v1beta1.CheckpointStartupPolicyWaitForCheckpoint
-	default:
-		return v1beta1.CheckpointStartupPolicy(policy)
-	}
-}
-
-func checkpointStartupPolicyFromV1beta1(policy v1beta1.CheckpointStartupPolicy) CheckpointStartupPolicy {
-	switch policy {
-	case v1beta1.CheckpointStartupPolicyImmediate:
-		return CheckpointStartupPolicyImmediate
-	case v1beta1.CheckpointStartupPolicyWaitForCheckpoint:
-		return CheckpointStartupPolicyWaitForCheckpoint
-	default:
-		return CheckpointStartupPolicy(policy)
-	}
-}
-
-func checkpointDeletionPolicyToV1beta1(policy CheckpointDeletionPolicy) v1beta1.CheckpointDeletionPolicy {
-	switch policy {
-	case CheckpointDeletionPolicyDelete:
-		return v1beta1.CheckpointDeletionPolicyDelete
-	case CheckpointDeletionPolicyRetain:
-		return v1beta1.CheckpointDeletionPolicyRetain
-	default:
-		return v1beta1.CheckpointDeletionPolicy(policy)
-	}
-}
-
-func checkpointDeletionPolicyFromV1beta1(policy v1beta1.CheckpointDeletionPolicy) CheckpointDeletionPolicy {
-	switch policy {
-	case v1beta1.CheckpointDeletionPolicyDelete:
-		return CheckpointDeletionPolicyDelete
-	case v1beta1.CheckpointDeletionPolicyRetain:
-		return CheckpointDeletionPolicyRetain
-	default:
-		return CheckpointDeletionPolicy(policy)
-	}
-}
-
-// ConvertFromGPUMemoryServiceSpec converts an enabled GMS config into the
-// v1beta1 experimental GMS config. Disabled configs are represented by absence
-// in v1beta1 and are skipped by the caller.
-func ConvertFromGPUMemoryServiceSpec(src *GPUMemoryServiceSpec, dst *v1beta1.GPUMemoryServiceSpec) {
-	*dst = v1beta1.GPUMemoryServiceSpec{
-		Mode:                  gmsModeToV1beta1(src.Mode),
-		DeviceClassName:       src.DeviceClassName,
-		ExtraClientContainers: slices.Clone(src.ExtraClientContainers),
-	}
-	if len(src.ExtraClientPods) > 0 {
-		dst.ExtraClientPods = make([]v1beta1.GMSClientPodSpec, len(src.ExtraClientPods))
-		for i := range src.ExtraClientPods {
-			dst.ExtraClientPods[i] = v1beta1.GMSClientPodSpec{
-				Name:        src.ExtraClientPods[i].Name,
-				PodTemplate: *src.ExtraClientPods[i].PodTemplate.DeepCopy(),
-			}
-		}
-	}
-}
-
-// ConvertToGPUMemoryServiceSpec converts the v1beta1 experimental GMS config
-// into the GMS config.
-func ConvertToGPUMemoryServiceSpec(src *v1beta1.GPUMemoryServiceSpec, dst *GPUMemoryServiceSpec) {
-	*dst = GPUMemoryServiceSpec{
-		Enabled:               true,
-		Mode:                  gmsModeFromV1beta1(src.Mode),
-		DeviceClassName:       src.DeviceClassName,
-		ExtraClientContainers: slices.Clone(src.ExtraClientContainers),
-	}
-	if len(src.ExtraClientPods) > 0 {
-		dst.ExtraClientPods = make([]GMSClientPodSpec, len(src.ExtraClientPods))
-		for i := range src.ExtraClientPods {
-			dst.ExtraClientPods[i] = GMSClientPodSpec{
-				Name:        src.ExtraClientPods[i].Name,
-				PodTemplate: *src.ExtraClientPods[i].PodTemplate.DeepCopy(),
-			}
-		}
-	}
-}
-
-// ConvertFromFailoverSpec converts an enabled failover config into the v1beta1
-// experimental failover config. Disabled configs are represented by absence in
-// v1beta1 and are skipped by the caller.
-func ConvertFromFailoverSpec(src *FailoverSpec, dst *v1beta1.FailoverSpec) {
-	*dst = v1beta1.FailoverSpec{
-		Mode:       gmsModeToV1beta1(src.Mode),
-		NumShadows: src.NumShadows,
-	}
-}
-
-// ConvertToFailoverSpec converts the v1beta1 experimental failover config into
-// the failover config.
-func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
-	*dst = FailoverSpec{
-		Enabled:    true,
-		Mode:       gmsModeFromV1beta1(src.Mode),
-		NumShadows: src.NumShadows,
-	}
-}
-
-// ConvertFromServiceCheckpointConfig converts a checkpoint config into the
-// v1beta1 experimental checkpoint config.
-func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1beta1.ComponentCheckpointConfig) {
-	*dst = v1beta1.ComponentCheckpointConfig{
-		Enabled:             src.Enabled,
-		Mode:                checkpointModeToV1beta1(src.Mode),
-		StartupPolicy:       checkpointStartupPolicyToV1beta1(src.StartupPolicy),
-		DeletionPolicy:      checkpointDeletionPolicyToV1beta1(src.DeletionPolicy),
-		TargetContainerName: src.TargetContainerName,
-	}
-	if src.CheckpointRef != nil {
-		dst.CheckpointRef = src.CheckpointRef
-	}
-	if src.Identity != nil {
-		dst.Identity = &v1beta1.DynamoCheckpointIdentity{}
-		ConvertFromDynamoCheckpointIdentity(src.Identity, dst.Identity)
-	}
-	if src.Job != nil {
-		dst.Job = &v1beta1.ComponentCheckpointJobConfig{
-			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
-		}
-		if src.Job.PodTemplate != nil {
-			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
-		}
-	}
-}
-
-// ConvertToServiceCheckpointConfig converts the v1beta1 experimental checkpoint
-// config into the checkpoint config.
-func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, dst *ServiceCheckpointConfig) {
-	*dst = ServiceCheckpointConfig{
-		Enabled:             src.Enabled,
-		Mode:                checkpointModeFromV1beta1(src.Mode),
-		StartupPolicy:       checkpointStartupPolicyFromV1beta1(src.StartupPolicy),
-		DeletionPolicy:      checkpointDeletionPolicyFromV1beta1(src.DeletionPolicy),
-		TargetContainerName: src.TargetContainerName,
-	}
-	if src.CheckpointRef != nil {
-		dst.CheckpointRef = src.CheckpointRef
-	}
-	if src.Identity != nil {
-		dst.Identity = &DynamoCheckpointIdentity{}
-		ConvertToDynamoCheckpointIdentity(src.Identity, dst.Identity)
-	}
-	if src.Job != nil {
-		dst.Job = &ServiceCheckpointJobConfig{
-			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
-		}
-		if src.Job.PodTemplate != nil {
-			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
-		}
-	}
-}
-
-// ConvertFromDynamoCheckpointIdentity converts checkpoint identity fields to
-// v1beta1.
-func ConvertFromDynamoCheckpointIdentity(src *DynamoCheckpointIdentity, dst *v1beta1.DynamoCheckpointIdentity) {
-	*dst = v1beta1.DynamoCheckpointIdentity{
-		Model:                src.Model,
-		BackendFramework:     src.BackendFramework,
-		DynamoVersion:        src.DynamoVersion,
-		TensorParallelSize:   src.TensorParallelSize,
-		PipelineParallelSize: src.PipelineParallelSize,
-		Dtype:                src.Dtype,
-		MaxModelLen:          src.MaxModelLen,
-		ExtraParameters:      src.ExtraParameters,
-	}
-}
-
-// ConvertToDynamoCheckpointIdentity converts checkpoint identity fields from
-// v1beta1.
-func ConvertToDynamoCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity, dst *DynamoCheckpointIdentity) {
-	*dst = DynamoCheckpointIdentity{
-		Model:                src.Model,
-		BackendFramework:     src.BackendFramework,
-		DynamoVersion:        src.DynamoVersion,
-		TensorParallelSize:   src.TensorParallelSize,
-		PipelineParallelSize: src.PipelineParallelSize,
-		Dtype:                src.Dtype,
-		MaxModelLen:          src.MaxModelLen,
-		ExtraParameters:      src.ExtraParameters,
-	}
-}
-
-func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec) {
+func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, s apiconversion.Scope) error {
 	var exp *v1beta1.ExperimentalSpec
 	ensureExp := func() *v1beta1.ExperimentalSpec {
 		if exp == nil {
@@ -1286,37 +852,51 @@ func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1b
 
 	if src.GPUMemoryService != nil && src.GPUMemoryService.Enabled {
 		ensureExp().GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{}
-		ConvertFromGPUMemoryServiceSpec(src.GPUMemoryService, exp.GPUMemoryService)
+		if err := Convert_v1alpha1_GPUMemoryServiceSpec_To_v1beta1_GPUMemoryServiceSpec(src.GPUMemoryService, exp.GPUMemoryService, s); err != nil {
+			return err
+		}
 	}
 
 	if src.Failover != nil && src.Failover.Enabled {
 		ensureExp().Failover = &v1beta1.FailoverSpec{}
-		ConvertFromFailoverSpec(src.Failover, exp.Failover)
+		if err := Convert_v1alpha1_FailoverSpec_To_v1beta1_FailoverSpec(src.Failover, exp.Failover, s); err != nil {
+			return err
+		}
 	}
 
 	if src.Checkpoint != nil {
 		ensureExp().Checkpoint = &v1beta1.ComponentCheckpointConfig{}
-		ConvertFromServiceCheckpointConfig(src.Checkpoint, exp.Checkpoint)
+		if err := Convert_v1alpha1_ServiceCheckpointConfig_To_v1beta1_ComponentCheckpointConfig(src.Checkpoint, exp.Checkpoint, s); err != nil {
+			return err
+		}
 	}
 
 	dst.Experimental = exp
+	return nil
 }
 
-func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec) {
+func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, s apiconversion.Scope) error {
 	if src.Experimental != nil && src.Experimental.GPUMemoryService != nil {
 		dst.GPUMemoryService = &GPUMemoryServiceSpec{}
-		ConvertToGPUMemoryServiceSpec(src.Experimental.GPUMemoryService, dst.GPUMemoryService)
+		if err := Convert_v1beta1_GPUMemoryServiceSpec_To_v1alpha1_GPUMemoryServiceSpec(src.Experimental.GPUMemoryService, dst.GPUMemoryService, s); err != nil {
+			return err
+		}
 	}
 
 	if src.Experimental != nil && src.Experimental.Failover != nil {
 		dst.Failover = &FailoverSpec{}
-		ConvertToFailoverSpec(src.Experimental.Failover, dst.Failover)
+		if err := Convert_v1beta1_FailoverSpec_To_v1alpha1_FailoverSpec(src.Experimental.Failover, dst.Failover, s); err != nil {
+			return err
+		}
 	}
 
 	if src.Experimental != nil && src.Experimental.Checkpoint != nil {
 		dst.Checkpoint = &ServiceCheckpointConfig{}
-		ConvertToServiceCheckpointConfig(src.Experimental.Checkpoint, dst.Checkpoint)
+		if err := Convert_v1beta1_ComponentCheckpointConfig_To_v1alpha1_ServiceCheckpointConfig(src.Experimental.Checkpoint, dst.Checkpoint, s); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1328,8 +908,8 @@ func convertExperimentalFromHub(src *v1beta1.DynamoComponentDeploymentSharedSpec
 // ExtraPodMetadata, FrontendSidecar) following the same merge precedence the
 // v1alpha1 controller uses at reconcile time: ExtraPodSpec.MainContainer wins
 // over dedicated fields, except for env and volumeMounts which are additive.
-func buildPodTemplateToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
-	podTpl, err := buildSharedPodTemplateFromAlpha(src, ctx.PodTemplateOrigin, false)
+func buildPodTemplateToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, podTemplateOrigin bool) error {
+	podTpl, err := buildSharedPodTemplateFromAlpha(src, podTemplateOrigin, false)
 	if err != nil {
 		return err
 	}
@@ -1596,6 +1176,47 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
 	}
+	return nil
+}
+
+func restoreSharedHubProjection(src *DynamoComponentDeploymentSharedSpec, dst, preserved *v1beta1.DynamoComponentDeploymentSharedSpec) error {
+	if preserved == nil {
+		return nil
+	}
+	if preserved.PodTemplate != nil {
+		if err := buildPodTemplateToHub(src, dst, true); err != nil {
+			return err
+		}
+	}
+	return restoreSharedHubOnlyFields(dst, preserved, src)
+}
+
+func restoreSharedAlphaProjection(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst, preserved *DynamoComponentDeploymentSharedSpec) error {
+	if preserved == nil {
+		return nil
+	}
+
+	// The standard conversion decomposes the live pod template without origin
+	// data. Clear every pod-derived field before applying the preserved origin so
+	// the second projection is idempotent and cannot retain stale baseline data.
+	dst.ExtraPodMetadata = nil
+	dst.ExtraPodSpec = nil
+	dst.Resources = nil
+	dst.Envs = nil
+	dst.EnvFromSecret = nil
+	dst.VolumeMounts = nil
+	dst.LivenessProbe = nil
+	dst.ReadinessProbe = nil
+	dst.FrontendSidecar = nil
+	convertVolumeMountsFromHub(src, dst)
+	if err := decomposePodTemplateFromHub(src, dst, preserved); err != nil {
+		return err
+	}
+	// Restore lossy cache flags before field-origin reconstruction so every
+	// compilation-cache mount is excluded from main-container origin matching.
+	restoreSharedPreservedFlatVolumeMounts(dst, preserved, src)
+	fillSharedAlphaOnlyFromPreserved(dst, preserved, sharedHasMainContainer(src))
+	pruneEmptyExtraPodSpec(dst, preserved)
 	return nil
 }
 
@@ -2545,4 +2166,203 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		return nil
 	}
 	return out
+}
+
+// Convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec
+// converts common fields with conversion-gen and projects the v1alpha1 flat
+// pod fields into the v1beta1 podTemplate representation.
+func Convert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec(in *DynamoComponentDeploymentSharedSpec, out *v1beta1.DynamoComponentDeploymentSharedSpec, s apiconversion.Scope) error {
+	return convertSharedSpecToHub(in, out, false, s)
+}
+
+// Convert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoComponentDeploymentSharedSpec
+// converts common fields with conversion-gen and decomposes podTemplate into
+// the v1alpha1 flat pod fields.
+func Convert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoComponentDeploymentSharedSpec(in *v1beta1.DynamoComponentDeploymentSharedSpec, out *DynamoComponentDeploymentSharedSpec, s apiconversion.Scope) error {
+	return convertSharedSpecToAlpha(in, out, nil, s)
+}
+
+// convertSharedSpecToHub handles fields whose representation changed:
+//   - legacy worker subcomponent values become first-class component types;
+//   - ServiceName becomes ComponentName;
+//   - SharedMemory is flattened to SharedMemorySize;
+//   - compilation-cache mounts become CompilationCache;
+//   - ScalingAdapter.Enabled becomes presence semantics;
+//   - GMS, failover, and checkpoint move under Experimental;
+//   - resources, env, probes, ExtraPodSpec, metadata, and FrontendSidecar are
+//     composed into PodTemplate.
+func convertSharedSpecToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, podTemplateOrigin bool, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_DynamoComponentDeploymentSharedSpec_To_v1beta1_DynamoComponentDeploymentSharedSpec(src, dst, s); err != nil {
+		return err
+	}
+
+	dst.ComponentType = sharedComponentTypeToHub(src)
+	dst.ComponentName = src.ServiceName
+
+	if src.SharedMemory != nil && (src.SharedMemory.Disabled || !src.SharedMemory.Size.IsZero()) {
+		dst.SharedMemorySize = &resource.Quantity{}
+		ConvertFromSharedMemorySpec(src.SharedMemory, dst.SharedMemorySize)
+	}
+	for _, vm := range src.VolumeMounts {
+		if vm.UseAsCompilationCache {
+			dst.CompilationCache = &v1beta1.CompilationCacheConfig{
+				PVCName:   vm.Name,
+				MountPath: vm.MountPoint,
+			}
+			break
+		}
+	}
+	if src.ScalingAdapter != nil && src.ScalingAdapter.Enabled {
+		dst.ScalingAdapter = &v1beta1.ScalingAdapter{}
+		if err := Convert_v1alpha1_ScalingAdapter_To_v1beta1_ScalingAdapter(src.ScalingAdapter, dst.ScalingAdapter, s); err != nil {
+			return err
+		}
+	} else {
+		dst.ScalingAdapter = nil
+	}
+	if err := convertExperimentalToHub(src, dst, s); err != nil {
+		return err
+	}
+	return buildPodTemplateToHub(src, dst, podTemplateOrigin)
+}
+
+// convertSharedSpecToAlpha reverses the cross-field projections above. The
+// optional restored value carries field-origin information that cannot be
+// inferred by decomposing a podTemplate alone.
+func convertSharedSpecToAlpha(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_DynamoComponentDeploymentSharedSpec_To_v1alpha1_DynamoComponentDeploymentSharedSpec(src, dst, s); err != nil {
+		return err
+	}
+
+	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
+
+	dst.ServiceName = src.ComponentName
+	if src.SharedMemorySize != nil {
+		dst.SharedMemory = &SharedMemorySpec{}
+		ConvertToSharedMemorySpec(src.SharedMemorySize, dst.SharedMemory)
+	}
+	convertVolumeMountsFromHub(src, dst)
+	if err := convertExperimentalFromHub(src, dst, s); err != nil {
+		return err
+	}
+	return decomposePodTemplateFromHub(src, dst, restored)
+}
+
+// Convert_v1alpha1_ServiceCheckpointConfig_To_v1beta1_ComponentCheckpointConfig
+// converts the renamed checkpoint config and its nested identity and job.
+func Convert_v1alpha1_ServiceCheckpointConfig_To_v1beta1_ComponentCheckpointConfig(in *ServiceCheckpointConfig, out *v1beta1.ComponentCheckpointConfig, s apiconversion.Scope) error {
+	*out = v1beta1.ComponentCheckpointConfig{
+		Enabled:             in.Enabled,
+		Mode:                v1beta1.CheckpointMode(in.Mode),
+		StartupPolicy:       v1beta1.CheckpointStartupPolicy(in.StartupPolicy),
+		DeletionPolicy:      v1beta1.CheckpointDeletionPolicy(in.DeletionPolicy),
+		TargetContainerName: in.TargetContainerName,
+	}
+	if in.CheckpointRef != nil {
+		out.CheckpointRef = in.CheckpointRef
+	}
+	if in.Identity != nil {
+		out.Identity = &v1beta1.DynamoCheckpointIdentity{}
+		if err := Convert_v1alpha1_DynamoCheckpointIdentity_To_v1beta1_DynamoCheckpointIdentity(in.Identity, out.Identity, s); err != nil {
+			return err
+		}
+	}
+	if in.Job != nil {
+		out.Job = &v1beta1.ComponentCheckpointJobConfig{
+			GMSClientContainers: in.Job.GMSClientContainers,
+			PodTemplate:         in.Job.PodTemplate,
+		}
+	}
+	return nil
+}
+
+// Convert_v1beta1_ComponentCheckpointConfig_To_v1alpha1_ServiceCheckpointConfig
+// converts the renamed checkpoint config and its nested identity and job.
+func Convert_v1beta1_ComponentCheckpointConfig_To_v1alpha1_ServiceCheckpointConfig(in *v1beta1.ComponentCheckpointConfig, out *ServiceCheckpointConfig, s apiconversion.Scope) error {
+	*out = ServiceCheckpointConfig{
+		Enabled:             in.Enabled,
+		Mode:                CheckpointMode(in.Mode),
+		StartupPolicy:       CheckpointStartupPolicy(in.StartupPolicy),
+		DeletionPolicy:      CheckpointDeletionPolicy(in.DeletionPolicy),
+		TargetContainerName: in.TargetContainerName,
+	}
+	if in.CheckpointRef != nil {
+		out.CheckpointRef = in.CheckpointRef
+	}
+	if in.Identity != nil {
+		out.Identity = &DynamoCheckpointIdentity{}
+		if err := Convert_v1beta1_DynamoCheckpointIdentity_To_v1alpha1_DynamoCheckpointIdentity(in.Identity, out.Identity, s); err != nil {
+			return err
+		}
+	}
+	if in.Job != nil {
+		out.Job = &ServiceCheckpointJobConfig{
+			GMSClientContainers: in.Job.GMSClientContainers,
+			PodTemplate:         in.Job.PodTemplate,
+		}
+	}
+	return nil
+}
+
+// Convert_v1alpha1_FailoverSpec_To_v1beta1_FailoverSpec converts an enabled
+// failover config. Disabled configs are represented by absence and skipped by
+// the shared-spec caller.
+func Convert_v1alpha1_FailoverSpec_To_v1beta1_FailoverSpec(in *FailoverSpec, out *v1beta1.FailoverSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_FailoverSpec_To_v1beta1_FailoverSpec(in, out, s); err != nil {
+		return err
+	}
+	out.Mode = gmsModeToV1beta1(in.Mode)
+	return nil
+}
+
+// Convert_v1beta1_FailoverSpec_To_v1alpha1_FailoverSpec restores the explicit
+// Enabled flag implied by presence in v1beta1.
+func Convert_v1beta1_FailoverSpec_To_v1alpha1_FailoverSpec(in *v1beta1.FailoverSpec, out *FailoverSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_FailoverSpec_To_v1alpha1_FailoverSpec(in, out, s); err != nil {
+		return err
+	}
+	out.Enabled = true
+	out.Mode = gmsModeFromV1beta1(in.Mode)
+	return nil
+}
+
+// Convert_v1alpha1_GPUMemoryServiceSpec_To_v1beta1_GPUMemoryServiceSpec
+// converts an enabled GMS config. Disabled configs are represented by absence
+// and skipped by the shared-spec caller.
+func Convert_v1alpha1_GPUMemoryServiceSpec_To_v1beta1_GPUMemoryServiceSpec(in *GPUMemoryServiceSpec, out *v1beta1.GPUMemoryServiceSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_GPUMemoryServiceSpec_To_v1beta1_GPUMemoryServiceSpec(in, out, s); err != nil {
+		return err
+	}
+	out.Mode = gmsModeToV1beta1(in.Mode)
+	return nil
+}
+
+// Convert_v1beta1_GPUMemoryServiceSpec_To_v1alpha1_GPUMemoryServiceSpec
+// restores the explicit Enabled flag implied by presence in v1beta1.
+func Convert_v1beta1_GPUMemoryServiceSpec_To_v1alpha1_GPUMemoryServiceSpec(in *v1beta1.GPUMemoryServiceSpec, out *GPUMemoryServiceSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_GPUMemoryServiceSpec_To_v1alpha1_GPUMemoryServiceSpec(in, out, s); err != nil {
+		return err
+	}
+	out.Enabled = true
+	out.Mode = gmsModeFromV1beta1(in.Mode)
+	return nil
+}
+
+// Convert_v1alpha1_ScalingAdapter_To_v1beta1_ScalingAdapter converts the
+// v1alpha1 enabled marker to the v1beta1 presence-only marker.
+func Convert_v1alpha1_ScalingAdapter_To_v1beta1_ScalingAdapter(in *ScalingAdapter, out *v1beta1.ScalingAdapter, s apiconversion.Scope) error {
+	// v1beta1 represents enabled=true by the presence of ScalingAdapter and has
+	// no field for Enabled. This wrapper explicitly accepts that lossy mapping;
+	// conversion-gen cannot generate the public Convert function for it.
+	return autoConvert_v1alpha1_ScalingAdapter_To_v1beta1_ScalingAdapter(in, out, s)
+}
+
+// Convert_v1beta1_ScalingAdapter_To_v1alpha1_ScalingAdapter restores the
+// Enabled flag implied by presence in v1beta1.
+func Convert_v1beta1_ScalingAdapter_To_v1alpha1_ScalingAdapter(in *v1beta1.ScalingAdapter, out *ScalingAdapter, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_ScalingAdapter_To_v1alpha1_ScalingAdapter(in, out, s); err != nil {
+		return err
+	}
+	out.Enabled = true
+	return nil
 }

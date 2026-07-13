@@ -45,4 +45,8 @@ var (
 
 	// AddToScheme adds the types in this group-version to the given scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
+
+	// localSchemeBuilder is used by conversion-gen to register generated
+	// conversion functions with the package scheme builder.
+	localSchemeBuilder = &SchemeBuilder.SchemeBuilder
 )

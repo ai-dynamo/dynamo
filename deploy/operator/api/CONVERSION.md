@@ -33,6 +33,12 @@ Their call stack is:
 6. Collect source-only fields in typed `save` values.
 7. Encode non-empty `save` values into sparse spec/status payloads on `dst`.
 
+`conversion-gen` supplies mechanical conversion for same-name, compatible
+fields. Context-aware converters call the generated `autoConvert_*` function
+before applying handwritten structural mappings, restoration, and sparse-save
+logic. Handwritten mappings remain authoritative when they overwrite a field
+populated by `autoConvert_*`.
+
 Example:
 
 ```text
@@ -69,7 +75,10 @@ func ConvertToDynamoWidgetSpec(
 - `ConvertFrom` means v1alpha1 -> hub.
 - `ConvertTo` means hub -> v1alpha1.
 - Do not include `V1alpha1` in conversion function names.
-- Do not add wrapper conversion functions with alternate names.
+- Keep domain conversion helpers in the `ConvertFrom<Type>` / `ConvertTo<Type>`
+  naming scheme below. The only additional wrappers are conversion-gen's
+  required standard `Convert_<package>_<Type>_To_<package>_<Type>` overrides in
+  the corresponding `*_conversion.go` file.
 - Parameter order is fixed: `src`, `dst`, `restored`, `save`, `ctx`.
 - Include `restored`, `save`, `ctx`, and `error` only when needed.
 - Put `ctx` last.
@@ -93,6 +102,25 @@ Allowed local helpers:
 - `ensure*` allocators for sparse save payloads.
 - Side-effect-free predicates.
 - Field-group projections, such as pod template composition/decomposition.
+
+## Generated Conversion
+
+- `api/v1alpha1/doc.go` declares v1beta1 as the conversion peer.
+- `make generate-conversions` runs the version-pinned Kubernetes
+  `conversion-gen` tool through `hack/tools/code-generator/generate.sh`.
+- Do not edit `zz_generated.conversion.go`.
+- Top-level standard overrides must delegate to `ConvertTo` / `ConvertFrom` so
+  `runtime.Scheme` conversion uses the same annotation-aware path as the
+  controller-runtime conversion webhook.
+- Context-aware spec converters call their generated `autoConvert_*` first,
+  then apply handwritten rename, reshape, restore, and save logic.
+- A generated `WARNING: ... requires manual conversion` is expected only when
+  the containing type has a handwritten standard override.
+- Generated output must not contain `compileErrorOnMissingConversion` or
+  `FIXME: Provide conversion function`.
+- Use field-level `+k8s:conversion-gen=false` in both peer versions only when
+  same-name fields have fundamentally incompatible Go types and their semantic
+  conversion is already handled by a containing handwritten override.
 
 ## Invariants
 
@@ -262,6 +290,7 @@ compare other and other2, ignoring only private spec/status annotations
 Run for conversion changes:
 
 ```sh
+make generate-conversions
 GOCACHE=/tmp/dynamo-go-cache go test ./api/v1alpha1 -count=1
 GOCACHE=/tmp/dynamo-go-cache go test ./api/... -count=1
 GOCACHE=/tmp/dynamo-go-cache go test ./api -run TestFuzzRoundTrip -roundtrip-fuzz-iters=3000 -count=1 -v

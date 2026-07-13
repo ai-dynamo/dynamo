@@ -183,6 +183,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// The validation webhook rejects values that do not match any container
 	// name in `podTemplate.spec.containers`.
 	// +optional
+	// +k8s:conversion-gen=false
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
 	// compilationCache configures a PVC-backed compilation cache. The operator

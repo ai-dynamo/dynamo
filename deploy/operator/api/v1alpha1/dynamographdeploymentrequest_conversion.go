@@ -55,6 +55,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apiconversion "k8s.io/apimachinery/pkg/conversion"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/conversion"
 )
@@ -90,24 +91,7 @@ func (src *DynamoGraphDeploymentRequest) ConvertTo(dstRaw conversion.Hub) error 
 	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", dstRaw)
 	}
-
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-
-	restoredHubSpec, restoredHubStatus := restoreDGDRHubAnnotations(&dst.ObjectMeta)
-	scrubDGDRInternalAnnotations(&dst.ObjectMeta)
-
-	var spokeSpecSave DynamoGraphDeploymentRequestSpec
-	if err := ConvertFromDynamoGraphDeploymentRequestSpec(&src.Spec, &dst.Spec, restoredHubSpec, &spokeSpecSave); err != nil {
-		return err
-	}
-
-	var spokeStatusSave DynamoGraphDeploymentRequestStatus
-	ConvertFromDynamoGraphDeploymentRequestStatus(&src.Status, &dst.Status, restoredHubStatus, &spokeStatusSave)
-	if err := saveDGDRSpokeAnnotations(&spokeSpecSave, &spokeStatusSave, dst); err != nil {
-		return err
-	}
-
-	return nil
+	return Convert_v1alpha1_DynamoGraphDeploymentRequest_To_v1beta1_DynamoGraphDeploymentRequest(src, dst, nil)
 }
 
 // ConvertFrom converts from the Hub version (v1beta1) to this DynamoGraphDeploymentRequest (v1alpha1).
@@ -116,22 +100,7 @@ func (dst *DynamoGraphDeploymentRequest) ConvertFrom(srcRaw conversion.Hub) erro
 	if !ok {
 		return fmt.Errorf("expected *v1beta1.DynamoGraphDeploymentRequest but got %T", srcRaw)
 	}
-
-	dst.ObjectMeta = *src.ObjectMeta.DeepCopy()
-
-	restoredSpokeSpec, restoredSpokeStatus := restoreDGDRSpokeAnnotations(&dst.ObjectMeta)
-	scrubDGDRInternalAnnotations(&dst.ObjectMeta)
-
-	var hubSpecSave v1beta1.DynamoGraphDeploymentRequestSpec
-	ConvertToDynamoGraphDeploymentRequestSpec(&src.Spec, &dst.Spec, restoredSpokeSpec, &hubSpecSave)
-
-	var hubStatusSave v1beta1.DynamoGraphDeploymentRequestStatus
-	ConvertToDynamoGraphDeploymentRequestStatus(&src.Status, &dst.Status, restoredSpokeStatus, &hubStatusSave)
-	if err := saveDGDRHubAnnotations(&hubSpecSave, &hubStatusSave, dst); err != nil {
-		return err
-	}
-
-	return nil
+	return Convert_v1beta1_DynamoGraphDeploymentRequest_To_v1alpha1_DynamoGraphDeploymentRequest(src, dst, nil)
 }
 
 func restoreDGDRHubAnnotations(obj metav1.Object) (*v1beta1.DynamoGraphDeploymentRequestSpec, *v1beta1.DynamoGraphDeploymentRequestStatus) {
@@ -287,16 +256,10 @@ func restoreDGDRSpokeStatus(raw string) (DynamoGraphDeploymentRequestStatus, boo
 	return status, true
 }
 
-// ConvertFromDynamoGraphDeploymentRequestSpec converts the DGDR spec from
-// v1alpha1 to v1beta1.
-func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, restored *v1beta1.DynamoGraphDeploymentRequestSpec, save *DynamoGraphDeploymentRequestSpec) error {
-	dst.Model = src.Model
+func convertDGDRSpecToHub(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec) error {
 	autoApply := src.AutoApply
 	dst.AutoApply = &autoApply
 
-	if src.Backend != "" {
-		dst.Backend = v1beta1.BackendType(src.Backend)
-	}
 	if src.DeploymentOverrides != nil && src.DeploymentOverrides.WorkersImage != "" {
 		dst.Image = src.DeploymentOverrides.WorkersImage
 	}
@@ -315,7 +278,6 @@ func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentReque
 		projectSLAAndWorkloadFromProfilingConfigBlob(blob, dst)
 		projectModelCacheFromProfilingConfigBlob(blob, dst)
 		projectPlannerFromProfilingConfigBlob(blob, dst)
-		saveDGDRAlphaOnlyProfilingConfig(blob, save)
 	}
 
 	// ProfilerImage → Image (the profiler runs in the frontend image)
@@ -325,9 +287,19 @@ func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentReque
 	}
 
 	projectProfilingConfigToProfilingJob(&src.ProfilingConfig, dst)
-	saveDGDRAlphaOnlySpec(src, save)
-	restoreDGDRHubOnlySpec(restored, dst)
+	return nil
+}
 
+func collectDGDRAlphaOnlySpec(src *DynamoGraphDeploymentRequestSpec, save *DynamoGraphDeploymentRequestSpec) error {
+	saveDGDRAlphaOnlySpec(src, save)
+	if src.ProfilingConfig.Config == nil || src.ProfilingConfig.Config.Raw == nil {
+		return nil
+	}
+	var blob dgdrProfilingConfigBlob
+	if err := json.Unmarshal(src.ProfilingConfig.Config.Raw, &blob); err != nil {
+		return fmt.Errorf("failed to parse ProfilingConfig.Config: %w", err)
+	}
+	saveDGDRAlphaOnlyProfilingConfig(blob, save)
 	return nil
 }
 
@@ -530,19 +502,13 @@ func projectProfilingConfigToProfilingJob(src *ProfilingConfigSpec, dst *v1beta1
 	}
 }
 
-// ConvertToDynamoGraphDeploymentRequestSpec converts the DGDR spec from
-// v1beta1 to v1alpha1.
-func ConvertToDynamoGraphDeploymentRequestSpec(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec, restored *DynamoGraphDeploymentRequestSpec, save *v1beta1.DynamoGraphDeploymentRequestSpec) {
-	dst.Model = src.Model
+func convertDGDRSpecToAlpha(src *v1beta1.DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec, restored *DynamoGraphDeploymentRequestSpec) error {
 	if src.AutoApply != nil {
 		dst.AutoApply = *src.AutoApply
 	} else {
 		dst.AutoApply = true // v1beta1 default
 	}
 
-	if src.Backend != "" {
-		dst.Backend = string(src.Backend)
-	}
 	if src.Features != nil && src.Features.Mocker != nil {
 		dst.UseMocker = src.Features.Mocker.Enabled
 	}
@@ -597,7 +563,7 @@ func ConvertToDynamoGraphDeploymentRequestSpec(src *v1beta1.DynamoGraphDeploymen
 
 	restoreDGDRAlphaOnlySpec(restored, dst)
 	projectProfilingJobToProfilingConfig(src, dst)
-	saveDGDRHubOnlySpec(src, save)
+	return nil
 }
 
 func restoreDGDRAlphaOnlySpec(restored *DynamoGraphDeploymentRequestSpec, dst *DynamoGraphDeploymentRequestSpec) {
@@ -1034,12 +1000,8 @@ func projectProfilingJobToProfilingConfig(src *v1beta1.DynamoGraphDeploymentRequ
 	}
 }
 
-// ConvertFromDynamoGraphDeploymentRequestStatus converts the DGDR status from
-// v1alpha1 to v1beta1.
-func ConvertFromDynamoGraphDeploymentRequestStatus(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, restored *v1beta1.DynamoGraphDeploymentRequestStatus, save *DynamoGraphDeploymentRequestStatus) {
+func convertDGDRStatusToHub(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus) {
 	dst.Phase = dgdrStateToPhase(string(src.State), src.Deployment)
-	dst.ObservedGeneration = src.ObservedGeneration
-	dst.Conditions = slices.Clone(src.Conditions)
 	if src.GeneratedDeployment != nil {
 		if dst.ProfilingResults == nil {
 			dst.ProfilingResults = &v1beta1.ProfilingResultsStatus{}
@@ -1050,16 +1012,10 @@ func ConvertFromDynamoGraphDeploymentRequestStatus(src *DynamoGraphDeploymentReq
 		dst.DGDName = src.Deployment.Name
 	}
 
-	saveDGDRAlphaOnlyStatus(src, save)
-	restoreDGDRHubOnlyStatus(restored, dst, src)
 }
 
-// ConvertToDynamoGraphDeploymentRequestStatus converts the DGDR status from
-// v1beta1 to v1alpha1.
-func ConvertToDynamoGraphDeploymentRequestStatus(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, restored *DynamoGraphDeploymentRequestStatus, save *v1beta1.DynamoGraphDeploymentRequestStatus) {
+func convertDGDRStatusToAlpha(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus) {
 	dst.State = DGDRState(dgdrPhaseToState(src.Phase))
-	dst.ObservedGeneration = src.ObservedGeneration
-	dst.Conditions = slices.Clone(src.Conditions)
 
 	if src.ProfilingResults != nil && src.ProfilingResults.SelectedConfig != nil {
 		dst.GeneratedDeployment = src.ProfilingResults.SelectedConfig.DeepCopy()
@@ -1073,8 +1029,6 @@ func ConvertToDynamoGraphDeploymentRequestStatus(src *v1beta1.DynamoGraphDeploym
 			Created: false,
 		}
 	}
-	restoreDGDRAlphaOnlyStatus(restored, dst, src)
-	saveDGDRHubOnlyStatus(src, dst, save)
 }
 
 func saveDGDRAlphaOnlyStatus(src *DynamoGraphDeploymentRequestStatus, save *DynamoGraphDeploymentRequestStatus) {
@@ -1258,4 +1212,94 @@ func dgdrPhaseToState(phase v1beta1.DGDRPhase) string {
 	default:
 		return string(DGDRStatePending)
 	}
+}
+
+// Convert_v1alpha1_DynamoGraphDeploymentRequest_To_v1beta1_DynamoGraphDeploymentRequest
+// converts live fields first, restores preserved hub-only values, and then
+// replaces the internal annotations with a sparse v1alpha1-only save.
+func Convert_v1alpha1_DynamoGraphDeploymentRequest_To_v1beta1_DynamoGraphDeploymentRequest(src *DynamoGraphDeploymentRequest, dst *v1beta1.DynamoGraphDeploymentRequest, s apiconversion.Scope) error {
+	restoredHubSpec, restoredHubStatus := restoreDGDRHubAnnotations(&src.ObjectMeta)
+	var converted v1beta1.DynamoGraphDeploymentRequest
+	if err := autoConvert_v1alpha1_DynamoGraphDeploymentRequest_To_v1beta1_DynamoGraphDeploymentRequest(src, &converted, s); err != nil {
+		return err
+	}
+	converted.ObjectMeta = *src.ObjectMeta.DeepCopy()
+	restoreDGDRHubOnlySpec(restoredHubSpec, &converted.Spec)
+	restoreDGDRHubOnlyStatus(restoredHubStatus, &converted.Status, &src.Status)
+
+	var spokeSpecSave DynamoGraphDeploymentRequestSpec
+	if err := collectDGDRAlphaOnlySpec(&src.Spec, &spokeSpecSave); err != nil {
+		return err
+	}
+	var spokeStatusSave DynamoGraphDeploymentRequestStatus
+	saveDGDRAlphaOnlyStatus(&src.Status, &spokeStatusSave)
+	scrubDGDRInternalAnnotations(&converted.ObjectMeta)
+	if err := saveDGDRSpokeAnnotations(&spokeSpecSave, &spokeStatusSave, &converted); err != nil {
+		return err
+	}
+	*dst = converted
+	return nil
+}
+
+// Convert_v1beta1_DynamoGraphDeploymentRequest_To_v1alpha1_DynamoGraphDeploymentRequest
+// converts live fields first, restores preserved spoke-only values, and then
+// replaces the internal annotations with a sparse v1beta1-only save.
+func Convert_v1beta1_DynamoGraphDeploymentRequest_To_v1alpha1_DynamoGraphDeploymentRequest(src *v1beta1.DynamoGraphDeploymentRequest, dst *DynamoGraphDeploymentRequest, s apiconversion.Scope) error {
+	restoredSpokeSpec, restoredSpokeStatus := restoreDGDRSpokeAnnotations(&src.ObjectMeta)
+	var converted DynamoGraphDeploymentRequest
+	if err := autoConvert_v1beta1_DynamoGraphDeploymentRequest_To_v1alpha1_DynamoGraphDeploymentRequest(src, &converted, s); err != nil {
+		return err
+	}
+	converted.ObjectMeta = *src.ObjectMeta.DeepCopy()
+	if err := convertDGDRSpecToAlpha(&src.Spec, &converted.Spec, restoredSpokeSpec); err != nil {
+		return err
+	}
+	restoreDGDRAlphaOnlyStatus(restoredSpokeStatus, &converted.Status, &src.Status)
+
+	var hubSpecSave v1beta1.DynamoGraphDeploymentRequestSpec
+	saveDGDRHubOnlySpec(&src.Spec, &hubSpecSave)
+	var hubStatusSave v1beta1.DynamoGraphDeploymentRequestStatus
+	saveDGDRHubOnlyStatus(&src.Status, &converted.Status, &hubStatusSave)
+	scrubDGDRInternalAnnotations(&converted.ObjectMeta)
+	if err := saveDGDRHubAnnotations(&hubSpecSave, &hubStatusSave, &converted); err != nil {
+		return err
+	}
+	*dst = converted
+	return nil
+}
+
+// Convert_v1alpha1_DynamoGraphDeploymentRequestSpec_To_v1beta1_DynamoGraphDeploymentRequestSpec
+// converts common fields and projects the opaque profiling configuration into
+// the typed v1beta1 SLA, workload, model-cache, planner, and profiling-job fields.
+func Convert_v1alpha1_DynamoGraphDeploymentRequestSpec_To_v1beta1_DynamoGraphDeploymentRequestSpec(in *DynamoGraphDeploymentRequestSpec, out *v1beta1.DynamoGraphDeploymentRequestSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_DynamoGraphDeploymentRequestSpec_To_v1beta1_DynamoGraphDeploymentRequestSpec(in, out, s); err != nil {
+		return err
+	}
+	return convertDGDRSpecToHub(in, out)
+}
+
+// Convert_v1beta1_DynamoGraphDeploymentRequestSpec_To_v1alpha1_DynamoGraphDeploymentRequestSpec
+// converts common fields and projects typed v1beta1 configuration back into
+// the v1alpha1 profiling configuration blob.
+func Convert_v1beta1_DynamoGraphDeploymentRequestSpec_To_v1alpha1_DynamoGraphDeploymentRequestSpec(in *v1beta1.DynamoGraphDeploymentRequestSpec, out *DynamoGraphDeploymentRequestSpec, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_DynamoGraphDeploymentRequestSpec_To_v1alpha1_DynamoGraphDeploymentRequestSpec(in, out, s); err != nil {
+		return err
+	}
+	return convertDGDRSpecToAlpha(in, out, nil)
+}
+
+func Convert_v1alpha1_DynamoGraphDeploymentRequestStatus_To_v1beta1_DynamoGraphDeploymentRequestStatus(in *DynamoGraphDeploymentRequestStatus, out *v1beta1.DynamoGraphDeploymentRequestStatus, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha1_DynamoGraphDeploymentRequestStatus_To_v1beta1_DynamoGraphDeploymentRequestStatus(in, out, s); err != nil {
+		return err
+	}
+	convertDGDRStatusToHub(in, out)
+	return nil
+}
+
+func Convert_v1beta1_DynamoGraphDeploymentRequestStatus_To_v1alpha1_DynamoGraphDeploymentRequestStatus(in *v1beta1.DynamoGraphDeploymentRequestStatus, out *DynamoGraphDeploymentRequestStatus, s apiconversion.Scope) error {
+	if err := autoConvert_v1beta1_DynamoGraphDeploymentRequestStatus_To_v1alpha1_DynamoGraphDeploymentRequestStatus(in, out, s); err != nil {
+		return err
+	}
+	convertDGDRStatusToAlpha(in, out)
+	return nil
 }
