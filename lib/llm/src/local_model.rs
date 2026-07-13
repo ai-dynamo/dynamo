@@ -575,6 +575,14 @@ impl LocalModel {
         worker_type: Option<crate::worker_type::WorkerType>,
         needs: Vec<Vec<crate::worker_type::WorkerType>>,
     ) -> anyhow::Result<()> {
+        // LoRA adapters are independent public model names even though their
+        // metadata and tokenizer are inherited from the base model. Callers
+        // may therefore clone a base LocalModel before attaching an adapter;
+        // make sure discovery does not merge that card back into the base
+        // model's entry.
+        if let Some(info) = &lora_info {
+            self.card.set_name(&info.name);
+        }
         self.card.model_type = model_type;
         self.card.model_input = model_input;
         self.card.worker_type = worker_type;

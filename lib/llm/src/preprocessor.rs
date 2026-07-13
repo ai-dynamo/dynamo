@@ -1129,10 +1129,101 @@ impl OpenAIPreprocessor {
             } else {
                 self.formatter.render(request)?
             };
-            Ok(Some(formatted_prompt))
+            Ok(Some(Self::repair_numbered_media_placeholders(
+                formatted_prompt,
+                request.typed_messages(),
+            )))
         } else {
             Ok(None)
         }
+    }
+
+    /// Repair string-content templates that expose a single numbered image
+    /// placeholder for every media item. The renderer flattens audio/video
+    /// parts through that image template because it does not retain
+    /// per-modality placeholder maps on this path. Rewrite only when the full
+    /// expected numbered sequence is present; otherwise preserve the rendered
+    /// prompt byte-for-byte.
+    fn repair_numbered_media_placeholders(
+        prompt: String,
+        messages: Option<&[ChatCompletionRequestMessage]>,
+    ) -> String {
+        let Some(messages) = messages else {
+            return prompt;
+        };
+        let mut replacements = Vec::new();
+        let mut expected_sources = HashMap::<String, usize>::new();
+        let mut literal_text = Vec::new();
+        let mut needs_repair = false;
+        let (mut image, mut video, mut audio) = (0_u32, 0_u32, 0_u32);
+        for message in messages {
+            let ChatCompletionRequestMessage::User(user) = message else {
+                continue;
+            };
+            let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content else {
+                continue;
+            };
+            // String-content renderers restart their synthetic image slot for
+            // each message, while TRT-LLM indexes each target modality over
+            // the complete conversation.
+            let mut slot = 0_u32;
+            for part in parts {
+                let target = match part {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => {
+                        slot += 1;
+                        image += 1;
+                        format!("<|image_{image}|>")
+                    }
+                    ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => {
+                        slot += 1;
+                        video += 1;
+                        needs_repair = true;
+                        format!("<|video_{video}|>")
+                    }
+                    ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
+                        slot += 1;
+                        audio += 1;
+                        needs_repair = true;
+                        format!("<|audio_{audio}|>")
+                    }
+                    ChatCompletionRequestUserMessageContentPart::Text(text) => {
+                        literal_text.push(text.text.as_str());
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let source = format!("<|image_{slot}|>");
+                *expected_sources.entry(source.clone()).or_default() += 1;
+                replacements.push((source, target));
+            }
+        }
+        if !needs_repair || replacements.is_empty() {
+            return prompt;
+        }
+
+        // A user may include placeholder-looking text of their own. Without
+        // renderer provenance, an extra occurrence is ambiguous; preserve the
+        // prompt instead of rewriting user content or a mismatched slot.
+        if expected_sources.iter().any(|(source, expected)| {
+            prompt.match_indices(source).count() != *expected
+                || literal_text.iter().any(|text| text.contains(source))
+        }) {
+            return prompt;
+        }
+
+        let mut repaired = String::with_capacity(prompt.len());
+        let mut cursor = 0;
+        for (source, target) in replacements {
+            let Some(relative) = prompt[cursor..].find(&source) else {
+                return prompt;
+            };
+            let start = cursor + relative;
+            repaired.push_str(&prompt[cursor..start]);
+            repaired.push_str(&target);
+            cursor = start + source.len();
+        }
+        repaired.push_str(&prompt[cursor..]);
+        repaired
     }
 
     /// Replace inline `data:` URLs with empty strings in message content parts.
@@ -3563,6 +3654,7 @@ impl
 #[cfg(test)]
 mod strip_tests {
     use super::OpenAIPreprocessor;
+    use dynamo_protocols::types::ChatCompletionRequestMessage;
 
     #[test]
     fn test_strip_inline_data_urls_replaces_data_urls() {
@@ -3615,6 +3707,121 @@ mod strip_tests {
         let mut messages = serde_json::json!([]);
         OpenAIPreprocessor::strip_inline_data_urls(&mut messages);
         assert_eq!(messages, serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_preserves_modality_indexes() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}},
+                    {"type": "text", "text": "compare"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,BBBB"}}
+                ]
+            }]))
+            .unwrap();
+        let rendered = "<|user|><|image_1|>compare<|image_2|><|image_3|><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            "<|user|><|audio_1|>compare<|image_1|><|audio_2|><|end|>"
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_fails_closed() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                ]
+            }]))
+            .unwrap();
+        let rendered = "<|user|><audio><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_numbers_modalities_across_messages() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                    ]
+                },
+                {"role": "assistant", "content": "first"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,BBBB"}},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                    ]
+                }
+            ]))
+            .unwrap();
+        let rendered = "<|user|><|image_1|><|end|><|assistant|>first<|end|><|user|><|image_1|><|image_2|><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            "<|user|><|audio_1|><|end|><|assistant|>first<|end|><|user|><|audio_2|><|image_1|><|end|>"
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_preserves_literal_collision() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "literal <|image_1|>"},
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                ]
+            }]))
+            .unwrap();
+        let rendered = "<|user|>literal <|image_1|><|image_1|><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            rendered
+        );
+    }
+
+    #[test]
+    fn test_repair_numbered_media_placeholders_preserves_literal_when_media_slot_is_missing() {
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "literal <|image_1|>"},
+                    {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAAA"}}
+                ]
+            }]))
+            .unwrap();
+        let rendered = "<|user|>literal <|image_1|><audio><|end|>";
+        assert_eq!(
+            OpenAIPreprocessor::repair_numbered_media_placeholders(
+                rendered.to_string(),
+                Some(&messages),
+            ),
+            rendered
+        );
     }
 }
 
