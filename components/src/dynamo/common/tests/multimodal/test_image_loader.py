@@ -17,6 +17,9 @@
 
 import asyncio
 import base64
+import subprocess
+import sys
+import textwrap
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
 
@@ -35,6 +38,36 @@ pytestmark = [
 ]
 
 _FETCH_BYTES_PATH = "dynamo.common.multimodal.image_loader.fetch_bytes"
+
+
+@pytest.mark.timeout(60)
+async def test_package_image_loader_import_does_not_import_torch() -> None:
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        class BlockTorchImport(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path, target=None):
+                if fullname == "torch" or fullname.startswith("torch."):
+                    raise AssertionError(f"unexpected import: {fullname}")
+                return None
+
+        sys.meta_path.insert(0, BlockTorchImport())
+
+        from dynamo.common.http.url_validator import validate_media_url
+        from dynamo.common.multimodal import ImageLoader
+
+        assert ImageLoader.__name__ == "ImageLoader"
+        assert callable(validate_media_url)
+        assert "dynamo.common.multimodal.embedding_transfer" not in sys.modules
+        assert "dynamo.common.memory.multimodal_embedding_cache_manager" not in sys.modules
+        """
+    )
+
+    await asyncio.to_thread(
+        subprocess.run, [sys.executable, "-c", script], check=True, timeout=30
+    )
 
 
 def _make_png_bytes() -> bytes:
