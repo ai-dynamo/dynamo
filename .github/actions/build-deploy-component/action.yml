@@ -56,6 +56,32 @@ inputs:
       release branches). No effect for non-operator components.
     required: false
     default: 'false'
+  diff_event_context:
+    description: |
+      OSRB CSV diff baseline context (operator only): pr | push | ''. Empty
+      skips baseline resolution and ships a baseline_unavailable diff. Selects
+      the rule in container/compliance/resolve_diff_base.py.
+    required: false
+    default: ''
+  diff_current_branch:
+    description: 'Current branch (github.ref_name) for OSRB diff baseline selection.'
+    required: false
+    default: ''
+  diff_base_branch:
+    description: 'PR target branch (changed-files base_ref); selects the main vs release/* baseline rule.'
+    required: false
+    default: ''
+  diff_merge_base_sha:
+    description: 'PR merge-base SHA; pins PR->main OSRB diffs to the fork point.'
+    required: false
+    default: ''
+  gh_token:
+    description: |
+      Token with actions: read to download a prior run's baseline compliance
+      artifact (cross-run) for the OSRB diff. Empty -> the diff soft-degrades
+      to a baseline_unavailable marker (build stays green).
+    required: false
+    default: ''
 
 outputs:
   image_tag:
@@ -209,6 +235,177 @@ runs:
         done
         mv /tmp/compliance/osrb-deps.csv "/tmp/compliance/osrb-operator-${ARCH}-${SHA8}.csv"
         mv /tmp/compliance/osrb.cdx.json "/tmp/compliance/osrb-operator-${ARCH}-${SHA8}.cdx.json"
+
+    # Inline-compliance OSRB diff (operator only). Resolves a baseline build,
+    # downloads its compliance artifact, and emits osrb-operator-<arch>-<sha8>.diff.csv
+    # next to the full CSV — the same resolve -> fetch -> diff flow the framework
+    # images get from shared-build-image.yml + the compliance-extract action,
+    # which the operator can't reuse (its Dockerfile isn't rendered by
+    # container/render.py). Empty diff_event_context or a missing baseline
+    # soft-degrades to a baseline_unavailable marker; the build stays green.
+    - name: Resolve diff baseline
+      id: resolve-diff-base
+      if: ${{ inputs.component == 'operator' && inputs.diff_event_context != '' }}
+      shell: bash
+      # All workflow-context values pass via env (never interpolated into the
+      # script body) so attacker-controllable strings like branch names can't
+      # inject shell — see zizmor "template-injection".
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+        DIFF_EVENT_CONTEXT: ${{ inputs.diff_event_context }}
+        DIFF_CURRENT_BRANCH: ${{ inputs.diff_current_branch }}
+        DIFF_BASE_BRANCH: ${{ inputs.diff_base_branch }}
+        DIFF_MERGE_BASE_SHA: ${{ inputs.diff_merge_base_sha }}
+        DIFF_CURRENT_SHA: ${{ github.sha }}
+        DIFF_REPO: ${{ github.repository }}
+        DIFF_RUN_ID: ${{ github.run_id }}
+      run: |
+        # The build checkout is shallow with no tags. Make the refs each baseline
+        # rule needs reachable (all best-effort; a miss just yields an empty
+        # base_sha and a baseline_unavailable diff). Depth 30 gives the
+        # first-parent baseline walks enough history to find an artifact:
+        git fetch --deepen=30 --quiet || true                                     # HEAD~N (main post-merge walk)
+        git fetch --tags --quiet || true                                          # vX.Y.Z tags (release branch)
+        if [ "${DIFF_BASE_BRANCH}" = "main" ] && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
+          git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk
+        fi
+        CURRENT_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)
+        # --artifact-prefix operator: the operator artifact is
+        # compliance-<sha>-operator (image_tag is <github.sha>-operator), so the
+        # baseline lookup targets compliance-<baseSHA>-operator.
+        python3 container/compliance/resolve_diff_base.py \
+          --event-context "${DIFF_EVENT_CONTEXT}" \
+          --current-branch "${DIFF_CURRENT_BRANCH}" \
+          --base-branch "${DIFF_BASE_BRANCH}" \
+          --merge-base-sha "${DIFF_MERGE_BASE_SHA}" \
+          --current-sha "${DIFF_CURRENT_SHA}" \
+          --current-version "${CURRENT_VERSION}" \
+          --artifact-prefix operator \
+          --repo "${DIFF_REPO}" \
+          --current-run-id "${DIFF_RUN_ID}" \
+          >> "$GITHUB_OUTPUT"
+
+    # Download the resolved baseline's compliance artifact so the diff has
+    # something to compare against. Any miss (expired retention, never built, no
+    # token) leaves /tmp/compliance-base empty and the diff marks it unavailable.
+    - name: Fetch baseline compliance artifact
+      id: fetch-baseline
+      if: ${{ inputs.component == 'operator' && steps.resolve-diff-base.outputs.base_artifact_id != '' && inputs.gh_token != '' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+        REPO: ${{ github.repository }}
+        ARTIFACT_ID: ${{ steps.resolve-diff-base.outputs.base_artifact_id }}
+        BASE_RUN_ID: ${{ steps.resolve-diff-base.outputs.base_run_id }}
+      run: |
+        set -euo pipefail
+        ARCHIVE="${RUNNER_TEMP}/compliance-baseline-${ARTIFACT_ID}.zip"
+        mkdir -p /tmp/compliance-base
+        if [ -n "${BASE_RUN_ID}" ]; then
+          echo "baseline_run_id=${BASE_RUN_ID}" >> "$GITHUB_OUTPUT"
+        fi
+        if gh api -X GET "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+          > "${ARCHIVE}" && unzip -q "${ARCHIVE}" -d /tmp/compliance-base; then
+          echo "Downloaded baseline artifact ${ARTIFACT_ID}."
+          echo "baseline_available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Baseline download failed; diff will mark it unavailable."
+          echo "baseline_available=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Emit osrb-operator-<arch>-<sha8>.diff.csv next to the full CSV, plus a
+    # self-describing baseline/ folder. Always runs so a diff (real or a
+    # baseline_unavailable marker) always ships. The operator's compliance
+    # artifact is single-platform and flat, so both the current and baseline
+    # CSVs sit directly under their dest dirs (arch_dir ".").
+    - name: Compute OSRB diff
+      if: ${{ inputs.component == 'operator' && always() }}
+      shell: bash
+      env:
+        REPO: ${{ github.repository }}
+        BASE_SHA: ${{ steps.resolve-diff-base.outputs.base_sha }}
+        BASE_LABEL: ${{ steps.resolve-diff-base.outputs.base_label }}
+        BASE_RUN_ID: ${{ steps.fetch-baseline.outputs.baseline_run_id }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+
+        # Write baseline/ (metadata + baseline CSV copy) into an arch dir.
+        # $1 = arch dir, $2 = baseline CSV path ('' when unavailable).
+        write_baseline_folder() {
+          local dir="$1/baseline" base_csv="$2"
+          mkdir -p "${dir}"
+          {
+            echo "# OSRB diff baseline"
+            echo
+            echo "The \`*.diff.csv\` next to this folder compares this build's OSRB"
+            echo "dependency CSV against the baseline described below."
+            echo
+            echo "## How the baseline is chosen (by build context)"
+            echo "- PR targeting \`main\` -> PR merge-base (or nearest earlier commit with an artifact)"
+            echo "- Post-merge on \`main\` -> the previous commit on \`main\`"
+            echo "- PR / post-merge on \`release/*\` -> highest release tag \`vX.Y.Z\` strictly older than the current version (semver first, later publish date breaks same-version ties)"
+            echo "- Nightly -> the previous successful scheduled nightly run (manual runs excluded)"
+            echo
+            echo "## This build's baseline"
+            echo "- Label: ${BASE_LABEL:-(none)}"
+            if [ -n "${BASE_SHA}" ]; then
+              echo "- Baseline commit SHA: \`${BASE_SHA}\`"
+              echo "- Commit: https://github.com/${REPO}/commit/${BASE_SHA}"
+            else
+              echo "- Baseline commit SHA: (none — no baseline was available)"
+            fi
+            if [ -n "${BASE_RUN_ID:-}" ] && [ "${BASE_RUN_ID}" != "null" ]; then
+              echo "- Generating workflow run: https://github.com/${REPO}/actions/runs/${BASE_RUN_ID}"
+            fi
+            if [ -n "${base_csv}" ]; then
+              echo "- Baseline CSV (copied into this folder): \`$(basename "${base_csv}")\`"
+            else
+              echo "- Baseline CSV: unavailable (expired artifact, first build of the line, or no prior run)"
+            fi
+          } > "${dir}/BASELINE.md"
+          if [ -n "${base_csv}" ]; then cp "${base_csv}" "${dir}/"; fi
+          echo "Wrote baseline folder: ${dir}"
+        }
+
+        diff_one() {  # $1 = current CSV, $2 = arch dir name (e.g. linux_amd64)
+          local cur="$1" arch_dir="$2"
+          local out="${cur%.csv}.diff.csv"
+          local base_csv="" base_arg=()
+          # Pick the baseline's full CSV, skipping its own *.diff.csv sibling
+          # (baseline artifacts now ship a diff too, and osrb-*.csv would match it).
+          for cand in /tmp/compliance-base/"${arch_dir}"/osrb-*.csv; do
+            [ -f "${cand}" ] || continue
+            case "${cand}" in *.diff.csv) continue;; esac
+            base_csv="${cand}"
+            base_arg=(--base "${base_csv}")
+            break
+          done
+          python3 container/compliance/diff_osrb_csv.py \
+            --current "${cur}" \
+            "${base_arg[@]}" \
+            --baseline-label "${BASE_LABEL}" \
+            --output "${out}"
+          echo "Wrote diff: ${out}"
+          write_baseline_folder "$(dirname "${cur}")" "${base_csv}"
+        }
+        found=0
+        for d in /tmp/compliance/linux_*; do
+          [ -d "$d" ] || continue
+          for cur in "$d"/osrb-*.csv; do
+            [ -f "$cur" ] || continue
+            case "$cur" in *.diff.csv) continue;; esac
+            found=1
+            diff_one "$cur" "$(basename "$d")"
+          done
+        done
+        if [ "${found}" -eq 0 ]; then  # single-platform: files directly under dest
+          for cur in /tmp/compliance/osrb-*.csv; do
+            [ -f "$cur" ] || continue
+            case "$cur" in *.diff.csv) continue;; esac
+            diff_one "$cur" "."
+          done
+        fi
 
     # /sources/ extraction: opt-in via archive_sources. PR / on-demand leave it
     # false; post-merge-ci.yml sets it true for push to main + release branches.
