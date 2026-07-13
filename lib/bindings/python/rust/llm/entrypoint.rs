@@ -457,6 +457,13 @@ impl RouterConfig {
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        RsLoadThresholdConfig {
+            active_decode_blocks_threshold,
+            active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac,
+        }
+        .validate()
+        .map_err(PyValueError::new_err)?;
         Ok(Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
