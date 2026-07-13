@@ -93,6 +93,7 @@ class DynamoWorkerProcess(ManagedProcess):
     ):
         self.worker_id = worker_id
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
 
         command = [
             "python3",

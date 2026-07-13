@@ -33,7 +33,7 @@ TEST_PROMPT = (
 
 
 def allocate_frontend_ports(request, count: int) -> list[int]:
-    ports = allocate_ports(count, DynamoPortRange.ROUTER.value)
+    ports = allocate_ports(count, DynamoPortRange.FRONTEND.value)
     request.addfinalizer(lambda: deallocate_ports(ports))
     return ports
 

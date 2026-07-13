@@ -123,6 +123,7 @@ class DynamoWorkerProcess(ManagedProcess):
         # path, so the env var only enables the feature (the value is never
         # bound). Allocate one per worker for cleanup symmetry with system_port.
         self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        request.addfinalizer(lambda port=self.fpm_port: deallocate_port(port))
         env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # Set GPU assignment for disaggregated mode (like disagg.sh)
@@ -222,6 +223,7 @@ def test_request_cancellation_sglang_aggregated(
 
     # Allocate ports to avoid conflicts with parallel tests
     system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=system_port: deallocate_port(port))
 
     # Step 1: Start the frontend (allocates its own port)
     with DynamoFrontendProcess(request) as frontend:
@@ -334,7 +336,9 @@ def test_request_cancellation_sglang_decode_cancel(
 
     # Allocate ports to avoid conflicts with parallel tests
     decode_system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=decode_system_port: deallocate_port(port))
     prefill_system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=prefill_system_port: deallocate_port(port))
 
     # Step 1: Start the frontend (allocates its own port)
     with DynamoFrontendProcess(request) as frontend:

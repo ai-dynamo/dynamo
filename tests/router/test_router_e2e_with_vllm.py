@@ -140,11 +140,17 @@ class VLLMProcess(ManagedEngineProcessMixin):
         self._indexer_process: Optional[ManagedProcess] = None
         self._indexer_b_process: Optional[ManagedProcess] = None
 
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda: deallocate_ports(allocated_ports))
+
         # Dynamically allocate unique system, KV event, and NIXL side-channel
         # ports (one of each per worker) to avoid conflicts in parallel test runs.
         self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._system_ports)
         self._kv_event_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
-        self._nixl_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._kv_event_ports)
+        self._nixl_ports = allocate_ports(num_workers, DynamoPortRange.NIXL.value)
+        allocated_ports.extend(self._nixl_ports)
         # Per-worker forward-pass-metrics (FPM) base ports. Setting
         # DYN_FORWARDPASS_METRIC_PORT makes dynamo.vllm auto-inject
         # InstrumentedScheduler, whose ZMQ PUB binds ``base_port + dp_rank`` in
@@ -163,31 +169,24 @@ class VLLMProcess(ManagedEngineProcessMixin):
         # uses num_workers=1.) External/hybrid LB, where dp_start > 0, isn't used.
         self._fpm_block = max(1, data_parallel_size or 1)
         self._fpm_ports = allocate_contiguous_ports(
-            num_workers, self._fpm_block, DynamoPortRange.ROUTER.value
+            num_workers, self._fpm_block, DynamoPortRange.FPM.value
         )
+        allocated_ports.extend(self._fpm_ports)
         self._replay_ports = (
             allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
             if standalone_indexer and zmq_replay
             else []
         )
+        allocated_ports.extend(self._replay_ports)
         self._indexer_ports = (
             allocate_ports(2, DynamoPortRange.ROUTER.value)
             if standalone_indexer
             else []
         )
+        allocated_ports.extend(self._indexer_ports)
         if standalone_indexer:
             self._standalone_indexer_port = self._indexer_ports[0]
             self._standalone_indexer_b_port = self._indexer_ports[1]
-        request.addfinalizer(
-            lambda: deallocate_ports(
-                self._system_ports
-                + self._kv_event_ports
-                + self._nixl_ports
-                + self._fpm_ports
-                + self._replay_ports
-                + self._indexer_ports
-            )
-        )
 
         if vllm_args is None:
             vllm_args = {}

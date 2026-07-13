@@ -57,6 +57,7 @@ class DynamoWorkerProcess(ManagedProcess):
     ):
         # Allocate system port for this worker
         system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=system_port: deallocate_port(port))
         self.system_port = system_port
         self.frontend_port = frontend_port
 

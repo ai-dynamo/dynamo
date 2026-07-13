@@ -96,6 +96,7 @@ class DynamoWorkerProcess(ManagedProcess):
     ):
         self.worker_id = worker_id
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
         self.bootstrap_port: int | None = None
         self.prefill_port: int | None = None
         self.disagg_mode = disagg_mode
@@ -124,6 +125,7 @@ class DynamoWorkerProcess(ManagedProcess):
         else:
             # Disaggregated
             self.bootstrap_port = allocate_port(12340)
+            request.addfinalizer(lambda port=self.bootstrap_port: deallocate_port(port))
             command.extend(
                 [
                     "--disaggregation-mode",
@@ -138,6 +140,9 @@ class DynamoWorkerProcess(ManagedProcess):
             )
             if disagg_mode == "prefill":
                 self.prefill_port = allocate_port(20000)
+                request.addfinalizer(
+                    lambda port=self.prefill_port: deallocate_port(port)
+                )
                 command.extend(["--port", str(self.prefill_port)])
 
         # Set environment variables
