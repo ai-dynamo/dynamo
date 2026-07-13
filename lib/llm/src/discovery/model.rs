@@ -587,6 +587,24 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
+    /// Select a generate engine and its routing metadata atomically from the
+    /// same WorkerSet. Request-side KV hashing must use the block size and LoRA
+    /// identity advertised by the worker set that will route the request.
+    pub fn get_generate_engine_with_routing_metadata(
+        &self,
+    ) -> Result<(GenerateStreamingEngine, u32, Option<String>), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.generate_engine.clone().map(|engine| {
+                (
+                    engine,
+                    ws.card().kv_cache_block_size,
+                    ws.card().lora.as_ref().map(|lora| lora.name.clone()),
+                )
+            })
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_engine_with_parsing(

@@ -73,6 +73,14 @@ from dynamo.vllm.kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
 
+from .engine_generate import GENERATE_CAPABILITY
+from .engine_generate import build_prompt as build_engine_generate_prompt
+from .engine_generate import (
+    build_sampling_params as build_engine_generate_sampling_params,
+)
+from .engine_generate import merge_kv_transfer_params
+from .engine_generate import payload as engine_generate_payload
+from .engine_generate import priority as engine_generate_priority
 from .handlers import (
     VllmEnginePauseController,
     _apply_nvext_cache_salt,
@@ -82,6 +90,7 @@ from .handlers import (
     build_sampling_params,
     get_dp_range_for_worker,
 )
+from .kv_event_utils import resolve_image_token_id
 from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
@@ -397,6 +406,11 @@ class VllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.engine_args.model,
             served_model_name=self._served_model_name,
+            runtime_data=(
+                {GENERATE_CAPABILITY: True}
+                if self.disaggregation_mode != DisaggregationMode.PREFILL
+                else None
+            ),
             llm=LlmRegistration(
                 context_length=self._model_max_len,
                 kv_cache_block_size=block_size,
@@ -419,26 +433,35 @@ class VllmLLMEngine(LLMEngine):
 
         request_id = context.id()
 
+        effective_request = dict(request)
+        is_native_generate = engine_generate_payload(effective_request) is not None
         multimodal_processor = self._multimodal_request_processor
         if multimodal_processor is None:
             raise RuntimeError("VllmLLMEngine.start() must complete before generate()")
-        prepared_prompt = await multimodal_processor.prepare_prompt(
-            dict(request),
-            request_id,
-            context,
-            self.disaggregation_mode,
-        )
-        prompt = prepared_prompt.prompt
-        _apply_nvext_cache_salt(prepared_prompt.request, prompt)
-
-        # Multimodal decode may replace token_ids with the expanded prefill
-        # sequence. Sampling limits must use that same effective request.
-        sampling_params = build_sampling_params(
-            prepared_prompt.request,
-            self._default_sampling_params,
-            self._model_max_len,
-            enable_rl=self.enable_rl,
-        )
+        if is_native_generate:
+            prepared_prompt = None
+            prompt = build_engine_generate_prompt(effective_request)
+            sampling_params = build_engine_generate_sampling_params(
+                effective_request,
+                self._default_sampling_params,
+                self._model_max_len,
+            )
+        else:
+            prepared_prompt = await multimodal_processor.prepare_prompt(
+                effective_request,
+                request_id,
+                context,
+                self.disaggregation_mode,
+            )
+            effective_request = prepared_prompt.request
+            prompt = prepared_prompt.prompt
+            sampling_params = build_sampling_params(
+                effective_request,
+                self._default_sampling_params,
+                self._model_max_len,
+                enable_rl=self.enable_rl,
+            )
+        _apply_nvext_cache_salt(effective_request, prompt)
 
         # vLLM's KV transfer is internal to NixlConnector
         # (--kv-transfer-config). Dispatch only sets connector hints and
@@ -447,25 +470,24 @@ class VllmLLMEngine(LLMEngine):
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            # `do_remote_decode` is prefill's to own; merge caller-supplied
-            # values on top of the defaults so explicit overrides win.
-            kv_defaults = {
+            framework_kv = {
                 "do_remote_prefill": False,
                 "remote_engine_id": None,
                 "remote_block_ids": None,
                 "remote_host": None,
                 "remote_port": None,
-            }
-            caller_kv = sampling_params.extra_args.get("kv_transfer_params", {})
-            sampling_params.extra_args["kv_transfer_params"] = {
-                **kv_defaults,
-                **caller_kv,
                 "do_remote_decode": True,
             }
+            caller_kv = sampling_params.extra_args.get("kv_transfer_params")
+            sampling_params.extra_args["kv_transfer_params"] = merge_kv_transfer_params(
+                caller_kv, framework_kv
+            )
             sampling_params.max_tokens = 1
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
-            prefill_result = require_prefill_result(request, self.disaggregation_mode)
+            prefill_result = require_prefill_result(
+                effective_request, self.disaggregation_mode
+            )
             prefill_prompt_tokens_details = prefill_result.get("prompt_tokens_details")
             # `disaggregated_params` may be present-but-None (prefill error path
             # / _build_disaggregated_params returning None), so use `or {}` — a
@@ -482,7 +504,9 @@ class VllmLLMEngine(LLMEngine):
                 )
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = kv_params
+            sampling_params.extra_args["kv_transfer_params"] = merge_kv_transfer_params(
+                sampling_params.extra_args.get("kv_transfer_params"), kv_params
+            )
 
         # Shared gating returns [] for PREFILL / hook-off, so this is a no-op
         # unless the hook is on and this is a generation worker.
@@ -499,15 +523,17 @@ class VllmLLMEngine(LLMEngine):
         if self._dp_range is not None:
             dp_start, dp_size = self._dp_range
             rank = validate_global_dp_rank(
-                forced_dp_rank(request), dp_start, dp_size, "vLLM"
+                forced_dp_rank(effective_request), dp_start, dp_size, "vLLM"
             )
             local_dp_rank = None if rank is None else rank - dp_start
 
         # Route to a loaded LoRA adapter when the request names one; the base
         # model resolves to None. With LoRA enabled, an unknown adapter name
         # raises rather than silently falling back to the base model.
-        lora_request = self._resolve_lora_request(request.get("model"))
-        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        lora_request = self._resolve_lora_request(effective_request.get("model"))
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(
+            effective_request
+        )
 
         gen = self.engine_client.generate(
             prompt,
@@ -515,6 +541,7 @@ class VllmLLMEngine(LLMEngine):
             request_id,
             data_parallel_rank=local_dp_rank,
             lora_request=lora_request,
+            priority=engine_generate_priority(effective_request),
             **_engine_generate_reasoning_kwargs(
                 self.engine_client,
                 reasoning_ended,
@@ -527,15 +554,32 @@ class VllmLLMEngine(LLMEngine):
         tokenizer = getattr(self.engine_client, "tokenizer", None)
         # vLLM emits a selected-token logprob dict even at `logprobs=0`,
         # so the top-k suppression happens below, not at the engine.
-        (
-            requested_logprobs_count,
-            requested_prompt_logprobs_count,
-        ) = _shared_logprobs.parse_logprob_options(
-            request.get("output_options", {}) or {}
-        )
+        if is_native_generate:
+            requested_logprobs_count = sampling_params.logprobs
+            requested_prompt_logprobs_count = sampling_params.prompt_logprobs
+        else:
+            (
+                requested_logprobs_count,
+                requested_prompt_logprobs_count,
+            ) = _shared_logprobs.parse_logprob_options(
+                effective_request.get("output_options", {}) or {}
+            )
 
         total_output_tokens_by_index: dict[int, int] = {}
+        prompt_logprobs_payload: Optional[list] = None
         async for res in gen:
+            if (
+                requested_prompt_logprobs_count is not None
+                and prompt_logprobs_payload is None
+            ):
+                candidate = (
+                    _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                        res, tokenizer=tokenizer
+                    )
+                )
+                if candidate:
+                    prompt_logprobs_payload = candidate
+
             if not res.outputs:
                 yield {
                     "finish_reason": "error: No outputs from vLLM engine",
@@ -587,13 +631,13 @@ class VllmLLMEngine(LLMEngine):
                 if finish_reason:
                     out["finish_reason"] = str(finish_reason)
                     # vLLM hangs prompt_logprobs off `RequestOutput`, not
-                    # `CompletionOutput` — read from `res`.
-                    if requested_prompt_logprobs_count is not None:
-                        prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
-                            res, tokenizer=tokenizer
-                        )
-                        if prompt_payload is not None:
-                            out["engine_data"] = {"prompt_logprobs": prompt_payload}
+                    # `CompletionOutput`, and emits it before the terminal
+                    # delta. Attach the payload captured above to the final
+                    # chunk so the frontend can assemble one response.
+                    if prompt_logprobs_payload is not None:
+                        out["engine_data"] = {
+                            "prompt_logprobs": prompt_logprobs_payload
+                        }
                     prompt_tokens = (
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
@@ -616,10 +660,14 @@ class VllmLLMEngine(LLMEngine):
                         handoff_params: dict[str, Any] = {}
                         if kv_transfer_params is not None:
                             handoff_params["kv_transfer_params"] = kv_transfer_params
-                        embedding_params = multimodal_processor.build_prefill_handoff(
-                            multi_modal_data=prepared_prompt.multi_modal_data,
-                            prompt_token_ids=list(res.prompt_token_ids or []),
-                            mm_processor_kwargs=prepared_prompt.mm_processor_kwargs,
+                        embedding_params = (
+                            None
+                            if prepared_prompt is None
+                            else multimodal_processor.build_prefill_handoff(
+                                multi_modal_data=prepared_prompt.multi_modal_data,
+                                prompt_token_ids=list(res.prompt_token_ids or []),
+                                mm_processor_kwargs=prepared_prompt.mm_processor_kwargs,
+                            )
                         )
                         if embedding_params is not None:
                             handoff_params["embedding_params"] = embedding_params
@@ -672,6 +720,9 @@ class VllmLLMEngine(LLMEngine):
             raise RuntimeError("Engine not initialized")
         kv_events_config = self.engine_args.kv_events_config
         dp_start, dp_size = self._dp_range
+        image_token_id = resolve_image_token_id(
+            self.engine_args.model, self._vllm_config
+        )
         return [
             ZmqSource(
                 endpoint=ZmqEventPublisher.offset_endpoint_port(
@@ -679,6 +730,7 @@ class VllmLLMEngine(LLMEngine):
                     data_parallel_rank=rank,
                 ).replace("*", "127.0.0.1"),
                 dp_rank=rank,
+                image_token_id=image_token_id,
             )
             for rank in range(dp_start, dp_start + dp_size)
         ]

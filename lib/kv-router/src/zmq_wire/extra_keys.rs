@@ -20,6 +20,22 @@ pub fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
     None
 }
 
+/// Map an unambiguously multimodal identifier to Dynamo's routing hash.
+///
+/// vLLM's own processor commonly emits 64-character hex digests, while
+/// external renderers (including RL renderers) may supply shorter opaque
+/// identifiers. Offset-tagged `extra_keys` distinguish MM identifiers from
+/// other string keys, so arbitrary non-empty values are safe to hash there.
+/// Preserve the existing canonical digest mapping for compatibility.
+pub fn hash_mm_identifier(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    Some(
+        parse_mm_hash_from_extra_key(s).unwrap_or_else(|| xxhash_rust::xxh3::xxh3_64(s.as_bytes())),
+    )
+}
+
 /// Extract a vLLM cache salt from `extra_keys` when a producer does not emit
 /// top-level `cache_salt`. vLLM aligns `extra_keys` with blocks and includes
 /// cache salt only in the first block. Dynamo tags the opaque value before
@@ -56,6 +72,13 @@ pub fn extra_keys_to_cache_namespace(
 pub fn extra_keys_to_block_mm_infos(
     extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>>,
 ) -> Option<Vec<Option<BlockExtraInfo>>> {
+    extra_keys_to_block_mm_infos_with_lora(extra_keys, None)
+}
+
+pub(crate) fn extra_keys_to_block_mm_infos_with_lora(
+    extra_keys: Option<Vec<Option<Vec<ExtraKeyItem>>>>,
+    lora_name: Option<&str>,
+) -> Option<Vec<Option<BlockExtraInfo>>> {
     let extra_keys = extra_keys?;
     if extra_keys.is_empty() {
         return None;
@@ -68,11 +91,15 @@ pub fn extra_keys_to_block_mm_infos(
                 .unwrap_or_default()
                 .iter()
                 .filter_map(|key| match key {
-                    ExtraKeyItem::Hash(hash)
-                    | ExtraKeyItem::HashWithSignedOffset((hash, _))
-                    | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => {
-                        parse_mm_hash_from_extra_key(hash)
-                    }
+                    // Bare strings are ambiguous with LoRA names and legacy
+                    // cache salts, so retain the canonical-digest filter.
+                    ExtraKeyItem::Hash(hash) if lora_name == Some(hash.as_str()) => None,
+                    ExtraKeyItem::Hash(hash) => parse_mm_hash_from_extra_key(hash),
+                    // vLLM 0.19+ tags MM identifiers with their block-relative
+                    // offsets. The tuple shape makes arbitrary identifiers
+                    // unambiguous, including hashes supplied by RL renderers.
+                    ExtraKeyItem::HashWithSignedOffset((hash, _))
+                    | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => hash_mm_identifier(hash),
                     ExtraKeyItem::Bytes(_)
                     | ExtraKeyItem::Signed(_)
                     | ExtraKeyItem::Unsigned(_)
@@ -139,6 +166,52 @@ mod tests {
         assert_eq!(
             extra_keys_to_cache_namespace(Some(&extra_keys), Some("adapter-a")).as_deref(),
             Some("adapter-a")
+        );
+    }
+
+    #[test]
+    fn offset_tagged_opaque_mm_identifier_is_hashed() {
+        let identifier = "opaque-renderer-image-0";
+        let infos = extra_keys_to_block_mm_infos_with_lora(
+            Some(vec![Some(vec![ExtraKeyItem::HashWithSignedOffset((
+                identifier.to_string(),
+                -3,
+            ))])]),
+            None,
+        )
+        .expect("MM block info");
+
+        assert_eq!(
+            infos[0].as_ref().expect("first block").mm_objects[0].mm_hash,
+            hash_mm_identifier(identifier).expect("non-empty identifier")
+        );
+    }
+
+    #[test]
+    fn bare_opaque_string_is_not_treated_as_mm_identifier() {
+        let extra_keys = Some(vec![Some(vec![ExtraKeyItem::Hash(
+            "adapter-or-salt".to_string(),
+        )])]);
+        assert_eq!(extra_keys_to_block_mm_infos(extra_keys), None);
+    }
+
+    #[test]
+    fn canonical_hex_lora_name_is_not_multimodal_metadata() {
+        let lora_name = "a".repeat(64);
+        let identifier = "opaque-image";
+        let infos = extra_keys_to_block_mm_infos_with_lora(
+            Some(vec![Some(vec![
+                ExtraKeyItem::Hash(lora_name.clone()),
+                ExtraKeyItem::HashWithUnsignedOffset((identifier.to_string(), 1)),
+            ])]),
+            Some(&lora_name),
+        )
+        .expect("offset-tagged MM identifier");
+
+        assert_eq!(infos[0].as_ref().expect("first block").mm_objects.len(), 1);
+        assert_eq!(
+            infos[0].as_ref().expect("first block").mm_objects[0].mm_hash,
+            hash_mm_identifier(identifier).expect("non-empty identifier")
         );
     }
 }

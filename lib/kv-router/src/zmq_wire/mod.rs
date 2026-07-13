@@ -27,7 +27,8 @@ pub use convert::{
     StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
 };
 pub use extra_keys::{
-    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
+    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, hash_mm_identifier,
+    parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
 pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, RawKvEvent};
