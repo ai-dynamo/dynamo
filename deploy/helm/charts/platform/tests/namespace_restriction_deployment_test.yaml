@@ -9,8 +9,9 @@ tests:
   - it: runs crd-apply for the default cluster-wide installation
     template: charts/dynamo-operator/templates/deployment.yaml
     asserts:
-      - exists:
-          path: spec.template.spec.initContainers
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: crd-apply
         documentSelector:
           path: kind
           value: Deployment

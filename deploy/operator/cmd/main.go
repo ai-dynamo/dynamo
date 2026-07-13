@@ -654,11 +654,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS
-	// secrets before this point. Auto mode can therefore patch admission and
-	// conversion CAs immediately; manual mode waits for externally provided
-	// ca.crt and only patches conversion, leaving admission CA management
-	// out-of-band.
+	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
+	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
+	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")

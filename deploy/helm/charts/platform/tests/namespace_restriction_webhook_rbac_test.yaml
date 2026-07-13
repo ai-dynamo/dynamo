@@ -9,8 +9,19 @@ tests:
   - it: allows the cluster-wide operator to patch CRD conversion CA bundles
     template: charts/dynamo-operator/templates/webhook-rbac.yaml
     asserts:
-      - exists:
-          path: rules[1]
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - apiextensions.k8s.io
+            resources:
+              - customresourcedefinitions
+            verbs:
+              - get
+              - list
+              - watch
+              - update
+              - patch
         documentIndex: 2
 
   - it: prevents a namespace-restricted operator from patching CRDs
@@ -21,8 +32,19 @@ tests:
     asserts:
       - hasDocuments:
           count: 4
-      - notExists:
-          path: rules[1]
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - apiextensions.k8s.io
+            resources:
+              - customresourcedefinitions
+            verbs:
+              - get
+              - list
+              - watch
+              - update
+              - patch
         documentIndex: 2
 
   - it: omits cluster-scoped admission and CRD rules from the namespace-restricted manager Role
