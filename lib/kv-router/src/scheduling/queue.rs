@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rustc_hash::FxHashSet;
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use super::config::RouterQueuePolicy;
@@ -104,18 +104,18 @@ struct TrackedAdmission {
 struct AdmissionCleanup {
     dirty: Mutex<HashMap<String, RequestOutcome>>,
     pending: AtomicBool,
-    notify: Notify,
 }
 
 impl AdmissionCleanup {
     fn enqueue(&self, request_id: String, outcome: RequestOutcome) {
         self.dirty.lock().unwrap().insert(request_id, outcome);
         self.pending.store(true, AtomicOrdering::Release);
-        self.notify.notify_one();
     }
 
     fn drain(&self) -> HashMap<String, RequestOutcome> {
-        if !self.pending.swap(false, AtomicOrdering::AcqRel) {
+        if !self.pending.load(AtomicOrdering::Acquire)
+            || !self.pending.swap(false, AtomicOrdering::AcqRel)
+        {
             return HashMap::new();
         }
         std::mem::take(&mut *self.dirty.lock().unwrap())
@@ -677,23 +677,7 @@ impl<
 > SchedulerQueueActor<P, C, Sel, RF>
 {
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
-        loop {
-            let command = tokio::select! {
-                // Enqueue is sent before its lease can be dropped. Preserve that
-                // ordering when both the command and cleanup wake are ready.
-                biased;
-                command = rx.recv() => command,
-                _ = self.cleanup.notify.notified() => {
-                    if self.drain_cleanup() {
-                        self.handle_update(None).await;
-                    }
-                    continue;
-                }
-            };
-            let Some(command) = command else {
-                self.drain_cleanup();
-                break;
-            };
+        while let Some(command) = rx.recv().await {
             match command {
                 AdmissionCommand::Enqueue {
                     request,
@@ -744,6 +728,7 @@ impl<
                 }
             }
         }
+        self.drain_cleanup();
 
         let class_counters = Arc::clone(&self.class_counters);
         for entry in self.pending.drain() {
