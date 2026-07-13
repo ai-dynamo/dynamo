@@ -158,6 +158,9 @@ pub struct AdmissionRequest<'a> {
 }
 
 impl<'a> AdmissionRequest<'a> {
+    /// Constructs a request with progress fixed at `context_tokens`.
+    ///
+    /// Live progress is only supplied by the scheduler-owned admission path.
     pub fn new(
         id: AdmissionId,
         session_id: Option<&'a str>,

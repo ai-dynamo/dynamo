@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
@@ -154,6 +154,10 @@ impl std::fmt::Debug for AdmissionLease {
 impl AdmissionLease {
     pub fn mark_completed(&mut self, context_tokens: usize) {
         self.outcome = RequestOutcome::Completed { context_tokens };
+    }
+
+    pub fn mark_aborted(&mut self) {
+        self.outcome = RequestOutcome::Aborted;
     }
 
     pub fn disarm(&mut self) {
@@ -990,7 +994,7 @@ impl<
 
         let mut made_ready = false;
         let mut ready_by_class: HashMap<usize, FxHashSet<_>> = HashMap::new();
-        let mut unmanaged_request_ids = FxHashSet::default();
+        let mut unmanaged_request_ids = HashSet::new();
         for (request_id, outcome) in dirty {
             let tracked = self.tracked_admissions.get(&request_id).copied();
             if tracked.is_none_or(|tracked| tracked.worker.is_some()) {
@@ -2542,6 +2546,27 @@ policy_classes:
                 ("first".to_owned(), RequestOutcome::Aborted),
                 ("coalesced".to_owned(), RequestOutcome::Aborted),
             ]
+        );
+    }
+
+    #[test]
+    fn completed_lease_can_be_aborted_before_drop() {
+        let cleanup = Arc::new(AdmissionCleanup::default());
+        let (actor_tx, _) = mpsc::channel(1);
+        let mut lease = AdmissionLease {
+            cleanup: Arc::clone(&cleanup),
+            actor_tx,
+            request_id: Some("late-error".to_owned()),
+            outcome: RequestOutcome::Aborted,
+        };
+
+        lease.mark_completed(96);
+        lease.mark_aborted();
+        drop(lease);
+
+        assert_eq!(
+            cleanup.drain(),
+            [("late-error".to_owned(), RequestOutcome::Aborted)]
         );
     }
 

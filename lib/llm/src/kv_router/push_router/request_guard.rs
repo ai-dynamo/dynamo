@@ -54,8 +54,11 @@ impl RequestCleanup {
 
     async fn finish(&mut self, outcome: RequestOutcome) {
         let result = if let Some(mut lease) = self.admission_lease.take() {
-            if let RequestOutcome::Completed { context_tokens } = outcome {
-                lease.mark_completed(context_tokens);
+            match outcome {
+                RequestOutcome::Completed { context_tokens } => {
+                    lease.mark_completed(context_tokens)
+                }
+                RequestOutcome::Aborted => lease.mark_aborted(),
             }
             // AdmissionLease reports the terminal outcome to the scheduler actor.
             // The scheduler actor remains the sole owner of booking and queue cleanup.
