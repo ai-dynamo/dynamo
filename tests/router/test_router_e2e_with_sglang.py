@@ -114,7 +114,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
         # socket (path derived from the worker's connection_id), so unlike vLLM
         # it never binds this port -- the env var only flips the feature on. One
         # shared value across workers is therefore sufficient (no collision).
-        self._fpm_port = allocate_port(DynamoPortRange.ROUTER.value)
+        self._fpm_port = allocate_port(DynamoPortRange.FPM.value)
         request.addfinalizer(
             lambda: deallocate_ports(
                 self._system_ports + self._kv_event_ports + [self._fpm_port]
