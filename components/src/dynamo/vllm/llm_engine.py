@@ -63,11 +63,7 @@ from dynamo.llm import (
     unregister_model,
 )
 from dynamo.runtime import Endpoint
-from dynamo.vllm.args import (
-    Config,
-    configure_rl_logprobs_mode,
-    parse_args,
-)
+from dynamo.vllm.args import Config, configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,

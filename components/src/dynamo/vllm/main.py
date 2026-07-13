@@ -49,12 +49,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
-from .args import (
-    Config,
-    _uses_dynamo_connector,
-    configure_rl_logprobs_mode,
-    parse_args,
-)
+from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
     get_metrics_model_name,
