@@ -308,12 +308,25 @@ jobs:
         run: |
           set -euo pipefail
           image="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${IMAGE_TAG}"
+          context="${RUNNER_TEMP}/gms-loader-experiment"
+          mkdir -p \
+            "${context}/deploy/gms-loader-experiment" \
+            "${context}/lib/gpu_memory_service/cli/snapshot" \
+            "${context}/lib/gpu_memory_service/snapshot/backends"
+          cp deploy/gms-loader-experiment/Dockerfile \
+            "${context}/deploy/gms-loader-experiment/"
+          cp lib/gpu_memory_service/cli/snapshot/loader.py \
+            "${context}/lib/gpu_memory_service/cli/snapshot/"
+          cp lib/gpu_memory_service/snapshot/{storage_client.py,transfer.py} \
+            "${context}/lib/gpu_memory_service/snapshot/"
+          cp lib/gpu_memory_service/snapshot/backends/nixl_staging.py \
+            "${context}/lib/gpu_memory_service/snapshot/backends/"
           docker buildx build \
             --push \
             --platform linux/amd64 \
             --tag "${image}" \
-            --file deploy/gms-loader-experiment/Dockerfile \
-            .
+            --file "${context}/deploy/gms-loader-experiment/Dockerfile" \
+            "${context}"
           {
             echo "### Experimental GMS Loader"
             echo
