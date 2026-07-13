@@ -373,7 +373,7 @@ def test_frontend_rejection_thresholds_default_to_none(
     assert config.active_decode_blocks_threshold is None
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
-    assert config.router_queue_threshold == 16.0
+    assert config.router_queue_threshold is None
     assert config.router_kwargs() == {
         "active_decode_blocks_threshold": None,
         "active_prefill_tokens_threshold": None,

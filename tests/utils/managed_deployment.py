@@ -1557,6 +1557,26 @@ class ManagedDeployment:
                     continue
                 try:
                     port_forward.stop()
+                except Exception as e:
+                    self._logger.debug(
+                        f"Error stopping port forward for pod {pod.name}: {e}"
+                    )
+                # kr8s' sync stop() can return before the background thread has
+                # fully torn down (or even finished starting), so we can't assume
+                # the old forward is dead once stop() returns. Track it so
+                # _cleanup() stops it later regardless of whether stop() raised,
+                # rather than losing the reference when we replace the object.
+                if port_forward not in self._active_port_forwards:
+                    self._active_port_forwards.append(port_forward)
+                # Create a fresh portforward object so local_port=0 picks a new
+                # ephemeral port rather than re-binding the previously assigned
+                # port that may still be in TIME_WAIT.
+                try:
+                    port_forward = pod.portforward(
+                        remote_port=remote_port,
+                        local_port=0,
+                        address="127.0.0.1",
+                    )
                     port_forward.start()
                 except Exception as e:
                     self._logger.debug(

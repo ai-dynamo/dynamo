@@ -134,6 +134,7 @@
 /skills                                                                                       @ai-dynamo/dynamo-process-codeowners
 /LICENSE                                                                                      @ai-dynamo/dynamo-process-codeowners
 /AGENTS.md                                                                                    @ai-dynamo/dynamo-process-codeowners
+/CLAUDE.md                                                                                    @ai-dynamo/dynamo-process-codeowners
 /CODEOWNERS                                                                                   @ai-dynamo/dynamo-process-codeowners
 /SECURITY.md                                                                                  @ai-dynamo/dynamo-process-codeowners
 /.claude/skills                                                                               @ai-dynamo/dynamo-process-codeowners
