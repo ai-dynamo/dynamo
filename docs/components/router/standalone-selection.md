@@ -123,12 +123,11 @@ Select a worker without booking active load:
 ### `POST /select_and_reserve`
 
 Select and atomically book load in the receiving selector process. Supply a
-globally unique `reservation_id`, or allow the service to generate one:
+globally unique `selection_id`, or allow the service to generate one:
 
 ```json
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
   "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
@@ -142,7 +141,6 @@ Both endpoints return the same selection shape:
 ```json
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
   "routing_group": "default",
   "worker_id": 1,
@@ -160,7 +158,7 @@ Both endpoints return the same selection shape:
 }
 ```
 
-`selection_id` and `reservation_id` are omitted when absent. All `overlap`
+`selection_id` is omitted when absent. All `overlap`
 values are matched token counts. `gpu`, `cpu`, and `disk` use the cumulative
 Mooncake tier semantics documented in the standalone indexer's
 [per-instance tier breakdown](standalone-indexer.md#per-instance-tier-breakdown).
@@ -182,9 +180,9 @@ Ray can keep model invocation separate from selector admission:
 
 1. Call `POST /select`.
 2. Send the request to the returned `endpoint` and `dp_rank`.
-3. Call `POST /reservations` with a globally unique reservation ID, selected
-   worker identity, the same prompt representation, and the returned
-   `effective_prefill_tokens`.
+3. Call `POST /reservations` with a `selection_id` (globally unique; reuse the
+   one from `/select`), the selected worker identity, the same prompt
+   representation, and the returned `effective_prefill_tokens`.
 4. Report prefill completion and request completion through the lifecycle API.
 
 ```http
@@ -192,7 +190,7 @@ POST /reservations
 Content-Type: application/json
 
 {
-  "reservation_id": "request-123",
+  "selection_id": "request-123",
   "model_name": "model",
   "routing_group": "default",
   "worker_id": 1,
@@ -211,9 +209,9 @@ reservation API does not accept or derive accounting from overlap fields.
 ## Reservation Lifecycle
 
 ```http
-POST /reservations/{reservation_id}/prefill_complete
-POST /reservations/{reservation_id}/output_block
-DELETE /reservations/{reservation_id}
+POST /reservations/{selection_id}/prefill_complete
+POST /reservations/{selection_id}/output_block
+DELETE /reservations/{selection_id}
 ```
 
 `prefill_complete` clears active prefill load. `output_block` updates only the

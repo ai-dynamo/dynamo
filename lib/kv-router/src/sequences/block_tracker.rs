@@ -43,6 +43,12 @@ impl RequestBlockChain {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ReleasedPromptPath {
+    pub(super) path: Vec<SequenceHash>,
+    pub(super) remove_from: usize,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct BlockTracker {
     nodes: SlotMap<BlockNodeId, BlockNode>,
@@ -160,11 +166,12 @@ impl BlockTracker {
         chain.tail = Some(node_id);
     }
 
-    /// Release a request chain and return the prompt suffix that became absent
-    /// from the worker.
-    pub(super) fn release(&mut self, chain: RequestBlockChain) -> Vec<SequenceHash> {
+    /// Release a request chain and return the complete prompt path plus the
+    /// first block that became absent from the worker.
+    pub(super) fn release(&mut self, chain: RequestBlockChain) -> Option<ReleasedPromptPath> {
         let RequestBlockChain { tail, prompt_depth } = chain;
-        let mut prompt_remove = Vec::new();
+        let mut removed_prompt_rev = Vec::new();
+        let mut retained = None;
         let mut current = tail;
 
         while let Some(node_id) = current {
@@ -180,6 +187,7 @@ impl BlockTracker {
                     .expect("request chain references a missing block node")
                     .incoming = NonZeroU32::new(incoming - 1)
                     .expect("shared block ownership count cannot become zero");
+                retained = Some(node_id);
                 break;
             }
 
@@ -208,13 +216,46 @@ impl BlockTracker {
                 .expect("validated block node disappeared before removal");
 
             if depth <= prompt_depth {
-                prompt_remove.push(hash);
+                removed_prompt_rev.push(hash);
             }
             current = parent;
         }
 
-        prompt_remove.reverse();
-        prompt_remove
+        if removed_prompt_rev.is_empty() {
+            return None;
+        }
+
+        let remove_from = prompt_depth
+            .checked_sub(removed_prompt_rev.len())
+            .expect("removed prompt suffix cannot exceed the prompt depth");
+        let mut path = Vec::with_capacity(prompt_depth);
+        let mut current = retained;
+        while let Some(node_id) = current {
+            let node = self
+                .nodes
+                .get(node_id)
+                .expect("retained prompt prefix references a missing block node");
+            if node.depth <= prompt_depth {
+                path.push(node.hash);
+            }
+            current = node.parent;
+        }
+        path.reverse();
+        assert_eq!(
+            path.len(),
+            remove_from,
+            "retained prompt prefix length differs from the released suffix boundary"
+        );
+
+        removed_prompt_rev.reverse();
+        path.extend(removed_prompt_rev);
+        assert_eq!(
+            path.len(),
+            prompt_depth,
+            "released prompt path length differs from the request prompt depth"
+        );
+
+        Some(ReleasedPromptPath { path, remove_from })
     }
 
     /// Mark the request's exclusively owned suffix as fractional.
@@ -475,6 +516,24 @@ mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use rustc_hash::FxHashSet;
 
+    fn released(path: &[SequenceHash], remove_from: usize) -> Option<ReleasedPromptPath> {
+        Some(ReleasedPromptPath {
+            path: path.to_vec(),
+            remove_from,
+        })
+    }
+
+    fn expected_release(
+        blocks: &[SequenceHash],
+        prompt_depth: usize,
+        counts: &FxHashMap<SequenceHash, usize>,
+    ) -> Option<ReleasedPromptPath> {
+        let remove_from = blocks[..prompt_depth]
+            .iter()
+            .position(|hash| counts[hash] == 1)?;
+        released(&blocks[..prompt_depth], remove_from)
+    }
+
     #[test]
     fn first_acquire_and_last_release_report_presence_transitions() {
         let mut tracker = BlockTracker::default();
@@ -488,12 +547,12 @@ mod tests {
         tracker.assert_consistent([&first, &second]);
         assert_eq!(tracker.active_blocks(), 1);
 
-        assert!(tracker.release(first).is_empty());
+        assert_eq!(tracker.release(first), None);
         assert_eq!(tracker.incoming_for(1), 1);
         tracker.assert_consistent([&second]);
         assert_eq!(tracker.active_blocks(), 1);
 
-        assert_eq!(tracker.release(second), vec![1]);
+        assert_eq!(tracker.release(second), released(&[1], 0));
         tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
     }
@@ -510,9 +569,9 @@ mod tests {
         assert_eq!(tracker.incoming_for(3), 1);
         tracker.assert_consistent([&longer, &shorter]);
 
-        assert!(tracker.release(shorter).is_empty());
+        assert_eq!(tracker.release(shorter), None);
         tracker.assert_consistent([&longer]);
-        assert_eq!(tracker.release(longer), vec![1, 2, 3]);
+        assert_eq!(tracker.release(longer), released(&[1, 2, 3], 0));
     }
 
     #[test]
@@ -527,9 +586,9 @@ mod tests {
         assert_eq!(tracker.incoming_for(3), 1);
         tracker.assert_consistent([&shorter, &longer]);
 
-        assert_eq!(tracker.release(longer), vec![3]);
+        assert_eq!(tracker.release(longer), released(&[1, 2, 3], 2));
         tracker.assert_consistent([&shorter]);
-        assert_eq!(tracker.release(shorter), vec![1, 2]);
+        assert_eq!(tracker.release(shorter), released(&[1, 2], 0));
     }
 
     #[test]
@@ -544,10 +603,10 @@ mod tests {
         tracker.assert_consistent([&left, &right]);
         assert_eq!(tracker.active_blocks(), 4);
 
-        assert_eq!(tracker.release(left), vec![3]);
+        assert_eq!(tracker.release(left), released(&[1, 2, 3], 2));
         tracker.assert_consistent([&right]);
         assert_eq!(tracker.active_blocks(), 3);
-        assert_eq!(tracker.release(right), vec![1, 2, 4]);
+        assert_eq!(tracker.release(right), released(&[1, 2, 4], 0));
         tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
     }
@@ -563,7 +622,7 @@ mod tests {
         assert_eq!(tracker.incoming_for(2), before);
         assert_eq!(tracker.incoming_for(42), 1);
         tracker.assert_consistent([&chain]);
-        assert_eq!(tracker.release(chain), vec![1, 2]);
+        assert_eq!(tracker.release(chain), released(&[1, 2], 0));
     }
 
     #[test]
@@ -577,10 +636,10 @@ mod tests {
         assert_eq!(tracker.incoming_for(2), 2);
         tracker.assert_consistent([&generating, &shared]);
 
-        assert!(tracker.release(generating).is_empty());
+        assert_eq!(tracker.release(generating), None);
         assert_eq!(tracker.incoming_for(2), 1);
         tracker.assert_consistent([&shared]);
-        assert_eq!(tracker.release(shared), vec![1, 2]);
+        assert_eq!(tracker.release(shared), released(&[1, 2], 0));
     }
 
     #[test]
@@ -589,9 +648,9 @@ mod tests {
         let (left, _) = tracker.acquire_prompt(&[1, 2, 3]);
         let (right, _) = tracker.acquire_prompt(&[1, 2, 4]);
 
-        assert_eq!(tracker.release(right), vec![4]);
+        assert_eq!(tracker.release(right), released(&[1, 2, 4], 2));
         tracker.assert_consistent([&left]);
-        assert_eq!(tracker.release(left), vec![1, 2, 3]);
+        assert_eq!(tracker.release(left), released(&[1, 2, 3], 0));
     }
 
     #[test]
@@ -603,7 +662,7 @@ mod tests {
         tracker.assert_consistent([&chain]);
         assert_eq!(tracker.active_blocks(), 1);
 
-        assert_eq!(tracker.release(chain), vec![1, 2]);
+        assert_eq!(tracker.release(chain), released(&[1, 2], 0));
         assert!(tracker.fractional_blocks.is_empty());
         tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
@@ -621,12 +680,12 @@ mod tests {
         assert!(!tracker.fractional_blocks.contains_key(&2));
         tracker.assert_consistent([&longer, &shared_prefix]);
 
-        assert_eq!(tracker.release(longer), vec![3]);
+        assert_eq!(tracker.release(longer), released(&[1, 2, 3], 2));
         assert!(tracker.fractional_blocks.is_empty());
         tracker.assert_consistent([&shared_prefix]);
         assert_eq!(tracker.active_blocks(), 2);
 
-        assert_eq!(tracker.release(shared_prefix), vec![1, 2]);
+        assert_eq!(tracker.release(shared_prefix), released(&[1, 2], 0));
         assert_eq!(tracker.active_blocks(), 0);
     }
 
@@ -639,7 +698,7 @@ mod tests {
         tracker.append_output(&mut chain, 42);
         tracker.assert_consistent([&chain]);
         assert_eq!(tracker.active_blocks(), 1);
-        assert!(tracker.release(chain).is_empty());
+        assert_eq!(tracker.release(chain), None);
         tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
     }
@@ -649,13 +708,13 @@ mod tests {
         let mut tracker = BlockTracker::default();
         let (first, _) = tracker.acquire_prompt(&[1]);
         let old_id = tracker.node_id_for(1);
-        assert_eq!(tracker.release(first), vec![1]);
+        assert_eq!(tracker.release(first), released(&[1], 0));
 
         let (second, _) = tracker.acquire_prompt(&[2]);
         assert!(tracker.nodes.get(old_id).is_none());
         assert_ne!(old_id, tracker.node_id_for(2));
         tracker.assert_consistent([&second]);
-        assert_eq!(tracker.release(second), vec![2]);
+        assert_eq!(tracker.release(second), released(&[2], 0));
     }
 
     #[test]
@@ -664,7 +723,7 @@ mod tests {
         let mut tracker = BlockTracker::default();
         let (first, _) = tracker.acquire_prompt(&[1]);
         let old_id = tracker.node_id_for(1);
-        assert_eq!(tracker.release(first), vec![1]);
+        assert_eq!(tracker.release(first), released(&[1], 0));
         let (second, _) = tracker.acquire_prompt(&[2]);
 
         tracker.unique_blocks.insert(99, old_id);
@@ -742,11 +801,7 @@ mod tests {
                 (chain @ Some(_), reference @ Some(_)) => {
                     let chain = chain.take().expect("matched active chain");
                     let (blocks, prompt_depth) = reference.take().expect("matched reference");
-                    let expected_remove = blocks[..prompt_depth]
-                        .iter()
-                        .copied()
-                        .filter(|hash| counts[hash] == 1)
-                        .collect::<Vec<_>>();
+                    let expected_remove = expected_release(&blocks, prompt_depth, &counts);
                     assert_eq!(tracker.release(chain), expected_remove);
                     for hash in blocks {
                         let count = counts.get_mut(&hash).expect("reference block is active");
@@ -768,11 +823,7 @@ mod tests {
         for slot in 0..SLOTS {
             if let Some(chain) = chains[slot].take() {
                 let (blocks, prompt_depth) = reference[slot].take().expect("active reference");
-                let expected_remove = blocks[..prompt_depth]
-                    .iter()
-                    .copied()
-                    .filter(|hash| counts[hash] == 1)
-                    .collect::<Vec<_>>();
+                let expected_remove = expected_release(&blocks, prompt_depth, &counts);
                 assert_eq!(tracker.release(chain), expected_remove);
                 for hash in blocks {
                     let count = counts.get_mut(&hash).expect("reference block is active");
@@ -799,7 +850,7 @@ mod tests {
         assert_eq!(first_new, Some(0));
         tracker.assert_consistent([&chain]);
         assert_eq!(tracker.active_blocks(), DEPTH);
-        assert_eq!(tracker.release(chain), sequence);
+        assert_eq!(tracker.release(chain), released(&sequence, 0));
         tracker.assert_consistent(std::iter::empty());
         assert_eq!(tracker.active_blocks(), 0);
     }

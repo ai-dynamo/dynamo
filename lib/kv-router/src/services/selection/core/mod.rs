@@ -68,7 +68,6 @@ struct PreparedSelectionInputs {
 struct SelectionOperation {
     key: SelectionKey,
     selection_id: Option<String>,
-    reservation_id: Option<String>,
     prompt: PromptRequest,
     router_config_override: Option<RouterConfigOverride>,
     expected_output_tokens: Option<u32>,
@@ -575,7 +574,6 @@ impl SelectionCore {
             SelectionOperation {
                 key: SelectionKey::new(req.model_name, req.routing_group),
                 selection_id: req.selection_id,
-                reservation_id: None,
                 prompt: req.prompt,
                 router_config_override: req.router_config_override,
                 expected_output_tokens: req.expected_output_tokens,
@@ -604,14 +602,13 @@ impl SelectionCore {
         req: SelectAndReserveRequest,
         policy_class: Option<String>,
     ) -> Result<SelectResponse, SelectionError> {
-        let reservation_id = req
-            .reservation_id
+        let selection_id = req
+            .selection_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.schedule_selection(
             SelectionOperation {
                 key: SelectionKey::new(req.model_name, req.routing_group),
-                selection_id: req.selection_id,
-                reservation_id: Some(reservation_id),
+                selection_id: Some(selection_id),
                 prompt: req.prompt,
                 router_config_override: req.router_config_override,
                 expected_output_tokens: req.expected_output_tokens,
@@ -636,7 +633,6 @@ impl SelectionCore {
         let SelectionOperation {
             key,
             selection_id,
-            reservation_id,
             prompt,
             router_config_override,
             expected_output_tokens,
@@ -659,9 +655,9 @@ impl SelectionCore {
         } = self.prepare_selection_inputs(&entry, &prompt).await?;
         let mode = if book {
             ScheduleMode::Tracked {
-                request_id: reservation_id.clone().ok_or_else(|| {
+                request_id: selection_id.clone().ok_or_else(|| {
                     SelectionError::Internal(
-                        "booked selection did not include a reservation ID".to_string(),
+                        "booked selection did not include a selection ID".to_string(),
                     )
                 })?,
             }
@@ -711,7 +707,6 @@ impl SelectionCore {
 
         Ok(SelectResponse {
             selection_id,
-            reservation_id,
             model_name: key.model_name,
             routing_group: key.routing_group,
             worker_id: response.best_worker.worker_id,
@@ -760,7 +755,7 @@ impl SelectionCore {
         entry
             .scheduler
             .add_request(SequenceRequest {
-                request_id: req.reservation_id.clone(),
+                request_id: req.selection_id.clone(),
                 token_sequence: Some(normalized.sequence_hashes),
                 track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
@@ -771,7 +766,7 @@ impl SelectionCore {
             .await?;
 
         Ok(ReservationResponse {
-            reservation_id: req.reservation_id,
+            selection_id: req.selection_id,
             model_name: key.model_name,
             routing_group: key.routing_group,
             worker_id: worker.worker_id,
@@ -780,37 +775,37 @@ impl SelectionCore {
         })
     }
 
-    pub async fn prefill_complete(&self, reservation_id: &str) -> Result<(), SelectionError> {
+    pub async fn prefill_complete(&self, selection_id: &str) -> Result<(), SelectionError> {
         let entries = { self.entries.read().values().cloned().collect::<Vec<_>>() };
         for entry in entries {
-            match entry.scheduler.mark_prefill_completed(reservation_id).await {
+            match entry.scheduler.mark_prefill_completed(selection_id).await {
                 Ok(()) => return Ok(()),
                 Err(SequenceError::RequestNotFound { .. }) => continue,
                 Err(error) => return Err(error.into()),
             }
         }
         Err(SelectionError::NotFound(format!(
-            "reservation {reservation_id} not found"
+            "reservation {selection_id} not found"
         )))
     }
 
-    pub async fn free_reservation(&self, reservation_id: &str) -> Result<(), SelectionError> {
+    pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
         let entries = { self.entries.read().values().cloned().collect::<Vec<_>>() };
         for entry in entries {
-            match entry.scheduler.free(reservation_id).await {
+            match entry.scheduler.free(selection_id).await {
                 Ok(()) => return Ok(()),
                 Err(SequenceError::RequestNotFound { .. }) => continue,
                 Err(error) => return Err(error.into()),
             }
         }
         Err(SelectionError::NotFound(format!(
-            "reservation {reservation_id} not found"
+            "reservation {selection_id} not found"
         )))
     }
 
     pub fn add_output_block(
         &self,
-        reservation_id: &str,
+        selection_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SelectionError> {
         if let Some(frac) = decay_fraction
@@ -825,7 +820,7 @@ impl SelectionCore {
         for entry in entries {
             match entry
                 .scheduler
-                .add_output_block(reservation_id, decay_fraction)
+                .add_output_block(selection_id, decay_fraction)
             {
                 Ok(()) => return Ok(()),
                 Err(SequenceError::RequestNotFound { .. }) => continue,
@@ -833,7 +828,7 @@ impl SelectionCore {
             }
         }
         Err(SelectionError::NotFound(format!(
-            "reservation {reservation_id} not found"
+            "reservation {selection_id} not found"
         )))
     }
 
@@ -1039,12 +1034,11 @@ mod tests {
         }
     }
 
-    fn reserve_request(reservation_id: &str) -> SelectAndReserveRequest {
+    fn reserve_request(selection_id: &str) -> SelectAndReserveRequest {
         SelectAndReserveRequest {
             model_name: "model".to_string(),
             routing_group: "default".to_string(),
-            selection_id: None,
-            reservation_id: Some(reservation_id.to_string()),
+            selection_id: Some(selection_id.to_string()),
             prompt: prompt(),
             router_config_override: None,
             expected_output_tokens: None,
@@ -1202,7 +1196,7 @@ mod tests {
             .create_reservation(ReservationRequest {
                 model_name: "model".to_string(),
                 routing_group: "default".to_string(),
-                reservation_id: "res-after-shutdown".to_string(),
+                selection_id: "res-after-shutdown".to_string(),
                 worker_id: 1,
                 dp_rank: None,
                 prompt: prompt(),
@@ -1283,7 +1277,7 @@ mod tests {
             core.create_reservation(ReservationRequest {
                 model_name: "model".to_string(),
                 routing_group: "default".to_string(),
-                reservation_id: format!("occupy-{worker_id}"),
+                selection_id: format!("occupy-{worker_id}"),
                 worker_id,
                 dp_rank: Some(0),
                 prompt: PromptRequest {
@@ -1312,7 +1306,6 @@ mod tests {
                     model_name: "model".to_string(),
                     routing_group: "default".to_string(),
                     selection_id: Some("refresh-selection".to_string()),
-                    reservation_id: Some("refreshed-request".to_string()),
                     prompt: PromptRequest {
                         token_ids: None,
                         mm_routing_info: None,
