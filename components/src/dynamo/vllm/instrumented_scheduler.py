@@ -1794,7 +1794,7 @@ class InstrumentedScheduler(AsyncScheduler):
                     )
 
     def _bench_prefill_batch_sizes(self, total_tokens: int) -> list[int]:
-        """Return power-of-two request counts plus the legal maximum."""
+        """Return the smallest configured presets from the legal batch axis."""
         upper_bound = min(
             total_tokens,
             self.max_num_running_reqs,

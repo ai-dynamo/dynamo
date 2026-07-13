@@ -717,7 +717,7 @@ def test_benchmark_synchronizer_rejects_different_points():
     def synchronize_follower():
         try:
             rank1.synchronize(follower_point)
-        except Exception as error:
+        except RuntimeError as error:
             follower_error["error"] = error
 
     follower = threading.Thread(target=synchronize_follower)
