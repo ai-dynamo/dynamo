@@ -679,14 +679,14 @@ impl<
                 biased;
                 command = rx.recv() => command,
                 _ = self.cleanup.notify.notified() => {
-                    if self.drain_cleanup(None) {
+                    if self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                     continue;
                 }
             };
             let Some(command) = command else {
-                self.drain_cleanup(None);
+                self.drain_cleanup();
                 break;
             };
             match command {
@@ -696,7 +696,7 @@ impl<
                     ack_tx,
                 } => {
                     let made_ready =
-                        self.handle_enqueue(request, block_hashes) | self.drain_cleanup(None);
+                        self.handle_enqueue(request, block_hashes) | self.drain_cleanup();
                     if made_ready {
                         self.handle_update(None).await;
                     }
@@ -704,20 +704,20 @@ impl<
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
                     self.handle_update(worker).await;
-                    if self.drain_cleanup(None) {
+                    if self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
                 }
                 AdmissionCommand::Reconcile { force, ack_tx } => {
                     self.handle_reconcile(force).await;
-                    if self.drain_cleanup(None) {
+                    if self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
                 }
                 AdmissionCommand::Dispatched { request_id } => {
-                    if self.handle_dispatched(&request_id) | self.drain_cleanup(None) {
+                    if self.handle_dispatched(&request_id) | self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                 }
@@ -725,7 +725,7 @@ impl<
                     request_id,
                     outcome,
                 } => {
-                    if self.drain_cleanup(Some((request_id, outcome))) {
+                    if self.handle_cleanup(&request_id, outcome) | self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                 }
@@ -733,7 +733,7 @@ impl<
                     request_id,
                     outcome,
                 } => {
-                    if self.handle_finished(&request_id, outcome) | self.drain_cleanup(None) {
+                    if self.handle_finished(&request_id, outcome) | self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                 }
@@ -986,11 +986,40 @@ impl<
         self.apply_admission_actions(actions)
     }
 
-    fn drain_cleanup(&mut self, initial: Option<(String, RequestOutcome)>) -> bool {
-        let mut dirty = self.cleanup.drain();
-        if let Some((request_id, outcome)) = initial {
-            dirty.insert(request_id, outcome);
+    fn handle_cleanup(&mut self, request_id: &str, outcome: RequestOutcome) -> bool {
+        let Some(tracked) = self.tracked_admissions.get(request_id).copied() else {
+            let owned_request_id = request_id.to_owned();
+            let rollback_booking = self.slots.request_worker(&owned_request_id).is_some();
+            if rollback_booking
+                && let Err(error) = self.slots.free(&owned_request_id, Instant::now())
+            {
+                tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
+            }
+
+            let mut removed_pending = false;
+            for class_index in 0..self.profile.classes().len() {
+                let removed = self.pending.take_if_in_class(class_index, |queued| {
+                    queued.request.mode.tracked_request_id() == Some(request_id)
+                });
+                removed_pending |= !removed.is_empty();
+                for entry in removed {
+                    self.subtract_pending_counters(class_index, entry.snapshot());
+                }
+            }
+            return rollback_booking || removed_pending;
+        };
+
+        let owned_request_id = request_id.to_owned();
+        let rollback_booking =
+            tracked.worker.is_some() && self.slots.request_worker(&owned_request_id).is_some();
+        if rollback_booking && let Err(error) = self.slots.free(&owned_request_id, Instant::now()) {
+            tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
         }
+        rollback_booking | self.handle_finished(request_id, outcome)
+    }
+
+    fn drain_cleanup(&mut self) -> bool {
+        let dirty = self.cleanup.drain();
         if dirty.is_empty() {
             return false;
         }
