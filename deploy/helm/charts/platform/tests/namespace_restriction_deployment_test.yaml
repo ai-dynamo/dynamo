@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: namespace restriction deployment
+templates:
+  - charts/dynamo-operator/templates/deployment.yaml
+  - charts/dynamo-operator/templates/operator-config.yaml
+tests:
+  - it: runs crd-apply for the default cluster-wide installation
+    template: charts/dynamo-operator/templates/deployment.yaml
+    asserts:
+      - exists:
+          path: spec.template.spec.initContainers
+        documentSelector:
+          path: kind
+          value: Deployment
+
+  - it: rejects CRD upgrades in namespace-restricted mode
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "namespaceRestriction.enabled=true is incompatible with upgradeCRD=true"
+
+  - it: omits crd-apply but retains admission serving in namespace-restricted mode
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - notExists:
+          path: spec.template.spec.initContainers
+        documentSelector:
+          path: kind
+          value: Deployment
+      - equal:
+          path: spec.template.spec.containers[0].ports[1].name
+          value: webhook-server
+        documentSelector:
+          path: kind
+          value: Deployment
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[1].name
+          value: cert
+        documentSelector:
+          path: kind
+          value: Deployment
+
+  - it: configures the target namespace and ownership Lease
+    template: charts/dynamo-operator/templates/operator-config.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.namespaceRestriction.targetNamespace: tenant-a
+      dynamo-operator.namespaceRestriction.lease.duration: 45s
+      dynamo-operator.namespaceRestriction.lease.renewInterval: 15s
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'restricted: "tenant-a"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'leaseDuration: "45s"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'leaseRenewInterval: "15s"'
+
+  - it: rejects custom webhook namespace selectors
+    template: charts/dynamo-operator/templates/deployment.yaml
+    set:
+      dynamo-operator.webhook.namespaceSelector.matchLabels.tenant: selected
+    asserts:
+      - failedTemplate:
+          errorPattern: "webhook.namespaceSelector must be empty"
