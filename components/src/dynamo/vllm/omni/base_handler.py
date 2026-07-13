@@ -6,6 +6,7 @@
 import asyncio
 import dataclasses
 import logging
+import os
 import time
 from typing import Any, AsyncGenerator, Dict
 
@@ -18,6 +19,7 @@ except ImportError:
     DiffusionParallelConfig = None  # type: ignore[assignment, misc]
 
 from dynamo._core import Context
+from dynamo.common.backend.metrics import ensure_prometheus_multiproc_dir
 from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
@@ -48,6 +50,9 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
             f"with model: {config.model}"
         )
 
+        self._prometheus_temp_dir = ensure_prometheus_multiproc_dir(
+            "vllm_prometheus_"
+        )
         omni_kwargs = self._build_omni_kwargs(config)
         self.engine_client = AsyncOmni(**omni_kwargs)
 
@@ -190,8 +195,20 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
     def cleanup(self):
         """Cleanup AsyncOmni orchestrator resources."""
         try:
-            if hasattr(self, "engine_client"):
-                self.engine_client.close()
+            engine_client = getattr(self, "engine_client", None)
+            if engine_client is not None:
+                engine_client.close()
+                self.engine_client = None
                 logger.info("AsyncOmni orchestrator closed")
         except Exception as e:
             logger.error(f"Error closing AsyncOmni orchestrator: {e}")
+        finally:
+            prometheus_temp_dir = getattr(self, "_prometheus_temp_dir", None)
+            if prometheus_temp_dir is not None:
+                if (
+                    os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+                    == prometheus_temp_dir.name
+                ):
+                    os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
+                prometheus_temp_dir.cleanup()
+                self._prometheus_temp_dir = None
