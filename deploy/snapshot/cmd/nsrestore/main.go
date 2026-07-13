@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"os"
+	"time"
 
 	"github.com/go-logr/logr"
 
@@ -20,6 +21,10 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	rootfsGMSReadyFile := flag.String("rootfs-gms-ready-file", "", "Experimental GMS transfer-ready marker path")
+	rootfsGMSReleaseFile := flag.String("rootfs-gms-release-file", "", "Experimental GMS transfer-release marker path")
+	rootfsGMSReleaseMode := flag.String("rootfs-gms-release-mode", "", "Experimental release mode: control or treatment")
+	rootfsGMSWaitTimeout := flag.Duration("rootfs-gms-wait-timeout", 5*time.Minute, "Experimental marker wait timeout")
 	flag.Parse()
 
 	if *checkpointPath == "" {
@@ -27,10 +32,14 @@ func main() {
 	}
 
 	opts := executor.RestoreOptions{
-		CheckpointPath: *checkpointPath,
-		CUDADeviceMap:  *cudaDeviceMap,
-		CgroupRoot:     *cgroupRoot,
-		TargetPodIP:    *targetPodIP,
+		CheckpointPath:       *checkpointPath,
+		CUDADeviceMap:        *cudaDeviceMap,
+		CgroupRoot:           *cgroupRoot,
+		TargetPodIP:          *targetPodIP,
+		RootfsGMSReadyFile:   *rootfsGMSReadyFile,
+		RootfsGMSReleaseFile: *rootfsGMSReleaseFile,
+		RootfsGMSReleaseMode: *rootfsGMSReleaseMode,
+		RootfsGMSWaitTimeout: *rootfsGMSWaitTimeout,
 	}
 
 	result, err := executor.RestoreInNamespace(context.Background(), opts, log)

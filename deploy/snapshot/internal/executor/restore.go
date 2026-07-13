@@ -35,6 +35,10 @@ type RestoreRequest struct {
 	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
+	RootfsGMSReadyFile          string
+	RootfsGMSReleaseFile        string
+	RootfsGMSReleaseMode        string
+	RootfsGMSWaitTimeout        time.Duration
 }
 
 // Restore performs external restore for the given request.
@@ -67,12 +71,13 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
+	restoreDuration := hostInspectDuration + result.PreRootfsWaitDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
 			"duration": restoreDuration.String(),
 			"phases": map[string]string{
 				"host_inspect_duration":    hostInspectDuration.String(),
+				"pre_rootfs_wait_duration": result.PreRootfsWaitDuration.String(),
 				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
 				"criu_restore_duration":    result.CRIURestoreDuration.String(),
 				"cuda_duration":            result.CUDADuration.String(),
@@ -216,6 +221,14 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
+	}
+	if req.RootfsGMSReadyFile != "" || req.RootfsGMSReleaseFile != "" || req.RootfsGMSReleaseMode != "" {
+		args = append(args,
+			"--rootfs-gms-ready-file", req.RootfsGMSReadyFile,
+			"--rootfs-gms-release-file", req.RootfsGMSReleaseFile,
+			"--rootfs-gms-release-mode", req.RootfsGMSReleaseMode,
+			"--rootfs-gms-wait-timeout", req.RootfsGMSWaitTimeout.String(),
+		)
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)

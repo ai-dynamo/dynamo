@@ -38,6 +38,7 @@ from gpu_memory_service.snapshot.transfer import (
     FileTransferSource,
     GMSSnapshotConfig,
     GMSTransferTarget,
+    RestoreTransferGate,
     TransferSession,
     validate_transfer_targets,
 )
@@ -97,6 +98,12 @@ class NixlPosixStagingTransferBackend:
         self._group_sources = group_sources
         self._group_kind = group_kind
         self._warn_under_parallelized = warn_under_parallelized
+        transfer_gate = config.backend_config.get("restore_transfer_gate")
+        if transfer_gate is not None and not callable(
+            getattr(transfer_gate, "wait", None)
+        ):
+            raise TypeError("restore_transfer_gate must provide wait(participant)")
+        self._restore_transfer_gate: Optional[RestoreTransferGate] = transfer_gate
         logger.info(
             "%s configured for device %d with %d workers using NIXL POSIX "
             "staging backend_params=%s; NIXL import is running in the "
@@ -119,6 +126,7 @@ class NixlPosixStagingTransferBackend:
             posix_backend_params=self._posix_backend_params,
             sources=sources,
             api_future=self._api_future,
+            restore_transfer_gate=self._restore_transfer_gate,
         )
 
     def close(self) -> None:
@@ -138,6 +146,7 @@ class _NixlPosixStagingTransferSession:
         posix_backend_params: Mapping[str, str],
         sources: Sequence[FileTransferSource],
         api_future: Optional[Future[object]] = None,
+        restore_transfer_gate: Optional[RestoreTransferGate] = None,
     ) -> None:
         self._backend_name = backend_name
         self._device = device
@@ -146,6 +155,7 @@ class _NixlPosixStagingTransferSession:
         self._posix_backend_params = dict(posix_backend_params)
         self._sources = list(sources)
         self._api_future = api_future
+        self._restore_transfer_gate = restore_transfer_gate
         self._agent_name_base = (
             f"gms_{backend_name.replace('-', '_')}_{device}_{os.getpid()}_{id(self):x}"
         )
@@ -202,35 +212,53 @@ class _NixlPosixStagingTransferSession:
         t0 = time.monotonic()
         prep_overlap_s = t0 - self._prep_started_at
         logger.info(
-            "%s restore targets ready after %.3fs of background staging prep; "
-            "starting transfers",
+            "%s restore targets ready after %.3fs of background staging prep; %s",
             self._backend_name,
             prep_overlap_s,
+            (
+                "waiting at the configured transfer gate"
+                if self._restore_transfer_gate is not None
+                else "starting transfers"
+            ),
         )
         try:
             with ThreadPoolExecutor(max_workers=self._worker_count) as pool:
                 transfer_futures: dict[Future[None], str] = {}
-                for prep_future in as_completed(self._prep_futures):
-                    group_name = self._prep_futures[prep_future]
-                    try:
-                        prepared = prep_future.result()
-                    except Exception as exc:
-                        self._cancel_event.set()
-                        raise RuntimeError(
-                            f"{self._backend_name} failed while preparing "
-                            f"{self._group_kind} group {group_name}: {exc}"
-                        ) from exc
-                    try:
+                if self._restore_transfer_gate is not None:
+                    prepared_groups = [
+                        self._prepared_group(prep_future)
+                        for prep_future in as_completed(self._prep_futures)
+                    ]
+                    self._restore_transfer_gate.wait(self._device)
+                    logger.info(
+                        "%s transfer gate released for device %d; "
+                        "submitting %d prepared work groups",
+                        self._backend_name,
+                        self._device,
+                        len(prepared_groups),
+                    )
+                    for prepared in prepared_groups:
                         transfer_futures[
                             pool.submit(
                                 self._restore_prepared_group,
                                 prepared,
                                 targets,
                             )
-                        ] = group_name
-                    except Exception:
-                        self._close_prepared_group(prepared)
-                        raise
+                        ] = prepared.group_name
+                else:
+                    for prep_future in as_completed(self._prep_futures):
+                        prepared = self._prepared_group(prep_future)
+                        try:
+                            transfer_futures[
+                                pool.submit(
+                                    self._restore_prepared_group,
+                                    prepared,
+                                    targets,
+                                )
+                            ] = prepared.group_name
+                        except Exception:
+                            self._close_prepared_group(prepared)
+                            raise
 
                 for transfer_future in as_completed(transfer_futures):
                     group_name = transfer_futures[transfer_future]
@@ -257,6 +285,20 @@ class _NixlPosixStagingTransferSession:
             self._group_kind,
             self._logical_group_count,
         )
+
+    def _prepared_group(
+        self,
+        prep_future: Future[_PreparedNixlGroup],
+    ) -> _PreparedNixlGroup:
+        group_name = self._prep_futures[prep_future]
+        try:
+            return prep_future.result()
+        except Exception as exc:
+            self._cancel_event.set()
+            raise RuntimeError(
+                f"{self._backend_name} failed while preparing "
+                f"{self._group_kind} group {group_name}: {exc}"
+            ) from exc
 
     def close(self) -> None:
         self._cancel_event.set()

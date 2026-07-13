@@ -183,6 +183,16 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 
 // ApplyRootfsDiffWithStats extracts rootfs-diff.tar and reports restore measurements.
 func ApplyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger) (RootfsDiffApplyStats, error) {
+	return applyRootfsDiffWithStats(checkpointPath, targetRoot, log, nil)
+}
+
+// ApplyRootfsDiffWithStatsBeforeExtract runs beforeExtract immediately before
+// starting the measured tar child.
+func ApplyRootfsDiffWithStatsBeforeExtract(checkpointPath, targetRoot string, log logr.Logger, beforeExtract func() error) (RootfsDiffApplyStats, error) {
+	return applyRootfsDiffWithStats(checkpointPath, targetRoot, log, beforeExtract)
+}
+
+func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger, beforeExtract func() error) (RootfsDiffApplyStats, error) {
 	var stats RootfsDiffApplyStats
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	statStart := time.Now()
@@ -208,6 +218,11 @@ func ApplyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 		stats.CgroupReadErrors = append(stats.CgroupReadErrors, "before: "+beforeErr.Error())
 	} else {
 		stats.CgroupBefore = cgroupBefore
+	}
+	if beforeExtract != nil {
+		if err := beforeExtract(); err != nil {
+			return stats, fmt.Errorf("before rootfs extract: %w", err)
+		}
 	}
 	extractStart := time.Now()
 	err = cmd.Run()

@@ -78,6 +78,41 @@ func TestBuildExclusions(t *testing.T) {
 	}
 }
 
+func TestApplyRootfsDiffWithStatsRunsHookImmediatelyBeforeTar(t *testing.T) {
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	if err := tar.NewWriter(archive).Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatalf("close archive: %v", err)
+	}
+	markerPath := filepath.Join(targetRoot, "before-extract")
+
+	stats, err := ApplyRootfsDiffWithStatsBeforeExtract(
+		checkpointDir,
+		targetRoot,
+		testr.New(t),
+		func() error {
+			return os.WriteFile(markerPath, []byte("ready"), 0o644)
+		},
+	)
+	if err != nil {
+		t.Fatalf("ApplyRootfsDiffWithStatsBeforeExtract: %v", err)
+	}
+	if stats.ExtractDuration <= 0 {
+		t.Fatalf("expected measured tar duration, got %+v", stats)
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("before-extract hook did not run: %v", err)
+	}
+}
+
 func TestFindWhiteoutFiles(t *testing.T) {
 	tests := []struct {
 		name  string

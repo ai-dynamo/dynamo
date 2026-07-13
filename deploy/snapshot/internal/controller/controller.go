@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -780,6 +781,10 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return nil
 	}
 
+	rootfsGMSReadyFile, rootfsGMSReleaseFile, rootfsGMSReleaseMode, rootfsGMSWaitTimeout, err := rootfsGMSABOptions(pod, containerName)
+	if err != nil {
+		return fmt.Errorf("invalid rootfs/GMS experiment options: %w", err)
+	}
 	if err := setRestoreStatus(snapshotprotocol.RestoreStatusInProgress); err != nil {
 		return fmt.Errorf("failed to annotate pod with restore in_progress: %w", err)
 	}
@@ -797,6 +802,10 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		TargetPodIP:                 pod.Status.PodIP,
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
+		RootfsGMSReadyFile:          rootfsGMSReadyFile,
+		RootfsGMSReleaseFile:        rootfsGMSReleaseFile,
+		RootfsGMSReleaseMode:        rootfsGMSReleaseMode,
+		RootfsGMSWaitTimeout:        rootfsGMSWaitTimeout,
 	}
 	placeholderHostPID, err := executor.Restore(restoreCtx, w.runtime, log, req)
 	if err != nil {
@@ -834,6 +843,39 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		return err
 	}
 	return nil
+}
+
+func rootfsGMSABOptions(pod *corev1.Pod, containerName string) (string, string, string, time.Duration, error) {
+	const (
+		readyEnv   = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_READY_FILE"
+		releaseEnv = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_RELEASE_FILE"
+		modeEnv    = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_RELEASE_MODE"
+		timeoutEnv = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_TIMEOUT_SECONDS"
+	)
+	for _, container := range pod.Spec.Containers {
+		if container.Name != containerName {
+			continue
+		}
+		values := make(map[string]string)
+		for _, env := range container.Env {
+			switch env.Name {
+			case readyEnv, releaseEnv, modeEnv, timeoutEnv:
+				if env.ValueFrom != nil {
+					return "", "", "", 0, fmt.Errorf("%s must use a literal value", env.Name)
+				}
+				values[env.Name] = env.Value
+			}
+		}
+		if values[readyEnv] == "" && values[releaseEnv] == "" && values[modeEnv] == "" && values[timeoutEnv] == "" {
+			return "", "", "", 0, nil
+		}
+		timeoutSeconds, err := strconv.Atoi(values[timeoutEnv])
+		if err != nil || timeoutSeconds <= 0 {
+			return "", "", "", 0, fmt.Errorf("%s must be a positive integer", timeoutEnv)
+		}
+		return values[readyEnv], values[releaseEnv], values[modeEnv], time.Duration(timeoutSeconds) * time.Second, nil
+	}
+	return "", "", "", 0, fmt.Errorf("target container %q not found", containerName)
 }
 
 func (w *NodeController) tryAcquire(podKey string) bool {

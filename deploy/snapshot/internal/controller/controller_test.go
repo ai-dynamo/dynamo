@@ -34,6 +34,62 @@ type fakeRuntime struct {
 	resolvedContainerIDs []string
 }
 
+func TestRootfsGMSABOptionsUsesOnlyTargetContainerLiteralEnv(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "gms-loader",
+					Env: []corev1.EnvVar{
+						{Name: "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_RELEASE_MODE", Value: "ignored"},
+					},
+				},
+				{
+					Name: "main",
+					Env: []corev1.EnvVar{
+						{Name: "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_READY_FILE", Value: "/checkpoints/.ab/ready"},
+						{Name: "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_RELEASE_FILE", Value: "/checkpoints/.ab/release"},
+						{Name: "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_RELEASE_MODE", Value: "control"},
+						{Name: "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_TIMEOUT_SECONDS", Value: "300"},
+					},
+				},
+			},
+		},
+	}
+
+	ready, release, mode, timeout, err := rootfsGMSABOptions(pod, "main")
+	if err != nil {
+		t.Fatalf("rootfsGMSABOptions: %v", err)
+	}
+	if ready != "/checkpoints/.ab/ready" || release != "/checkpoints/.ab/release" || mode != "control" || timeout != 5*time.Minute {
+		t.Fatalf("unexpected rootfs/GMS options: %q %q %q %s", ready, release, mode, timeout)
+	}
+}
+
+func TestRootfsGMSABOptionsRejectsNonLiteralEnv(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "main",
+					Env: []corev1.EnvVar{
+						{
+							Name: "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_GMS_READY_FILE",
+							ValueFrom: &corev1.EnvVarSource{
+								FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if _, _, _, _, err := rootfsGMSABOptions(pod, "main"); err == nil {
+		t.Fatal("expected non-literal experiment option to fail")
+	}
+}
+
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
 
 func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {

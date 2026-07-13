@@ -3,6 +3,9 @@
 
 """Unit tests for the GMS snapshot loader CLI."""
 
+import json
+import threading
+
 import pytest
 
 try:
@@ -107,3 +110,78 @@ def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
             "clear_existing": True,
         },
     )
+
+
+def test_file_transfer_gate_waits_for_all_devices_and_release(tmp_path):
+    ready_file = tmp_path / "transfer-ready"
+    release_file = tmp_path / "transfer-release"
+    gate = loader._FileTransferGate(
+        ready_file=str(ready_file),
+        release_file=str(release_file),
+        participants=[0, 1],
+        timeout_s=1.0,
+    )
+    completed: list[int] = []
+
+    threads = [
+        threading.Thread(
+            target=lambda device=device: (
+                gate.wait(device),
+                completed.append(device),
+            )
+        )
+        for device in [0, 1]
+    ]
+    threads[0].start()
+    assert not ready_file.exists()
+    threads[1].start()
+
+    for _ in range(100):
+        if ready_file.exists():
+            break
+        threading.Event().wait(0.01)
+    assert json.loads(ready_file.read_text(encoding="utf-8"))["participants"] == [
+        0,
+        1,
+    ]
+    assert completed == []
+
+    release_file.write_text("release\n", encoding="utf-8")
+    for thread in threads:
+        thread.join(timeout=1.0)
+        assert not thread.is_alive()
+    assert sorted(completed) == [0, 1]
+
+
+def test_file_transfer_gate_times_out_without_release(tmp_path):
+    gate = loader._FileTransferGate(
+        ready_file=str(tmp_path / "transfer-ready"),
+        release_file=str(tmp_path / "transfer-release"),
+        participants=[0],
+        timeout_s=0.01,
+    )
+
+    with pytest.raises(TimeoutError, match="transfer release marker"):
+        gate.wait(0)
+
+
+def test_loader_rejects_transfer_gate_for_non_posix_backend(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "device-0").mkdir()
+    monkeypatch.setattr(loader.cuda_utils, "list_devices", lambda: [0])
+
+    with pytest.raises(SystemExit):
+        loader.main(
+            [
+                "--checkpoint-dir",
+                str(tmp_path),
+                "--transfer-backend",
+                "nixl-gds",
+                "--experiment-transfer-ready-file",
+                str(tmp_path / "ready"),
+                "--experiment-transfer-release-file",
+                str(tmp_path / "release"),
+            ]
+        )

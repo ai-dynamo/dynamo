@@ -27,6 +27,7 @@ from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
 from gpu_memory_service.snapshot.transfer import (
     GMSSnapshotConfig,
     GMSTransferTarget,
+    RestoreTransferGate,
     TransferBackendKind,
     build_file_transfer_sources,
     create_transfer_backend,
@@ -50,6 +51,7 @@ class GMSStorageClient:
         sharded_ssd_roots: Optional[Sequence[str]] = None,
         sharded_ssd_queues_per_root: int = 2,
         posix_backend_params: Optional[Mapping[str, str]] = None,
+        restore_transfer_gate: Optional[RestoreTransferGate] = None,
     ) -> None:
         self.output_dir = output_dir
         self.device = device
@@ -71,6 +73,7 @@ class GMSStorageClient:
             if posix_backend_params is None
             else {str(key): str(value) for key, value in posix_backend_params.items()}
         )
+        self._restore_transfer_gate = restore_transfer_gate
 
         if socket_path is None:
             from gpu_memory_service.common.utils import get_socket_path
@@ -249,6 +252,7 @@ class GMSStorageClient:
                     "sharded_ssd_roots": self._sharded_ssd_roots,
                     "sharded_ssd_queues_per_root": self._sharded_ssd_queues_per_root,
                     "posix_backend_params": self._posix_backend_params,
+                    "restore_transfer_gate": self._restore_transfer_gate,
                 },
             ),
         )

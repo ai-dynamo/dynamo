@@ -4,6 +4,7 @@
 """Unit tests for NIXL/POSIX staging restore planning."""
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -14,9 +15,13 @@ try:
         split_work_groups,
     )
     from gpu_memory_service.snapshot.backends.nixl_staging import (
+        _PreparedNixlGroup,
         _NixlPosixStagingTransferSession,
     )
-    from gpu_memory_service.snapshot.transfer import FileTransferSource
+    from gpu_memory_service.snapshot.transfer import (
+        FileTransferSource,
+        GMSTransferTarget,
+    )
 except ModuleNotFoundError:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
@@ -133,3 +138,79 @@ def test_staging_prep_starts_before_restore(monkeypatch):
     finally:
         allow_finish.set()
         session.close()
+
+
+def test_transfer_gate_runs_after_all_prep_and_before_transfer(monkeypatch):
+    sources = [
+        FileTransferSource(
+            allocation_id=f"alloc-{idx}",
+            file_path=f"/checkpoint/shard-{idx}.bin",
+            file_offset=0,
+            byte_count=4096,
+        )
+        for idx in range(2)
+    ]
+    gate_entered = threading.Event()
+    release_gate = threading.Event()
+    transfers: list[str] = []
+
+    class FakeGate:
+        def wait(self, participant):
+            assert participant == 0
+            gate_entered.set()
+            assert release_gate.wait(timeout=1.0)
+
+    def group_sources(_sources):
+        return {
+            source.allocation_id: [(source.file_path, [source])] for source in sources
+        }
+
+    def prepare_group(_session, _worker_index, group_name, file_groups):
+        return _PreparedNixlGroup(
+            group_name=group_name,
+            file_groups=file_groups,
+            agent=object(),
+            agent_name=f"agent-{group_name}",
+            slots=[],
+            prep_elapsed_s=0.0,
+        )
+
+    monkeypatch.setattr(
+        _NixlPosixStagingTransferSession,
+        "_prepare_group",
+        prepare_group,
+    )
+    session = _NixlPosixStagingTransferSession(
+        backend_name="test-backend",
+        device=0,
+        max_workers=2,
+        group_sources=group_sources,
+        group_kind="file",
+        warn_under_parallelized=False,
+        posix_backend_params={},
+        sources=sources,
+        restore_transfer_gate=FakeGate(),
+    )
+    monkeypatch.setattr(
+        session,
+        "_restore_prepared_group",
+        lambda prepared, _targets: transfers.append(prepared.group_name),
+    )
+    targets = {
+        source.allocation_id: GMSTransferTarget(
+            allocation_id=source.allocation_id,
+            va=idx * 4096,
+            device=0,
+            byte_count=source.byte_count,
+        )
+        for idx, source in enumerate(sources)
+    }
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        restore = pool.submit(session.restore, targets)
+        assert gate_entered.wait(timeout=1.0)
+        assert transfers == []
+        release_gate.set()
+        restore.result(timeout=1.0)
+
+    assert sorted(transfers) == ["alloc-0", "alloc-1"]

@@ -12,10 +12,14 @@ restored engine on weight load.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
+import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 
 from gpu_memory_service.common import cuda_utils
@@ -31,6 +35,137 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class _FileTransferGate:
+    """Process-wide file barrier for synchronized restore experiments."""
+
+    def __init__(
+        self,
+        *,
+        ready_file: str,
+        release_file: str,
+        participants: list[int],
+        timeout_s: float,
+    ) -> None:
+        if not os.path.isabs(ready_file) or not os.path.isabs(release_file):
+            raise ValueError("transfer gate marker paths must be absolute")
+        if ready_file == release_file:
+            raise ValueError("transfer gate ready and release paths must differ")
+        if timeout_s <= 0:
+            raise ValueError("transfer gate timeout must be positive")
+        if not participants:
+            raise ValueError("transfer gate requires at least one participant")
+
+        self._ready_file = ready_file
+        self._release_file = release_file
+        self._expected = frozenset(participants)
+        self._timeout_s = timeout_s
+        self._arrived: set[int] = set()
+        self._released = False
+        self._failure: Exception | None = None
+        self._condition = threading.Condition()
+
+    def wait(self, participant: int) -> None:
+        started_at = time.monotonic()
+        deadline = started_at + self._timeout_s
+        with self._condition:
+            if self._failure is not None:
+                raise RuntimeError("GMS experimental transfer gate failed") from (
+                    self._failure
+                )
+            if participant not in self._expected:
+                raise RuntimeError(
+                    f"unexpected transfer gate participant {participant}; "
+                    f"expected={sorted(self._expected)}"
+                )
+            if participant in self._arrived:
+                raise RuntimeError(f"duplicate transfer gate participant {participant}")
+            self._arrived.add(participant)
+            is_last = self._arrived == self._expected
+
+        if is_last:
+            try:
+                marker_started_at = time.monotonic()
+                _write_marker_atomically(
+                    self._ready_file,
+                    {
+                        "readyAt": datetime.now(timezone.utc).isoformat(),
+                        "participants": sorted(self._arrived),
+                    },
+                )
+                marker_elapsed_s = time.monotonic() - marker_started_at
+                logger.info(
+                    "GMS experimental transfer-ready marker created: "
+                    "path=%s participants=%s duration=%.6fs",
+                    self._ready_file,
+                    sorted(self._arrived),
+                    marker_elapsed_s,
+                )
+                while not os.path.exists(self._release_file):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "timed out waiting for GMS experimental transfer "
+                            f"release marker {self._release_file}"
+                        )
+                    time.sleep(0.01)
+            except Exception as exc:
+                with self._condition:
+                    self._failure = exc
+                    self._condition.notify_all()
+                raise
+            with self._condition:
+                self._released = True
+                self._condition.notify_all()
+        else:
+            with self._condition:
+                while not self._released and self._failure is None:
+                    remaining_s = deadline - time.monotonic()
+                    if remaining_s <= 0:
+                        self._failure = TimeoutError(
+                            "timed out waiting for all GMS transfer gate "
+                            f"participants; arrived={sorted(self._arrived)} "
+                            f"expected={sorted(self._expected)}"
+                        )
+                        self._condition.notify_all()
+                        break
+                    self._condition.wait(timeout=remaining_s)
+                if self._failure is not None:
+                    raise RuntimeError("GMS experimental transfer gate failed") from (
+                        self._failure
+                    )
+
+        logger.info(
+            "GMS experimental transfer gate released: device=%d "
+            "release_file=%s wait=%.6fs",
+            participant,
+            self._release_file,
+            time.monotonic() - started_at,
+        )
+
+
+def _write_marker_atomically(path: str, payload: dict[str, object]) -> None:
+    parent = os.path.dirname(path)
+    if not os.path.isdir(parent):
+        raise FileNotFoundError(
+            f"transfer gate marker directory does not exist: {parent}"
+        )
+    fd, temporary_path = tempfile.mkstemp(
+        dir=parent,
+        prefix=f".{os.path.basename(path)}.",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary_path, path)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+
+
 def _load_device(
     checkpoint_dir: str,
     device: int,
@@ -38,6 +173,7 @@ def _load_device(
     transfer_backend: str,
     sharded_ssd_roots: list[str],
     sharded_ssd_queues_per_root: int,
+    restore_transfer_gate: _FileTransferGate | None = None,
 ) -> None:
     input_dir = os.path.join(checkpoint_dir, f"device-{device}")
     logger.info(
@@ -59,6 +195,7 @@ def _load_device(
         transfer_backend=transfer_backend,
         sharded_ssd_roots=sharded_ssd_roots,
         sharded_ssd_queues_per_root=sharded_ssd_queues_per_root,
+        restore_transfer_gate=restore_transfer_gate,
     )
     client.load_to_gms(
         input_dir,
@@ -104,6 +241,28 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Number of independent sharded-ssd restore queues per SSD root.",
+    )
+    parser.add_argument(
+        "--experiment-transfer-ready-file",
+        default="",
+        help=(
+            "Experimental opt-in: atomically create this file after all device "
+            "targets and NIXL POSIX staging workers are ready."
+        ),
+    )
+    parser.add_argument(
+        "--experiment-transfer-release-file",
+        default="",
+        help=(
+            "Experimental opt-in: wait for this file before submitting any "
+            "NIXL POSIX FILE-to-DRAM transfer."
+        ),
+    )
+    parser.add_argument(
+        "--experiment-transfer-gate-timeout-seconds",
+        type=float,
+        default=300.0,
+        help="Timeout for the experimental transfer gate.",
     )
     return parser
 
@@ -167,6 +326,32 @@ def main(argv: list[str] | None = None) -> None:
         sharded_ssd_queues_per_root,
     )
     devices = _list_checkpoint_devices(checkpoint_dir)
+    gate_paths = (
+        args.experiment_transfer_ready_file,
+        args.experiment_transfer_release_file,
+    )
+    if any(gate_paths) and not all(gate_paths):
+        parser.error(
+            "--experiment-transfer-ready-file and "
+            "--experiment-transfer-release-file must be set together"
+        )
+    if all(gate_paths) and transfer_backend not in {
+        TransferBackendKind.NIXL.value,
+        TransferBackendKind.SHARDED_SSD.value,
+    }:
+        parser.error(
+            "the experimental transfer gate requires a NIXL POSIX staging backend"
+        )
+    transfer_gate = (
+        _FileTransferGate(
+            ready_file=args.experiment_transfer_ready_file,
+            release_file=args.experiment_transfer_release_file,
+            participants=devices,
+            timeout_s=args.experiment_transfer_gate_timeout_seconds,
+        )
+        if all(gate_paths)
+        else None
+    )
 
     t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=len(devices)) as pool:
@@ -179,6 +364,7 @@ def main(argv: list[str] | None = None) -> None:
                 transfer_backend,
                 sharded_ssd_roots,
                 sharded_ssd_queues_per_root,
+                transfer_gate,
             ): dev
             for dev in devices
         }

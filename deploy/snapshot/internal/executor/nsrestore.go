@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,14 +20,19 @@ import (
 
 // RestoreOptions holds configuration for an in-namespace restore.
 type RestoreOptions struct {
-	CheckpointPath string
-	CUDADeviceMap  string
-	CgroupRoot     string
-	TargetPodIP    string
+	CheckpointPath       string
+	CUDADeviceMap        string
+	CgroupRoot           string
+	TargetPodIP          string
+	RootfsGMSReadyFile   string
+	RootfsGMSReleaseFile string
+	RootfsGMSReleaseMode string
+	RootfsGMSWaitTimeout time.Duration
 }
 
 type RestoreInNamespaceResult struct {
 	RestoredPID            int                   `json:"restoredPID"`
+	PreRootfsWaitDuration  time.Duration         `json:"preRootfsWaitDuration"`
 	NSRestoreSetupDuration time.Duration         `json:"nsrestoreSetupDuration"`
 	NSRestoreSetupTimings  NSRestoreSetupTimings `json:"nsrestoreSetupTimings"`
 	CRIURestoreDuration    time.Duration         `json:"criuRestoreDuration"`
@@ -45,7 +52,7 @@ type NSRestoreSetupTimings struct {
 	RootfsDiffCgroupAfter         snapshotruntime.CgroupResourceSnapshot `json:"rootfsDiffCgroupAfter"`
 	RootfsDiffCgroupDelta         snapshotruntime.CgroupResourceDelta    `json:"rootfsDiffCgroupDelta"`
 	RootfsDiffCgroupReadErrors    []string                               `json:"rootfsDiffCgroupReadErrors,omitempty"`
-	RootfsReadyMarkerDuration     time.Duration                          `json:"rootfsReadyMarkerDuration"`
+	RootfsReleaseMarkerDuration   time.Duration                          `json:"rootfsReleaseMarkerDuration"`
 	DeletedFilesReadDuration      time.Duration                          `json:"deletedFilesReadDuration"`
 	DeletedFilesParseDuration     time.Duration                          `json:"deletedFilesParseDuration"`
 	DeletedFilesRemoveDuration    time.Duration                          `json:"deletedFilesRemoveDuration"`
@@ -67,7 +74,7 @@ func (t *NSRestoreSetupTimings) finalize(total time.Duration) {
 		t.BuildRestoreOptsDuration +
 		t.RootfsDiffStatDuration +
 		t.RootfsDiffExtractDuration +
-		t.RootfsReadyMarkerDuration +
+		t.RootfsReleaseMarkerDuration +
 		t.DeletedFilesReadDuration +
 		t.DeletedFilesParseDuration +
 		t.DeletedFilesRemoveDuration +
@@ -131,6 +138,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	setupTimings.finalize(setupDuration)
 	result := &RestoreInNamespaceResult{
 		RestoredPID:            restoredPID,
+		PreRootfsWaitDuration:  executeTimings.preRootfsWaitDuration,
 		NSRestoreSetupDuration: setupDuration,
 		NSRestoreSetupTimings:  setupTimings,
 		CRIURestoreDuration:    executeTimings.criuRestoreDuration,
@@ -152,7 +160,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 			"rootfs_diff_cgroup_after":       setupTimings.RootfsDiffCgroupAfter,
 			"rootfs_diff_cgroup_delta":       setupTimings.RootfsDiffCgroupDelta,
 			"rootfs_diff_cgroup_read_errors": setupTimings.RootfsDiffCgroupReadErrors,
-			"rootfs_ready_marker_duration":   setupTimings.RootfsReadyMarkerDuration.String(),
+			"rootfs_release_marker_duration": setupTimings.RootfsReleaseMarkerDuration.String(),
 			"deleted_files_read_duration":    setupTimings.DeletedFilesReadDuration.String(),
 			"deleted_files_parse_duration":   setupTimings.DeletedFilesParseDuration.String(),
 			"deleted_files_remove_duration":  setupTimings.DeletedFilesRemoveDuration.String(),
@@ -169,6 +177,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	)
 	log.Info("nsrestore timing summary",
 		"restored_pid", restoredPID,
+		"pre_rootfs_wait_duration", result.PreRootfsWaitDuration,
 		"nsrestore_setup_duration", result.NSRestoreSetupDuration,
 		"criu_restore_duration", result.CRIURestoreDuration,
 		"cuda_duration", result.CUDADuration,
@@ -178,6 +187,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 }
 
 type nsrestorePhaseTimings struct {
+	preRootfsWaitDuration  time.Duration
 	nsrestoreSetupDuration time.Duration
 	nsrestoreSetupTimings  NSRestoreSetupTimings
 	criuRestoreDuration    time.Duration
@@ -187,9 +197,40 @@ type nsrestorePhaseTimings struct {
 func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
 	timings := &nsrestorePhaseTimings{}
 
+	gateEnabled, err := validateRootfsGMSGate(opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	if gateEnabled {
+		waitStart := time.Now()
+		if err := waitForMarker(ctx, opts.RootfsGMSReadyFile, opts.RootfsGMSWaitTimeout); err != nil {
+			return nil, 0, fmt.Errorf("wait for GMS transfer-ready marker: %w", err)
+		}
+		timings.preRootfsWaitDuration = time.Since(waitStart)
+		log.Info("GMS transfer-ready marker observed",
+			"path", opts.RootfsGMSReadyFile,
+			"duration", timings.preRootfsWaitDuration,
+		)
+	}
+
 	// Apply rootfs diff inside the namespace (target root is /)
 	nsrestoreSetupStart := time.Now()
-	rootfsStats, err := snapshotruntime.ApplyRootfsDiffWithStats(opts.CheckpointPath, "/", log)
+	var beforeRootfsExtract func() error
+	if gateEnabled && opts.RootfsGMSReleaseMode == "control" {
+		beforeRootfsExtract = func() error {
+			markerStart := time.Now()
+			if err := writeMarkerAtomically(opts.RootfsGMSReleaseFile); err != nil {
+				return fmt.Errorf("write control GMS release marker: %w", err)
+			}
+			timings.nsrestoreSetupTimings.RootfsReleaseMarkerDuration = time.Since(markerStart)
+			log.Info("Control GMS release marker created immediately before rootfs tar",
+				"path", opts.RootfsGMSReleaseFile,
+				"duration", timings.nsrestoreSetupTimings.RootfsReleaseMarkerDuration,
+			)
+			return nil
+		}
+	}
+	rootfsStats, err := snapshotruntime.ApplyRootfsDiffWithStatsBeforeExtract(opts.CheckpointPath, "/", log, beforeRootfsExtract)
 	timings.nsrestoreSetupTimings.RootfsDiffStatDuration = rootfsStats.StatDuration
 	timings.nsrestoreSetupTimings.RootfsDiffSizeBytes = rootfsStats.SizeBytes
 	timings.nsrestoreSetupTimings.RootfsDiffExtractDuration = rootfsStats.ExtractDuration
@@ -201,15 +242,15 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	if err != nil {
 		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
 	}
-	if markerPath := os.Getenv("DYN_SNAPSHOT_EXPERIMENT_ROOTFS_READY_FILE"); markerPath != "" {
+	if gateEnabled && opts.RootfsGMSReleaseMode == "treatment" {
 		markerStart := time.Now()
-		if err := os.WriteFile(markerPath, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0644); err != nil {
-			return nil, 0, fmt.Errorf("failed to write experimental rootfs ready marker %s: %w", markerPath, err)
+		if err := writeMarkerAtomically(opts.RootfsGMSReleaseFile); err != nil {
+			return nil, 0, fmt.Errorf("write treatment GMS release marker: %w", err)
 		}
-		timings.nsrestoreSetupTimings.RootfsReadyMarkerDuration = time.Since(markerStart)
-		log.Info("Wrote experimental rootfs ready marker",
-			"path", markerPath,
-			"duration", timings.nsrestoreSetupTimings.RootfsReadyMarkerDuration,
+		timings.nsrestoreSetupTimings.RootfsReleaseMarkerDuration = time.Since(markerStart)
+		log.Info("Treatment GMS release marker created immediately after rootfs",
+			"path", opts.RootfsGMSReleaseFile,
+			"duration", timings.nsrestoreSetupTimings.RootfsReleaseMarkerDuration,
 		)
 	}
 
@@ -306,4 +347,91 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	timings.cudaDuration = time.Since(cudaStart)
 
 	return timings, int(restoredPID), nil
+}
+
+func validateRootfsGMSGate(opts RestoreOptions) (bool, error) {
+	values := []string{
+		opts.RootfsGMSReadyFile,
+		opts.RootfsGMSReleaseFile,
+		opts.RootfsGMSReleaseMode,
+	}
+	configured := 0
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			configured++
+		}
+	}
+	if configured == 0 {
+		return false, nil
+	}
+	if configured != len(values) {
+		return false, fmt.Errorf("rootfs/GMS gate requires ready file, release file, and release mode")
+	}
+	if opts.RootfsGMSReleaseMode != "control" && opts.RootfsGMSReleaseMode != "treatment" {
+		return false, fmt.Errorf("invalid rootfs/GMS release mode %q", opts.RootfsGMSReleaseMode)
+	}
+	if opts.RootfsGMSWaitTimeout <= 0 {
+		return false, fmt.Errorf("rootfs/GMS wait timeout must be positive")
+	}
+	ready := filepath.Clean(opts.RootfsGMSReadyFile)
+	release := filepath.Clean(opts.RootfsGMSReleaseFile)
+	if !filepath.IsAbs(ready) || !filepath.IsAbs(release) {
+		return false, fmt.Errorf("rootfs/GMS marker paths must be absolute")
+	}
+	if ready == release {
+		return false, fmt.Errorf("rootfs/GMS ready and release marker paths must differ")
+	}
+	checkpoint := filepath.Clean(opts.CheckpointPath)
+	for _, marker := range []string{ready, release} {
+		if marker == checkpoint || strings.HasPrefix(marker, checkpoint+string(os.PathSeparator)) {
+			return false, fmt.Errorf("rootfs/GMS marker path %q is inside immutable checkpoint %q", marker, checkpoint)
+		}
+	}
+	return true, nil
+}
+
+func waitForMarker(ctx context.Context, path string, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("timed out waiting for %s: %w", path, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func writeMarkerAtomically(path string) error {
+	parent := filepath.Dir(path)
+	if info, err := os.Stat(parent); err != nil {
+		return fmt.Errorf("marker directory %s: %w", parent, err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("marker parent %s is not a directory", parent)
+	}
+	temp, err := os.CreateTemp(parent, "."+filepath.Base(path)+".")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if _, err := fmt.Fprintf(temp, "%s\n", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Link(tempPath, path)
 }

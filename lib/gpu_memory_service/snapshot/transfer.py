@@ -67,6 +67,13 @@ class TransferSession(Protocol):
         """Release resources and cancel any pending work."""
 
 
+class RestoreTransferGate(Protocol):
+    """Optional synchronization point immediately before restore transfers."""
+
+    def wait(self, participant: int) -> None:
+        """Block one restore participant until the transfer gate is released."""
+
+
 class TransferBackend(Protocol):
     """Backend capable of restoring bytes into GMS targets."""
 
