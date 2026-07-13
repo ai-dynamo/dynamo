@@ -120,6 +120,22 @@ KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
 MULTI_CONNECTOR_WRAPPERS: Tuple[str, ...] = ("MultiConnector", "PdConnector")
 
 
+def disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(
+    vllm_config: Any,
+) -> None:
+    """Disable HMA before vLLM builds KV cache groups for incompatible PdConnector children."""
+    kv_cfg = vllm_config.kv_transfer_config
+    if kv_cfg is None or kv_cfg.kv_connector != "PdConnector":
+        return
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiConnector,
+    )
+
+    if not MultiConnector.all_children_support_hma(kv_cfg):
+        vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = True
+
+
 def make_kv_connector_protocol(vllm_config: Any) -> KvConnectorProtocol:
     """Resolve the PD protocol for the engine's configured KV connector.
 
