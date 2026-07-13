@@ -1585,7 +1585,7 @@ def test_qwen3_coder_non_streaming_preserves_content_before_tool_call(
         tool_parser=_make_qwen3_tool_parser(
             tokenizer, qwen3_coder_request_for_sampling.tools
         ),
-        reasoning_parser_class=_resolve_qwen3_reasoning_parser_class(),
+        reasoning_parser_class=None,
         chat_template_kwargs={"reasoning_effort": None},
         stream_response=False,
     )
