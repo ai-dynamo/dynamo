@@ -147,8 +147,8 @@ on:
       diff_event_context:
         description: |
           Where this build runs, for OSRB CSV diff-baseline selection: 'pr' for a
-          PR build (pass diff_base_branch), 'push' for a post-merge build. Empty
-          disables diffing.
+          PR build (pass diff_base_branch and diff_merge_base_sha), 'push' for a
+          post-merge build. Empty disables diffing.
         required: false
         type: string
         default: ''
@@ -159,6 +159,11 @@ on:
         default: ''
       diff_base_branch:
         description: 'For PR builds, the PR''s target branch (e.g. main or release/1.3.0). Empty for pushes.'
+        required: false
+        type: string
+        default: ''
+      diff_merge_base_sha:
+        description: 'For PR builds targeting main, the true merge-base SHA. Pins the diff baseline to the PR fork point.'
         required: false
         type: string
         default: ''
@@ -476,7 +481,7 @@ jobs:
       # caller sets that today; see the input note). Skipped for dev / local-dev
       # targets (those don't ship and don't go through OSRB).
       # Resolve which prior build's OSRB CSV to diff this one against. The rules
-      # depend on where we run (PR->main vs post-merge->main vs release branch);
+      # depend on where we run (PR merge-base vs post-merge main vs release branch);
       # see container/compliance/resolve_diff_base.py. Reads the current version
       # from pyproject.toml for the release-branch case, and deepens history by
       # one so HEAD~1 is reachable for the main post-merge case (checkout is
@@ -496,6 +501,7 @@ jobs:
           DIFF_EVENT_CONTEXT: ${{ inputs.diff_event_context }}
           DIFF_CURRENT_BRANCH: ${{ inputs.diff_current_branch }}
           DIFF_BASE_BRANCH: ${{ inputs.diff_base_branch }}
+          DIFF_MERGE_BASE_SHA: ${{ inputs.diff_merge_base_sha }}
           DIFF_CURRENT_SHA: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
           DIFF_REPO: ${{ github.repository }}
           DIFF_RUN_ID: ${{ github.run_id }}
@@ -505,16 +511,20 @@ jobs:
         run: |
           # The build checkout is shallow with no tags. Make the refs each
           # baseline rule needs reachable (all best-effort; a miss just yields an
-          # empty base_sha and a baseline_unavailable diff). Depth 30 so the
-          # main-baseline first-parent walk has commits to traverse:
+          # empty base_sha and a baseline_unavailable diff). Depth 30 gives the
+          # first-parent baseline walks enough history to find an artifact:
           git fetch --deepen=30 --quiet || true                                     # HEAD~N (main post-merge walk)
           git fetch --tags --quiet || true                                          # vX.Y.Z tags (release branch)
-          git fetch --depth=30 origin main:refs/remotes/origin/main --quiet || true # origin/main history (PR -> main walk)
+          if [ "${DIFF_BASE_BRANCH}" = "main" ] \
+            && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
+            git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk
+          fi
           CURRENT_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)
           python3 container/compliance/resolve_diff_base.py \
             --event-context "${DIFF_EVENT_CONTEXT}" \
             --current-branch "${DIFF_CURRENT_BRANCH}" \
             --base-branch "${DIFF_BASE_BRANCH}" \
+            --merge-base-sha "${DIFF_MERGE_BASE_SHA}" \
             --current-sha "${DIFF_CURRENT_SHA}" \
             --current-version "${CURRENT_VERSION}" \
             --artifact-prefix "${DIFF_ARTIFACT_PREFIX}" \

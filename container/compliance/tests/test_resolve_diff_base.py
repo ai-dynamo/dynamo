@@ -257,3 +257,38 @@ class TestResolveDispatch:
         sha, label, _, _ = resolve("nightly", "main", "", "", repo="ai-dynamo/dynamo")
         assert sha == ""
         assert "no current run id" in label
+
+    def test_pr_to_main_requires_merge_base(self):
+        sha, label, _, _ = resolve("pr", "pull-request/7", "main", "")
+        assert sha == ""
+        assert label == "PR merge-base unavailable"
+
+    def test_pr_to_main_starts_from_merge_base(self, monkeypatch):
+        calls = []
+
+        def fake_resolve(start_ref, repo, prefix, label="main", limit=25):
+            calls.append((start_ref, repo, prefix, label, limit))
+            return "base", label, "artifact", "run"
+
+        monkeypatch.setattr(resolve_diff_base, "_resolve_main_baseline", fake_resolve)
+
+        result = resolve(
+            "pr",
+            "pull-request/7",
+            "main",
+            "",
+            repo="ai-dynamo/dynamo",
+            artifact_prefix="vllm-runtime",
+            merge_base_sha="fork-point",
+        )
+
+        assert result == ("base", "PR merge-base", "artifact", "run")
+        assert calls == [
+            (
+                "fork-point",
+                "ai-dynamo/dynamo",
+                "vllm-runtime",
+                "PR merge-base",
+                25,
+            )
+        ]

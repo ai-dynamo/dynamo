@@ -81,11 +81,10 @@ removals), then by ecosystem (`rust, python, go, dpkg, native`), then name.
 
 The baseline (resolved by `resolve_diff_base.py`) depends on where the build runs:
 
-- **PR targeting `main`** → the most recent commit on `main` (walking first-parent
-  history) that actually has this container's `compliance-<sha>-<container>`
-  artifact. Post-merge builds every framework, but each container's artifact lands
-  at a different time and a leg can fail, so the tip of `main` frequently lacks a
-  given container's artifact — the walk finds the newest commit that has it.
+- **PR targeting `main`** → the PR's true merge-base (fork point), walking backward
+  on first-parent history only when that commit lacks this container's
+  `compliance-<sha>-<container>` artifact. Advancing `main` alone does not move
+  this starting point; it moves when the PR is rebased or updated with `main`.
 - **Post-merge on `main`** → the same walk, starting from the previous commit on `main`.
 - **PR targeting / post-merge on `release/*`** → the release tag `vX.Y.Z` that is
   the highest one strictly older than the current version (semver order first —

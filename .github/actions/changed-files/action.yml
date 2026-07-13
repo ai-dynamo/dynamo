@@ -55,6 +55,9 @@ outputs:
   base_ref:
     description: 'PR target branch (baseRefName) for push-to-pull-request/N events; empty otherwise. Used for OSRB compliance-diff baseline selection.'
     value: ${{ steps.merge-base.outputs.base_ref }}
+  merge_base_sha:
+    description: 'True PR merge-base SHA for push-to-pull-request/N events; empty otherwise. Used as the stable OSRB diff baseline starting point.'
+    value: ${{ steps.merge-base.outputs.base_sha }}
 
 runs:
   using: "composite"

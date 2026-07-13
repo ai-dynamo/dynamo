@@ -257,7 +257,7 @@ runs:
             echo "dependency CSV against the baseline described below."
             echo
             echo "## How the baseline is chosen (by build context)"
-            echo "- PR targeting \`main\` -> latest commit on \`main\`"
+            echo "- PR targeting \`main\` -> PR merge-base (or nearest earlier commit with an artifact)"
             echo "- Post-merge on \`main\` -> the previous commit on \`main\`"
             echo "- PR / post-merge on \`release/*\` -> highest release tag \`vX.Y.Z\` strictly older than the current version (semver first, later publish date breaks same-version ties)"
             echo "- Nightly -> the previous successful scheduled nightly run (manual runs excluded)"

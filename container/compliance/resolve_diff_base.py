@@ -6,7 +6,8 @@
 
 The baseline depends on where the build runs:
 
-1. PR targeting ``main``            -> latest commit on ``main``.
+1. PR targeting ``main``            -> the PR's merge-base, walking backward
+                                       only when that commit lacks the artifact.
 2. Post-merge push to ``main``      -> the previous commit on ``main`` (HEAD~1).
 3. PR targeting / push to a ``release/*`` branch
                                     -> the release tag ``vX.Y.Z`` that is the
@@ -36,7 +37,8 @@ not be resolved). Callers degrade gracefully.
 
 Usage:
     resolve_diff_base.py --event-context {pr|push} --current-branch <ref_name> \\
-        --base-branch <baseRefName|''> --current-sha <sha> \\
+        --base-branch <baseRefName|''> --merge-base-sha <sha|''> \\
+        --current-sha <sha> \\
         --current-version <X.Y.Z|''> --repo <owner/repo>
 """
 
@@ -256,7 +258,11 @@ def pick_commit_with_artifact(
 
 
 def _resolve_main_baseline(
-    start_ref: str, repo: str, artifact_prefix: str, limit: int = 25
+    start_ref: str,
+    repo: str,
+    artifact_prefix: str,
+    label: str = "main",
+    limit: int = 25,
 ) -> tuple[str, str, str, str]:
     """Baseline for the main cases: the most recent commit on main's first-parent
     history (from ``start_ref`` backward) that actually has a
@@ -271,14 +277,14 @@ def _resolve_main_baseline(
     if not tip:
         return (
             "",
-            f"main baseline ({start_ref} unresolved; shallow clone?)",
+            f"{label} baseline ({start_ref} unresolved; shallow clone?)",
             "",
             "",
         )
     # Without a prefix (or token) we can't check availability -> use the tip,
     # preserving the original behavior.
     if not artifact_prefix:
-        return tip, f"main {_short(tip)}", "", ""
+        return tip, f"{label} {_short(tip)}", "", ""
     shas = _first_parent_shas(start_ref, limit)
     chosen, artifact, saw_error = pick_commit_with_artifact(
         shas, lambda s: find_artifact(repo, s, artifact_prefix)
@@ -286,20 +292,25 @@ def _resolve_main_baseline(
     if chosen and artifact:
         artifact_id, run_id = artifact
         if chosen == tip:
-            return chosen, f"main {_short(chosen)}", artifact_id, run_id
+            return chosen, f"{label} {_short(chosen)}", artifact_id, run_id
         return (
             chosen,
-            f"main {_short(chosen)} (nearest with {artifact_prefix} artifact)",
+            f"{label} {_short(chosen)} (nearest with {artifact_prefix} artifact)",
             artifact_id,
             run_id,
         )
     if saw_error:
         # Preserve the candidate SHA for diagnostics. Without an artifact id,
         # the download soft-degrades to a baseline_unavailable diff.
-        return tip, f"main {_short(tip)} (artifact availability unchecked)", "", ""
+        return (
+            tip,
+            f"{label} {_short(tip)} (artifact availability unchecked)",
+            "",
+            "",
+        )
     return (
         "",
-        f"no main commit with a {artifact_prefix} artifact in last {limit}",
+        f"no {label} commit with a {artifact_prefix} artifact in last {limit}",
         "",
         "",
     )
@@ -326,6 +337,7 @@ def resolve(
     repo: str = "",
     current_run_id: str = "",
     artifact_prefix: str = "",
+    merge_base_sha: str = "",
 ) -> tuple[str, str, str, str]:
     """Return (base_sha, base_label, artifact_id, run_id)."""
     # Rule 4: nightly build -> previous successful scheduled run of the same
@@ -345,11 +357,14 @@ def resolve(
             )
         return "", "no previous successful scheduled nightly run found", "", ""
 
-    # Rule 1: PR targeting main -> most recent main commit that has this
-    # container's artifact (walk back main; the tip often isn't built yet).
+    # Rule 1: PR targeting main -> the PR's stable fork point, walking backward
+    # only if that commit lacks this container's artifact.
     if event_context == "pr" and base_branch == "main":
-        ref = "origin/main" if _git("rev-parse", "origin/main") else "main"
-        return _resolve_main_baseline(ref, repo, artifact_prefix)
+        if not merge_base_sha:
+            return "", "PR merge-base unavailable", "", ""
+        return _resolve_main_baseline(
+            merge_base_sha, repo, artifact_prefix, label="PR merge-base"
+        )
 
     # Rule 2: post-merge push to main -> walk back from the previous main commit
     # (HEAD is the just-merged commit, still building, so start at HEAD~1).
@@ -406,6 +421,11 @@ def main() -> None:
         default="",
         help="For PRs, the PR's target branch (gh pr view --json baseRefName); empty for pushes",
     )
+    parser.add_argument(
+        "--merge-base-sha",
+        default="",
+        help="For PRs targeting main, the true merge-base SHA used as the stable baseline starting point",
+    )
     parser.add_argument("--current-sha", default="", help="github.sha (informational)")
     parser.add_argument(
         "--current-version",
@@ -437,6 +457,7 @@ def main() -> None:
         args.repo,
         args.current_run_id,
         args.artifact_prefix,
+        args.merge_base_sha,
     )
 
     print(
