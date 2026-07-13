@@ -1777,7 +1777,7 @@ class KvRouterConfig:
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
-        router_queue_threshold: Optional[float] = 16.0,
+        router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
         use_remote_indexer: bool = False,
@@ -1820,13 +1820,13 @@ class KvRouterConfig:
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
-            router_queue_threshold: Queue threshold fraction for prefill token capacity (default: 16.0).
+            router_queue_threshold: Optional queue threshold fraction for prefill token capacity (default: None).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
-                Set to None to disable queueing (all requests go directly to the scheduler).
+                Set a numeric value to enable queueing.
             router_policy_config: Startup-only policy-family and cache-bucket queue
                 YAML path. When omitted, router_queue_threshold and
-                router_queue_policy define one default queue.
+                router_queue_policy define one synthetic policy class.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -2247,6 +2247,7 @@ async def register_model(
     self_host_metadata: Optional[bool] = None,
     ignore_weights: bool = False,
     max_gpu_lora_count: Optional[int] = None,
+    model_aliases: Optional[List[str]] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.

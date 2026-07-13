@@ -11,8 +11,7 @@ on:
   push:
     branches: [main]
     paths:
-      - ".github/codeowners/**"
-      - "CODEOWNERS"
+      - "**"
 
 # This workflow runs scripts sourced from the PR diff; keep the token
 # read-only and out of the persisted git config (zizmor: artipacked,
