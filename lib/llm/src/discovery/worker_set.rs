@@ -188,8 +188,8 @@ impl WorkerSet {
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
-    pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
-        crate::protocols::openai::ParsingOptions::new(
+    pub fn parsing_options(&self) -> crate::protocols::common::ParsingOptions {
+        crate::protocols::common::ParsingOptions::new(
             self.card.runtime_config.tool_call_parser.clone(),
             self.card.runtime_config.reasoning_parser.clone(),
         )

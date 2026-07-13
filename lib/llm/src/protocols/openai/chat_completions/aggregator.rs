@@ -10,9 +10,8 @@ use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse
 use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
-    common::extensions::merge_response_nvext,
+    common::{ParsingOptions, extensions::merge_response_nvext},
     convert_sse_stream,
-    openai::ParsingOptions,
 };
 
 use dynamo_protocols::types::ChatCompletionMessageContent;

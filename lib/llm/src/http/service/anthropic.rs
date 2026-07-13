@@ -46,11 +46,11 @@ use crate::protocols::anthropic::types::{
     AnthropicErrorBody, AnthropicErrorResponse, SystemContent,
     chat_completion_to_anthropic_response,
 };
+use crate::protocols::common::ParsingOptions;
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
     apply_header_routing_overrides, session_affinity_from_headers,
 };
-use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,

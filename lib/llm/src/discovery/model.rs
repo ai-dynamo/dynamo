@@ -15,7 +15,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
-use crate::protocols::openai::ParsingOptions;
+use crate::protocols::common::ParsingOptions;
 
 use crate::types::{
     RealtimeBidirectionalEngine,

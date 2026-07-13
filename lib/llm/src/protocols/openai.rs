@@ -319,37 +319,3 @@ pub trait DeltaGeneratorExt<ResponseType: Send + 'static + std::fmt::Debug>:
         None
     }
 }
-
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
-pub struct ParsingOptions {
-    pub tool_call_parser: Option<String>,
-
-    pub reasoning_parser: Option<String>,
-
-    /// Request-side gate for routing the batch tool-call finalize through
-    /// `dynamo-parsers-v2` (see
-    /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`). Defaults `false`
-    /// so any path that does not explicitly opt in stays on the v1 finalize path; the
-    /// chat HTTP handlers set it from the request's tool_choice. The env flag and family
-    /// support are checked separately in the aggregator.
-    #[serde(default)]
-    pub experimental_v2_batch_eligible: bool,
-}
-
-impl ParsingOptions {
-    pub fn new(tool_call_parser: Option<String>, reasoning_parser: Option<String>) -> Self {
-        Self {
-            tool_call_parser,
-            reasoning_parser,
-            experimental_v2_batch_eligible: false,
-        }
-    }
-
-    /// Set whether this request is eligible for the experimental v2 batch parser
-    /// (request-side tool_choice gate). See
-    /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`.
-    pub fn with_experimental_v2_batch_eligible(mut self, eligible: bool) -> Self {
-        self.experimental_v2_batch_eligible = eligible;
-        self
-    }
-}

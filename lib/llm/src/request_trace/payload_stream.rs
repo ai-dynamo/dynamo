@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::sync::oneshot;
 
-use crate::protocols::openai::ParsingOptions;
+use crate::protocols::common::ParsingOptions;
 use crate::protocols::openai::chat_completions::{
     DeltaAggregator, NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
 };

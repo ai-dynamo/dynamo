@@ -494,7 +494,7 @@ impl ModelManager {
     ) -> Result<
         (
             OpenAIChatCompletionsStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
+            crate::protocols::common::ParsingOptions,
         ),
         ModelManagerError,
     > {
@@ -510,7 +510,7 @@ impl ModelManager {
     ) -> Result<
         (
             OpenAICompletionsStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
+            crate::protocols::common::ParsingOptions,
         ),
         ModelManagerError,
     > {
@@ -526,7 +526,7 @@ impl ModelManager {
     ) -> Result<
         (
             GenerateStreamingEngine,
-            crate::protocols::openai::ParsingOptions,
+            crate::protocols::common::ParsingOptions,
         ),
         ModelManagerError,
     > {

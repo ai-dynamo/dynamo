@@ -4,8 +4,8 @@
 use dynamo_llm::protocols::{
     Annotated, ContentProvider, DataStream,
     codec::{Message, SseCodecError, create_message_stream},
+    common::ParsingOptions,
     openai::{
-        ParsingOptions,
         chat_completions::{
             NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
             aggregator::ChatCompletionAggregator,

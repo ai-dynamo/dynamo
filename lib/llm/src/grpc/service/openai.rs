@@ -10,7 +10,7 @@ use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
 use crate::http::service::metadata::extract_metadata_from_grpc;
-use crate::protocols::openai::ParsingOptions;
+use crate::protocols::common::ParsingOptions;
 use crate::protocols::openai::completions::{
     NvCreateCompletionRequest, NvCreateCompletionResponse,
 };

@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::ParsingOptions;
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
-use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, aggregator::ChatCompletionAggregator,
 };
