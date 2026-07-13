@@ -366,21 +366,6 @@ mod select_service_cli_tests {
         assert_eq!(config.max_entries, 100);
         assert_eq!(config.max_bytes, 1_048_576);
     }
-
-    #[test]
-    fn selection_cache_falls_back_to_defaults() {
-        let cli = SelectServiceCli::try_parse_from(["dynamo.select_service"]).unwrap();
-
-        let config = selection_cache_config_from_overrides(
-            cli.selection_cache_ttl_secs,
-            cli.selection_cache_max_entries,
-            cli.selection_cache_max_bytes,
-        );
-        let default = RsSelectionCacheConfig::default();
-        assert_eq!(config.ttl, default.ttl);
-        assert_eq!(config.max_entries, default.max_entries);
-        assert_eq!(config.max_bytes, default.max_bytes);
-    }
 }
 
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>

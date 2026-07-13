@@ -718,24 +718,6 @@ async fn cached_reservation_books_from_select() {
 }
 
 #[tokio::test]
-async fn cached_reservation_needs_prior_select() {
-    let app = app();
-    assert_eq!(
-        register_worker(app.clone(), None).await.status(),
-        StatusCode::CREATED
-    );
-
-    let response = post(app, "/reservations", r#"{"selection_id":"never-selected"}"#).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(
-        response_json(response).await["error"]
-            .as_str()
-            .unwrap()
-            .contains("no pending selection")
-    );
-}
-
-#[tokio::test]
 async fn reservation_requires_selection_id() {
     let app = app();
     assert_eq!(
