@@ -39,6 +39,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**
 

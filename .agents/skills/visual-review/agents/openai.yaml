@@ -1,0 +1,4 @@
+interface:
+  display_name: "Visual Review"
+  short_description: "Build interactive code reviews with diagrams"
+  default_prompt: "Use $visual-review to deeply review this pull request and create an interactive HTML dashboard."
