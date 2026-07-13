@@ -103,9 +103,13 @@ features:
       hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
       system: h200_sxm
       backend: vllm
+      systems_path: /path/to/aiconfigurator/systems
       prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
       decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
 ```
+
+`systems_path` is optional. Set it to a local AI Configurator systems root when
+the planner should use custom system specifications or performance data.
 
 ### Throughput-Based Scaling Settings
 

@@ -37,6 +37,27 @@ pub(super) struct RustAicCallback {
 }
 
 #[cfg(feature = "aic-forward-pass")]
+#[derive(PartialEq, Eq, Hash)]
+struct AicEngineCacheKey {
+    backend_name: String,
+    system: String,
+    systems_path: Option<String>,
+    backend_version: Option<String>,
+    model_path: String,
+    tp_size: usize,
+    moe_tp_size: Option<usize>,
+    moe_ep_size: Option<usize>,
+    attention_dp_size: Option<usize>,
+    gemm_dtype: Option<String>,
+    moe_dtype: Option<String>,
+    fmha_dtype: Option<String>,
+    kv_cache_dtype: Option<String>,
+    comm_dtype: Option<String>,
+    nextn: u32,
+    nextn_accept_rate_bits: Option<Vec<u64>>,
+}
+
+#[cfg(feature = "aic-forward-pass")]
 impl AicCallback for RustAicCallback {
     fn predict_prefill(&self, batch_size: usize, effective_isl: usize, prefix: usize) -> f64 {
         // The engine's predict_prefill_latency takes the FULL isl and subtracts
@@ -152,17 +173,33 @@ fn build_rust_engine(
     // cost, but callers may construct several callbacks (per-worker,
     // prefill+decode). Mirror the Python `_cached_engine_handle` so the build is
     // paid once per unique config (speculative config included).
-    static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
-    let key = format!(
-        "{backend_name}|{system}|{systems_path:?}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
-    );
+    static CACHE: OnceLock<Mutex<HashMap<AicEngineCacheKey, Arc<AicEngine>>>> = OnceLock::new();
+    let key = AicEngineCacheKey {
+        backend_name: backend_name.to_owned(),
+        system: system.to_owned(),
+        systems_path: systems_path.map(str::to_owned),
+        backend_version: backend_version.map(str::to_owned),
+        model_path: model_path.to_owned(),
+        tp_size,
+        moe_tp_size,
+        moe_ep_size,
+        attention_dp_size,
+        gemm_dtype: gemm_dtype.clone(),
+        moe_dtype: moe_dtype.clone(),
+        fmha_dtype: fmha_dtype.clone(),
+        kv_cache_dtype: kv_cache_dtype.clone(),
+        comm_dtype: comm_dtype.clone(),
+        nextn,
+        nextn_accept_rate_bits: nextn_accept_rates
+            .as_ref()
+            .map(|rates| rates.iter().map(|rate| rate.to_bits()).collect()),
+    };
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
         return Ok(Arc::clone(existing));
     }
-    // Reuse aiconfigurator's own systems-path resolution: this sets
-    // AICONFIGURATOR_SYSTEMS_PATH in the process env, which build_aic_engine
-    // reads for the Rust-side perf-DB load.
+    // Configure AIC's bundled/default roots only when no explicit path was
+    // supplied. Explicit paths are passed directly to build_aic_engine below.
     if systems_path.is_none()
         && let Err(e) = py
             .import("aiconfigurator.sdk.rust_engine_step")

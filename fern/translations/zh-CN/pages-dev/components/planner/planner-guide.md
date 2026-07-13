@@ -96,9 +96,13 @@ features:
       hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
       system: h200_sxm
       backend: vllm
+      systems_path: /path/to/aiconfigurator/systems
       prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
       decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
 ```
+
+`systems_path` 是可选字段。当 planner 需要使用自定义系统规格或性能数据时，
+请将其设置为本地 AI Configurator systems 根目录。
 
 ### 基于吞吐量的扩缩容设置
 

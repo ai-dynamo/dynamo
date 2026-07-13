@@ -121,6 +121,7 @@ def _config(
     dp: int = 1,
     min_observations: int = 5,
     speculative_nextn: int = 0,
+    systems_path: str | None = None,
 ) -> PlannerConfig:
     pick = PickedParallelConfig(dp=dp)
     return PlannerConfig.model_construct(
@@ -128,6 +129,7 @@ def _config(
             hf_id="Qwen/Qwen3-0.6B",
             system="h200_sxm",
             backend="vllm",
+            systems_path=systems_path,
             prefill_pick=pick,
             decode_pick=pick,
         ),
@@ -236,6 +238,37 @@ def test_missing_capability_fields_use_rust_shim_defaults(monkeypatch):
         "max_num_seqs": rust_adapter.DEFAULT_MAX_NUM_SEQS,
         "max_kv_tokens": rust_adapter.DEFAULT_MAX_KV_TOKENS,
     }
+
+
+def test_aic_systems_path_reaches_rust_config_and_model_identity(monkeypatch):
+    fake = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _install_fake_rust(monkeypatch, fake)
+
+    local = PlannerEnginePerfModel(
+        worker_type="prefill",
+        config=_config(systems_path="/tmp/aic-systems"),
+        capabilities=_caps(),
+    )
+    assert _FakeRustFactory.last_kwargs is not None
+    assert (
+        _FakeRustFactory.last_kwargs["aic_config"].kwargs["systems_path"]
+        == "/tmp/aic-systems"
+    )
+
+    bundled = PlannerEnginePerfModel(
+        worker_type="prefill",
+        config=_config(systems_path=None),
+        capabilities=_caps(),
+    )
+    assert local._model_key() != bundled._model_key()
 
 
 @pytest.mark.parametrize(
