@@ -954,7 +954,8 @@ pub fn run_sglang_sidecar(py: Python<'_>, args: Vec<String>) -> PyResult<()> {
     argv.push("python -m dynamo.sglang_sidecar".to_string());
     argv.extend(args);
 
-    let (engine, config) = dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(argv))
+    let (engine, config) = py
+        .allow_threads(|| dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(argv)))
         .map_err(|err| PyValueError::new_err(err.to_string()))?;
 
     py.allow_threads(|| {
