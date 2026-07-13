@@ -3,6 +3,8 @@
 
 """Unit tests for AudioGenerationHandler."""
 
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -156,6 +158,31 @@ class TestIsTtsModel:
         handler = _make_audio_handler()
         handler.engine_client.stage_list = None
         assert handler._is_tts_model() is False
+
+
+def test_tts_prompt_len_uses_prompt_embeds_builder(monkeypatch):
+    module_name = "vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder"
+    estimator = MagicMock(return_value=37)
+    module = ModuleType(module_name)
+    module.Qwen3TTSPromptEmbedsBuilder = SimpleNamespace(
+        estimate_prompt_len_from_additional_information=estimator
+    )
+    monkeypatch.setitem(sys.modules, module_name, module)
+
+    legacy_module_name = "vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_talker"
+    monkeypatch.setitem(sys.modules, legacy_module_name, ModuleType(legacy_module_name))
+
+    handler = _make_audio_handler()
+    handler._tts_tokenizer = lambda _text, padding: {"input_ids": [1, 2]}
+    handler.engine_client.model_config.hf_config = SimpleNamespace(
+        talker_config=SimpleNamespace(
+            codec_language_id={"english": 1},
+            spk_is_dialect={"vivian": "english"},
+        )
+    )
+
+    assert handler._estimate_tts_prompt_len({"task_type": ["CustomVoice"]}) == 37
+    estimator.assert_called_once()
 
 
 class TestEngineInputsFromAudio:

@@ -380,8 +380,8 @@ class AudioGenerationHandler:
         Falls back to 2048 if the model-specific estimator is unavailable.
         """
         try:
-            from vllm_omni.model_executor.models.qwen3_tts.qwen3_tts_talker import (
-                Qwen3TTSTalkerForConditionalGeneration,
+            from vllm_omni.model_executor.models.qwen3_tts.prompt_embeds_builder import (
+                Qwen3TTSPromptEmbedsBuilder,
             )
 
             if not hasattr(self, "_tts_tokenizer") or self._tts_tokenizer is None:
@@ -397,7 +397,7 @@ class AudioGenerationHandler:
             talker_config = getattr(hf_config, "talker_config", None)
             task_type = (tts_params.get("task_type") or ["CustomVoice"])[0]
 
-            return Qwen3TTSTalkerForConditionalGeneration.estimate_prompt_len_from_additional_information(
+            return Qwen3TTSPromptEmbedsBuilder.estimate_prompt_len_from_additional_information(
                 additional_information=tts_params,
                 task_type=task_type,
                 tokenize_prompt=lambda t: self._tts_tokenizer(t, padding=False)[
