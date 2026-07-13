@@ -11,7 +11,10 @@ use std::time::Duration;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
-use crate::protocols::{BlockHashOptions, LocalBlockHash};
+use crate::protocols::{
+    BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
+    compute_seq_hash_for_block,
+};
 use crate::tracking_hash::{TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope};
 
 const fn default_track_prefill_tokens() -> bool {
@@ -94,8 +97,24 @@ pub fn apply_deprecated_overlap_score_weight_override(
 }
 
 /// Build a [`KvRouterConfig`] from defaults and standard Dynamo environment variables.
+///
+/// # Panics
+///
+/// Panics when `DYN_ROUTER_TRACKING_HASH` is not a supported algorithm. Startup
+/// paths should use [`try_kv_router_config_from_dynamo_env`] to report the error.
 pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
-    let config = kv_router_config_from_lookup(|key| env::var(key).ok());
+    try_kv_router_config_from_dynamo_env()
+        .unwrap_or_else(|error| panic!("invalid Dynamo router environment configuration: {error}"))
+}
+
+/// Build a [`KvRouterConfig`] from standard Dynamo environment variables.
+pub fn try_kv_router_config_from_dynamo_env() -> Result<KvRouterConfig, String> {
+    let config = kv_router_config_from_lookup(|key| env::var(key).ok())?;
+    log_env_config(&config);
+    Ok(config)
+}
+
+fn log_env_config(config: &KvRouterConfig) {
     tracing::info!(
         overlap_score_credit = config.overlap_score_credit,
         overlap_score_credit_decay = config.overlap_score_credit_decay,
@@ -113,10 +132,11 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
-    config
 }
 
-fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvRouterConfig {
+fn kv_router_config_from_lookup(
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Result<KvRouterConfig, String> {
     fn parse_f64(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<f64> {
         get_env(key).and_then(|value| value.parse().ok())
     }
@@ -170,7 +190,7 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
         config.router_track_prefill_tokens = value;
     }
     if let Some(value) = get_env("DYN_ROUTER_TRACKING_HASH") {
-        config.router_tracking_hash = value.parse().unwrap_or(TrackingHashAlgorithm::Invalid);
+        config.router_tracking_hash = value.parse()?;
     }
     if let Some(value) = get_env("DYN_ROUTER_TRACKING_KEY_FILE") {
         config.router_tracking_key_file = Some(value.into());
@@ -188,7 +208,7 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
         config.router_predicted_ttl_secs = Some(value);
     }
 
-    config
+    Ok(config)
 }
 
 fn apply_deprecated_overlap_score_weight_override_option(
@@ -699,15 +719,8 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
                 .as_deref()
                 .is_some_and(|value| !value.is_empty() && value.trim() == value);
             if !valid_key_id {
-                return Err(
-                    "keyed-xxh3-v1 requires a nonempty router_tracking_key_id".to_string(),
-                );
+                return Err("keyed-xxh3-v1 requires a nonempty router_tracking_key_id".to_string());
             }
-        }
-        TrackingHashAlgorithm::Invalid => {
-            return Err(
-                "router_tracking_hash must be public-xxh3-v1 or keyed-xxh3-v1".to_string(),
-            );
         }
     }
     if config.router_track_output_blocks && !config.router_track_active_blocks {
@@ -861,7 +874,54 @@ impl KvRouterConfig {
     /// - `None` if `router_track_active_blocks` is false
     /// - Random hashes if `router_track_active_blocks` is true but `router_assume_kv_reuse` is false
     /// - Actual sequence hashes if both are true
+    /// # Panics
+    ///
+    /// Panics in keyed mode because the legacy interface has no initialized
+    /// [`TrackingHashContext`]. Keyed callers must use
+    /// [`Self::compute_seq_hashes_for_tracking_with_context`].
     pub fn compute_seq_hashes_for_tracking(
+        &self,
+        tokens: &[u32],
+        block_size: u32,
+        config_override: Option<&RouterConfigOverride>,
+        hash_options: BlockHashOptions<'_>,
+        precomputed_block_hashes: Option<&[LocalBlockHash]>,
+    ) -> Option<Vec<u64>> {
+        assert_eq!(
+            self.router_tracking_hash,
+            TrackingHashAlgorithm::PublicXxh3V1,
+            "compute_seq_hashes_for_tracking cannot be used with keyed tracking; initialize a TrackingHashContext and call compute_seq_hashes_for_tracking_with_context"
+        );
+
+        if !self.router_track_active_blocks {
+            return None;
+        }
+
+        let num_blocks = complete_block_count(
+            tokens.len(),
+            block_size,
+            hash_options.is_eagle.unwrap_or(false),
+        );
+        if num_blocks == 0 {
+            return Some(Vec::new());
+        }
+
+        if self.assume_kv_reuse(config_override) {
+            let block_hashes = match precomputed_block_hashes {
+                Some(block_hashes) => block_hashes,
+                None => {
+                    let computed = compute_block_hash_for_seq(tokens, block_size, hash_options);
+                    return Some(compute_seq_hash_for_block(&computed));
+                }
+            };
+            Some(compute_seq_hash_for_block(block_hashes))
+        } else {
+            Some(random_sequence_hashes(num_blocks))
+        }
+    }
+
+    /// Compute sequence hashes with a router-initialized tracking-hash context.
+    pub fn compute_seq_hashes_for_tracking_with_context(
         &self,
         tracking_hash: &TrackingHashContext,
         scope: TrackingHashScope<'_>,
@@ -870,27 +930,23 @@ impl KvRouterConfig {
         hash_options: BlockHashOptions<'_>,
         precomputed_block_hashes: Option<&[LocalBlockHash]>,
     ) -> Option<Vec<u64>> {
+        assert_eq!(
+            tracking_hash.algorithm(),
+            self.router_tracking_hash,
+            "tracking hash context must match KvRouterConfig"
+        );
         if !self.router_track_active_blocks {
             return None;
         }
 
-        let num_blocks = tokens.len() / scope.block_size as usize;
-        if num_blocks == 0 {
-            return Some(Vec::new());
-        }
-
         let assume_kv_reuse = self.assume_kv_reuse(config_override);
-
-        if assume_kv_reuse {
-            Some(tracking_hash.compute_sequence_hashes(
-                scope,
-                tokens,
-                hash_options,
-                precomputed_block_hashes,
-            ))
-        } else {
-            Some((0..num_blocks).map(|_| fastrand::u64(..)).collect())
-        }
+        Some(tracking_hash.compute_sequence_hashes_for_tracking(
+            scope,
+            tokens,
+            hash_options,
+            assume_kv_reuse,
+            precomputed_block_hashes,
+        ))
     }
 
     /// Check if KV event subscription should be started.
@@ -906,15 +962,15 @@ impl KvRouterConfig {
     }
 }
 
+fn random_sequence_hashes(num_blocks: usize) -> Vec<u64> {
+    (0..num_blocks).map(|_| fastrand::u64(..)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, compute_seq_hash_for_block};
     use std::collections::HashMap;
-
-    fn public_tracking_context(config: &KvRouterConfig) -> TrackingHashContext {
-        TrackingHashContext::from_config(config).unwrap()
-    }
 
     fn test_tracking_scope(block_size: u32) -> TrackingHashScope<'static> {
         TrackingHashScope {
@@ -925,6 +981,10 @@ mod tests {
     }
 
     fn config_from_values(values: &[(&str, &str)]) -> KvRouterConfig {
+        try_config_from_values(values).unwrap()
+    }
+
+    fn try_config_from_values(values: &[(&str, &str)]) -> Result<KvRouterConfig, String> {
         let values: HashMap<&str, &str> = values.iter().copied().collect();
         kv_router_config_from_lookup(|key| values.get(key).map(|value| (*value).to_string()))
     }
@@ -1017,18 +1077,15 @@ mod tests {
             assert!(invalid_credit.validate_config().is_err());
         }
 
-        let invalid_hash = config_from_values(&[("DYN_ROUTER_TRACKING_HASH", "mystery")]);
-        assert_eq!(
-            invalid_hash.router_tracking_hash,
-            TrackingHashAlgorithm::Invalid
-        );
-        assert!(invalid_hash.validate_config().is_err());
+        let error = try_config_from_values(&[("DYN_ROUTER_TRACKING_HASH", "mystery")]).unwrap_err();
+        assert!(error.contains("public-xxh3-v1 or keyed-xxh3-v1"));
+
+        assert!(serde_json::to_string(&config_from_values(&[])).is_ok());
     }
 
     #[test]
     fn compute_seq_hashes_for_tracking_uses_mm_hashes() {
         let cfg = KvRouterConfig::default();
-        let tracking_hash = public_tracking_context(&cfg);
         let tokens = vec![1, 2, 3, 4];
         let mm_infos = vec![
             Some(BlockExtraInfo {
@@ -1041,20 +1098,12 @@ mod tests {
         ];
 
         let without_mm = cfg
-            .compute_seq_hashes_for_tracking(
-                &tracking_hash,
-                test_tracking_scope(2),
-                &tokens,
-                None,
-                BlockHashOptions::default(),
-                None,
-            )
+            .compute_seq_hashes_for_tracking(&tokens, 2, None, BlockHashOptions::default(), None)
             .unwrap();
         let with_mm = cfg
             .compute_seq_hashes_for_tracking(
-                &tracking_hash,
-                test_tracking_scope(2),
                 &tokens,
+                2,
                 None,
                 BlockHashOptions {
                     block_mm_infos: Some(&mm_infos),
@@ -1070,20 +1119,60 @@ mod tests {
     #[test]
     fn compute_seq_hashes_for_tracking_uses_precomputed_block_hashes() {
         let config = KvRouterConfig::default();
-        let tracking_hash = public_tracking_context(&config);
         let tokens: Vec<u32> = (0..8).collect();
         let precomputed = vec![LocalBlockHash(11), LocalBlockHash(29)];
 
         let seq_hashes = config.compute_seq_hashes_for_tracking(
-            &tracking_hash,
-            test_tracking_scope(4),
             &tokens,
+            4,
             None,
             BlockHashOptions::default(),
             Some(&precomputed),
         );
 
         assert_eq!(seq_hashes, Some(compute_seq_hash_for_block(&precomputed)));
+    }
+
+    #[test]
+    fn context_aware_tracking_matches_public_legacy_api() {
+        let config = KvRouterConfig::default();
+        let context = TrackingHashContext::from_config(&config).unwrap();
+        let tokens: Vec<u32> = (0..8).collect();
+
+        let legacy = config.compute_seq_hashes_for_tracking(
+            &tokens,
+            4,
+            None,
+            BlockHashOptions::default(),
+            None,
+        );
+        let context_aware = config.compute_seq_hashes_for_tracking_with_context(
+            &context,
+            test_tracking_scope(4),
+            &tokens,
+            None,
+            BlockHashOptions::default(),
+            None,
+        );
+
+        assert_eq!(legacy, context_aware);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot be used with keyed tracking")]
+    fn legacy_tracking_api_does_not_fall_back_in_keyed_mode() {
+        let config = KvRouterConfig {
+            router_tracking_hash: TrackingHashAlgorithm::KeyedXxh3V1,
+            ..Default::default()
+        };
+
+        let _ = config.compute_seq_hashes_for_tracking(
+            &[1, 2, 3, 4],
+            4,
+            None,
+            BlockHashOptions::default(),
+            None,
+        );
     }
 
     #[test]

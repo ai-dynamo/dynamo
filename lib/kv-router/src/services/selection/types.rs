@@ -14,11 +14,11 @@ use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 use crate::services::indexer::registry::IndexerKey;
 use crate::services::overlap::MooncakeOverlapSummary;
+use crate::tracking_hash::DEFAULT_TRACKING_ROUTING_GROUP;
 
 use super::input::PromptRequest;
 
 const DEFAULT_MODEL_NAME: &str = "default";
-const DEFAULT_ROUTING_GROUP: &str = "default";
 pub(super) const WORKER_TYPE: &str = "select";
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -27,7 +27,7 @@ fn default_model_name() -> String {
 }
 
 fn default_routing_group() -> String {
-    DEFAULT_ROUTING_GROUP.to_string()
+    DEFAULT_TRACKING_ROUTING_GROUP.to_string()
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]

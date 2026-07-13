@@ -51,6 +51,7 @@ tracing = { workspace = true }
 zmq = { version = "0.10", optional = true }
 uuid = { workspace = true }
 xxhash-rust = { workspace = true }
+zeroize = { workspace = true }
 
 # dependencies
 crossbeam-queue = "0.3"

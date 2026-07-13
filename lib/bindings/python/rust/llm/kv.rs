@@ -20,10 +20,10 @@ use crate::Endpoint;
 ))]
 use clap::Parser;
 #[cfg(feature = "select-service")]
-use dynamo_kv_router::config::kv_router_config_from_dynamo_env;
-use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
-#[cfg(feature = "select-service")]
 use dynamo_kv_router::TrackingHashAlgorithm;
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
+use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
@@ -397,7 +397,8 @@ where
         init_standalone_logging();
 
         let rt = tokio::runtime::Runtime::new()?;
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
         if let Some(algorithm) = cli.router_tracking_hash {
             kv_router_config.router_tracking_hash = algorithm;
         }
@@ -521,7 +522,9 @@ impl SelectionService {
                 "replica_sync_peers requires replica_sync_port",
             ));
         }
-        let mut builder = SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
+        let kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
+        let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
             .selection_cache(selection_cache.unwrap_or_default().inner);

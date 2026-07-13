@@ -506,7 +506,7 @@ impl OfflineReplayRouter {
                 } else if self.config.router_assume_kv_reuse {
                     Some(replay_hashes.sequence_hashes)
                 } else {
-                    self.config.compute_seq_hashes_for_tracking(
+                    self.config.compute_seq_hashes_for_tracking_with_context(
                         &self.tracking_hash,
                         self.tracking_hash_scope(),
                         &request.tokens,
@@ -519,7 +519,7 @@ impl OfflineReplayRouter {
             }
             None => {
                 let overlaps = self.indexer.find_matches_for_request(&request.tokens, None);
-                let token_seq = self.config.compute_seq_hashes_for_tracking(
+                let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
                     &self.tracking_hash,
                     self.tracking_hash_scope(),
                     &request.tokens,

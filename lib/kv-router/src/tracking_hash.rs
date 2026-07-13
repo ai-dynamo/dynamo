@@ -10,16 +10,20 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow, bail};
 use dynamo_tokens::SequenceHash;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::config::KvRouterConfig;
 use crate::protocols::{
-    BlockHashOptions, LocalBlockHash, compute_block_hash_for_seq,
+    BlockHashOptions, LocalBlockHash, complete_block_count, compute_block_hash_for_seq,
     compute_block_hash_for_seq_with_seed, compute_seq_hash_for_block,
     compute_seq_hash_for_block_with_seed,
 };
 
 const KEY_SIZE: usize = 32;
 const KEYED_XXH3_V1_DOMAIN: &[u8] = b"dynamo.router.tracking-hash/keyed-xxh3-v1\0";
+
+/// Default routing group used when a router request does not specify one.
+pub const DEFAULT_TRACKING_ROUTING_GROUP: &str = "default";
 
 /// Hash algorithm used only for router-derived active-sequence tracking state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,9 +34,6 @@ pub enum TrackingHashAlgorithm {
     PublicXxh3V1,
     /// Provider-keyed scope derivation with XXH3 block and chain hashing.
     KeyedXxh3V1,
-    /// Invalid value captured from an environment variable so startup validation can fail.
-    #[serde(skip)]
-    Invalid,
 }
 
 impl fmt::Display for TrackingHashAlgorithm {
@@ -40,7 +41,6 @@ impl fmt::Display for TrackingHashAlgorithm {
         formatter.write_str(match self {
             Self::PublicXxh3V1 => "public-xxh3-v1",
             Self::KeyedXxh3V1 => "keyed-xxh3-v1",
-            Self::Invalid => "invalid",
         })
     }
 }
@@ -73,7 +73,7 @@ pub struct TrackingHashScope<'a> {
 pub struct TrackingHashContext {
     algorithm: TrackingHashAlgorithm,
     key_id: Option<Box<str>>,
-    provider_key: Option<[u8; KEY_SIZE]>,
+    provider_key: Option<Zeroizing<[u8; KEY_SIZE]>>,
 }
 
 impl fmt::Debug for TrackingHashContext {
@@ -118,26 +118,22 @@ impl TrackingHashContext {
                     .router_tracking_key_file
                     .as_ref()
                     .ok_or_else(|| anyhow!("keyed-xxh3-v1 requires router_tracking_key_file"))?;
-                let key_bytes = fs::read(key_path).with_context(|| {
-                    format!(
-                        "failed to read router tracking key file {}",
-                        key_path.display()
-                    )
-                })?;
+                let key_bytes = Zeroizing::new(
+                    fs::read(key_path).context("failed to read router tracking key file")?,
+                );
                 let actual_size = key_bytes.len();
-                let provider_key: [u8; KEY_SIZE] = key_bytes.try_into().map_err(|_| {
-                    anyhow!(
+                if actual_size != KEY_SIZE {
+                    bail!(
                         "router tracking key file must contain exactly {KEY_SIZE} raw bytes; found {actual_size}"
-                    )
-                })?;
+                    );
+                }
+                let mut provider_key = Zeroizing::new([0_u8; KEY_SIZE]);
+                provider_key.copy_from_slice(&key_bytes);
                 Ok(Self {
                     algorithm: TrackingHashAlgorithm::KeyedXxh3V1,
                     key_id: Some(key_id.into()),
                     provider_key: Some(provider_key),
                 })
-            }
-            TrackingHashAlgorithm::Invalid => {
-                bail!("router_tracking_hash is invalid")
             }
         }
     }
@@ -146,10 +142,15 @@ impl TrackingHashContext {
         self.algorithm
     }
 
+    /// Return the provider-managed key epoch without exposing secret material.
+    pub fn key_id(&self) -> Option<&str> {
+        self.key_id.as_deref()
+    }
+
     /// Compute sequence identities for active tracking. Public mode may reuse
     /// already-computed public block hashes; keyed mode must hash canonical
     /// block bytes under its derived block seed.
-    pub fn compute_sequence_hashes(
+    pub(crate) fn compute_sequence_hashes(
         &self,
         scope: TrackingHashScope<'_>,
         tokens: &[u32],
@@ -178,9 +179,34 @@ impl TrackingHashContext {
                 );
                 compute_seq_hash_for_block_with_seed(&block_hashes, chain_seed)
             }
-            TrackingHashAlgorithm::Invalid => {
-                unreachable!("invalid tracking hash algorithms cannot construct a context")
-            }
+        }
+    }
+
+    /// Compute active-tracking identities using the configured reuse policy.
+    ///
+    /// Callers that start from raw tokens should use this method rather than
+    /// choosing between keyed/public and random identities themselves.
+    pub fn compute_sequence_hashes_for_tracking(
+        &self,
+        scope: TrackingHashScope<'_>,
+        tokens: &[u32],
+        options: BlockHashOptions<'_>,
+        assume_kv_reuse: bool,
+        precomputed_public_block_hashes: Option<&[LocalBlockHash]>,
+    ) -> Vec<SequenceHash> {
+        let num_blocks = complete_block_count(
+            tokens.len(),
+            scope.block_size,
+            options.is_eagle.unwrap_or(false),
+        );
+        if num_blocks == 0 {
+            return Vec::new();
+        }
+
+        if assume_kv_reuse {
+            self.compute_sequence_hashes(scope, tokens, options, precomputed_public_block_hashes)
+        } else {
+            (0..num_blocks).map(|_| fastrand::u64(..)).collect()
         }
     }
 
@@ -242,6 +268,7 @@ mod tests {
     use std::io::Write;
 
     use tempfile::NamedTempFile;
+    use zeroize::Zeroize;
 
     use super::*;
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo};
@@ -482,7 +509,11 @@ mod tests {
             router_tracking_key_id: Some("2026-01".to_string()),
             ..Default::default()
         };
-        assert!(TrackingHashContext::from_config(&missing_config).is_err());
+        let missing_error = TrackingHashContext::from_config(&missing_config)
+            .unwrap_err()
+            .to_string();
+        assert!(missing_error.contains("failed to read router tracking key file"));
+        assert!(!missing_error.contains("/definitely/missing/tracking-key"));
 
         let unreadable_dir = tempfile::tempdir().unwrap();
         let unreadable_config = KvRouterConfig {
@@ -491,12 +522,11 @@ mod tests {
             router_tracking_key_id: Some("2026-01".to_string()),
             ..Default::default()
         };
-        assert!(
-            TrackingHashContext::from_config(&unreadable_config)
-                .unwrap_err()
-                .to_string()
-                .contains("failed to read router tracking key file")
-        );
+        let unreadable_error = TrackingHashContext::from_config(&unreadable_config)
+            .unwrap_err()
+            .to_string();
+        assert!(unreadable_error.contains("failed to read router tracking key file"));
+        assert!(!unreadable_error.contains(&unreadable_dir.path().display().to_string()));
 
         let (_key_file, valid_config) = keyed_config("2026-01", &[0xab; KEY_SIZE]);
         let debug = format!(
@@ -505,6 +535,20 @@ mod tests {
         );
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("171"));
+    }
+
+    #[test]
+    fn retained_key_is_zeroizable_and_only_epoch_is_exposed() {
+        let (_key_file, config) = keyed_config("2026-01", &[0xab; KEY_SIZE]);
+        let mut context = TrackingHashContext::from_config(&config).unwrap();
+
+        assert_eq!(context.key_id(), Some("2026-01"));
+        let provider_key = context.provider_key.as_mut().unwrap();
+        provider_key.zeroize();
+        assert_eq!(provider_key.as_ref(), &[0_u8; KEY_SIZE]);
+
+        let public = TrackingHashContext::from_config(&KvRouterConfig::default()).unwrap();
+        assert_eq!(public.key_id(), None);
     }
 
     #[test]

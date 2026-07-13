@@ -1542,6 +1542,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "blake3",
  "crossbeam-queue",
  "dashmap",
  "derive_builder",
@@ -1567,6 +1568,7 @@ dependencies = [
  "tracing",
  "uuid",
  "xxhash-rust",
+ "zeroize",
 ]
 
 [[package]]

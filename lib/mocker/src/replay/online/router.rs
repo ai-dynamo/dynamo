@@ -232,7 +232,7 @@ impl KvReplayRouter {
                 )
             })
             .collect();
-        let token_seq = self.config.compute_seq_hashes_for_tracking(
+        let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
             &self.tracking_hash,
             TrackingHashScope {
                 model_name: "replay",

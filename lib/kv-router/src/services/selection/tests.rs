@@ -274,6 +274,92 @@ fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
 }
 
 #[test]
+fn keyed_reservation_hashes_directly_from_tokens() {
+    let mut key_file = NamedTempFile::new().unwrap();
+    key_file.write_all(&[0x47; 32]).unwrap();
+    let config = crate::config::KvRouterConfig {
+        router_tracking_hash: crate::TrackingHashAlgorithm::KeyedXxh3V1,
+        router_tracking_key_file: Some(key_file.path().to_path_buf()),
+        router_tracking_key_id: Some("2026-01".to_string()),
+        ..test_config()
+    };
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [1, 2, 3, 4, 5, 6, 7, 8],
+        "cache_salt": "tenant-a"
+    }))
+    .unwrap();
+    let scope = TrackingHashScope {
+        model_name: "model",
+        routing_group: "default",
+        block_size: 4,
+    };
+
+    let normalized = request
+        .normalize_for_reservation(
+            false,
+            TrackingHashInput {
+                context: &context,
+                scope,
+                assume_kv_reuse: true,
+            },
+        )
+        .unwrap();
+    let expected = context.compute_sequence_hashes_for_tracking(
+        scope,
+        &[1, 2, 3, 4, 5, 6, 7, 8],
+        BlockHashOptions {
+            cache_namespace: Some("tenant-a"),
+            ..Default::default()
+        },
+        true,
+        None,
+    );
+
+    assert_eq!(normalized.sequence_hashes, expected);
+    assert_eq!(normalized.isl_tokens, 8);
+}
+
+#[test]
+fn randomized_reservation_uses_canonical_complete_block_count() {
+    let config = test_config();
+    let context = TrackingHashContext::from_config(&config).unwrap();
+    let cases = [
+        (Vec::new(), false, 0),
+        (vec![1, 2, 3], false, 0),
+        (vec![1, 2, 3, 4], false, 1),
+        (vec![1, 2, 3, 4], true, 0),
+        (vec![1, 2, 3, 4, 5], true, 1),
+        (vec![1, 2, 3, 4, 5, 6, 7, 8], true, 1),
+        (vec![1, 2, 3, 4, 5, 6, 7, 8, 9], true, 2),
+    ];
+
+    for (token_ids, is_eagle, expected_blocks) in cases {
+        let request: PromptRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": token_ids,
+            "is_eagle": is_eagle
+        }))
+        .unwrap();
+        let normalized = request
+            .normalize_for_reservation(
+                false,
+                TrackingHashInput {
+                    context: &context,
+                    scope: TrackingHashScope {
+                        model_name: "model",
+                        routing_group: "default",
+                        block_size: 4,
+                    },
+                    assume_kv_reuse: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(normalized.sequence_hashes.len(), expected_blocks);
+    }
+}
+
+#[test]
 fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
     let worker = WorkerWithDpRank::new(1, 0);
     let idle_worker = WorkerWithDpRank::new(2, 0);
