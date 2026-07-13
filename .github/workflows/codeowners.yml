@@ -43,9 +43,9 @@ jobs:
             --override-ini="filterwarnings="
 
       # Coverage gate: fail if any tracked file falls through to the catch-all.
-      # New directories must be covered by an area glob or a classify rule.
-      # Uses the same shared matcher the generator below routes by, so the gate
-      # and the artifact cannot disagree.
+      # New directories must be covered by an explicit path glob. This is the
+      # only step that reads git ls-files; the drift check below is a pure
+      # function of areas.yaml, so it never fires on unrelated tree churn.
       - name: Validate 100% coverage (strict)
         run: |
           python .github/codeowners/build_codeowners.py \
@@ -54,14 +54,15 @@ jobs:
             --strict
 
       # Regenerate, then fail if the committed CODEOWNERS or CONTRIBUTORS.md
-      # drifted from what the sources produce (i.e. someone hand-edited an
-      # output, or changed areas.yaml / external_contributors.yaml without
-      # regenerating).
+      # drifted from what the sources produce. emit_codeowners.py is a PURE
+      # FUNCTION of areas.yaml + external_contributors.yaml (no tree walk),
+      # so this diff only ever fires when a policy input or a committed output
+      # actually changed -- never because unrelated files moved on the base
+      # branch.
       - name: Regenerate and check for drift
         run: |
           python .github/codeowners/emit_codeowners.py \
             --areas .github/codeowners/areas.yaml \
-            --repo . \
             --out CODEOWNERS \
             --external .github/codeowners/external_contributors.yaml \
             --contributors-out CONTRIBUTORS.md

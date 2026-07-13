@@ -1,14 +1,15 @@
 """Validate CODEOWNERS coverage against a live tree (repo-agnostic).
 
-Reads an ``areas.yaml`` (each area declares its path globs directly), runs the
-declared path-globs -> auto-classify keyword layer over the tree via the
-shared resolution pipeline, then reports how much of the tree is EXPLICITLY
-owned vs. falls to the catch-all.
+Reads an ``areas.yaml`` (each area declares its path globs directly), asks the
+pure resolver in ``codeowners_match`` what the emitted CODEOWNERS would cover,
+and reports how much of the live tree is EXPLICITLY owned vs. falls to the
+catch-all.
 
-The on-disk handoff to ``emit_codeowners.py`` used to be a near-copy of
-``areas.yaml`` written to ``/tmp/areas.resolved.yaml``; that's gone. Both
-scripts call ``codeowners_match.compute_resolution`` directly, so the gate
-here and the file produced by ``emit_codeowners.py`` cannot disagree.
+This is the ONLY place in the pipeline that reads ``git ls-files``. Emission
+is a pure function of the policy YAML; the tree only enters here, in the
+``--strict`` gate that asserts every tracked file matches some non-catch-all
+rule. The gate and the emitted file share the same resolver, so a file the
+gate accepts is a file the emitter has a rule for.
 
 Usage:
   uv run python .github/codeowners/build_codeowners.py \\
@@ -25,7 +26,7 @@ from pathlib import Path
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
-from codeowners_match import compute_resolution, load_tree  # noqa: E402
+from codeowners_match import compute_resolution, load_tree, match  # noqa: E402
 
 
 def main() -> int:
@@ -42,9 +43,15 @@ def main() -> int:
     args = ap.parse_args()
 
     spec = yaml.safe_load(Path(args.areas).read_text())
+    # Resolution is a pure function of the YAML; the tree only feeds the
+    # coverage/drift reports below, never the rule set.
+    model = compute_resolution(spec)
     tree = load_tree(Path(args.repo))
-    model = compute_resolution(spec, tree)
     unmatched = model.unmatched_paths(tree)
+    # Deletions never fail a gate (coverage counts files, and the drift check
+    # forces the CODEOWNERS regeneration), so stale claims would otherwise
+    # accumulate silently in areas.yaml. Surface them; never block on them.
+    dead = [g for g in model.owned_patterns() if not any(match(g, p) for p in tree)]
 
     n_tree = len(tree)
     n_owned = n_tree - len(unmatched)
@@ -52,18 +59,18 @@ def main() -> int:
 
     print(f"areas: {len(model.areas)} | tree files: {n_tree}")
     print(
-        f"explicitly owned: {n_owned}/{n_tree} ({pct:.2f}%) | "
-        f"catch-all only: {len(unmatched)}"
+        f"explicitly owned: {n_owned}/{n_tree} ({pct:.2f}%) | catch-all only: {len(unmatched)}"
     )
-    print(f"auto-classified new dirs: {len(model.auto_classified)}")
-    for d, lbl in model.auto_classified[:20]:
-        print(f"    {d} -> {lbl}")
-    print(f"keyword co-owned dirs: {len(model.keyword_coowned)}")
-    for s in model.keyword_coowned[:20]:
-        print(f"    {s['glob']} -> {' + '.join(s['owners'])}")
     if unmatched:
-        print("catch-all-only sample (add an area or classify rule to cover these):")
+        print("catch-all-only sample (add an explicit glob to cover these):")
         print("   ", unmatched[:15])
+    if dead:
+        print(
+            f"globs matching no files: {len(dead)} "
+            "(prune from areas.yaml when the paths are gone; never blocking):"
+        )
+        for g in dead[:10]:
+            print(f"    {g}")
     print("\nper-area glob counts:")
     counts = Counter({a.label: len(a.path_globs) for a in model.areas})
     for lbl, c in counts.most_common():
@@ -71,8 +78,7 @@ def main() -> int:
 
     if args.strict and unmatched:
         print(
-            f"!! strict: {len(unmatched)} file(s) fall to the catch-all -- "
-            "cover them in areas.yaml"
+            f"!! strict: {len(unmatched)} file(s) fall to the catch-all -- cover them in areas.yaml"
         )
         return 1
     return 0
