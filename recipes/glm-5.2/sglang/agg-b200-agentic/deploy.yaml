@@ -30,7 +30,7 @@ data:
     max-running-requests: 128
     cuda-graph-max-bs: 128
     watchdog-timeout: 3600
-    mem-fraction-static: 0.925
+    mem-fraction-static: 0.927
     enable-dp-lm-head: true
     enable-metrics: true
     speculative-moe-runner-backend: flashinfer_cutlass
@@ -72,7 +72,7 @@ spec:
                       fieldPath: metadata.uid
                 - name: DYN_ROUTER_MODE
                   value: kv
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4-30723
               imagePullPolicy: Always
               resources: {}
       replicas: 1
@@ -121,7 +121,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-glm5.2-rc4-30723
               imagePullPolicy: Always
               resources:
                 requests:
