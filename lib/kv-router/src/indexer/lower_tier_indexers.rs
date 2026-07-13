@@ -339,7 +339,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            candidates.kv_block_hashes,
+            candidates.block_hashes,
             vec![
                 ExternalSequenceBlockHash(101),
                 ExternalSequenceBlockHash(102)
