@@ -23,7 +23,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 | `--router-kv-overlap-score-credit` | `1.0` | 设备本地 prefix 重叠的 credit 乘数，范围从 0.0 到 1.0 |
 | `--router-prefill-load-scale` | `1.0` | 在加入 decode block 之前，对调整后的 prompt 侧 prefill 负载进行缩放 |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | 消费 worker KV 事件，或在没有事件时回退到近似路由 |
-| `--router-queue-threshold` | `16.0` | 背压队列阈值；通过 `nvext.agent_hints.priority` 启用优先级调度 |
+| `--router-queue-threshold` | disabled | 背压队列阈值；设置数值后启用队列，`nvext.agent_hints.priority` 会对等待中的请求重新排序 |
 | `--router-queue-policy` | `fcfs` | 队列调度策略：`fcfs`（尾部 TTFT）、`wspt`（平均 TTFT）或 `lcfs`（仅用于比较的反向排序） |
 | `--no-router-track-prefill-tokens` | disabled | 在 router 负载统计中忽略 prompt 侧 prefill token；适用于仅 decode 的路由路径 |
 
@@ -57,6 +57,6 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 - **[分离式服务](/dynamo/dev/components/router/disaggregated-serving)**：Prefill 和 decode 路由设置
 - **[Router Operations](/dynamo/dev/components/router/router-operations)**：副本、持久化和恢复
 - **[Router Examples](/dynamo/dev/components/router/router-examples)**：Python API 用法、K8s 示例和自定义路由模式
-- **[Router Testing](https://github.com/ai-dynamo/dynamo/blob/350e27a05b1d713091c51055e803fd99428fc00f/docs/components/router/router-testing.md)**：从 Rust 单元测试到基于 fixture 的 replay 和完整进程 E2E 的测试层级
+- **[Router Testing](https://github.com/ai-dynamo/dynamo/blob/7d2c34171f3ab81cc7e866ac1341d78cdd3e7d0e/docs/components/router/router-testing.md)**：从 Rust 单元测试到基于 fixture 的 replay 和完整进程 E2E 的测试层级
 - **[Standalone Indexer](/dynamo/dev/components/router/standalone-indexer)**：将 KV indexer 作为单独服务运行，以便独立扩缩容
 - **[Router Design](/dynamo/dev/design-docs/component-design/router-design)**：架构细节、算法和事件传输模式
