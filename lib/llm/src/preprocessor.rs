@@ -385,6 +385,7 @@ impl OpenAIPreprocessor {
     fn backend_extra_args<R: OAIChatLikeRequest + NvExtProvider>(
         request: &R,
         reasoning_parser_configured: bool,
+        reasoning_ended: Option<bool>,
     ) -> Option<serde_json::Value> {
         let mut extra_args = serde_json::Map::new();
 
@@ -413,6 +414,9 @@ impl OpenAIPreprocessor {
                 "reasoning_parser_kwargs".to_string(),
                 serde_json::json!({ "chat_template_kwargs": chat_template_args }),
             );
+        }
+        if reasoning_parser_configured && let Some(reasoning_ended) = reasoning_ended {
+            extra_args.insert("reasoning_ended".to_string(), reasoning_ended.into());
         }
 
         if extra_args.is_empty() {
@@ -462,6 +466,9 @@ impl OpenAIPreprocessor {
                 bool_arg("enable_thinking") != Some(false)
             }
             Some("kimi_k25") => bool_arg("thinking") != Some(false),
+            Some("minimax_m2") => {
+                Self::deepseek_renderer_reasoning_enabled(chat_template_args, true)
+            }
 
             // DeepSeek V3/V3.1 templates are opt-in. The native V3.2/V4
             // renderers default to thinking; all honor the same aliases.
@@ -842,6 +849,18 @@ impl OpenAIPreprocessor {
         }
 
         let mut preprocessed = builder.build()?;
+        if let Some(reasoning_ended) = Self::prompt_injected_reasoning_ended_arg(
+            self.runtime_config.reasoning_parser.as_deref(),
+            formatted_prompt.as_deref(),
+        ) {
+            let extra_args = preprocessed
+                .extra_args
+                .get_or_insert_with(|| serde_json::json!({}));
+            let extra_args = extra_args
+                .as_object_mut()
+                .context("preprocessed extra_args must be an object")?;
+            extra_args.insert("reasoning_ended".to_string(), reasoning_ended.into());
+        }
 
         // If omitted, allow generation up to the remaining context length. Responses requests
         // preserve omission so backend adapters can compute the dynamic cap from their
@@ -1006,9 +1025,11 @@ impl OpenAIPreprocessor {
             }));
         }
 
-        if let Some(extra_args) =
-            Self::backend_extra_args(request, self.runtime_config.reasoning_parser.is_some())
-        {
+        if let Some(extra_args) = Self::backend_extra_args(
+            request,
+            self.runtime_config.reasoning_parser.is_some(),
+            None,
+        ) {
             builder.extra_args(Some(extra_args));
         }
 
@@ -1409,9 +1430,14 @@ impl OpenAIPreprocessor {
                 extra_args["formatted_prompt"] = serde_json::Value::String(prompt.to_string());
             }
 
-            if let Some(serde_json::Value::Object(backend_extra_args)) =
-                Self::backend_extra_args(request, self.runtime_config.reasoning_parser.is_some())
-            {
+            if let Some(serde_json::Value::Object(backend_extra_args)) = Self::backend_extra_args(
+                request,
+                self.runtime_config.reasoning_parser.is_some(),
+                Self::prompt_injected_reasoning_ended_arg(
+                    self.runtime_config.reasoning_parser.as_deref(),
+                    formatted_prompt,
+                ),
+            ) {
                 let extra_args_obj = extra_args
                     .as_object_mut()
                     .expect("multimodal extra_args must be an object");
@@ -2785,6 +2811,7 @@ impl OpenAIPreprocessor {
                     | "step3"
                     | "kimi_k25"
                     | "mistral"
+                    | "minimax_m2"
                     | "minimax_append_think"
                     | "nemotron_nano"
                     | "nemotron3"
@@ -2807,6 +2834,7 @@ impl OpenAIPreprocessor {
                     | "step3"
                     | "kimi_k25"
                     | "mistral"
+                    | "minimax_m2"
                     | "nemotron_nano"
                     | "nemotron3"
                     | "nemotron_v3"
@@ -2847,6 +2875,23 @@ impl OpenAIPreprocessor {
         match reasoning_parser {
             Some("minimax_m3") | Some("minimax-m3") => prompt.ends_with("<mm:think>"),
             _ => prompt.ends_with("<think>"),
+        }
+    }
+
+    fn prompt_injected_reasoning_ended_arg(
+        reasoning_parser: Option<&str>,
+        formatted_prompt: Option<&str>,
+    ) -> Option<bool> {
+        let should_forward = matches!(
+            reasoning_parser,
+            Some("minimax_m2" | "minimax_m3" | "minimax-m3")
+        );
+        if should_forward
+            && Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt)
+        {
+            Some(false)
+        } else {
+            None
         }
     }
 
@@ -2896,7 +2941,8 @@ impl OpenAIPreprocessor {
                 !Self::deepseek_renderer_reasoning_enabled(chat_template_args, false)
             }
             Some(
-                "deepseek_r1" | "deepseek_v3_2" | "deepseek_v4" | "deepseek-v4" | "deepseekv4",
+                "deepseek_r1" | "deepseek_v3_2" | "deepseek_v4" | "deepseek-v4" | "deepseekv4"
+                | "minimax_m2",
             ) => !Self::deepseek_renderer_reasoning_enabled(chat_template_args, true),
             Some("gemma4") | Some("gemma-4") => {
                 if let Some(enabled) = dynamo_renderer::thinking_bool_from_args(chat_template_args)
@@ -3894,6 +3940,7 @@ mod tests {
             "step3",
             "kimi_k25",
             "mistral",
+            "minimax_m2",
             "nemotron_nano",
             "nemotron3",
             "nemotron_v3",
@@ -3977,6 +4024,56 @@ mod tests {
     }
 
     #[test]
+    fn test_prompt_injected_reasoning_ended_backend_arg_by_parser() {
+        let cases = [
+            (
+                Some("minimax_m2"),
+                Some("...<think>\n"),
+                Some(false),
+                "MiniMax M2 needs native backend reasoning state aligned with the prompt",
+            ),
+            (
+                Some("minimax_m3"),
+                Some("...<mm:think>\n"),
+                Some(false),
+                "MiniMax M3 needs native backend reasoning state aligned with the prompt",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some("...<think>\n"),
+                None,
+                "DeepSeek V4 native guided JSON must not be forced into reasoning mode",
+            ),
+            (
+                Some("deepseek-v4"),
+                Some("...<think>\n"),
+                None,
+                "DeepSeek V4 alias must not receive reasoning_ended=false",
+            ),
+            (
+                Some("qwen3"),
+                Some("...<think>\n"),
+                None,
+                "Qwen-style prompt injection is handled by Dynamo postprocessing only",
+            ),
+            (
+                Some("minimax_m2"),
+                Some("plain prompt"),
+                None,
+                "no injected reasoning opener means no backend state override",
+            ),
+        ];
+
+        for (parser, prompt, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(parser, prompt),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
+
+    #[test]
     fn test_backend_extra_args_preserves_nvext_and_sampling_extensions() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
@@ -3994,7 +4091,7 @@ mod tests {
         }))
         .unwrap();
 
-        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false).unwrap();
+        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false, None).unwrap();
 
         assert_eq!(extra_args["nvext"]["cache_salt"], "step_7");
         assert_eq!(
@@ -4033,7 +4130,8 @@ mod tests {
                 }))
                 .unwrap();
 
-            let extra_args = OpenAIPreprocessor::backend_extra_args(&request, true).unwrap();
+            let extra_args =
+                OpenAIPreprocessor::backend_extra_args(&request, true, Some(false)).unwrap();
 
             assert_eq!(
                 extra_args["reasoning_parser_kwargs"]["chat_template_kwargs"],
@@ -4042,6 +4140,7 @@ mod tests {
                     "reasoning_effort": "high"
                 })
             );
+            assert_eq!(extra_args["reasoning_ended"], false);
         }
     }
 
@@ -4058,10 +4157,12 @@ mod tests {
         }))
         .unwrap();
 
-        let extra_args = OpenAIPreprocessor::backend_extra_args(&request, false).unwrap();
+        let extra_args =
+            OpenAIPreprocessor::backend_extra_args(&request, false, Some(false)).unwrap();
 
         assert_eq!(extra_args["sampling_options"]["detokenize"], false);
         assert!(extra_args.get("reasoning_parser_kwargs").is_none());
+        assert!(extra_args.get("reasoning_ended").is_none());
     }
 
     /// Verifies no parser metadata is added when template arguments are absent.
@@ -4073,7 +4174,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(OpenAIPreprocessor::backend_extra_args(&request, true).is_none());
+        assert!(OpenAIPreprocessor::backend_extra_args(&request, true, None).is_none());
     }
 
     /// Verifies the SGLang reasoning gate is limited to forced guided tool
@@ -4205,6 +4306,8 @@ mod tests {
                 true,
             ),
             ("kimi_k25", serde_json::json!({"thinking": false}), false),
+            ("minimax_m2", serde_json::json!({}), true),
+            ("minimax_m2", serde_json::json!({"thinking": false}), false),
             ("mistral", serde_json::json!({}), false),
             (
                 "mistral",
@@ -4470,6 +4573,24 @@ mod tests {
                 Some(&thinking_false),
                 true,
                 "deepseek_v3_2 + thinking=false → disabled",
+            ),
+            (
+                Some("minimax_m2"),
+                Some(&thinking_false),
+                true,
+                "minimax_m2 + thinking=false → disabled",
+            ),
+            (
+                Some("minimax_m2"),
+                Some(&thinking_true),
+                false,
+                "minimax_m2 + thinking=true → enabled",
+            ),
+            (
+                Some("minimax_m2"),
+                None,
+                false,
+                "minimax_m2 + no args → enabled",
             ),
             (
                 Some("basic"),
