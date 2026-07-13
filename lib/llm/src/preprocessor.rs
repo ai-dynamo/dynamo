@@ -172,6 +172,8 @@ struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
     bypass_bare_guided_json: bool,
+    // TODO: Track this per choice.index for n > 1. The current bypass
+    // decision and parser state are shared across all streamed choices.
     guided_json_bypass_decision: Option<bool>,
 }
 
