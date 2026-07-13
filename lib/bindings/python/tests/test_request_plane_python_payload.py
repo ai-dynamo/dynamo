@@ -59,13 +59,28 @@ async def request_plane_client(runtime):
         endpoint.serve_endpoint(_generate, health_check_payload=health_payload)
     )
     client = await endpoint.client()
-    await client.wait_for_instances()
+    try:
+        await client.wait_for_instances()
 
-    yield client
+        # instances() returns a structured snapshot across all transports; its
+        # instance_ids must match instance_ids(). Each entry carries transport
+        # details. On the TCP request plane every instance's transport is "tcp"
+        # with a "host:port/..." address.
+        instances = client.instances()
+        assert {i.instance_id for i in instances} == set(client.instance_ids())
+        for instance in instances:
+            assert instance.transport.kind in ("tcp", "nats_tcp")
+            assert instance.transport.address
+            assert instance.endpoint == "generate"
+        for instance in instances:
+            assert instance.transport.kind == "tcp"
+            assert ":" in instance.transport.address
 
-    server_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await server_task
+        yield client
+    finally:
+        server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await server_task
 
 
 @pytest.mark.asyncio
