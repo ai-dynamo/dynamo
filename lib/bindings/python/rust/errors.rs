@@ -134,6 +134,31 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
 );
 
+/// Read `(code, message)` off a Python exception carrying an HTTP-style
+/// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
+/// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
+///
+/// SECURITY: `.message` is forwarded verbatim to clients on 4xx responses
+/// (HTTP protocol contract). Python callers must ensure it contains no
+/// internal state, file paths, traceback strings, or backend identifiers.
+/// Non-4xx codes (including 5xx) are sanitized downstream — the original
+/// message survives in server logs only.
+pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
+    let value = err.value(py);
+    let code = value
+        .getattr("code")
+        .ok()
+        .and_then(|a| a.extract::<u16>().ok())
+        .or_else(|| {
+            value
+                .getattr("status")
+                .ok()
+                .and_then(|a| a.extract::<u16>().ok())
+        })?;
+    let message = value.getattr("message").ok()?.extract::<String>().ok()?;
+    Some((code, message))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,29 +190,4 @@ mod tests {
             }
         });
     }
-}
-
-/// Read `(code, message)` off a Python exception carrying an HTTP-style
-/// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
-/// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
-///
-/// SECURITY: `.message` is forwarded verbatim to clients on 4xx responses
-/// (HTTP protocol contract). Python callers must ensure it contains no
-/// internal state, file paths, traceback strings, or backend identifiers.
-/// Non-4xx codes (including 5xx) are sanitized downstream — the original
-/// message survives in server logs only.
-pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
-    let value = err.value(py);
-    let code = value
-        .getattr("code")
-        .ok()
-        .and_then(|a| a.extract::<u16>().ok())
-        .or_else(|| {
-            value
-                .getattr("status")
-                .ok()
-                .and_then(|a| a.extract::<u16>().ok())
-        })?;
-    let message = value.getattr("message").ok()?.extract::<String>().ok()?;
-    Some((code, message))
 }

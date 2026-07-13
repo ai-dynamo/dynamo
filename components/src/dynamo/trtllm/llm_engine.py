@@ -702,8 +702,9 @@ class TrtllmLLMEngine(LLMEngine):
         async with self._pause_lock:
             if controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
-            if self._resume_recovery_required or self._controller_needs_resume_recovery(
-                controller
+            if (
+                self._resume_recovery_required
+                or self._controller_needs_resume_recovery(controller)
             ):
                 return {
                     "status": "error",

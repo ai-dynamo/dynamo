@@ -9,7 +9,7 @@ import os
 from dataclasses import dataclass
 from inspect import isawaitable
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping, TypeVar
+from typing import Awaitable, Callable, Mapping, Protocol, TypeVar, cast
 
 from dynamo.common.snapshot.constants import (
     KUBERNETES_OPTIONAL_ENV_NAMES,
@@ -23,6 +23,13 @@ from dynamo.common.snapshot.constants import (
 
 logger = logging.getLogger(__name__)
 ConfigT = TypeVar("ConfigT")
+
+
+class _RuntimeConfig(Protocol):
+    namespace: str
+    discovery_backend: str
+    request_plane: str
+    event_plane: str | None
 
 
 @dataclass(frozen=True)
@@ -122,7 +129,9 @@ def load_restored_runtime_config(
     )
 
 
-def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
+def parse_snapshot_restore_runtime_config(
+    argv: list[str] | None,
+) -> _RuntimeConfig:
     """Parse Dynamo runtime args after restore env has been applied.
 
     This uses the same ``DynamoRuntimeArgGroup`` env/CLI handling as normal
@@ -142,7 +151,7 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
     args, _ = parser.parse_known_args(argv)
     config = DynamoRuntimeConfig.from_cli_args(args)
     config.validate()
-    return config
+    return cast(_RuntimeConfig, config)
 
 
 def apply_snapshot_restore_env() -> dict[str, str | None]:

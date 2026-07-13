@@ -282,9 +282,9 @@ class VllmLLMEngine(LLMEngine):
             )
 
         if not config.served_model_name:
-            config.served_model_name = config.engine_args.served_model_name = (
-                config.model
-            )
+            config.served_model_name = (
+                config.engine_args.served_model_name
+            ) = config.model
 
         configure_rl_logprobs_mode(config)
 
@@ -568,9 +568,9 @@ class VllmLLMEngine(LLMEngine):
             for output in res.outputs:
                 output_idx = getattr(output, "index", 0) or 0
                 token_ids = list(output.token_ids or [])
-                total_output_tokens_by_index[output_idx] = (
-                    total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
-                )
+                total_output_tokens_by_index[
+                    output_idx
+                ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
                 finish_reason = getattr(output, "finish_reason", None)
                 if not token_ids and not finish_reason:
                     continue

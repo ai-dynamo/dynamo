@@ -11,13 +11,13 @@ from typing import Any
 
 import sglang as sgl
 
+from dynamo.common.backend import PreRuntimeOutcome
 from dynamo.common.snapshot.lifecycle import (
     EngineSnapshotController,
     SnapshotConfig,
     configure_snapshot_capture_env,
     unified_snapshot_outcome,
 )
-from dynamo.common.backend import PreRuntimeOutcome
 from dynamo.llm.exceptions import Cancelled, EngineShutdown, InvalidArgument
 
 from .pause import SGLangEnginePauseController
@@ -125,9 +125,9 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
         warmup_args["input_ids"] = np.load(
             server_args.debug_tensor_dump_input_file
         ).tolist()
-        warmup_args["sampling_params"]["max_new_tokens"] = (
-            DUMMY_DEBUG_TENSOR_MAX_NEW_TOKENS
-        )
+        warmup_args["sampling_params"][
+            "max_new_tokens"
+        ] = DUMMY_DEBUG_TENSOR_MAX_NEW_TOKENS
 
     is_disaggregated = server_args.disaggregation_mode != "null"
     if is_disaggregated:

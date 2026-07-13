@@ -26,9 +26,8 @@ use dynamo_backend_common::{
     LlmRegistration as RsLlmRegistration, MetricsBindings, MetricsCtx, OnPublisherReady,
     PreRuntimeContext as RsPreRuntimeContext, PreRuntimeOutcome as RsPreRuntimeOutcome,
     PreprocessedRequest, RawEngine, RestoredRuntimeConfig as RsRestoredRuntimeConfig,
-    RuntimeConfig as RsRuntimeConfig,
-    SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
-    WorkerExit as RsWorkerExit,
+    RuntimeConfig as RsRuntimeConfig, SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker,
+    WorkerConfig as RsWorkerConfig, WorkerExit as RsWorkerExit,
 };
 use dynamo_llm::local_model::runtime_config::{
     StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
@@ -1593,9 +1592,7 @@ fn class_name(item: &Bound<'_, PyAny>) -> PyResult<String> {
     item.get_type().getattr("__name__")?.extract::<String>()
 }
 
-fn depythonize_pre_runtime_outcome(
-    bound: &Bound<'_, PyAny>,
-) -> PyResult<RsPreRuntimeOutcome> {
+fn depythonize_pre_runtime_outcome(bound: &Bound<'_, PyAny>) -> PyResult<RsPreRuntimeOutcome> {
     let action_obj = bound.getattr("action")?;
     let action: String = match action_obj.getattr("value") {
         Ok(value) => value.extract()?,
