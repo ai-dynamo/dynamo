@@ -90,10 +90,16 @@ RUN pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dis
 #   planner  — kubernetes/aiconfigurator/scikit-learn/filterpy/pmdarima
 # requirements.trtllm.txt is intentionally NOT installed here: it pins nixl/nixl-cu13
 # from PyPI, but this image builds NIXL from source below.
+# PyYAML is installed by apt in the pytorch-rubin base (dist-packages, no RECORD),
+# so pip can't uninstall it to satisfy requirements.common.txt's PyYAML==6.0.3.
+# Install it fresh first (ignore the apt copy, no deps); the -r install below then
+# sees a pip-managed 6.0.3 and never attempts an uninstall. Add any further
+# apt-managed packages that trip "Cannot uninstall ... no RECORD file" to this pre-step.
 RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/req.common.txt \
     --mount=type=bind,source=container/deps/requirements.frontend.txt,target=/tmp/req.frontend.txt \
     --mount=type=bind,source=container/deps/requirements.planner.txt,target=/tmp/req.planner.txt \
-    pip install --break-system-packages --no-cache-dir \
+    pip install --break-system-packages --no-cache-dir --ignore-installed --no-deps PyYAML \
+ && pip install --break-system-packages --no-cache-dir \
       -r /tmp/req.common.txt \
       -r /tmp/req.frontend.txt \
       -r /tmp/req.planner.txt
