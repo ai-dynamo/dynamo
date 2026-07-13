@@ -22,6 +22,10 @@ ARG GO_VERSION=1.26.3
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
+ARG NIXL_REPO=https://github.com/ai-dynamo/nixl.git
+# Immutable pin containing "fix(posix): surface and recover from short writes
+# in all io queues". Do not replace with v1.1.0 or a mutable PR/branch ref.
+ARG NIXL_REF=71ca3cb249a481ae892fcc042a456e1a9b87463d
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
@@ -75,6 +79,66 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags="-w -s" -o /nsrestore ./cmd/nsrestore
 
 # =============================================================================
+# Stage: NIXL SDK/runtime builder (POSIX backend only)
+# =============================================================================
+FROM ${AGENT_BASE_IMAGE} AS nixl-builder
+
+ARG NIXL_REPO
+ARG NIXL_REF
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    git \
+    libaio-dev \
+    meson \
+    ninja-build \
+    pkg-config \
+    pybind11-dev \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build a test configuration first. Keep its generic warm-up below Docker's
+# 1024-FD limit; the upstream short-write/error-recovery matrix is independent
+# of this count. Package a separate release configuration afterward.
+RUN git init /tmp/nixl \
+    && cd /tmp/nixl \
+    && git remote add origin ${NIXL_REPO} \
+    && git fetch --depth 1 origin ${NIXL_REF} \
+    && test "$(git rev-parse FETCH_HEAD)" = "${NIXL_REF}" \
+    && git checkout --detach ${NIXL_REF} \
+    && CXXFLAGS="-Wno-error=maybe-uninitialized -Wno-maybe-uninitialized" meson setup build-test \
+      --buildtype=debugoptimized \
+      -Dbuild_tests=true \
+      -Dbuild_examples=false \
+      -Denable_plugins=POSIX \
+    && meson compile -C build-test \
+    && NIXL_PLUGIN_DIR=/tmp/nixl/build-test/src/plugins/posix \
+      ./build-test/test/unit/plugins/posix/nixl_posix_test -n 32 \
+    && meson setup build \
+      --prefix=/usr/local \
+      --libdir=lib \
+      --buildtype=release \
+      -Dbuild_tests=false \
+      -Dbuild_examples=false \
+      -Denable_plugins=POSIX \
+    && meson compile -C build \
+    && DESTDIR=/nixl-install meson install -C build --strip \
+    && mkdir -p /nixl-runtime/lib/plugins \
+    && printf '%s\n' "${NIXL_REF}" > /nixl-runtime/NIXL_COMMIT \
+    && cp /tmp/nixl/subprojects/liburing-liburing-2.14/LICENSE /nixl-runtime/liburing-LICENSE \
+    && cp \
+      /nixl-install/usr/local/lib/libnixl.so \
+      /nixl-install/usr/local/lib/libnixl_build.so \
+      /nixl-install/usr/local/lib/libnixl_common.so \
+      /nixl-install/usr/local/lib/libserdes.so \
+      /nixl-install/usr/local/lib/libstream.so \
+      /nixl-install/usr/local/lib/libfile_utils.so \
+      /nixl-runtime/lib/ \
+    && cp -a /nixl-install/usr/local/lib/liburing.so* /nixl-runtime/lib/ \
+    && cp /nixl-install/usr/local/lib/plugins/libplugin_POSIX.so /nixl-runtime/lib/plugins/
+
+# =============================================================================
 # Stage: CUDA checkpoint helper builder
 # =============================================================================
 FROM ${AGENT_BASE_IMAGE} AS cuda-helper-builder
@@ -85,13 +149,51 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /workspace
 
-COPY cmd/cuda-checkpoint-helper/main.c ./cmd/cuda-checkpoint-helper/main.c
+COPY --from=nixl-builder /nixl-install/usr/local /usr/local
+COPY cmd/cuda-checkpoint-helper/main.cpp ./cmd/cuda-checkpoint-helper/main.cpp
+COPY cmd/cuda-checkpoint-helper/cuda_checkpoint_compat.h ./cmd/cuda-checkpoint-helper/cuda_checkpoint_compat.h
+COPY cmd/cuda-checkpoint-helper/daemon_protocol.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp
+COPY cmd/cuda-checkpoint-helper/daemon_protocol.h ./cmd/cuda-checkpoint-helper/daemon_protocol.h
+COPY cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
+COPY cmd/cuda-checkpoint-helper/storage_manifest.cpp ./cmd/cuda-checkpoint-helper/storage_manifest.cpp
+COPY cmd/cuda-checkpoint-helper/storage_manifest.h ./cmd/cuda-checkpoint-helper/storage_manifest.h
+COPY cmd/cuda-checkpoint-helper/storage_manifest_test.cpp ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.cpp ./cmd/cuda-checkpoint-helper/transfer_config.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_config.h ./cmd/cuda-checkpoint-helper/transfer_config.h
+COPY cmd/cuda-checkpoint-helper/transfer_config_test.cpp ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_engine.cpp ./cmd/cuda-checkpoint-helper/transfer_engine.cpp
+COPY cmd/cuda-checkpoint-helper/transfer_engine.h ./cmd/cuda-checkpoint-helper/transfer_engine.h
 
-RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
-    ./cmd/cuda-checkpoint-helper/main.c \
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread -o /cuda-checkpoint-helper \
+    ./cmd/cuda-checkpoint-helper/main.cpp \
+    ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+    ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+    ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+    ./cmd/cuda-checkpoint-helper/transfer_engine.cpp \
     -I/usr/local/cuda/include \
+    -I/usr/local/include \
     -L/usr/local/cuda/lib64/stubs \
-    -lcuda
+    -L/usr/local/lib \
+    -Wl,-rpath,/usr/local/lib \
+    -lnixl -lnixl_build -lcuda
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+      -o /cuda-checkpoint-helper-daemon-protocol-test \
+      ./cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+      ./cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp \
+    && /cuda-checkpoint-helper-daemon-protocol-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-storage-test \
+      ./cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+      ./cmd/cuda-checkpoint-helper/storage_manifest_test.cpp \
+    && /cuda-checkpoint-helper-storage-test
+
+RUN g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+      -o /cuda-checkpoint-helper-transfer-test \
+      ./cmd/cuda-checkpoint-helper/transfer_config.cpp \
+      ./cmd/cuda-checkpoint-helper/transfer_config_test.cpp \
+    && /cuda-checkpoint-helper-transfer-test
 
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
@@ -160,6 +262,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-c1 \
     libgnutls30t64 \
     libnftables1 \
+    libaio1t64 \
     iproute2 \
     iptables \
     procps \
@@ -178,7 +281,15 @@ RUN criu --version
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
-RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
+COPY --from=nixl-builder /nixl-runtime/lib /usr/local/lib
+COPY --from=nixl-builder /nixl-runtime/NIXL_COMMIT /usr/local/share/nixl/NIXL_COMMIT
+COPY --from=nixl-builder /tmp/nixl/LICENSE /legal/NIXL/LICENSE
+COPY --from=nixl-builder /nixl-runtime/liburing-LICENSE /legal/liburing/LICENSE
+ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
+RUN ldconfig
+RUN chmod +x \
+    /usr/local/sbin/cuda-checkpoint \
+    /usr/local/bin/cuda-checkpoint-helper
 
 # Copy the built binaries
 COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
@@ -221,6 +332,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libprotobuf-c1 \
     libgnutls30t64 \
     libnftables1 \
+    libaio1t64 \
     iproute2 \
     iptables \
     procps \
@@ -238,6 +350,12 @@ RUN criu --version && echo "CRIU installed successfully"
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
 COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
+COPY --from=nixl-builder /nixl-runtime/lib /usr/local/lib
+COPY --from=nixl-builder /nixl-runtime/NIXL_COMMIT /usr/local/share/nixl/NIXL_COMMIT
+COPY --from=nixl-builder /tmp/nixl/LICENSE /legal/NIXL/LICENSE
+COPY --from=nixl-builder /nixl-runtime/liburing-LICENSE /legal/liburing/LICENSE
+ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
+RUN ldconfig
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
 # Copy nsrestore binary (invoked by DaemonSet via nsenter)

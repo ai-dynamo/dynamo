@@ -10,7 +10,6 @@ import (
 	"github.com/go-logr/logr"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/cuda"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
@@ -24,10 +23,11 @@ type RestoreOptions struct {
 }
 
 type RestoreInNamespaceResult struct {
-	RestoredPID            int           `json:"restoredPID"`
-	NSRestoreSetupDuration time.Duration `json:"nsrestoreSetupDuration"`
-	CRIURestoreDuration    time.Duration `json:"criuRestoreDuration"`
-	CUDADuration           time.Duration `json:"cudaDuration"`
+	RestoredPID            int                              `json:"restoredPID"`
+	NSRestoreSetupDuration time.Duration                    `json:"nsrestoreSetupDuration"`
+	CRIURestoreDuration    time.Duration                    `json:"criuRestoreDuration"`
+	CUDADuration           time.Duration                    `json:"cudaDuration"`
+	DeferredCUDAProcesses  []snapshotruntime.ProcessDetails `json:"deferredCUDAProcesses,omitempty"`
 }
 
 // RestoreInNamespace performs a full restore from inside the target container's namespaces.
@@ -52,6 +52,12 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"manage_cgroups_mode", m.CRIUDump.CRIU.ManageCgroupsMode,
 		"checkpoint_has_cuda", !m.CUDA.IsEmpty(),
 	)
+	if !m.CUDA.IsEmpty() {
+		_, err = m.CUDA.EffectiveStorageMode()
+		if err != nil {
+			return nil, fmt.Errorf("invalid CUDA artifact metadata: %w", err)
+		}
+	}
 
 	// Phase 1: Configure — build CRIU opts from manifest
 	configureStart := time.Now()
@@ -75,6 +81,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		NSRestoreSetupDuration: manifestReadDuration + configureDuration + executeTimings.nsrestoreSetupDuration,
 		CRIURestoreDuration:    executeTimings.criuRestoreDuration,
 		CUDADuration:           executeTimings.cudaDuration,
+		DeferredCUDAProcesses:  executeTimings.deferredCUDAProcesses,
 	}
 	log.V(1).Info("nsrestore timing summary",
 		"restored_pid", restoredPID,
@@ -90,6 +97,7 @@ type nsrestorePhaseTimings struct {
 	nsrestoreSetupDuration time.Duration
 	criuRestoreDuration    time.Duration
 	cudaDuration           time.Duration
+	deferredCUDAProcesses  []snapshotruntime.ProcessDetails
 }
 
 func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
@@ -162,9 +170,15 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			"restored_cuda_pids", restorePIDs,
 			"criu_callback_pid", restoredPID,
 		)
-		_, err = cuda.RestoreAndUnlockProcessTree(ctx, restorePIDs, opts.CUDADeviceMap, log)
-		if err != nil {
-			return nil, 0, fmt.Errorf("CUDA restore failed: %w", err)
+		for _, pid := range restorePIDs {
+			process, err := snapshotruntime.ReadProcessDetails("/proc", pid)
+			if err != nil {
+				return nil, 0, fmt.Errorf("capture restored CUDA process identity for PID %d: %w", pid, err)
+			}
+			if process.StartTimeTicks == 0 || process.Cgroup == "" {
+				return nil, 0, fmt.Errorf("capture restored CUDA process identity for PID %d: incomplete proc identity", pid)
+			}
+			timings.deferredCUDAProcesses = append(timings.deferredCUDAProcesses, process)
 		}
 	}
 	timings.cudaDuration = time.Since(cudaStart)

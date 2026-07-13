@@ -6,9 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/testr"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	batchv1 "k8s.io/api/batch/v1"
@@ -19,6 +22,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	clientgotesting "k8s.io/client-go/testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
@@ -30,6 +34,7 @@ const testContainerID = "test-container"
 // fakeRuntime is a minimal Runtime implementation for controller reconciliation
 // tests.
 type fakeRuntime struct {
+	mu                   sync.Mutex
 	containerIDByPod     string
 	resolvedContainerIDs []string
 }
@@ -37,6 +42,8 @@ type fakeRuntime struct {
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
 
 func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.resolvedContainerIDs = append(r.resolvedContainerIDs, id)
 	return 0, nil, errors.New("not implemented")
 }
@@ -50,6 +57,39 @@ func (r *fakeRuntime) ResolveContainerByPod(ctx context.Context, pod, ns, ctr st
 	return 0, nil, errors.New("not implemented")
 }
 func (r *fakeRuntime) Close() error { return nil }
+
+type restoreCleanupRuntime struct {
+	mu                sync.Mutex
+	pid               int
+	resolveErr        error
+	resolveCalls      int
+	sawCanceledCtx    bool
+	operationSequence *[]string
+}
+
+func (r *restoreCleanupRuntime) ResolveContainer(ctx context.Context, _ string) (int, *specs.Spec, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resolveCalls++
+	r.sawCanceledCtx = ctx.Err() != nil
+	if r.operationSequence != nil {
+		*r.operationSequence = append(*r.operationSequence, "resolve")
+	}
+	if r.resolveErr != nil {
+		return 0, nil, r.resolveErr
+	}
+	return r.pid, &specs.Spec{}, nil
+}
+
+func (*restoreCleanupRuntime) ResolveContainerIDByPod(context.Context, string, string, string) (string, error) {
+	return "", errors.New("not implemented")
+}
+
+func (*restoreCleanupRuntime) ResolveContainerByPod(context.Context, string, string, string) (int, *specs.Spec, error) {
+	return 0, nil, errors.New("not implemented")
+}
+
+func (*restoreCleanupRuntime) Close() error { return nil }
 
 // makeTestController creates a NodeController with a fake k8s client and nil executors.
 // The fake clientset is empty so any goroutine launched by runCheckpoint/runRestore
@@ -1011,5 +1051,227 @@ func TestRunCheckpointKeepsLeaseAndInFlightOnTerminalStatusPatchFailure(t *testi
 	}
 	if remainingLease.Spec.HolderIdentity == nil || *remainingLease.Spec.HolderIdentity != "test-holder" {
 		t.Fatalf("unexpected remaining lease holder: %#v", remainingLease.Spec.HolderIdentity)
+	}
+}
+
+func TestRunRestoreFailureKillsBeforeTerminalStatusEvenWhenAnnotationFails(t *testing.T) {
+	pod := makePod(
+		"restore-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		false,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: "checkpoint-1"},
+		nil,
+	)
+	clientset := fake.NewClientset(pod.DeepCopy())
+	var operations []string
+	clientset.PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+		patch := action.(clientgotesting.PatchAction).GetPatch()
+		if strings.Contains(string(patch), snapshotprotocol.RestoreStatusFailed) {
+			operations = append(operations, "status-failed")
+			return true, nil, errors.New("injected terminal annotation failure")
+		}
+		operations = append(operations, "status-in-progress")
+		return false, nil, nil
+	})
+
+	rt := &restoreCleanupRuntime{
+		pid:               4242,
+		operationSequence: &operations,
+	}
+	w := makeTestController(t)
+	w.clientset = clientset
+	w.runtime = rt
+	w.restoreExecutor = func(
+		context.Context,
+		snapshotruntime.Runtime,
+		logr.Logger,
+		executor.RestoreRequest,
+	) (int, error) {
+		operations = append(operations, "restore")
+		return 0, errors.New("injected restore failure")
+	}
+	w.signalProcess = func(_ logr.Logger, pid int, signal syscall.Signal, _ string) error {
+		operations = append(operations, "kill")
+		if pid != 4242 || signal != syscall.SIGKILL {
+			t.Fatalf("signal = (%d, %v), want (4242, SIGKILL)", pid, signal)
+		}
+		return errors.New("injected kill failure")
+	}
+
+	checkpointDir := t.TempDir()
+	attemptKey := "default/restore-pod/main/" + testContainerID
+	w.inFlight[attemptKey] = struct{}{}
+	err := w.runRestore(
+		context.Background(),
+		pod,
+		"main",
+		testContainerID,
+		"checkpoint-1",
+		checkpointLocations{HostPath: checkpointDir, ContainerPath: checkpointDir},
+		attemptKey,
+		time.Now(),
+	)
+	if err == nil {
+		t.Fatal("runRestore() error = nil, want joined restore/kill/status error")
+	}
+	for _, message := range []string{
+		"injected restore failure",
+		"injected kill failure",
+		"injected terminal annotation failure",
+	} {
+		if !strings.Contains(err.Error(), message) {
+			t.Fatalf("runRestore() error = %v, want %q", err, message)
+		}
+	}
+
+	killIndex := -1
+	failedStatusIndex := -1
+	for index, operation := range operations {
+		switch operation {
+		case "kill":
+			killIndex = index
+		case "status-failed":
+			failedStatusIndex = index
+		}
+	}
+	if killIndex < 0 || failedStatusIndex < 0 || killIndex >= failedStatusIndex {
+		t.Fatalf("operations = %v, want SIGKILL before failed status persistence", operations)
+	}
+}
+
+func TestRunRestoreFailureUsesDetachedCleanupContextAfterParentCancellation(t *testing.T) {
+	pod := makePod(
+		"restore-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		false,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: "checkpoint-1"},
+		nil,
+	)
+	w := makeTestController(t, pod.DeepCopy())
+	rt := &restoreCleanupRuntime{pid: 5150}
+	w.runtime = rt
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w.restoreExecutor = func(
+		context.Context,
+		snapshotruntime.Runtime,
+		logr.Logger,
+		executor.RestoreRequest,
+	) (int, error) {
+		cancel()
+		return 0, errors.New("restore failed after cancellation")
+	}
+	killCalls := 0
+	w.signalProcess = func(_ logr.Logger, pid int, signal syscall.Signal, _ string) error {
+		killCalls++
+		if pid != 5150 || signal != syscall.SIGKILL {
+			t.Fatalf("signal = (%d, %v), want (5150, SIGKILL)", pid, signal)
+		}
+		return nil
+	}
+
+	checkpointDir := t.TempDir()
+	attemptKey := "default/restore-pod/main/" + testContainerID
+	w.inFlight[attemptKey] = struct{}{}
+	err := w.runRestore(
+		ctx,
+		pod,
+		"main",
+		testContainerID,
+		"checkpoint-1",
+		checkpointLocations{HostPath: checkpointDir, ContainerPath: checkpointDir},
+		attemptKey,
+		time.Now(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "restore failed after cancellation") {
+		t.Fatalf("runRestore() error = %v, want original restore failure", err)
+	}
+	rt.mu.Lock()
+	resolveCalls := rt.resolveCalls
+	sawCanceledCtx := rt.sawCanceledCtx
+	rt.mu.Unlock()
+	if resolveCalls != 1 || sawCanceledCtx {
+		t.Fatalf(
+			"cleanup ResolveContainer calls = %d, canceled context = %v; want one call with live detached context",
+			resolveCalls,
+			sawCanceledCtx,
+		)
+	}
+	if killCalls != 1 {
+		t.Fatalf("SIGKILL calls = %d, want 1", killCalls)
+	}
+}
+
+func TestRunRestoreSentinelFailureKillsBeforeTerminalStatus(t *testing.T) {
+	pod := makePod(
+		"restore-pod",
+		"default",
+		testNodeName,
+		corev1.PodRunning,
+		false,
+		map[string]string{snapshotprotocol.CheckpointIDLabel: "checkpoint-1"},
+		nil,
+	)
+	clientset := fake.NewClientset(pod.DeepCopy())
+	var operations []string
+	clientset.PrependReactor("patch", "pods", func(action clientgotesting.Action) (bool, runtime.Object, error) {
+		patch := action.(clientgotesting.PatchAction).GetPatch()
+		if strings.Contains(string(patch), snapshotprotocol.RestoreStatusFailed) {
+			operations = append(operations, "status-failed")
+		}
+		return false, nil, nil
+	})
+
+	w := makeTestController(t)
+	w.clientset = clientset
+	w.restoreExecutor = func(
+		context.Context,
+		snapshotruntime.Runtime,
+		logr.Logger,
+		executor.RestoreRequest,
+	) (int, error) {
+		return 0, nil
+	}
+	w.signalProcess = func(_ logr.Logger, pid int, signal syscall.Signal, _ string) error {
+		operations = append(operations, "kill")
+		if pid != 0 || signal != syscall.SIGKILL {
+			t.Fatalf("signal = (%d, %v), want (0, SIGKILL)", pid, signal)
+		}
+		return nil
+	}
+
+	checkpointDir := t.TempDir()
+	attemptKey := "default/restore-pod/main/" + testContainerID
+	w.inFlight[attemptKey] = struct{}{}
+	err := w.runRestore(
+		context.Background(),
+		pod,
+		"main",
+		testContainerID,
+		"checkpoint-1",
+		checkpointLocations{HostPath: checkpointDir, ContainerPath: checkpointDir},
+		attemptKey,
+		time.Now(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "restore-complete sentinel") {
+		t.Fatalf("runRestore() error = %v, want sentinel failure", err)
+	}
+
+	killIndex := -1
+	statusIndex := -1
+	for index, operation := range operations {
+		switch operation {
+		case "kill":
+			killIndex = index
+		case "status-failed":
+			statusIndex = index
+		}
+	}
+	if killIndex < 0 || statusIndex < 0 || killIndex >= statusIndex {
+		t.Fatalf("operations = %v, want SIGKILL before failed status persistence", operations)
 	}
 }

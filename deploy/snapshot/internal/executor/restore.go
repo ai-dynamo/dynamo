@@ -30,12 +30,15 @@ type RestoreRequest struct {
 	ContainerID                 string
 	StartedAt                   time.Time
 	NSRestorePath               string
+	CUDATransfer                types.CUDATransferSettings
 	PodName                     string
 	PodNamespace                string
 	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
 }
+
+var validateCUDARestoreBackend = cuda.ValidateRestoreBackend
 
 // Restore performs external restore for the given request.
 // Returns the namespace-relative PID of the restored process.
@@ -66,6 +69,35 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	result, err := execNSRestore(ctx, log, req, snap)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
+	}
+	if len(result.DeferredCUDAProcesses) > 0 {
+		hostProcesses := make([]snapshotruntime.ProcessDetails, 0, len(result.DeferredCUDAProcesses))
+		for _, namespaceProcess := range result.DeferredCUDAProcesses {
+			process, err := snapshotruntime.ResolveHostProcessIdentity(
+				snapshotruntime.HostProcPath,
+				namespaceProcess,
+			)
+			if err != nil {
+				return 0, fmt.Errorf("resolve restored CUDA host process identity: %w", err)
+			}
+			if err := snapshotruntime.ValidateProcessIdentity(snapshotruntime.HostProcPath, process); err != nil {
+				return 0, fmt.Errorf("validate restored CUDA process identity: %w", err)
+			}
+			hostProcesses = append(hostProcesses, process)
+		}
+		cudaTimings, err := cuda.RestoreAndUnlockProcessTreeValidated(
+			ctx,
+			hostProcesses,
+			snap.CUDADeviceMap,
+			snap.CUDAStorageMode,
+			req.CheckpointLocation,
+			req.CUDATransfer,
+			log,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("host CUDA restore failed: %w", err)
+		}
+		result.CUDADuration += cudaTimings.TotalDuration
 	}
 	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
@@ -126,6 +158,16 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}
+	cudaStorageMode := types.CUDAStorageModeLegacy
+	if !m.CUDA.IsEmpty() {
+		cudaStorageMode, err = m.CUDA.EffectiveStorageMode()
+		if err != nil {
+			return nil, fmt.Errorf("invalid CUDA artifact metadata: %w", err)
+		}
+		if err := validateCUDARestoreBackend(ctx, cudaStorageMode); err != nil {
+			return nil, fmt.Errorf("CUDA artifact backend %q is unavailable before restore: %w", cudaStorageMode, err)
+		}
+	}
 
 	containerName := req.ContainerName
 	if containerName == "" {
@@ -182,11 +224,13 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 	}
 
 	return &types.RestoreContainerSnapshot{
-		CheckpointPath: checkpointPath,
-		PlaceholderPID: placeholderPID,
-		TargetRoot:     fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
-		CgroupRoot:     cgroupRoot,
-		CUDADeviceMap:  cudaDeviceMap,
+		CheckpointPath:  checkpointPath,
+		PlaceholderPID:  placeholderPID,
+		TargetRoot:      fmt.Sprintf("%s/%d/root", snapshotruntime.HostProcPath, placeholderPID),
+		CgroupRoot:      cgroupRoot,
+		CUDADeviceMap:   cudaDeviceMap,
+		CUDAStorageMode: cudaStorageMode,
+		HasCUDA:         !m.CUDA.IsEmpty(),
 	}, nil
 }
 
@@ -200,14 +244,37 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if checkpointPath == "" {
 		checkpointPath = snap.CheckpointPath
 	}
-	args := []string{
+	nsenterPrefix := []string{
 		"-t", strconv.Itoa(snap.PlaceholderPID),
 		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
 		// from the host-visible hierarchy so --cgroup-root remap works.
-		"-m", "-u", "-i", "-n", "-p",
-		"--", req.NSRestorePath,
-		"--checkpoint-path", checkpointPath,
+		"-m", "-u", "-i", "-n", "-p", "--",
 	}
+	if snap.HasCUDA {
+		capabilityArgs := append(
+			append([]string{}, nsenterPrefix...),
+			req.NSRestorePath, "--check-host-cuda-restore-capability",
+		)
+		output, err := exec.CommandContext(ctx, "nsenter", capabilityArgs...).CombinedOutput()
+		capability := strings.TrimSpace(string(output))
+		if err != nil {
+			return nil, fmt.Errorf(
+				"placeholder nsrestore does not support mandatory host CUDA restore; use a matching placeholder image (output: %q): %w",
+				capability,
+				err,
+			)
+		}
+		if capability != "host-cuda-restore-v1" {
+			return nil, fmt.Errorf(
+				"placeholder nsrestore does not support mandatory host CUDA restore; use a matching placeholder image (capability response: %q)",
+				capability,
+			)
+		}
+	}
+	args := append(append([]string{}, nsenterPrefix...),
+		req.NSRestorePath,
+		"--checkpoint-path", checkpointPath,
+	)
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
@@ -217,7 +284,6 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	if req.TargetPodIP != "" {
 		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
-
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()

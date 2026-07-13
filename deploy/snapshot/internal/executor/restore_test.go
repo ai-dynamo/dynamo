@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,6 +17,42 @@ import (
 type restoreFakeRuntime struct {
 	resolvedID      string
 	resolveByPodHit bool
+}
+
+func TestInspectRestoreRejectsUnsupportedPOSIXBeforeResolvingPlaceholder(t *testing.T) {
+	checkpointDir := t.TempDir()
+	manifest := types.NewCheckpointManifest(
+		"checkpoint-posix",
+		types.CRIUDumpManifest{},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "", nil),
+		types.OverlayManifest{},
+	)
+	manifest.CUDA = types.NewCUDAManifest(
+		[]int{456}, []string{"GPU-aaa"}, types.CUDAStorageModePOSIX,
+	)
+	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	oldValidate := validateCUDARestoreBackend
+	validateCUDARestoreBackend = func(context.Context, string) error {
+		return errors.New("CustomStorage unavailable")
+	}
+	t.Cleanup(func() { validateCUDARestoreBackend = oldValidate })
+
+	rt := &restoreFakeRuntime{}
+	_, err := inspectRestore(
+		context.Background(),
+		rt,
+		testr.New(t),
+		RestoreRequest{CheckpointID: "checkpoint-posix", CheckpointLocation: checkpointDir},
+	)
+	if err == nil || !strings.Contains(err.Error(), "unavailable before restore") {
+		t.Fatalf("inspectRestore() error = %v, want early POSIX capability rejection", err)
+	}
+	if rt.resolvedID != "" || rt.resolveByPodHit {
+		t.Fatal("placeholder resolution occurred before POSIX capability rejection")
+	}
 }
 
 func (r *restoreFakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
@@ -88,5 +126,44 @@ func TestInspectRestoreUsesContainerIDWhenProvided(t *testing.T) {
 	}
 	if rt.resolveByPodHit {
 		t.Fatal("ResolveContainerByPod should not be used when ContainerID is provided")
+	}
+}
+
+func TestRestoreInNamespaceRejectsUnknownCUDAStorageModeBeforeRootfs(t *testing.T) {
+	checkpointDir := t.TempDir()
+	manifest := types.NewCheckpointManifest(
+		"checkpoint-unknown-storage",
+		types.CRIUDumpManifest{
+			ExtMnt: map[string]string{"/": "/"},
+		},
+		types.NewSourcePodManifest("source-id", 456, "node-1", "source-pod", "default", "", nil),
+		types.OverlayManifest{},
+	)
+	manifest.CUDA = types.CUDAManifest{
+		PIDs:           []int{456},
+		SourceGPUUUIDs: []string{"GPU-aaa"},
+		StorageMode:    "object-store",
+	}
+	if err := types.WriteManifest(checkpointDir, manifest); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	// If validation moves after rootfs application, this invalid archive makes
+	// that regression fail with a rootfs error instead of doing privileged work.
+	if err := os.WriteFile(filepath.Join(checkpointDir, "rootfs-diff.tar"), []byte("not a tar archive"), 0o600); err != nil {
+		t.Fatalf("WriteFile(rootfs-diff.tar): %v", err)
+	}
+
+	_, err := RestoreInNamespace(
+		context.Background(),
+		RestoreOptions{CheckpointPath: checkpointDir},
+		testr.New(t),
+	)
+	if err == nil {
+		t.Fatal("RestoreInNamespace() error = nil, want unsupported CUDA storage mode")
+	}
+	if !strings.Contains(err.Error(), "invalid CUDA artifact metadata") ||
+		!strings.Contains(err.Error(), "unsupported CUDA artifact storage mode") {
+		t.Fatalf("RestoreInNamespace() error = %v, want early CUDA metadata validation", err)
 	}
 }

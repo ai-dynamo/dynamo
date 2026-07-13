@@ -80,14 +80,30 @@ func Checkpoint(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger
 	}
 
 	// Phase 2: Configure CRIU options and build checkpoint manifest
-	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir)
+	cudaStorageMode := types.CUDAStorageModeLegacy
+	if len(state.CUDAHostPIDs) > 0 {
+		cudaStorageMode, err = cuda.SelectCheckpointBackend(ctx)
+		if err != nil {
+			return fmt.Errorf("select CUDA checkpoint backend: %w", err)
+		}
+	}
+	criuOpts, data, err := configureCheckpoint(log, state, req, cfg, tmpDir, cudaStorageMode)
 	if err != nil {
 		return err
 	}
 	phaseTimings.PrepareDuration = time.Since(prepareStart)
 
 	// Phase 3: Capture — CRIU dump, rootfs diff
-	captureTimings, err := captureCheckpoint(ctx, criuOpts, &cfg.CRIU, data, state, tmpDir, log)
+	captureTimings, err := captureCheckpoint(
+		ctx,
+		criuOpts,
+		&cfg.CRIU,
+		cfg.CUDACheckpoint.TransferSettings(),
+		data,
+		state,
+		tmpDir,
+		log,
+	)
 	if err != nil {
 		return err
 	}
@@ -227,6 +243,7 @@ func configureCheckpoint(
 	req CheckpointRequest,
 	cfg *types.AgentConfig,
 	checkpointDir string,
+	cudaStorageMode string,
 ) (*criurpc.CriuOpts, *types.CheckpointManifest, error) {
 	criuOpts, err := criu.BuildDumpOptions(state, &cfg.CRIU, checkpointDir, log)
 	if err != nil {
@@ -240,7 +257,7 @@ func configureCheckpoint(
 		types.NewOverlayManifest(cfg.Overlay, state.UpperDir, state.OCISpec),
 	)
 	if len(state.CUDANSPIDs) > 0 {
-		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs)
+		m.CUDA = types.NewCUDAManifest(state.CUDANSPIDs, state.GPUUUIDs, cudaStorageMode)
 	}
 
 	if err := types.WriteManifest(checkpointDir, m); err != nil {
@@ -250,12 +267,40 @@ func configureCheckpoint(
 	return criuOpts, m, nil
 }
 
-func captureCheckpoint(ctx context.Context, criuOpts *criurpc.CriuOpts, criuSettings *types.CRIUSettings, data *types.CheckpointManifest, state *types.CheckpointContainerSnapshot, checkpointDir string, log logr.Logger) (*checkpointPhaseTimings, error) {
+func captureCheckpoint(
+	ctx context.Context,
+	criuOpts *criurpc.CriuOpts,
+	criuSettings *types.CRIUSettings,
+	cudaTransfer types.CUDATransferSettings,
+	data *types.CheckpointManifest,
+	state *types.CheckpointContainerSnapshot,
+	checkpointDir string,
+	log logr.Logger,
+) (*checkpointPhaseTimings, error) {
 	timings := &checkpointPhaseTimings{}
 
 	// CUDA lock+checkpoint must happen before CRIU dump
 	if len(state.CUDAHostPIDs) > 0 {
-		cudaTimings, err := cuda.LockAndCheckpointProcessTree(ctx, state.CUDAHostPIDs, log)
+		storageMode, err := data.CUDA.EffectiveStorageMode()
+		if err != nil {
+			return nil, err
+		}
+		processes := make([]snapshotruntime.ProcessDetails, 0, len(state.CUDAHostPIDs))
+		for _, pid := range state.CUDAHostPIDs {
+			process, readErr := snapshotruntime.ReadProcessDetails(snapshotruntime.HostProcPath, pid)
+			if readErr != nil {
+				return nil, fmt.Errorf("capture CUDA process identity for host PID %d: %w", pid, readErr)
+			}
+			processes = append(processes, process)
+		}
+		cudaTimings, err := cuda.LockAndCheckpointProcessTreeValidated(
+			ctx,
+			processes,
+			storageMode,
+			checkpointDir,
+			cudaTransfer,
+			log,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("CUDA checkpoint failed: %w", err)
 		}

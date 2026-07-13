@@ -20,12 +20,23 @@ func main() {
 	cudaDeviceMap := flag.String("cuda-device-map", "", "CUDA device map for cuda-checkpoint-helper restore")
 	cgroupRoot := flag.String("cgroup-root", "", "CRIU cgroup root remap path")
 	targetPodIP := flag.String("target-pod-ip", "", "Restore pod IP for CRIU TCP socket remapping")
+	checkHostCUDARestoreCapability := flag.Bool(
+		"check-host-cuda-restore-capability",
+		false,
+		"Report support for mandatory host-side CUDA restore and exit",
+	)
 	flag.Parse()
 
+	if *checkHostCUDARestoreCapability {
+		if flag.NArg() != 0 {
+			fatal(log, nil, "--check-host-cuda-restore-capability takes no arguments")
+		}
+		_, _ = os.Stdout.WriteString("host-cuda-restore-v1\n")
+		return
+	}
 	if *checkpointPath == "" {
 		fatal(log, nil, "--checkpoint-path is required")
 	}
-
 	opts := executor.RestoreOptions{
 		CheckpointPath: *checkpointPath,
 		CUDADeviceMap:  *cudaDeviceMap,

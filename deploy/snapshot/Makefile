@@ -8,6 +8,7 @@ PLACEHOLDER_IMG ?= nvcr.io/nvidian/dynamo-dev/dynamo-vllm-placeholder:latest
 # Optional CRIU source override for snapshot image builds. If unset, the
 # Dockerfile defaults are used.
 CRIU_BUILD_ARGS = $(if $(CRIU_REPO),--build-arg CRIU_REPO=$(CRIU_REPO),) $(if $(CRIU_REF),--build-arg CRIU_REF=$(CRIU_REF),)
+NIXL_BUILD_ARGS = $(if $(NIXL_REPO),--build-arg NIXL_REPO=$(NIXL_REPO),) $(if $(NIXL_REF),--build-arg NIXL_REF=$(NIXL_REF),)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -45,8 +46,27 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: fmt vet ## Run tests.
+test: fmt vet test-cuda-helper ## Run tests.
 	go test ./... -v -coverprofile cover.out
+
+.PHONY: test-cuda-helper
+test-cuda-helper: ## Run GPU-independent CUDA helper protocol, manifest, and transfer-planner tests.
+	@mkdir -p bin
+	g++ -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+		-o bin/cuda-checkpoint-helper-daemon-protocol-test \
+		cmd/cuda-checkpoint-helper/daemon_protocol.cpp \
+		cmd/cuda-checkpoint-helper/daemon_protocol_test.cpp
+	bin/cuda-checkpoint-helper-daemon-protocol-test
+	g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+		-o bin/cuda-checkpoint-helper-storage-test \
+		cmd/cuda-checkpoint-helper/storage_manifest.cpp \
+		cmd/cuda-checkpoint-helper/storage_manifest_test.cpp
+	bin/cuda-checkpoint-helper-storage-test
+	g++ -std=c++20 -O2 -Wall -Wextra -Werror \
+		-o bin/cuda-checkpoint-helper-transfer-test \
+		cmd/cuda-checkpoint-helper/transfer_config.cpp \
+		cmd/cuda-checkpoint-helper/transfer_config_test.cpp
+	bin/cuda-checkpoint-helper-transfer-test
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter.
@@ -68,6 +88,7 @@ build: fmt vet ## Build snapshot-agent binary.
 docker-build-agent: ## Build snapshot-agent docker image (linux/amd64 only).
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target agent \
 		$(CRIU_BUILD_ARGS) \
+		$(NIXL_BUILD_ARGS) \
 		-t ${IMG} .
 
 .PHONY: docker-build-placeholder
@@ -83,6 +104,7 @@ endif
 	if [ -z "$$BASE_IMAGE_USER" ]; then BASE_IMAGE_USER=root; fi; \
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target placeholder \
 		$(CRIU_BUILD_ARGS) \
+		$(NIXL_BUILD_ARGS) \
 		--build-arg BASE_IMAGE=${PLACEHOLDER_BASE_IMG} \
 		--build-arg BASE_IMAGE_USER=$$BASE_IMAGE_USER \
 		-t ${PLACEHOLDER_IMG} .

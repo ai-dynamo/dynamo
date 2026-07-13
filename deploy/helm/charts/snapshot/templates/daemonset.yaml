@@ -24,22 +24,21 @@ spec:
         {{- with .Values.daemonset.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- if or .Values.openshift.enabled .Values.daemonset.podAnnotations }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- if .Values.openshift.enabled }}
         # Pin this DS to the built-in "privileged" SCC even if a higher-priority
         # custom SCC is added later. See openshift/enhancements custom-scc-preemption-prevention.
         # User-supplied podAnnotations cannot override this key.
         openshift.io/required-scc: privileged
-        {{- with omit .Values.daemonset.podAnnotations "openshift.io/required-scc" }}
+        {{- with omit .Values.daemonset.podAnnotations "checksum/config" "openshift.io/required-scc" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- else }}
-        {{- with .Values.daemonset.podAnnotations }}
+        {{- with omit .Values.daemonset.podAnnotations "checksum/config" }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
         {{- end }}
-      {{- end }}
     spec:
       serviceAccountName: {{ include "snapshot.serviceAccountName" . }}
       hostPID: true
@@ -125,6 +124,8 @@ spec:
             - name: config
               mountPath: /etc/snapshot
               readOnly: true
+            - name: cuda-helper-socket
+              mountPath: "/run/cuda-checkpoint-helper"
             {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
             # Mount the checkpoint PVC directly in namespace-local agent mode
             - name: checkpoints
@@ -166,11 +167,66 @@ spec:
           {{- end }}
           resources:
             {{- toYaml .Values.daemonset.resources | nindent 12 }}
+        - name: cuda-checkpoint-helper
+          image: "{{ .Values.daemonset.image.repository }}:{{ .Values.daemonset.image.tag }}"
+          imagePullPolicy: {{ .Values.daemonset.image.pullPolicy }}
+          command:
+            - /usr/local/bin/cuda-checkpoint-helper
+          args:
+            - --daemon
+            - --socket
+            - "/run/cuda-checkpoint-helper/helper.sock"
+            - --max-operation-seconds
+            - {{ .Values.config.cudaCheckpoint.daemon.maxOperationSeconds | quote }}
+          securityContext:
+            privileged: true
+          startupProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - "/run/cuda-checkpoint-helper/helper.sock"
+            periodSeconds: 2
+            failureThreshold: 150
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - "/run/cuda-checkpoint-helper/helper.sock"
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/cuda-checkpoint-helper
+                - --health
+                - --socket
+                - "/run/cuda-checkpoint-helper/helper.sock"
+            periodSeconds: 30
+            timeoutSeconds: 2
+            failureThreshold: 3
+          volumeMounts:
+            - name: cuda-helper-socket
+              mountPath: "/run/cuda-checkpoint-helper"
+            - name: host-proc
+              mountPath: /host/proc
+            {{- if and (eq .Values.storage.type "pvc") (eq .Values.storage.accessMode "agentMount") }}
+            - name: checkpoints
+              mountPath: {{ .Values.storage.pvc.basePath }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.config.cudaCheckpoint.daemon.resources | nindent 12 }}
       volumes:
         # Configuration ConfigMap
         - name: config
           configMap:
             name: {{ include "snapshot.fullname" . }}-config
+        - name: cuda-helper-socket
+          emptyDir: {}
         {{- if .Values.seccomp.deploy }}
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles

@@ -4,6 +4,7 @@ package types
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -11,12 +12,34 @@ import (
 // AgentConfig holds the full agent configuration: static checkpoint settings
 // from the ConfigMap YAML, plus runtime fields from environment variables.
 type AgentConfig struct {
-	NodeName            string          `yaml:"-"`
-	RestrictedNamespace string          `yaml:"-"`
-	Storage             StorageSpec     `yaml:"storage"`
-	Overlay             OverlaySettings `yaml:"overlay"`
-	Restore             RestoreSpec     `yaml:"restore"`
-	CRIU                CRIUSettings    `yaml:"criu"`
+	NodeName            string                 `yaml:"-"`
+	RestrictedNamespace string                 `yaml:"-"`
+	Storage             StorageSpec            `yaml:"storage"`
+	CUDACheckpoint      CUDACheckpointSettings `yaml:"cudaCheckpoint"`
+	Overlay             OverlaySettings        `yaml:"overlay"`
+	Restore             RestoreSpec            `yaml:"restore"`
+	CRIU                CRIUSettings           `yaml:"criu"`
+}
+
+func pathsOverlap(first, second string) bool {
+	first = filepath.Clean(first)
+	second = filepath.Clean(second)
+	return first == string(filepath.Separator) || second == string(filepath.Separator) ||
+		first == second ||
+		strings.HasPrefix(first, second+string(filepath.Separator)) ||
+		strings.HasPrefix(second, first+string(filepath.Separator))
+}
+
+// CUDACheckpointSettings holds CUDA checkpoint storage settings.
+type CUDACheckpointSettings struct {
+	TransferBufferCount *int    `yaml:"transferBufferCount"`
+	TransferChunkBytes  *uint64 `yaml:"transferChunkBytes"`
+}
+
+// CUDATransferSettings holds validated custom-storage transfer settings.
+type CUDATransferSettings struct {
+	BufferCount int
+	ChunkBytes  uint64
 }
 
 const (
@@ -26,7 +49,65 @@ const (
 	// StorageAccessModePodMount means workload pods mount the checkpoint PVC,
 	// and snapshot-agent reaches it through /host/proc/<pid>/root.
 	StorageAccessModePodMount = "podMount"
+	// CUDAStorageModeLegacy uses the CUDA driver's existing host-memory storage.
+	CUDAStorageModeLegacy = "legacy"
+	// CUDAStorageModePOSIX stores CUDA custom-storage extents in checkpoint files.
+	CUDAStorageModePOSIX = "posix"
+	// DefaultCUDATransferBufferCount preserves the original single-buffer path.
+	DefaultCUDATransferBufferCount = 1
+	// DefaultCUDATransferChunkBytes preserves the original 64 MiB chunks.
+	DefaultCUDATransferChunkBytes = 64 * 1024 * 1024
+	maxCUDATransferBufferCount    = 8
+	minCUDATransferChunkBytes     = 1 * 1024 * 1024
+	maxCUDATransferChunkBytes     = 256 * 1024 * 1024
+	maxCUDAPinnedBytesPerDevice   = 1 * 1024 * 1024 * 1024
+	cudaTransferBufferAlignment   = 4096
+	CUDAHelperSocketDirectory     = "/run/cuda-checkpoint-helper"
+	CUDAHelperSocketPath          = CUDAHelperSocketDirectory + "/helper.sock"
 )
+
+func (c CUDACheckpointSettings) TransferSettings() CUDATransferSettings {
+	settings := CUDATransferSettings{
+		BufferCount: DefaultCUDATransferBufferCount,
+		ChunkBytes:  DefaultCUDATransferChunkBytes,
+	}
+	if c.TransferBufferCount != nil {
+		settings.BufferCount = *c.TransferBufferCount
+	}
+	if c.TransferChunkBytes != nil {
+		settings.ChunkBytes = *c.TransferChunkBytes
+	}
+	return settings
+}
+
+func (c CUDATransferSettings) WithDefaults() CUDATransferSettings {
+	settings := c
+	if settings.BufferCount == 0 {
+		settings.BufferCount = DefaultCUDATransferBufferCount
+	}
+	if settings.ChunkBytes == 0 {
+		settings.ChunkBytes = DefaultCUDATransferChunkBytes
+	}
+	return settings
+}
+
+func (c CUDATransferSettings) Validate() error {
+	if c.BufferCount < 1 || c.BufferCount > maxCUDATransferBufferCount {
+		return fmt.Errorf("buffer count must be between 1 and %d", maxCUDATransferBufferCount)
+	}
+	if c.ChunkBytes < minCUDATransferChunkBytes || c.ChunkBytes > maxCUDATransferChunkBytes || c.ChunkBytes%cudaTransferBufferAlignment != 0 {
+		return fmt.Errorf(
+			"chunk bytes must be a %d-byte multiple between %d and %d",
+			cudaTransferBufferAlignment,
+			minCUDATransferChunkBytes,
+			maxCUDATransferChunkBytes,
+		)
+	}
+	if uint64(c.BufferCount) > maxCUDAPinnedBytesPerDevice/c.ChunkBytes {
+		return fmt.Errorf("buffers exceed the 1 GiB per-device pinned-memory limit")
+	}
+	return nil
+}
 
 func (c *AgentConfig) LoadEnvOverrides() {
 	if v := os.Getenv("NODE_NAME"); v != "" {
@@ -66,6 +147,27 @@ func (c *AgentConfig) Validate() error {
 		}
 	}
 	c.Storage.AccessMode = accessMode
+	if accessMode == StorageAccessModeAgentMount &&
+		pathsOverlap(basePath, CUDAHelperSocketDirectory) {
+		return &ConfigError{
+			Field:   "storage.basePath",
+			Message: "agent-mounted storage.basePath must not overlap the CUDA helper socket directory",
+		}
+	}
+	if c.CUDACheckpoint.TransferBufferCount == nil {
+		value := DefaultCUDATransferBufferCount
+		c.CUDACheckpoint.TransferBufferCount = &value
+	}
+	if c.CUDACheckpoint.TransferChunkBytes == nil {
+		value := uint64(DefaultCUDATransferChunkBytes)
+		c.CUDACheckpoint.TransferChunkBytes = &value
+	}
+	if err := c.CUDACheckpoint.TransferSettings().Validate(); err != nil {
+		return &ConfigError{
+			Field:   "cudaCheckpoint",
+			Message: err.Error(),
+		}
+	}
 	if c.CRIU.TcpClose && c.CRIU.TcpEstablished {
 		return &ConfigError{
 			Field:   "criu",
