@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -43,7 +44,8 @@ def test_enable_router_hint_support_extracts_kvcc_endpoint():
         ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true"
     )
     runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY, "tcp://127.0.0.1:23280"
+        ROUTER_HINT_SOURCE_CONTROL_ENDPOINT_RUNTIME_KEY,
+        json.dumps("tcp://127.0.0.1:23280"),
     )
 
 
