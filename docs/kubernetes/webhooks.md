@@ -331,7 +331,7 @@ Lease-based ownership mechanism.
 
 ### Scenario
 
-```
+```text
 Cluster:
 ├─ Operator A (cluster-wide, namespace: platform-system)
 │  └─ Skips reconciliation and admission in team-a
