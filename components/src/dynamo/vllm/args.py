@@ -22,6 +22,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
+from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
 from dynamo.vllm.constants import DisaggregationMode
@@ -169,13 +170,12 @@ def update_dynamo_config_with_engine(
 ) -> None:
     """Update dynamo_config fields from engine_config and worker flags."""
 
-    if getattr(engine_config, "served_model_name", None) is not None:
-        served = engine_config.served_model_name
-        if len(served) > 1:
-            raise ValueError("We do not support multiple model names.")
-        dynamo_config.served_model_name = served[0]
-    else:
-        dynamo_config.served_model_name = None
+    # vLLM's --served-model-name is nargs="+"; each token may itself pack
+    # several comma-separated names. The first is the primary served name; any
+    # remaining names are registered as aliases for the same worker.
+    served_names = split_served_model_names(engine_config.served_model_name)
+    dynamo_config.served_model_name = served_names[0] if served_names else None
+    dynamo_config.served_model_aliases = served_names[1:]
 
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint

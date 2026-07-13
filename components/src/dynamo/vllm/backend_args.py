@@ -9,7 +9,7 @@ import argparse
 import logging
 import os
 import warnings
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -446,6 +446,10 @@ class DynamoVllmConfig(ConfigBase):
 
     # GMS shadow mode
     gms_shadow_mode: bool = False
+
+    # Extra served names beyond the primary, parsed from --served-model-name.
+    # None (not []) since ConfigBase copies class defaults by reference.
+    served_model_aliases: Optional[List[str]] = None
 
     # Benchmark / self-profiling
     benchmark_mode: Optional[str] = None
