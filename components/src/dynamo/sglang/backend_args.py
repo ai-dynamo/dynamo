@@ -165,6 +165,13 @@ class DynamoSGLangArgGroup(ArgGroup):
             "(1=minimal, 2=per-request [default], 3=+decode_loop, 4=full).",
         )
 
+        g.add_argument(
+            "--enable-conditional-disagg",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help=argparse.SUPPRESS,
+        )
+
 
 class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
@@ -184,12 +191,20 @@ class DynamoSGLangConfig(ConfigBase):
     video_generation_worker: bool
     enable_rl: bool
     frontend_decoding: bool = False
+    enable_conditional_disagg: bool = False
     sglang_trace_level: int
 
     def validate(self) -> None:
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
             self.embedding_transfer_mode = EmbeddingTransferMode(
                 str(self.embedding_transfer_mode)
+            )
+
+        if self.enable_conditional_disagg:
+            raise ValueError(
+                "--enable-conditional-disagg is not supported by the SGLang "
+                "backend yet. SGLang decode workers cannot run "
+                "conditional-disagg bypass requests as local prefill+decode."
             )
 
         if (self.disagg_config is not None) ^ (self.disagg_config_key is not None):
