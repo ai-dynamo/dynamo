@@ -205,7 +205,14 @@ impl DefaultWorkerSelector {
         let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
-        let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
+        let decode_cost_blocks = if self.worker_type == "decode" {
+            // For decode workers, balance on running-request count (batch size) so that
+            // per-step batch sizes stay high and even; a few long requests no longer lock
+            // a dp out of new work the way raw block load would.
+            worker_load.active_requests as f64
+        } else {
+            worker_load.potential_decode_blocks() as f64
+        };
         let logit = prefill_cost_blocks + decode_cost_blocks;
 
         if shared_beyond > 0 {
@@ -420,12 +427,16 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .unwrap_or(0);
 
         if self.worker_type == "decode" {
+            let best_active_requests = request
+                .worker_load_for(best_worker)
+                .active_requests;
             tracing::info!(
                 router_mode = "kv",
                 worker_id = best_worker.worker_id,
                 worker_type = %self.worker_type,
                 dp_rank = ?best_worker.dp_rank,
                 logit = best_logit,
+                active_requests = best_active_requests,
                 host_pinned_blocks = best_host_pinned_overlap_blocks,
                 disk_blocks = best_disk_overlap_blocks,
                 "Selected worker"

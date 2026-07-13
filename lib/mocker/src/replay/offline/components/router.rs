@@ -574,6 +574,7 @@ impl OfflineReplayRouter {
                     prefill_load_hint,
                     worker: selection.worker,
                     lora_name: None,
+                    isl_tokens: request.isl_tokens,
                 },
                 decay_now,
             )

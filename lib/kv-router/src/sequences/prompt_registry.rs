@@ -34,6 +34,10 @@ pub struct WorkerLoadProjection {
     /// These blocks may still exist in an inactive cache; this field describes
     /// additional active block footprint, not cache misses.
     pub additional_active_blocks: usize,
+    /// Number of active (running) requests on this worker, i.e. its batch size.
+    pub active_requests: usize,
+    /// Sum of ISL (input sequence length in tokens) across all active requests.
+    pub active_isl_tokens: usize,
 }
 
 impl WorkerLoadProjection {
@@ -57,7 +61,10 @@ pub type PotentialLoadMaps = (
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
+    /// Number of active (running) requests on this worker, i.e. its batch size.
     pub(super) active_requests: usize,
+    /// Sum of ISL (input sequence length in tokens) across all active requests.
+    pub(super) active_isl_tokens: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
 
@@ -334,6 +341,8 @@ impl PromptRegistry {
                     active_prefill_tokens: load.active_tokens(decay_now),
                     active_decode_blocks: load.active_blocks,
                     additional_active_blocks: query_len.saturating_sub(overlap_depth),
+                    active_requests: load.active_requests,
+                    active_isl_tokens: load.active_isl_tokens,
                 },
             );
         }
@@ -354,6 +363,20 @@ impl PromptRegistry {
             .read()
             .iter()
             .map(|(worker, load)| (worker, load.active_requests))
+            .collect()
+    }
+
+    pub(super) fn active_requests(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.loads
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().active_requests))
+            .collect()
+    }
+
+    pub(super) fn active_isl_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.loads
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().active_isl_tokens))
             .collect()
     }
 
@@ -441,6 +464,7 @@ mod tests {
         WorkerLoadSnapshot {
             active_blocks,
             active_requests: 0,
+            active_isl_tokens: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
     }
@@ -455,6 +479,7 @@ mod tests {
         WorkerLoadSnapshot {
             active_blocks,
             active_requests: 0,
+            active_isl_tokens: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
                 anchored_prefill: Some(AnchoredPrefillSnapshot {

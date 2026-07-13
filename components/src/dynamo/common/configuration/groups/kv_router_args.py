@@ -52,6 +52,10 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "shared_cache_multiplier",
     "shared_cache_type",
     "router_predicted_ttl_secs",
+    "decode_block_guard_frac",
+    "pool_long_isl_threshold",
+    "pool_short_dp_ranks",
+    "max_kv_cache_tokens",
 )
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
@@ -105,6 +109,29 @@ def _default_prefill_load_scale() -> float:
     return 1.0
 
 
+def _parse_dp_rank_list(value: str) -> Optional[list[int]]:
+    """Parse a dp_rank spec like '0,1,2,3' or '0-23' (or a mix) into a sorted list."""
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    ranks: set[int] = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo_str, hi_str = part.split("-", 1)
+            lo, hi = int(lo_str), int(hi_str)
+            if hi < lo:
+                raise ValueError(f"invalid dp_rank range {part!r}: end < start")
+            ranks.update(range(lo, hi + 1))
+        else:
+            ranks.add(int(part))
+    return sorted(ranks)
+
+
 class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
@@ -135,6 +162,10 @@ class KvRouterConfigBase(ConfigBase):
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     router_predicted_ttl_secs: Optional[float] = None
+    decode_block_guard_frac: float = 1.0
+    pool_long_isl_threshold: Optional[int] = None
+    pool_short_dp_ranks: Optional[list[int]] = None
+    max_kv_cache_tokens: Optional[int] = None
     load_aware: bool = False
 
     def apply_load_aware_preset(self) -> None:
@@ -490,4 +521,62 @@ class KvRouterArgGroup(ArgGroup):
                 "Independent of --router-ttl-secs, which covers pure approximate mode."
             ),
             arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-decode-block-guard-frac",
+            env_var="DYN_ROUTER_DECODE_BLOCK_GUARD_FRAC",
+            default=1.0,
+            help=(
+                "KV Router: Fraction of a decode worker's total_kv_blocks usable "
+                "before the router stops routing new requests to it (hard memory "
+                "admission guard). Range 0.0-1.0; 1.0 (default) disables the guard. "
+                "Only applied to decode workers that report total_kv_blocks. Use e.g. "
+                "0.9 to leave headroom and avoid decode-side OOM under length skew."
+            ),
+            arg_type=float,
+            dest="decode_block_guard_frac",
+        )
+        add_argument(
+            g,
+            flag_name="--router-pool-long-isl-threshold",
+            env_var="DYN_ROUTER_POOL_LONG_ISL_THRESHOLD",
+            default=None,
+            help=(
+                "KV Router: ISL (in tokens) at or above which a request is routed to "
+                "the 'long' pool. When set together with --router-pool-short-dp-ranks, "
+                "decode dp ranks are split into a short pool (the listed ranks) and a "
+                "long pool (the complement). Unset (default) disables length-based pooling."
+            ),
+            arg_type=int,
+            dest="pool_long_isl_threshold",
+        )
+        add_argument(
+            g,
+            flag_name="--router-pool-short-dp-ranks",
+            env_var="DYN_ROUTER_POOL_SHORT_DP_RANKS",
+            default=None,
+            help=(
+                "KV Router: Comma-separated dp_ranks forming the 'short' request pool "
+                "(e.g. '0,1,2,3' or '0-23'). Requests with isl < "
+                "--router-pool-long-isl-threshold are confined to these ranks; longer "
+                "requests go to the complementary ranks. Unset (default) disables pooling."
+            ),
+            arg_type=_parse_dp_rank_list,
+            dest="pool_short_dp_ranks",
+        )
+        add_argument(
+            g,
+            flag_name="--router-max-kv-cache-tokens",
+            env_var="DYN_ROUTER_MAX_KV_CACHE_TOKENS",
+            default=None,
+            help=(
+                "KV Router: Override the max KV cache size (in tokens) used by "
+                "the memory guard. When set, replaces the worker-reported "
+                "total_kv_blocks for guard calculations. Useful when the "
+                "worker-reported value is inaccurate. Unset (default) uses the "
+                "worker-reported value."
+            ),
+            arg_type=int,
+            dest="max_kv_cache_tokens",
         )

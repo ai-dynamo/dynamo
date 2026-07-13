@@ -47,6 +47,7 @@ pub(super) struct RequestState {
     blocks: RequestBlockChain,
     started_at: Instant,
     expected_output_tokens: Option<u32>,
+    isl_tokens: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -173,6 +174,7 @@ impl ActiveSequences {
         expected_output_tokens: Option<u32>,
         track_prefill_tokens: bool,
         prefill_load_hint: Option<PrefillLoadHint>,
+        isl_tokens: usize,
         decay_now: Instant,
     ) -> SequenceMutationOutcome {
         if self.requests.contains_key(&request_id) {
@@ -214,6 +216,7 @@ impl ActiveSequences {
                 blocks,
                 started_at,
                 expected_output_tokens,
+                isl_tokens,
             },
         );
 
@@ -323,6 +326,7 @@ impl ActiveSequences {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
             active_requests: self.requests.len(),
+            active_isl_tokens: self.requests.values().map(|r| r.isl_tokens).sum(),
             prefill: self.prefill.snapshot(),
         }
     }
@@ -393,6 +397,7 @@ mod tests {
             None,
             true,
             tracking_hint(8),
+                0,
             decay_now,
         );
         assert_eq!(
@@ -413,6 +418,7 @@ mod tests {
             None,
             true,
             tracking_hint(12),
+                0,
             decay_now,
         );
         assert_eq!(
@@ -452,6 +458,7 @@ mod tests {
             None,
             true,
             tracking_hint(12),
+                0,
             decay_now,
         );
         assert_eq!(
@@ -503,6 +510,7 @@ mod tests {
             None,
             true,
             tracking_hint(12),
+                0,
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 3);
@@ -514,6 +522,7 @@ mod tests {
             None,
             true,
             tracking_hint(4),
+                0,
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -525,6 +534,7 @@ mod tests {
             None,
             true,
             tracking_hint(0),
+                0,
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 5);
@@ -555,6 +565,7 @@ mod tests {
             None,
             true,
             tracking_hint(12),
+                0,
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 3);
@@ -572,6 +583,7 @@ mod tests {
             None,
             true,
             tracking_hint(8),
+                0,
             decay_now,
         );
         assert_eq!(seq_manager.active_blocks(), 2);
@@ -601,6 +613,7 @@ mod tests {
             None,
             true,
             tracking_hint(12),
+                0,
             decay_now,
         );
         assert_eq!(seq_manager.active_tokens(decay_now), 12);
@@ -617,6 +630,7 @@ mod tests {
             None,
             true,
             tracking_hint(8),
+                0,
             decay_now,
         );
         assert_eq!(seq_manager.active_tokens(decay_now), 8);
@@ -636,6 +650,7 @@ mod tests {
             None,
             false,
             None,
+                0,
             decay_now,
         );
 
@@ -660,6 +675,7 @@ mod tests {
             None,
             true,
             Some(prefill_hint(50, 10)),
+                0,
             decay_now,
         );
         seq_manager.add_request_with_prefill_tracking(
@@ -668,6 +684,7 @@ mod tests {
             None,
             true,
             Some(prefill_hint(30, 10)),
+                0,
             decay_now,
         );
 
@@ -710,6 +727,7 @@ mod tests {
             None,
             true,
             tracking_hint(8),
+            0,
             Instant::now(),
         );
         seq_manager.add_request_with_prefill_tracking(
@@ -718,6 +736,7 @@ mod tests {
             None,
             true,
             tracking_hint(8),
+            0,
             Instant::now(),
         );
         assert_eq!(seq_manager.active_blocks(), 4);
@@ -756,6 +775,7 @@ mod tests {
             None,
             true,
             tracking_hint(4),
+            0,
             Instant::now(),
         );
         assert!(expired.expired_request_ids.is_empty());
@@ -775,6 +795,7 @@ mod tests {
             None,
             true,
             Some(prefill_hint(40, 100)),
+                0,
             first_decay_now,
         );
         tokio::time::advance(Duration::from_secs(250)).await;
@@ -784,6 +805,7 @@ mod tests {
             None,
             true,
             Some(prefill_hint(30, 100)),
+            0,
             Instant::now(),
         );
 
