@@ -5,11 +5,11 @@
 
 These tests verify the Rust → Python binding surface that
 ``dynamo.common.backend.Worker`` delegates to. They DO NOT exercise the
-full lifecycle (which would require etcd, NATS, and a running event
-loop) — that's covered by the Rust unit tests in
-``lib/backend-common/src/worker.rs``. Here we just pin down the Python
-constructor signatures and class identity so the shim in ``worker.py``
-can't silently drift from the Rust types.
+full serving lifecycle (which would require etcd and NATS) — that's covered by
+the Rust unit tests in ``lib/backend-common/src/worker.rs``. Here we pin down
+the Python constructor signatures, class identity, and the pre-runtime
+exit/error boundary so the shim in ``worker.py`` can't silently drift from the
+Rust types.
 
 If the compiled extension hasn't been built (e.g. fresh checkout without
 ``maturin develop``), every test in the module skips with a clear hint.
@@ -17,6 +17,7 @@ If the compiled extension hasn't been built (e.g. fresh checkout without
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -45,6 +46,63 @@ def test_module_exposes_expected_classes():
         "PreRuntimeContext",
     ):
         assert hasattr(backend, name), f"missing {name} on dynamo._core.backend"
+
+
+@pytest.mark.asyncio
+async def test_pre_runtime_outcome_and_typed_error_forwarding():
+    """Exercise Python C-API conversion through the built extension.
+
+    Rust unit-test binaries cannot call the Python C API because this crate
+    uses PyO3's ``extension-module`` mode and intentionally does not link
+    libpython. Keep the cross-language assertions on the extension surface.
+    """
+    from dynamo.common.backend import PreRuntimeOutcome
+    from dynamo.llm.exceptions import InvalidArgument
+
+    class SnapshotExitEngine:
+        def __init__(self):
+            self.cleanup_calls = 0
+
+        async def prepare_for_runtime(self, context):
+            assert isinstance(context, backend.PreRuntimeContext)
+            assert context.is_cancelled() is False
+            return PreRuntimeOutcome.exit_success()
+
+        async def cleanup(self):
+            self.cleanup_calls += 1
+
+    class InvalidSnapshotEngine:
+        def __init__(self):
+            self.cleanup_calls = 0
+
+        async def prepare_for_runtime(self, context):
+            assert isinstance(context, backend.PreRuntimeContext)
+            raise InvalidArgument("invalid snapshot flags")
+
+        async def cleanup(self):
+            self.cleanup_calls += 1
+
+    def make_worker(engine):
+        runtime = backend.RuntimeConfig(
+            discovery_backend="mem",
+            request_plane="tcp",
+            event_plane=None,
+        )
+        config = backend.WorkerConfig(
+            namespace="snapshot-binding-test",
+            model_name="test-model",
+            runtime=runtime,
+        )
+        return backend.Worker(engine, config, asyncio.get_running_loop())
+
+    exit_engine = SnapshotExitEngine()
+    assert await make_worker(exit_engine).run() is True
+    assert exit_engine.cleanup_calls == 0
+
+    invalid_engine = InvalidSnapshotEngine()
+    with pytest.raises(InvalidArgument, match="invalid snapshot flags"):
+        await make_worker(invalid_engine).run()
+    assert invalid_engine.cleanup_calls == 1
 
 
 def test_runtime_config_accepts_optional_fields():
