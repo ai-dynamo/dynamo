@@ -360,6 +360,7 @@ areas:
   - ATTRIBUTIONS-Rust.md
   - ATTRIBUTIONS-container-frontend.md
   - ATTRIBUTIONS.md
+  - CLAUDE.md
   - CODEOWNERS
   - CODE_OF_CONDUCT.md
   - CONTRIBUTING.md
