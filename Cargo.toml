@@ -79,6 +79,7 @@ velo = { version = "0.1.0" }
 # External dependencies
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core" }
 anyhow = { version = "1" }
+async-openai = { version = "=0.34.0", default-features = false }
 lru = { version = "0.16" }
 async-nats = { version = "0.49.1", features = ["service"] }
 async-stream = { version = "0.3" }

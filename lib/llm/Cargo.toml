@@ -69,6 +69,7 @@ dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+async-openai = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
