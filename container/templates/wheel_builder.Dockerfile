@@ -294,6 +294,20 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
 # NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
 # GPU images) and VP9 from libvpx (BSD).
+#
+# MEDIA CODEC ALLOWLIST (see OPS-7665): the in-tree libavcodec should carry only
+# the media formats we actually build and use, not ffmpeg's full default decoder
+# set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
+# narrow allowlist keeps the shipped libav*.so limited to that set (HW NVDEC can
+# be re-added explicitly if a decode feature ever needs H.264/H.265). The
+# allowlist covers exactly two paths: (1) the encode CLI ingesting rawvideo
+# frames from imageio over a pipe, and (2) the Rust media-ffmpeg VideoDecoder
+# decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4). Image decode
+# does not use ffmpeg (it goes through the Rust `image` crate), so no still-image
+# decoders are enabled here.
+#
+# Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
+# this also trims the decoder surface to what we ship.
 # Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
 ARG NV_CODEC_HEADERS_REF
@@ -346,8 +360,15 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --enable-libvpx \
         --disable-encoders \
         --enable-encoder=h264_nvenc,libvpx_vp9 \
+        --disable-decoders \
+        --enable-decoder=vp8,vp9,rawvideo \
         --disable-muxers \
         --enable-muxer=mov,mp4,matroska,webm \
+        --disable-demuxers \
+        --enable-demuxer=mov,matroska,rawvideo \
+        --disable-parsers \
+        --enable-parser=vp8,vp9 \
+        --disable-protocols \
         --enable-protocol=file,pipe && \
     make -j$(nproc) && \
     make install && \

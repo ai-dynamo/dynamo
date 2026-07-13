@@ -52,6 +52,9 @@ register_model(
 > [!WARNING]
 > **Video decoding**: Video decoding needs to be enabled via the `dynamo-llm/media-ffmpeg` rust feature. The following ffmpeg dynamic libraries must be available on the system: `libavcodec`, `libavdevice`, `libavfilter`, `libavformat`, `libswresample`, `libswscale`. These are available in dynamo dockerfiles rendered with `enable_media_ffmpeg` set to true in `container/context.yaml`.
 
+> [!WARNING]
+> **Supported input codecs**: The in-tree ffmpeg is built with a narrow decoder allowlist (VP8/VP9 video in mp4/webm/mkv) — it carries only the media formats we build and use, not ffmpeg's full default set (see `container/templates/wheel_builder.Dockerfile` and OPS-7665). Other codecs, including H.264 and H.265, are intentionally **not** decodable in software; decoding them would require enabling the NVDEC hardware decoders (`h264_cuvid`/`hevc_cuvid`), which is not wired up today.
+
 ## Image decoding options
 
 ### Limits (not overridable at runtime via `media_io_kwargs`)
