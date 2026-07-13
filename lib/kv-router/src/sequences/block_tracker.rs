@@ -67,6 +67,10 @@ impl BlockTracker {
     ///
     /// # Collision scope
     ///
+    /// Collision handling is outside the active-sequence tracker's scope: it
+    /// assumes distinct live lineages have distinct [`SequenceHash`] values and
+    /// does not detect, prevent, or recover from true hash collisions.
+    ///
     /// `SequenceHash` is a probabilistic 64-bit identifier, so collisions are
     /// possible but very unlikely. A collision matters here only when both
     /// blocks are live in the same `WorkerWithDpRank` tracker: each worker and
