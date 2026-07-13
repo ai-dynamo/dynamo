@@ -31,6 +31,7 @@ use super::openai::{
     get_or_create_request_id, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
+use crate::discovery::GenerateEngineSelection;
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::{SamplingOptions, StopConditions};
@@ -556,11 +557,19 @@ async fn handler_generate(
         return response.into_response();
     }
 
-    let (engine, kv_cache_block_size, lora_name, supports_exact_mm_routing) = match state
+    let GenerateEngineSelection {
+        engine,
+        kv_cache_block_size,
+        lora_name,
+        supports_exact_mm_routing,
+    } = match state
         .manager()
-        .get_generate_engine_with_routing_metadata(&model)
+        .get_generate_engine_for_capability_with_routing(
+            &model,
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        )
     {
-        Ok(engine_and_block_size) => engine_and_block_size,
+        Ok(selection) => selection,
         Err(error) => {
             let (status, error_type) = match error {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {

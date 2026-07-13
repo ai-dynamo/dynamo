@@ -3,7 +3,7 @@
 
 mod model;
 pub(crate) mod readiness;
-pub use model::Model;
+pub use model::{GenerateEngineSelection, Model};
 
 pub mod kv_source_membership;
 pub use kv_source_membership::{
