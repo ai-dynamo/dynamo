@@ -155,6 +155,27 @@ impl LoadThresholdConfig {
             || self.active_prefill_tokens_threshold.is_some()
             || self.active_prefill_tokens_threshold_frac.is_some()
     }
+
+    /// Validate threshold values shared by startup and dynamic configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(threshold) = self.active_decode_blocks_threshold
+            && (!threshold.is_finite() || !(0.0..=1.0).contains(&threshold))
+        {
+            return Err(format!(
+                "active_decode_blocks_threshold must be between 0.0 and 1.0, got {threshold}"
+            ));
+        }
+
+        if let Some(threshold) = self.active_prefill_tokens_threshold_frac
+            && (!threshold.is_finite() || threshold < 0.0)
+        {
+            return Err(format!(
+                "active_prefill_tokens_threshold_frac must be a finite value greater than or equal to 0.0, got {threshold}"
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// Worker load monitoring state per dp_rank
@@ -1020,7 +1041,55 @@ mod tests {
 
     #[test]
     fn load_threshold_config_default_is_not_configured() {
-        assert!(!LoadThresholdConfig::default().is_configured());
+        let config = LoadThresholdConfig::default();
+        assert!(!config.is_configured());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn load_threshold_config_validates_decode_fraction() {
+        for threshold in [0.0, 0.85, 1.0] {
+            let config = LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(threshold),
+                ..Default::default()
+            };
+            assert!(config.validate().is_ok(), "threshold={threshold}");
+        }
+
+        for threshold in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+            let config = LoadThresholdConfig {
+                active_decode_blocks_threshold: Some(threshold),
+                ..Default::default()
+            };
+            let error = config.validate().unwrap_err();
+            assert!(
+                error.contains("active_decode_blocks_threshold"),
+                "threshold={threshold}, error={error}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_threshold_config_validates_prefill_fraction() {
+        for threshold in [0.0, 0.9, 64.0] {
+            let config = LoadThresholdConfig {
+                active_prefill_tokens_threshold_frac: Some(threshold),
+                ..Default::default()
+            };
+            assert!(config.validate().is_ok(), "threshold={threshold}");
+        }
+
+        for threshold in [-0.1, f64::NAN, f64::INFINITY] {
+            let config = LoadThresholdConfig {
+                active_prefill_tokens_threshold_frac: Some(threshold),
+                ..Default::default()
+            };
+            let error = config.validate().unwrap_err();
+            assert!(
+                error.contains("active_prefill_tokens_threshold_frac"),
+                "threshold={threshold}, error={error}"
+            );
+        }
     }
 
     #[test]

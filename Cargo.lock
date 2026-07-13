@@ -2514,6 +2514,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "slotmap",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2718,9 +2719,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "3.1.0"
+version = "4.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fcc167dc02fd8f01996592adc004e1b192f742f26fa41f7b88799d320c8bbee"
+checksum = "91699e585f751e0ac61db985f794fde10b7983929b41245f34828789297562e1"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2740,9 +2741,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.1.11"
+version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf3d2b9c65028a66f05b2db424d5f472b13662e7c7382c36685b884d6c8e2329"
+checksum = "6a0fa2c447c6cef29cbda22172f2587a5f5ef8eb69af8cae359e277c8b672ec8"
 dependencies = [
  "anyhow",
  "dynamo-parsers",
@@ -2773,9 +2774,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "1.3.5"
+version = "1.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdad36db205c171171d03036a9cd7641f8824943a528957e26436d5c8ff04a52"
+checksum = "3472f4ee978f581bac985c4f5ebad55a9b1b4ccb025ed3e9df708efa56e83bfa"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2878,10 +2879,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-sidecar"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-runtime",
+ "futures",
+ "prost 0.13.5",
+ "rand 0.9.4",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
-version = "1.4.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eda65fd29fa8fc5395fc9430155d68d67a7eef216415a152cbf85e9916aa0bbf"
+checksum = "61fb9c031ea19d99d1faf8ff304fe666eb2dbd4666fcb416af3f08ae88f5be80"
 dependencies = [
  "aho-corasick",
  "anyhow",

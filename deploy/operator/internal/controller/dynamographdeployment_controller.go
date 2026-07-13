@@ -239,7 +239,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
-			r.setCurrentWorkerHashes(dynamoDeployment, hashes)
+			r.setCurrentWorkerHashes(dynamoDeployment, workerHashesForCompletedGeneration(hashes.v2, hashes))
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
@@ -284,12 +284,18 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
+
 	if err != nil {
 		logger.Error(err, "failed to reconcile the resources")
 		reason = "failed_to_reconcile_the_resources"
 		return ctrl.Result{}, err
 	}
 
+	// Assign status only after confirming the reconcile succeeded. On error,
+	// reconcileResources returns an empty ReconcileResult; assigning it here
+	// would wipe Components/Restart, which the deferred status update would then
+	// persist. Deferring the assignment past the error check preserves the
+	// last-known-good status on a transient failure.
 	state = reconcileResult.State
 	reason = reconcileResult.Reason
 	message = reconcileResult.Message
@@ -509,16 +515,15 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		// single-node GMS components stall in the in-progress list because the
 		// corresponding PodClique never exists.
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
-		var readinessErr error
+		// A transient read error surfaces here as isReady=false, so the component
+		// conservatively remains in-progress (we never mark a restart complete on
+		// a component we could not read). The reconcile that owns readiness
+		// classification propagates the error and retries, so it is safe to
+		// discard it in this progress-tracking helper.
 		if usesPCSG {
-			isReady, reason, _, readinessErr = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, _, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
-			isReady, reason, _, readinessErr = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
-		}
-		if readinessErr != nil {
-			logger.Error(readinessErr, "failed to check component readiness", "componentName", componentName, "resourceName", resourceName)
-			updatedInProgress = append(updatedInProgress, componentName)
-			continue
+			isReady, reason, _, _, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
 		if !isReady {
 			logger.V(1).Info("component not ready", "componentName", componentName, "resourceName", resourceName, "reason", reason)
@@ -671,14 +676,18 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(
 		logger.Error(err, "failed to sync the Grove GangSet")
 		return nil, fmt.Errorf("failed to sync the Grove GangSet: %w", err)
 	}
-	allComponentsReady, reason, componentStatuses, err := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get Grove component readiness: %w", err)
-	}
 	syncedGrovePodCliqueSetAsResource, err := commoncontroller.NewResourceWithComponentStatuses(
 		syncedGrovePodCliqueSet,
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
-			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas
+			// Grove readiness: all underlying PodCliques and PodCliqueScalingGroups have replicas == availableReplicas.
+			// A transient (non-NotFound) read error is handled authoritatively by
+			// reconcileGroveResources, which re-evaluates and returns the error so
+			// the reconcile retries; here we defensively treat it as not-ready so a
+			// read blip can never surface as "ready".
+			allComponentsReady, reason, componentStatuses, readErr := dynamo.GetComponentReadinessAndServiceReplicaStatuses(ctx, r.Client, dynamoDeployment)
+			if readErr != nil {
+				return false, nvidiacomv1beta1.DGDReadyReasonSomeResourcesNotReady, nil
+			}
 			if !allComponentsReady {
 				return false, reason, componentStatuses
 			}
@@ -1234,9 +1243,48 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		}
 	}
 
-	// Check resource readiness
+	// Check resource readiness and overlay the Grove-specific Ready reason.
+	// Extracted to keep this function's cyclomatic complexity within the
+	// gocyclo limit.
+	return r.checkGroveResourcesReadiness(ctx, dynamoDeployment, resources)
+}
+
+// checkGroveResourcesReadiness computes the readiness result for the synced
+// Grove resources and overlays the Grove-specific Ready reason
+// classification on a not-ready result. A transient Grove read error is
+// returned (not folded into the result) so the reconcile retries and does not
+// advance ObservedGeneration on a blip.
+func (r *DynamoGraphDeploymentReconciler) checkGroveResourcesReadiness(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, resources []Resource) (ReconcileResult, error) {
 	result := r.checkResourcesReadiness(resources)
+	if err := r.applyGroveReadyClassification(ctx, dynamoDeployment, &result); err != nil {
+		return ReconcileResult{}, err
+	}
 	return result, nil
+}
+
+// applyGroveReadyClassification replaces the generic not-ready reason on result
+// with a Grove-specific classification (insufficient_capacity / pods_not_ready /
+// updating / mixed_not_ready_reasons / some_resources_are_not_ready) computed
+// from Grove PodClique / PodCliqueScalingGroup status (REQ 1). It only overrides
+// when the result is not successful; the ready path keeps checkResourcesReadiness's
+// success result.
+//
+// A non-nil error is a transient (non-NotFound) Grove read failure: the caller
+// should return it so the reconcile retries rather than publishing a possibly
+// wrong not-ready diagnosis and advancing ObservedGeneration. NotFound is not an
+// error and is classified as a legitimate not-ready state.
+func (r *DynamoGraphDeploymentReconciler) applyGroveReadyClassification(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, result *ReconcileResult) error {
+	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
+		return nil
+	}
+	classification, err := dynamo.ClassifyGroveReadiness(ctx, r.Client, dynamoDeployment)
+	if err != nil {
+		return err
+	}
+	if classification != "" {
+		result.Reason = Reason(classification)
+	}
+	return nil
 }
 
 // isNewRestartRequest checks if the current spec.restart.id represents a new restart request
@@ -2764,16 +2812,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						if !okOld || !okNew {
 							return false
 						}
-						// Mirrors the readiness gates in CheckPodCliqueReady
-						// (dynamo/grove.go): ObservedGeneration, Status.Replicas,
-						// UpdatedReplicas, and ReadyReplicas. Without the
-						// non-ReadyReplicas signals, the DGD can stay stale at the
-						// tail of a rolling update when ReadyReplicas is flat.
-						return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
-							oldPC.Status.UpdatedReplicas != newPC.Status.UpdatedReplicas ||
-							oldPC.Status.Replicas != newPC.Status.Replicas ||
-							oldPC.Spec.Replicas != newPC.Spec.Replicas ||
-							!ptrInt64Equal(oldPC.Status.ObservedGeneration, newPC.Status.ObservedGeneration)
+						return podCliqueStatusChangeIsSignificant(oldPC, newPC)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -2796,16 +2835,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 						if !okOld || !okNew {
 							return false
 						}
-						// ObservedGeneration is tracked because CheckPCSGReady uses it as
-						// a readiness gate ("spec not yet processed" while
-						// ObservedGeneration < Generation). A PCSG spec edit that does
-						// not change Spec.Replicas (e.g. template/topology edits) would
-						// otherwise not wake the DGD when Grove catches up.
-						return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
-							oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
-							oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
-							oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
-							!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration)
+						return pcsgStatusChangeIsSignificant(oldPCSG, newPCSG)
 					},
 					GenericFunc: func(ge event.GenericEvent) bool { return false },
 				}),
@@ -2929,4 +2959,68 @@ func ptrInt64Equal(a, b *int64) bool {
 		return false
 	}
 	return *a == *b
+}
+
+// groveScheduledConditionChanged reports whether either of the Grove scheduling
+// conditions consumed by the Ready-reason classification (dynamo/grove.go)
+// changed between two condition slices. It watches PodCliqueScheduled (set on
+// PodCliques) and MinAvailableBreached (set on PodCliqueScalingGroups); a single
+// helper serves both since each object only carries the condition relevant to
+// it. A change in Status or Reason on either condition is treated as a change,
+// so a scheduling shortfall clearing (or appearing) re-wakes the DGD even when
+// the replica counters are otherwise flat.
+func groveScheduledConditionChanged(oldConds, newConds []metav1.Condition) bool {
+	for _, condType := range []string{
+		groveconstants.ConditionTypePodCliqueScheduled,
+		groveconstants.ConditionTypeMinAvailableBreached,
+	} {
+		oldCond := meta.FindStatusCondition(oldConds, condType)
+		newCond := meta.FindStatusCondition(newConds, condType)
+		if (oldCond == nil) != (newCond == nil) {
+			return true
+		}
+		if oldCond != nil && newCond != nil &&
+			(oldCond.Status != newCond.Status || oldCond.Reason != newCond.Reason) {
+			return true
+		}
+	}
+	return false
+}
+
+// podCliqueStatusChangeIsSignificant reports whether a PodClique status update
+// affects the DGD's Grove readiness/classification and therefore must not be
+// filtered out by the watch predicate.
+//
+// It mirrors every field CheckPodCliqueReady (dynamo/grove.go) reads: the
+// replica counters gate readiness and rolling-update detection; ScheduledReplicas
+// and ScheduleGatedReplicas feed the InsufficientCapacity classification and the
+// exposed status.components[*].scheduledReplicas; the PodCliqueScheduled
+// condition is another capacity signal; ObservedGeneration gates "spec not yet
+// processed". In particular, scheduling can advance (e.g. 1/N -> N/N) while the
+// ready/updated/replica counters and the condition stay flat, so ScheduledReplicas
+// must be compared or that event would be dropped and the DGD left stale.
+func podCliqueStatusChangeIsSignificant(oldPC, newPC *grovev1alpha1.PodClique) bool {
+	return oldPC.Status.ReadyReplicas != newPC.Status.ReadyReplicas ||
+		oldPC.Status.UpdatedReplicas != newPC.Status.UpdatedReplicas ||
+		oldPC.Status.Replicas != newPC.Status.Replicas ||
+		oldPC.Status.ScheduledReplicas != newPC.Status.ScheduledReplicas ||
+		oldPC.Status.ScheduleGatedReplicas != newPC.Status.ScheduleGatedReplicas ||
+		oldPC.Spec.Replicas != newPC.Spec.Replicas ||
+		!ptrInt64Equal(oldPC.Status.ObservedGeneration, newPC.Status.ObservedGeneration) ||
+		groveScheduledConditionChanged(oldPC.Status.Conditions, newPC.Status.Conditions)
+}
+
+// pcsgStatusChangeIsSignificant is the PodCliqueScalingGroup analogue of
+// podCliqueStatusChangeIsSignificant. It mirrors every field CheckPCSGReady
+// reads, including ScheduledReplicas (capacity classification + exposed counter)
+// and the MinAvailableBreached condition, so a scheduling-only advance re-wakes
+// the DGD.
+func pcsgStatusChangeIsSignificant(oldPCSG, newPCSG *grovev1alpha1.PodCliqueScalingGroup) bool {
+	return oldPCSG.Status.AvailableReplicas != newPCSG.Status.AvailableReplicas ||
+		oldPCSG.Status.UpdatedReplicas != newPCSG.Status.UpdatedReplicas ||
+		oldPCSG.Status.Replicas != newPCSG.Status.Replicas ||
+		oldPCSG.Status.ScheduledReplicas != newPCSG.Status.ScheduledReplicas ||
+		oldPCSG.Spec.Replicas != newPCSG.Spec.Replicas ||
+		!ptrInt64Equal(oldPCSG.Status.ObservedGeneration, newPCSG.Status.ObservedGeneration) ||
+		groveScheduledConditionChanged(oldPCSG.Status.Conditions, newPCSG.Status.Conditions)
 }

@@ -97,6 +97,47 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out
 }
 
+/// serde `deserialize_with` that maps an explicitly-present value -- *including
+/// an explicit JSON `null`* -- to `Some`. Paired with `#[serde(default)]` (which
+/// supplies `None` only when the key is absent), this distinguishes "field
+/// missing" from "field present but null/invalid". A plain `Option<Value>` would
+/// collapse an explicit `null` into `None`, letting a malformed present
+/// `max_position_embeddings` silently fall through to the next source instead of
+/// surfacing the documented deserialization error.
+fn deserialize_present_json_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// Minimal projection of `config.json`, holding only the fields consulted when
+/// deriving the architectural context length. Every other entry is skipped by
+/// serde. This matters because some HF configs (e.g. Nemotron-H) serialize
+/// fields such as `time_step_limit` with non-finite literals (`Infinity`,
+/// `NaN`) that are valid JSON5 but not strict JSON; deserializing the whole
+/// document into `serde_json::Value` would reject them, whereas projecting into
+/// this struct via the JSON5 parser never materializes those unread fields.
+///
+/// The two consulted fields are captured as raw `serde_json::Value` (rather than
+/// `u32`) so the original per-field error messages are preserved when a value is
+/// present but not a valid integer. `deserialize_present_json_value` keeps an
+/// explicit `null` distinguishable from an absent key (see its docs).
+#[derive(Deserialize)]
+struct ArchMaxContextConfig {
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    max_position_embeddings: Option<serde_json::Value>,
+    text_config: Option<ArchMaxContextTextConfig>,
+}
+
+#[derive(Deserialize)]
+struct ArchMaxContextTextConfig {
+    #[serde(default, deserialize_with = "deserialize_present_json_value")]
+    max_position_embeddings: Option<serde_json::Value>,
+}
+
 /// Resolve the static architectural context limit from local HF metadata.
 ///
 /// `config.json` is authoritative when it declares `max_position_embeddings`;
@@ -128,20 +169,24 @@ fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Resu
     let Some(config_json) = config_json else {
         return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
     };
-    let config: serde_json::Value = serde_json::from_str(&config_json)
+    // Parse with the JSON5 parser (a lenient superset of JSON) into a minimal
+    // projection, mirroring `HFConfig::from_json_file`. This tolerates non-finite
+    // literals (`Infinity`, `NaN`) that HF configs may emit in fields we don't
+    // read, which strict `serde_json` would reject.
+    let config: ArchMaxContextConfig = json_five::from_str(&config_json)
         .with_context(|| format!("Failed to parse JSON from file: {}", config_path.display()))?;
 
-    let context_length = match config.get("max_position_embeddings") {
+    let context_length = match config.max_position_embeddings {
         Some(value) => Some(
-            serde_json::from_value(value.clone())
+            serde_json::from_value(value)
                 .context("Failed to deserialize max_position_embeddings")?,
         ),
         None => match config
-            .get("text_config")
-            .and_then(|text_config| text_config.get("max_position_embeddings"))
+            .text_config
+            .and_then(|text_config| text_config.max_position_embeddings)
         {
             Some(value) => Some(
-                serde_json::from_value(value.clone())
+                serde_json::from_value(value)
                     .context("Failed to deserialize text_config.max_position_embeddings")?,
             ),
             None => tokenizer_context_length(),
@@ -829,6 +874,11 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraInfo>,
 
+    /// Additional names this model responds to (aliases).
+    /// Requests using any of these names will be routed to this worker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
@@ -1047,6 +1097,25 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
 
+                // Aliases participate in the checksum. Every worker in a
+                // deployment carries the same static --served-model-name list,
+                // so their checksums still match and they share one WorkerSet;
+                // changing the alias list rolls a new WorkerSet (consistent per
+                // set) rather than mutating a live one in place. `aliases` holds
+                // only the alternate names (the primary is `display_name`, hashed
+                // above), so order within the list still matters — hash in order.
+                // Skipped entirely when empty so a card without aliases keeps the
+                // same checksum as before this field existed (no spurious
+                // WorkerSet split on upgrade); this is the last hashed field, so
+                // omission is unambiguous.
+                if !self.aliases.is_empty() {
+                    bytes_to_hash.extend((self.aliases.len() as u32).to_be_bytes());
+                    for alias in &self.aliases {
+                        bytes_to_hash.extend((alias.len() as u32).to_be_bytes());
+                        bytes_to_hash.extend(alias.as_bytes());
+                    }
+                }
+
                 // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
@@ -1188,18 +1257,18 @@ impl ModelDeploymentCard {
                         format!("Failed to load tiktoken tokenizer from {}", p.display())
                     })?;
 
+                let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
-                    // Empty specials disable L1, so the wrapper bypasses cache observers.
-                    // The instrumentation helper still binds zero-valued per-model token
-                    // series, ready for future tiktoken special-token extraction.
                     tracing::info!(
                         cache_bytes,
-                        "wrapping tiktoken tokenizer in L1 cache (no special tokens registered; L1 is disabled until tiktoken special-token extraction is added)",
+                        cache_extend,
+                        boundaries = specials.len(),
+                        "wrapping tiktoken tokenizer in L1 prefix cache",
                     );
                     instrumented_tokenizer_cache(
                         raw,
-                        Vec::new(),
+                        specials,
                         cache_bytes,
                         cache_extend,
                         self.name(),
@@ -1236,6 +1305,11 @@ impl ModelDeploymentCard {
 
     pub fn source_path(&self) -> &str {
         self.source_path.as_ref().unwrap_or(&self.display_name)
+    }
+
+    /// Set additional names (aliases) this model responds to.
+    pub fn set_aliases(&mut self, aliases: Vec<String>) {
+        self.aliases = aliases;
     }
 
     /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
@@ -1582,6 +1656,7 @@ impl ModelDeploymentCard {
             worker_type: Default::default(), // set later
             needs: Default::default(),       // set later
             lora: None,
+            aliases: Vec::new(),
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             tensor_model_config: None,
@@ -2773,6 +2848,50 @@ mod ownership_tests {
             err.to_string()
                 .contains("Failed to deserialize text_config.max_position_embeddings"),
             "{err:?}"
+        );
+
+        // An explicit null is a present-but-malformed value: it must error, not
+        // silently fall through to text_config/tokenizer (regression guard for
+        // the Option<Value> projection collapsing null into None).
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": null}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize max_position_embeddings"),
+            "{err:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": null}}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
+            "{err:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn architectural_context_tolerates_non_finite_literals() -> anyhow::Result<()> {
+        // Some HF configs (e.g. Nemotron-H) serialize fields such as
+        // `time_step_limit` with the bare literal `Infinity`, which is valid
+        // JSON5 but not strict JSON. Deriving max_position_embeddings must not
+        // choke on such literals in fields we never read.
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": 262144, "time_step_limit": [0.0, Infinity]}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(262144)
         );
 
         Ok(())

@@ -79,12 +79,6 @@ const (
 	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
 	AnnotationGeneratedDGDSpec    = "nvidia.com/generated-dgd-spec"
 
-	// Annotation keys for v1alpha1 round-trip compatibility.
-	// The conversion layer stores v1alpha1 fields that have no v1beta1 spec equivalent
-	// as annotations so the controller can still honour them for converted resources.
-	AnnotationConfigMapRef = "nvidia.com/dgdr-config-map-ref"
-	AnnotationOutputPVC    = "nvidia.com/dgdr-output-pvc"
-
 	// Size limits
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
 
@@ -1441,6 +1435,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		if err != nil {
 			return nil, false, err
 		}
+		alphaProfilingConfig, err := restoredAlphaProfilingConfig(dgdr)
+		if err != nil {
+			return nil, false, fmt.Errorf("restore v1alpha1 profiling compatibility fields: %w", err)
+		}
 
 		// Common environment variables
 		profilerEnv := []corev1.EnvVar{
@@ -1489,8 +1487,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			})
 		}
 
-		// v1alpha1 round-trip: mount ConfigMap if referenced via annotation
-		cmRef := configMapRefFromAnnotation(dgdr)
+		// v1alpha1 round-trip: mount a ConfigMap restored from structural
+		// conversion preservation (or the read-only legacy fallback).
+		cmRef := alphaProfilingConfig.ConfigMapRef
 		if cmRef != nil {
 			volumeMounts = append(volumeMounts, corev1.VolumeMount{
 				Name:      VolumeNameProfilingConfig,
@@ -1560,11 +1559,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			}},
 		}
 
-		// Use PVC for profiling output if round-tripped v1alpha1 annotation is present,
-		// otherwise use emptyDir (v1beta1 default).
+		// Use a PVC for profiling output when restored from v1alpha1 conversion
+		// preservation; otherwise use emptyDir (the v1beta1 default).
 		var profilingOutputVolume corev1.Volume
-		if outputPVC := outputPVCFromAnnotation(dgdr); outputPVC != "" {
-			logger.Info("Using PVC for profiling output (from v1alpha1 annotation)", "pvc", outputPVC)
+		if outputPVC := alphaProfilingConfig.OutputPVC; outputPVC != "" {
+			logger.Info("Using PVC for profiling output (from v1alpha1 compatibility fields)", "pvc", outputPVC)
 			profilingOutputVolume = corev1.Volume{
 				Name: VolumeNameProfilingOutput,
 				VolumeSource: corev1.VolumeSource{
@@ -1596,7 +1595,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			})
 		}
 
-		// v1alpha1 round-trip: add ConfigMap volume if referenced via annotation
+		// v1alpha1 round-trip: add the restored ConfigMap volume.
 		if cmRef != nil {
 			cmKey := cmRef.Key
 			if cmKey == "" {
@@ -1864,36 +1863,19 @@ func extractModelCachePVCConfig(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequ
 	return dgdr.Spec.ModelCache.PVCName, mountPath
 }
 
-// configMapKeySelector mirrors v1alpha1.ConfigMapKeySelector for annotation deserialization.
-type configMapKeySelector struct {
-	Name string `json:"name"`
-	Key  string `json:"key,omitempty"`
-}
-
-// configMapRefFromAnnotation reads the ConfigMap reference from the round-trip annotation.
-// Returns nil for native v1beta1 resources (no annotation present).
-func configMapRefFromAnnotation(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) *configMapKeySelector {
-	if dgdr.Annotations == nil {
-		return nil
+// restoredAlphaProfilingConfig converts the hub object back to its served
+// v1alpha1 shape so controller behavior follows the same structural
+// preservation rules as API clients. ConvertFrom also retains a read-only
+// fallback for objects stored with Dynamo 1.0/1.1 annotations.
+func restoredAlphaProfilingConfig(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (dgdv1alpha1.ProfilingConfigSpec, error) {
+	if dgdr == nil {
+		return dgdv1alpha1.ProfilingConfigSpec{}, nil
 	}
-	raw, ok := dgdr.Annotations[AnnotationConfigMapRef]
-	if !ok || raw == "" {
-		return nil
+	alpha := &dgdv1alpha1.DynamoGraphDeploymentRequest{}
+	if err := alpha.ConvertFrom(dgdr); err != nil {
+		return dgdv1alpha1.ProfilingConfigSpec{}, err
 	}
-	var ref configMapKeySelector
-	if err := json.Unmarshal([]byte(raw), &ref); err != nil {
-		return nil
-	}
-	return &ref
-}
-
-// outputPVCFromAnnotation reads the output PVC name from the round-trip annotation.
-// Returns "" for native v1beta1 resources (always emptyDir).
-func outputPVCFromAnnotation(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
-	if dgdr.Annotations == nil {
-		return ""
-	}
-	return dgdr.Annotations[AnnotationOutputPVC]
+	return alpha.Spec.ProfilingConfig, nil
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed

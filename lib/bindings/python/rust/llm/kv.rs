@@ -572,11 +572,11 @@ impl SelectionService {
     fn prefill_complete<'p>(
         &self,
         py: Python<'p>,
-        reservation_id: String,
+        selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            core.prefill_complete(&reservation_id)
+            core.prefill_complete(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
             Ok(())
@@ -584,14 +584,10 @@ impl SelectionService {
     }
 
     /// Record one decode output block for a reservation, advancing its decode load.
-    #[pyo3(signature = (reservation_id, *, decay_fraction = None))]
-    fn add_output_block(
-        &self,
-        reservation_id: String,
-        decay_fraction: Option<f64>,
-    ) -> PyResult<()> {
+    #[pyo3(signature = (selection_id, *, decay_fraction = None))]
+    fn add_output_block(&self, selection_id: String, decay_fraction: Option<f64>) -> PyResult<()> {
         self.inner
-            .add_output_block(&reservation_id, decay_fraction)
+            .add_output_block(&selection_id, decay_fraction)
             .map_err(selection_to_pyerr)
     }
 
@@ -599,11 +595,11 @@ impl SelectionService {
     fn free_reservation<'p>(
         &self,
         py: Python<'p>,
-        reservation_id: String,
+        selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            core.free_reservation(&reservation_id)
+            core.free_reservation(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
             Ok(())
@@ -904,11 +900,12 @@ impl KvEventPublisher {
     ///         so that routers can recover events directly from this worker.
     ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
     ///     zmq_topic: ZMQ topic filter (default "").
-    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
-    ///         events into a single batch before flushing.
-    ///         ``None`` disables batching: every event is published immediately.
-    ///         ``50`` to enable batching with a 50 ms window.
-    ///         ``0`` is treated as ``None`` (also disables batching).
+    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to retain a
+    ///         compatible pending tail across input lists. ``None`` and ``0``
+    ///         disable cross-list timeout batching and flush at each input-list
+    ///         boundary. A ZMQ input list is one native SGLang/vLLM event batch,
+    ///         so compatible events within that list are still coalesced.
+    ///         Use ``50`` to allow compatible tails to span lists for up to 50 ms.
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
     #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
