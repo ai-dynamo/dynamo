@@ -44,7 +44,7 @@ use tracing;
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
-use crate::preprocessor::media::MediaLoader;
+use crate::preprocessor::media::{MediaDataDescriptor, MediaLoader};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -584,7 +584,11 @@ impl OpenAIPreprocessor {
         let context_length = mdc.effective_context_length();
 
         let media_loader = match mdc.media_decoder {
-            Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
+            Some(media_decoder) => Some(MediaLoader::new(
+                media_decoder,
+                mdc.media_preprocessor,
+                mdc.media_fetcher,
+            )?),
             None => None,
         };
 
@@ -1269,12 +1273,15 @@ impl OpenAIPreprocessor {
 
             for ((type_str, _content_part), result) in fetch_tasks.into_iter().zip(results) {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
-                let rdma_descriptor = result?;
+                let media_descriptor = result?;
 
                 // Decoded RDMA descriptor carries shape `[H, W, C]`.
                 // Image-only; MM-routing doesn't cover audio/video.
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
+                    let MediaDataDescriptor::Decoded(rdma_descriptor) = &media_descriptor else {
+                        anyhow::bail!("image preprocessing is not supported in the Rust frontend");
+                    };
                     let shape = &rdma_descriptor.tensor_info.shape;
                     if shape.len() >= 2 {
                         let h = shape[0] as u32;
@@ -1319,10 +1326,13 @@ impl OpenAIPreprocessor {
                     }
                 }
 
-                media_map
-                    .entry(type_str)
-                    .or_default()
-                    .push(MultimodalData::Decoded(rdma_descriptor));
+                let media = match media_descriptor {
+                    MediaDataDescriptor::Decoded(descriptor) => MultimodalData::Decoded(descriptor),
+                    MediaDataDescriptor::Preprocessed(descriptor) => {
+                        MultimodalData::Preprocessed(descriptor)
+                    }
+                };
+                media_map.entry(type_str).or_default().push(media);
             }
         }
 

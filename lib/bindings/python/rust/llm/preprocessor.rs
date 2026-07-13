@@ -4,12 +4,50 @@
 use super::*;
 use std::time::Duration;
 
-use llm_rs::preprocessor::media::{MediaDecoder as RsMediaDecoder, MediaFetcher as RsMediaFetcher};
+use llm_rs::preprocessor::media::{
+    MediaDecoder as RsMediaDecoder, MediaFetcher as RsMediaFetcher,
+    MediaPreprocessor as RsMediaPreprocessor,
+};
 
 #[pyclass]
 #[derive(Clone)]
 pub struct MediaDecoder {
     pub(crate) inner: RsMediaDecoder,
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct MediaPreprocessor {
+    pub(crate) inner: RsMediaPreprocessor,
+}
+
+#[pymethods]
+impl MediaPreprocessor {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: RsMediaPreprocessor::default(),
+        }
+    }
+
+    fn enable_video(
+        &mut self,
+        model_type: &str,
+        preprocessor_config_json: &str,
+    ) -> PyResult<()> {
+        self.inner.video = Some(
+            dynamo_multimodal::registry::VideoProcessorConfig::from_hf(
+                model_type,
+                preprocessor_config_json,
+            )
+            .map_err(|err| {
+                PyErr::new::<PyException, _>(format!(
+                    "Failed to configure video processor for model_type={model_type:?}: {err}"
+                ))
+            })?,
+        );
+        Ok(())
+    }
 }
 
 #[pymethods]

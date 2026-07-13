@@ -22,6 +22,7 @@ from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher
+from dynamo._core import MediaPreprocessor as MediaPreprocessor
 from dynamo._core import ModelCardInstanceId as ModelCardInstanceId
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig

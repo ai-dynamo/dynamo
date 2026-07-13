@@ -182,6 +182,54 @@ failure after a full transfer does not currently have a raw-media fallback.
 P/D prefill deliberately uses the original media because it still needs
 raw-media-derived metadata for the decode handoff.
 
+### Frontend Qwen3-VL Video Preprocessing
+
+**Experimental. Available since v1.3.0.** An aggregated Qwen3-VL worker can move video decode and
+Hugging Face-compatible vision preprocessing into the Rust frontend. The frontend transfers FP32
+patch tensors, the `video_grid_thw` value, and frame timestamps over NIXL. vLLM still runs the
+vision encoder.
+
+Enable the path with both frontend media flags:
+
+```bash
+bash launch/agg_multimodal.sh --unified \
+  --model Qwen/Qwen3-VL-2B-Instruct \
+  --enable-multimodal \
+  --frontend-decoding \
+  --frontend-video-preprocessing
+```
+
+The worker loads `preprocessor_config.json` from the model bundle and advertises preprocessing as a
+separate discovery capability from media decoding. The model-specific processor emits Dynamo's
+backend-neutral processed-media representation: named tensor fields, per-field batching layout,
+placement hints, feature-token counts, and content hashes. Large fields use NIXL while small metadata
+stays inline. The wire representation contains neither a Hugging Face version nor a model-specific
+schema version; compatibility is validated from field names, dtypes, shapes, and layouts.
+
+Qwen3-VL is the first registered processor. A future model adds a processor and prompt specification.
+The contract is designed so vLLM, SGLang, and TensorRT-LLM adapters can consume the same
+representation without a model-by-backend implementation. Set `DYN_MM_VIDEO_MAX_FRAMES` to cap
+sampled frames; the default is `32`, sampled at 2 frames per second.
+
+This initial path has the following constraints:
+
+- `model_type` must be `qwen3_vl`.
+- The worker must use aggregated mode and Dynamo's token pipeline.
+- A request can contain multiple videos, but cannot mix videos with images or audio.
+- `use_audio_in_video` is unsupported.
+- `mm_processor_kwargs` cannot change preprocessing; only `do_sample_frames=false` is accepted.
+
+> [!WARNING]
+> A preprocessing or transfer error fails the request. Dynamo does not retry the request through
+> vLLM's raw-video processor.
+
+Run the standalone Rust microbenchmark without a CI performance threshold:
+
+```bash
+cargo run -p dynamo-multimodal --release \
+  --example bench_qwen3_vl_video -- 2000 512 512 8
+```
+
 <Warning>
 The unified vLLM entry point does not provide a separate Encode worker and
 rejects both `--disaggregation-mode encode` and `--route-to-encoder`. Use the

@@ -15,7 +15,7 @@ use uuid::Uuid;
 use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::preprocessor::media::RdmaMediaDataDescriptor;
+use crate::preprocessor::media::{ProcessedMediaDataDescriptor, RdmaMediaDataDescriptor};
 use crate::protocols::TokenIdType;
 
 /// Routing hints for directing requests to specific workers.
@@ -152,6 +152,7 @@ pub enum MultimodalData {
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
+    Preprocessed(ProcessedMediaDataDescriptor),
 }
 
 // multimodal map containing {mm_part_type: [data...]}

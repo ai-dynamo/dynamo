@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
+media-preprocessing = ["media-ffmpeg", "dynamo-llm/media-preprocessing"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-indexer"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
@@ -48,6 +49,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 # on the predict hot path.
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
+dynamo-multimodal = { path = "../../multimodal" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "4.1.1" }
 dynamo-backend-common = { path = "../../backend-common" }

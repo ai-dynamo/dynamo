@@ -30,7 +30,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
     MmKwargsShmTransferMetadata,
     MmKwargsTransferMetadata,
 )
-from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.multimodal.video_loader import PREPROCESSED_VARIANT_KEY, VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 
 from .hash_utils import compute_mm_uuids_from_images
@@ -40,6 +40,7 @@ from .models.qwen import (
     build_qwen_embedding_params,
     load_qwen_grid_params,
 )
+from .processed_media_adapter import build_processed_media_input
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +443,38 @@ class VllmMultimodalRequestProcessor:
             )
         return None
 
+    async def try_processed_media(
+        self,
+        request: dict[str, Any],
+        mm_processor_kwargs: Optional[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        """Consume Dynamo's backend-neutral processed-media payload."""
+        mm_map = request.get("multi_modal_data") or {}
+        video_items = mm_map.get(VIDEO_URL_KEY) or []
+        has_preprocessed = any(
+            isinstance(item, dict) and PREPROCESSED_VARIANT_KEY in item
+            for item in video_items
+        )
+        if not has_preprocessed:
+            return None
+
+        if mm_map.get(IMAGE_URL_KEY) or mm_map.get(AUDIO_URL_KEY):
+            raise ValueError(
+                "Frontend-preprocessed video requests cannot mix image or audio inputs"
+            )
+        if mm_processor_kwargs and mm_processor_kwargs.get("use_audio_in_video"):
+            raise ValueError(
+                "use_audio_in_video is not supported with frontend-preprocessed video"
+            )
+
+        media_items = await self.video_loader.load_processed_media_batch(video_items)
+        return build_processed_media_input(
+            prompt_token_ids=request["token_ids"],
+            media_items=media_items,
+            engine_client=self.engine_client,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+
     async def _receive_mm_kwargs(
         self,
         extra_args: dict[str, Any],
@@ -591,6 +624,15 @@ class VllmMultimodalRequestProcessor:
         multi_modal_data: Optional[dict[str, Any]] = None
         pre_rendered = None
 
+        contains_processed_media = any(
+            isinstance(item, dict) and PREPROCESSED_VARIANT_KEY in item
+            for item in (request.get("multi_modal_data") or {}).get(VIDEO_URL_KEY, [])
+        )
+        if contains_processed_media and mode != DisaggregationMode.AGGREGATED:
+            raise ValueError(
+                "Frontend-preprocessed video is supported only in aggregated mode"
+            )
+
         if mode == DisaggregationMode.DECODE:
             prefill_result = request.get("prefill_result") or {}
             disaggregated_params = prefill_result.get("disaggregated_params") or {}
@@ -630,7 +672,9 @@ class VllmMultimodalRequestProcessor:
                         mm_processor_kwargs,
                     )
         elif mode == DisaggregationMode.AGGREGATED:
-            pre_rendered = await self.try_receive_mm_kwargs(request)
+            pre_rendered = await self.try_processed_media(request, mm_processor_kwargs)
+            if pre_rendered is None:
+                pre_rendered = await self.try_receive_mm_kwargs(request)
             if pre_rendered is None:
                 multi_modal_data = await self.extract_multimodal_data(
                     request,

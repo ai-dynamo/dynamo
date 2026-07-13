@@ -80,6 +80,7 @@ pub struct LocalModelBuilder {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     media_decoder: Option<MediaDecoder>,
+    media_preprocessor: Option<crate::preprocessor::media::MediaPreprocessor>,
     media_fetcher: Option<MediaFetcher>,
 }
 
@@ -111,6 +112,7 @@ impl Default for LocalModelBuilder {
             namespace: Default::default(),
             namespace_prefix: Default::default(),
             media_decoder: Default::default(),
+            media_preprocessor: Default::default(),
             media_fetcher: Default::default(),
         }
     }
@@ -289,6 +291,14 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn media_preprocessor(
+        &mut self,
+        media_preprocessor: Option<crate::preprocessor::media::MediaPreprocessor>,
+    ) -> &mut Self {
+        self.media_preprocessor = media_preprocessor;
+        self
+    }
+
     pub fn media_fetcher(&mut self, media_fetcher: Option<MediaFetcher>) -> &mut Self {
         self.media_fetcher = media_fetcher;
         self
@@ -336,6 +346,7 @@ impl LocalModelBuilder {
             card.user_data = self.user_data.take();
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
+            card.media_preprocessor = self.media_preprocessor.clone();
             card.media_fetcher = self.media_fetcher.clone();
             card.router_config = self.router_config.clone();
 
@@ -389,6 +400,7 @@ impl LocalModelBuilder {
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
+        card.media_preprocessor = self.media_preprocessor.clone();
         card.media_fetcher = self.media_fetcher.clone();
         card.router_config = self.router_config.clone();
 

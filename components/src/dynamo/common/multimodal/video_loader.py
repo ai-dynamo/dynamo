@@ -23,13 +23,22 @@ import numpy as np
 
 from dynamo.common.http import fetch_bytes
 from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
+from dynamo.common.multimodal.processed_media import ProcessedField, ProcessedMedia
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
 
+_INLINE_DTYPES = {
+    "uint8": np.dtype("u1"),
+    "float32": np.dtype("<f4"),
+    "int64": np.dtype("<i8"),
+    "float64": np.dtype("<f8"),
+}
+
 
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
+PREPROCESSED_VARIANT_KEY: Final = "Preprocessed"
 
 
 def _create_nixl_connector() -> Any:
@@ -157,6 +166,105 @@ class VideoLoader:
             raise ValueError("Decoded video metadata is required")
 
         return np.ascontiguousarray(frames), metadata
+
+    async def _load_processed_media(self, metadata: Dict[str, Any]) -> ProcessedMedia:
+        if self._nixl_connector is None:
+            raise RuntimeError("NIXL connector is not initialized")
+        raw_fields = metadata.get("fields")
+        if not isinstance(raw_fields, dict) or not raw_fields:
+            raise ValueError("Processed media must contain named fields")
+
+        async def load_field(
+            name: str, field: dict[str, Any]
+        ) -> tuple[str, ProcessedField]:
+            storage = field.get("storage")
+            if storage == "rdma":
+                value = await read_decoded_media_via_nixl(
+                    self._nixl_connector, field, trim_alpha=False
+                )
+            elif storage == "inline":
+                dtype_name = str(field.get("dtype", "")).lower()
+                try:
+                    dtype = _INLINE_DTYPES[dtype_name]
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Unsupported inline dtype for processed field {name}: "
+                        f"{dtype_name!r}"
+                    ) from exc
+                try:
+                    payload = bytes(field["data"])
+                    value = (
+                        np.frombuffer(payload, dtype=dtype)
+                        .reshape(field["shape"])
+                        .copy()
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid inline payload for processed field {name}"
+                    ) from exc
+            else:
+                raise ValueError(
+                    f"Unsupported storage for processed field {name}: {storage!r}"
+                )
+            layout = field.get("layout")
+            if not isinstance(layout, dict) or "kind" not in layout:
+                raise ValueError(f"Processed field {name} has no valid layout")
+            return name, ProcessedField(
+                value=np.ascontiguousarray(value),
+                layout=layout,
+                keep_on_host=bool(field.get("keep_on_host", False)),
+                forward=bool(field.get("forward", True)),
+            )
+
+        fields = dict(
+            await asyncio.gather(
+                *(load_field(name, field) for name, field in raw_fields.items())
+            )
+        )
+        feature_token_counts = [
+            int(value) for value in metadata["feature_token_counts"]
+        ]
+        raw_original_sizes = metadata["original_sizes"]
+        if any(len(value) != 2 for value in raw_original_sizes):
+            raise ValueError(
+                "Processed-media original sizes must contain two dimensions"
+            )
+        original_sizes = [
+            (int(value[0]), int(value[1])) for value in raw_original_sizes
+        ]
+        content_hashes = [str(value) for value in metadata["content_hashes"]]
+        if not (
+            len(feature_token_counts) == len(original_sizes) == len(content_hashes) == 1
+        ):
+            raise ValueError(
+                "Each processed-media descriptor must contain exactly one item"
+            )
+        return ProcessedMedia(
+            modality=str(metadata["modality"]),
+            fields=fields,
+            feature_token_counts=feature_token_counts,
+            original_sizes=original_sizes,
+            content_hashes=content_hashes,
+        )
+
+    async def load_processed_media_batch(
+        self, video_mm_items: List[Dict[str, Any]]
+    ) -> list[ProcessedMedia]:
+        if not video_mm_items or any(
+            not isinstance(item, dict) or PREPROCESSED_VARIANT_KEY not in item
+            for item in video_mm_items
+        ):
+            raise ValueError(
+                "Preprocessed video requests cannot mix URL or decoded video items"
+            )
+        return list(
+            await asyncio.gather(
+                *(
+                    self._load_processed_media(item[PREPROCESSED_VARIANT_KEY])
+                    for item in video_mm_items
+                )
+            )
+        )
 
     async def load_video_batch(
         self,

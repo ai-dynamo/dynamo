@@ -2245,6 +2245,7 @@ async def register_model(
     base_model_path: Optional[str] = None,
     needs: Optional[List[List[WorkerType]]] = None,
     self_host_metadata: Optional[bool] = None,
+    media_preprocessor: Optional[MediaPreprocessor] = None,
     ignore_weights: bool = False,
     max_gpu_lora_count: Optional[int] = None,
 ) -> None:
@@ -2312,6 +2313,15 @@ class MediaDecoder:
 
     def __init__(self) -> None: ...
     def enable_image(self, decoder_options: Dict[str, Any]) -> None: ...
+
+
+class MediaPreprocessor:
+    """Model-specific preprocessing applied after media decoding."""
+
+    def __init__(self) -> None: ...
+    def enable_video(
+        self, model_type: str, preprocessor_config_json: str
+    ) -> None: ...
 
 
 class MediaFetcher:
@@ -3284,6 +3294,7 @@ class backend:
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
+            media_preprocessor: Optional[MediaPreprocessor] = None,
         ) -> None: ...
 
     class Worker:

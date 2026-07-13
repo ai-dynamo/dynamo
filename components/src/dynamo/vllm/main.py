@@ -732,10 +732,12 @@ async def register_vllm_model(
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 
-    # Configure media decoder for frontend image decoding when enabled
-    # This enables frontend to decode images and transfer via NIXL RDMA
-    media_decoder, media_fetcher = create_frontend_media_config(
-        config.frontend_decoding
+    # Configure frontend media decoding and optional model preprocessing.
+    media_decoder, media_preprocessor, media_fetcher = create_frontend_media_config(
+        config.frontend_decoding,
+        video_preprocessing=config.frontend_video_preprocessing,
+        model=config.model,
+        model_type=getattr(vllm_config.model_config.hf_config, "model_type", None),
     )
 
     await register_model(
@@ -748,6 +750,7 @@ async def register_vllm_model(
         runtime_config=runtime_config,
         custom_template_path=config.custom_jinja_template,
         media_decoder=media_decoder,
+        media_preprocessor=media_preprocessor,
         media_fetcher=media_fetcher,
         worker_type=worker_type,
         needs=needs,

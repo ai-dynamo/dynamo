@@ -109,3 +109,67 @@ async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch)
         decoded_item,
         return_metadata=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_load_processed_media_loads_named_rdma_and_inline_fields(monkeypatch):
+    loader = VideoLoader(enable_frontend_decoding=False)
+    loader._nixl_connector = object()
+    tensor = np.arange(24, dtype=np.float32).reshape(4, 6)
+    read_tensor = AsyncMock(return_value=tensor)
+    monkeypatch.setattr(video_loader_module, "read_decoded_media_via_nixl", read_tensor)
+    metadata = {
+        "modality": "video",
+        "fields": {
+            "pixel_values_videos": {
+                "storage": "rdma",
+                "shape": [4, 6],
+                "dtype": "FLOAT32",
+                "layout": {"kind": "flat", "sizes_key": "patches_per_video"},
+            },
+            "video_grid_thw": {
+                "storage": "inline",
+                "dtype": "INT64",
+                "data": list(np.asarray([1, 2, 2], dtype="<i8").tobytes()),
+                "shape": [1, 3],
+                "layout": {"kind": "batched"},
+                "keep_on_host": True,
+            },
+            "timestamps": {
+                "storage": "inline",
+                "dtype": "FLOAT64",
+                "data": list(np.asarray([0.25], dtype="<f8").tobytes()),
+                "shape": [1, 1],
+                "layout": {"kind": "batched"},
+                "keep_on_host": True,
+            },
+        },
+        "feature_token_counts": [1],
+        "original_sizes": [[2, 2]],
+        "content_hashes": ["abc"],
+    }
+
+    (media,) = await loader.load_processed_media_batch([{"Preprocessed": metadata}])
+
+    np.testing.assert_array_equal(media.fields["pixel_values_videos"].value, tensor)
+    np.testing.assert_array_equal(media.fields["video_grid_thw"].value, [[1, 2, 2]])
+    np.testing.assert_array_equal(media.fields["timestamps"].value, [[0.25]])
+    assert media.fields["video_grid_thw"].value.flags.writeable
+    assert media.modality == "video"
+    read_tensor.assert_awaited_once_with(
+        loader._nixl_connector,
+        metadata["fields"]["pixel_values_videos"],
+        trim_alpha=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_load_processed_media_rejects_mixed_variants():
+    loader = VideoLoader(enable_frontend_decoding=False)
+    with pytest.raises(ValueError, match="cannot mix"):
+        await loader.load_processed_media_batch(
+            [
+                {"Preprocessed": {}},
+                {"Url": "https://example.com/video.mp4"},
+            ]
+        )

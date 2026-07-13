@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-multimodal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Backend-neutral multimodal preprocessing primitives for Dynamo"
+
+[dependencies]
+anyhow.workspace = true
+fast_image_resize = { version = "6.0.0", features = ["image"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+ndarray = "0.17"
+rayon = "1.12"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
