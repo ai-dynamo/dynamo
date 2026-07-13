@@ -45,9 +45,9 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Track prompt-side prefill load in worker load accounting |
 | `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load, `aic` for oldest-prefill decay using an AIC prediction |
 | `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. >1 enables the concurrent radix tree, including with `--no-router-kv-events` |
-| `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `16.0` | Queue threshold fraction of prefill capacity. Priority hints only affect requests waiting in this queue |
+| `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | unset | Queue threshold fraction of prefill capacity. Setting a numeric value enables queueing; priority hints only affect requests waiting in this queue |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
-| `--router-policy-config` | `DYN_ROUTER_POLICY_CONFIG` | — | Startup-only [policy-family and cache-bucket YAML](../router/router-configuration.md#policy-class-queues). Falls back to the single queue configured above when omitted |
+| `--router-policy-config` | `DYN_ROUTER_POLICY_CONFIG` | — | Startup-only [policy-family and cache-bucket YAML](../router/router-configuration.md#policy-class-queues). Uses one synthetic policy class when omitted; queueing requires a numeric threshold |
 | `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers unavailable |
 
 ## AIC Prefill Load Model
