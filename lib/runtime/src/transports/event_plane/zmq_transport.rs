@@ -170,13 +170,13 @@ impl ZmqPubTransport {
 impl EventTransportTx for ZmqPubTransport {
     async fn publish(&self, _subject: &str, envelope_bytes: Bytes) -> Result<()> {
         let codec = MsgpackCodec;
-        let envelope = codec.decode_envelope(&envelope_bytes)?;
+        let (publisher_id, sequence) = codec.decode_envelope_identity(&envelope_bytes)?;
 
         let frame = Frame::new(envelope_bytes);
         let frames = vec![
             self.topic.as_bytes().to_vec(),
-            envelope.publisher_id.to_be_bytes().to_vec(),
-            envelope.sequence.to_be_bytes().to_vec(),
+            publisher_id.to_be_bytes().to_vec(),
+            sequence.to_be_bytes().to_vec(),
             frame.encode().to_vec(),
         ];
 

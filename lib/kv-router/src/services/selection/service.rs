@@ -241,20 +241,20 @@ impl SelectionService {
         self.core.create_reservation(req).await
     }
 
-    pub async fn prefill_complete(&self, reservation_id: &str) -> Result<(), SelectionError> {
-        self.core.prefill_complete(reservation_id).await
+    pub async fn prefill_complete(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.prefill_complete(selection_id).await
     }
 
     pub fn add_output_block(
         &self,
-        reservation_id: &str,
+        selection_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SelectionError> {
-        self.core.add_output_block(reservation_id, decay_fraction)
+        self.core.add_output_block(selection_id, decay_fraction)
     }
 
-    pub async fn free_reservation(&self, reservation_id: &str) -> Result<(), SelectionError> {
-        self.core.free_reservation(reservation_id).await
+    pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.free_reservation(selection_id).await
     }
 
     pub fn ready(&self) -> ReadyResponse {
