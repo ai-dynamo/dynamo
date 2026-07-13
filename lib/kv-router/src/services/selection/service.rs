@@ -12,9 +12,9 @@ use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
 
-use super::cache::SelectionCacheConfig;
 use super::core::{SelectionCore, SelectionServiceConfig};
 use super::error::SelectionError;
+use super::pending::SelectionCacheConfig;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
