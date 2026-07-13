@@ -66,7 +66,7 @@ type LeaseAwareValidator struct {
 
 // LeaseAwareDefaulter skips defaulting in namespaces owned by namespace-restricted operators.
 type LeaseAwareDefaulter struct {
-	defaulter          admission.CustomDefaulter
+	defaulter          admission.Defaulter[runtime.Object]
 	excludedNamespaces ExcludedNamespacesChecker
 }
 
@@ -85,7 +85,7 @@ func NewLeaseAwareValidator(validator admission.CustomValidator, excludedNamespa
 
 // NewLeaseAwareDefaulter creates a defaulter that skips namespaces claimed by a Lease.
 // If excludedNamespaces is nil, the defaulter is returned unchanged.
-func NewLeaseAwareDefaulter(defaulter admission.CustomDefaulter, excludedNamespaces ExcludedNamespacesChecker) admission.CustomDefaulter {
+func NewLeaseAwareDefaulter(defaulter admission.Defaulter[runtime.Object], excludedNamespaces ExcludedNamespacesChecker) admission.Defaulter[runtime.Object] {
 	if excludedNamespaces == nil {
 		return defaulter
 	}
