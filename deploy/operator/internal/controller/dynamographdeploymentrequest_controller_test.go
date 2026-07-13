@@ -24,6 +24,7 @@ import (
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -239,13 +240,25 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(k8sClient.Create(ctx, sa)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, sa) }()
 
+			alphaCompatibility := &dgdv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: dgdv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: dgdv1alpha1.ProfilingConfigSpec{
+						ConfigMapRef: &dgdv1alpha1.ConfigMapKeySelector{Name: "test-config", Key: "disagg.yaml"},
+						OutputPVC:    "test-output-pvc",
+					},
+				},
+			}
+			structuralHub := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(alphaCompatibility.ConvertTo(structuralHub)).Should(Succeed())
+			Expect(structuralHub.Annotations).Should(HaveKey("nvidia.com/dgdr-spec"))
+			Expect(structuralHub.Annotations).ShouldNot(HaveKey("nvidia.com/dgdr-config-map-ref"))
+			Expect(structuralHub.Annotations).ShouldNot(HaveKey("nvidia.com/dgdr-output-pvc"))
+
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      dgdrName,
-					Namespace: namespace,
-					Annotations: map[string]string{
-						"nvidia.com/dgdr-config-map-ref": `{"name":"test-config","key":"disagg.yaml"}`,
-					},
+					Name:        dgdrName,
+					Namespace:   namespace,
+					Annotations: structuralHub.Annotations,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
 					Model:   "test-model",
@@ -311,18 +324,52 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(profilerEnvNames).ShouldNot(HaveKey(EnvDGDOverrideToolPath))
 			Expect(job.Spec.Template.Spec.InitContainers).Should(BeEmpty())
 
-			// Verify emptyDir volume (not PVC)
+			// Verify both alpha-only profiling fields were restored from the
+			// structural payload and used by the controller.
 			Expect(job.Spec.Template.Spec.Volumes).Should(ContainElement(
 				corev1.Volume{
 					Name: VolumeNameProfilingOutput,
 					VolumeSource: corev1.VolumeSource{
-						EmptyDir: &corev1.EmptyDirVolumeSource{},
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "test-output-pvc",
+						},
+					},
+				},
+			))
+			Expect(job.Spec.Template.Spec.Volumes).Should(ContainElement(
+				corev1.Volume{
+					Name: VolumeNameProfilingConfig,
+					VolumeSource: corev1.VolumeSource{
+						ConfigMap: &corev1.ConfigMapVolumeSource{
+							LocalObjectReference: corev1.LocalObjectReference{Name: "test-config"},
+							DefaultMode:          ptr.To[int32](420),
+							Items: []corev1.KeyToPath{{
+								Key:  "disagg.yaml",
+								Path: ProfilingConfigDefaultKey,
+							}},
+						},
 					},
 				},
 			))
 
 			// Clean up job
 			_ = k8sClient.Delete(ctx, job)
+		})
+
+		It("Should retain read-only support for legacy profiling annotations", func() {
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					"nvidia.com/dgdr-config-map-ref": `{"name":"legacy-config","key":"legacy.yaml"}`,
+					"nvidia.com/dgdr-output-pvc":     "legacy-output-pvc",
+				}},
+			}
+
+			config, err := restoredAlphaProfilingConfig(dgdr)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(config.ConfigMapRef).NotTo(BeNil())
+			Expect(config.ConfigMapRef.Name).To(Equal("legacy-config"))
+			Expect(config.ConfigMapRef.Key).To(Equal("legacy.yaml"))
+			Expect(config.OutputPVC).To(Equal("legacy-output-pvc"))
 		})
 
 		It("Should deliver the version-matched override tool when a DGD override is present", func() {

@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use dynamo_kv_router::LocalBlockHash;
+use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfMatchMode, EventTransposedCkfIndexer};
 use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
+use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier, WorkerWithDpRank};
 use dynamo_kv_router::{
     BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
     ThreadPoolIndexer,
@@ -23,6 +24,7 @@ pub enum MooncakeIndexerKind {
     NestedMap,
     ConcurrentRadixTree,
     ConcurrentRadixTreeCompressed,
+    TransposedCkf,
     BranchShardedCrtc,
 }
 
@@ -34,6 +36,9 @@ pub struct MooncakeIndexerConfig {
     pub num_shards: usize,
     pub num_event_workers_per_shard: usize,
     pub prefix_depth: usize,
+    pub expected_blocks_per_dc: usize,
+    pub publish_every_n_events: usize,
+    pub ckf_match_mode: CkfMatchMode,
 }
 
 #[allow(dead_code)]
@@ -46,6 +51,9 @@ impl MooncakeIndexerConfig {
             num_shards: 2,
             num_event_workers_per_shard: 4,
             prefix_depth: 2,
+            expected_blocks_per_dc: 16_384,
+            publish_every_n_events: 1,
+            ckf_match_mode: CkfMatchMode::FullMap,
         }
     }
 
@@ -74,6 +82,36 @@ impl MooncakeIndexerConfig {
         }
     }
 
+    pub fn transposed_ckf(num_event_workers: usize, expected_blocks_per_dc: usize) -> Self {
+        Self {
+            kind: MooncakeIndexerKind::TransposedCkf,
+            num_event_workers,
+            expected_blocks_per_dc,
+            ..Self::radix_tree()
+        }
+    }
+
+    pub fn with_publish_every_n_events(mut self, publish_every_n_events: usize) -> Self {
+        self.publish_every_n_events = publish_every_n_events;
+        self
+    }
+
+    pub fn with_ckf_match_mode(mut self, ckf_match_mode: CkfMatchMode) -> Self {
+        self.ckf_match_mode = ckf_match_mode;
+        self
+    }
+
+    pub(crate) fn build_transposed_ckf_backend(&self) -> anyhow::Result<EventTransposedCkfIndexer> {
+        let workers = std::array::from_fn(|lane| WorkerWithDpRank::new(lane as u64, 0));
+        let mut config = CkfConfig::new(self.expected_blocks_per_dc);
+        config.publish_every_n_events = self.publish_every_n_events;
+        Ok(EventTransposedCkfIndexer::new_with_match_mode(
+            workers,
+            config,
+            self.ckf_match_mode,
+        )?)
+    }
+
     pub fn branch_sharded_crtc(
         num_shards: usize,
         num_event_workers_per_shard: usize,
@@ -96,6 +134,10 @@ impl MooncakeIndexerConfig {
             MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
                 "concurrent-radix-tree-compressed"
             }
+            MooncakeIndexerKind::TransposedCkf => match self.ckf_match_mode {
+                CkfMatchMode::FullMap => "transposed-ckf",
+                CkfMatchMode::MaxDepthMatches => "transposed-ckf-max-depth",
+            },
             MooncakeIndexerKind::BranchShardedCrtc => "branch-sharded-crtc",
         }
     }
@@ -108,9 +150,10 @@ impl MooncakeIndexerConfig {
             "concurrent-radix-tree-compressed" => {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
+            "transposed-ckf" => Self::transposed_ckf(num_event_workers, 16_384),
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, transposed-ckf, branch-sharded-crtc",
                 name
             ),
         };
@@ -121,8 +164,8 @@ impl MooncakeIndexerConfig {
         &self,
         block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
-    ) -> Arc<dyn KvIndexerInterface + Send + Sync> {
-        match self.kind {
+    ) -> anyhow::Result<Arc<dyn KvIndexerInterface + Send + Sync>> {
+        let indexer: Arc<dyn KvIndexerInterface + Send + Sync> = match self.kind {
             MooncakeIndexerKind::RadixTree => Arc::new(KvIndexer::new(
                 CancellationToken::new(),
                 block_size,
@@ -150,6 +193,15 @@ impl MooncakeIndexerConfig {
                     Some(metrics),
                 ))
             }
+            MooncakeIndexerKind::TransposedCkf => {
+                let backend = self.build_transposed_ckf_backend()?;
+                Arc::new(ThreadPoolIndexer::new_with_metrics(
+                    backend,
+                    self.num_event_workers,
+                    block_size,
+                    Some(metrics),
+                ))
+            }
             MooncakeIndexerKind::BranchShardedCrtc => {
                 let shards = (0..self.num_shards)
                     .map(|_| {
@@ -167,7 +219,8 @@ impl MooncakeIndexerConfig {
                     block_size,
                 ))
             }
-        }
+        };
+        Ok(indexer)
     }
 
     pub fn build_approximate_with_prune_config(
@@ -209,6 +262,9 @@ impl MooncakeIndexerConfig {
                     Some(metrics),
                     Some(prune_config),
                 ))
+            }
+            MooncakeIndexerKind::TransposedCkf => {
+                anyhow::bail!("transposed-ckf does not support approximate pruning")
             }
             MooncakeIndexerKind::BranchShardedCrtc => {
                 anyhow::bail!("branch-sharded-crtc does not support approximate pruning")

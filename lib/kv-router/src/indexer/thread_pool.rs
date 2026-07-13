@@ -197,14 +197,19 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 
     pub fn new_with_metrics_and_pruning(
-        backend: T,
+        mut backend: T,
         num_workers: usize,
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
         assert!(num_workers > 0, "Number of workers must be greater than 0");
+        assert!(
+            prune_config.is_none() || backend.supports_routing_decision_pruning(),
+            "backend does not support routing-decision pruning"
+        );
         super::warn_on_unit_block_size("thread_pool", kv_block_size);
+        backend.configure_metrics(metrics.as_deref());
 
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
@@ -973,6 +978,12 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        if !self.backend.supports_event_dump() {
+            return Err(KvRouterError::Unsupported(
+                "backend cannot reconstruct router events".to_string(),
+            ));
+        }
+
         // Send DumpEvents to every worker as a FIFO barrier: each worker must
         // finish processing all previously queued Events before it handles
         // DumpEvents, so by the time all workers respond we know the shared
