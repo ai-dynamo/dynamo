@@ -81,12 +81,19 @@ mod llm;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
+mod python_payload;
 
-type JsonServerStreamingIngress =
-    Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+type PythonServerStreamingIngress = Ingress<
+    SingleIn<python_payload::PythonPayload>,
+    ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
 
-type JsonBidirectionalIngress =
-    Ingress<rs::pipeline::ManyIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+type PythonBidirectionalIngress = Ingress<
+    rs::pipeline::ManyIn<python_payload::PythonPayload>,
+    ManyOut<python_payload::PythonResponseItem>,
+    python_payload::PythonIngressPayloadAdapter,
+>;
 
 static INIT: OnceCell<()> = OnceCell::new();
 
@@ -168,6 +175,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
+    m.add_function(wrap_pyfunction!(run_select_service, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -203,7 +211,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
     }
     m.add_class::<llm::replay::PlannerReplayBridge>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::SelectionService>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
+    m.add_class::<llm::kv::MultimodalEmbeddingCachePublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
     m.add_class::<RoutingConstraints>()?;
@@ -251,7 +262,11 @@ where
 }
 
 fn standalone_to_pyerr(err: anyhow::Error) -> PyErr {
-    #[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
+    #[cfg(any(
+        feature = "kv-indexer",
+        feature = "slot-tracker",
+        feature = "select-service"
+    ))]
     if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
         let _ = clap_error.print();
         return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());
@@ -287,6 +302,14 @@ fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_slot_tracker_cli(argv))
+        .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_select_service")]
+#[pyo3(signature = (argv=None))]
+fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || llm::kv::run_select_service_cli(argv))
         .map_err(standalone_to_pyerr)
 }
 
@@ -332,7 +355,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -354,6 +377,9 @@ fn register_model<'p>(
     needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
     tensor_model_config: Option<&Bound<'p, PyDict>>,
+    ignore_weights: bool,
+    max_gpu_lora_count: Option<u32>,
+    model_aliases: Option<Vec<String>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -458,6 +484,7 @@ fn register_model<'p>(
     // This preserves backward-compat: workers that don't specify router_config continue to
     // fall back to the frontend-level global router config via the watcher.
     let explicit_router_config: Option<RouterConfig> = router_config.map(|rc| rc.into());
+    let model_aliases = model_aliases.unwrap_or_default();
 
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
@@ -517,6 +544,15 @@ fn register_model<'p>(
             card.worker_type = worker_type_value;
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
+            // Aliases are only honored on the LLM surfaces (their handlers
+            // canonicalize alias→primary); ignore them for these types.
+            if !model_aliases.is_empty() {
+                tracing::warn!(
+                    model_name = %model_name,
+                    "Ignoring served-model-name aliases: not supported for \
+                     tensor/images/videos/realtime models"
+                );
+            }
 
             card.runtime_config = runtime_config.inner;
             card.tensor_model_config = tensor_model_config;
@@ -537,16 +573,12 @@ fn register_model<'p>(
         }
 
         // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
-        // Pass ignore_weights=true: register_model only consumes metadata (config.json,
-        // tokenizer*, generation_config.json, chat template) when building the MDC, so any
-        // weight files would be downloaded and discarded. Engines load weights independently
-        // before register_model runs — SGLang and vLLM via an explicit fetch_model pre-flight,
-        // TRT-LLM via a pre-staged local path (which takes the fs::exists branch above) or
-        // via its own runtime resolving the HF repo.
+        // ModelExpress load paths pass ignore_weights=true because the engine already owns
+        // weight acquisition; other load paths keep the default full-fetch behavior.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, true)
+            LocalModel::fetch(&source_path, ignore_weights)
                 .await
                 .map_err(to_pyerr)?
         };
@@ -560,9 +592,20 @@ fn register_model<'p>(
             .source_path(source_path.clone().into())
             // --served_model_name
             .model_name(model_name.clone())
+            // --served_model_name aliases (additional names this model responds to)
+            .model_aliases(model_aliases)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
-            .runtime_config(runtime_config.inner)
+            .runtime_config({
+                let mut rc = runtime_config.inner;
+                // The base worker registration carries the worker's LoRA slot capacity so the
+                // frontend allocator sees idle-but-LoRA-capable workers before any adapter is
+                // loaded. Adapter registrations (lora_name set) carry it via LoraInfo instead.
+                if lora_identifier.is_none() {
+                    rc.max_gpu_lora_count = max_gpu_lora_count;
+                }
+                rc
+            })
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
@@ -579,7 +622,7 @@ fn register_model<'p>(
             .as_ref()
             .map(|name| llm_rs::model_card::LoraInfo {
                 name: name.clone(),
-                max_gpu_lora_count: None,
+                max_gpu_lora_count,
             });
 
         local_model
@@ -997,7 +1040,7 @@ impl DistributedRuntime {
     /// Register an async Python callback for /engine/{route_name}
     ///
     /// Args:
-    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     route_name: Route path (e.g., "control/start_profile" → /engine/control/start_profile)
     ///     callback: Async function with signature: async def(body: dict) -> dict
     ///
     /// Example:
@@ -1006,7 +1049,7 @@ impl DistributedRuntime {
     ///     await engine.start_profile(**body)
     ///     return {"status": "ok"}
     ///
-    /// runtime.register_engine_route("start_profile", start_profile)
+    /// runtime.register_engine_route("control/start_profile", start_profile)
     /// ```
     #[pyo3(signature = (route_name, callback))]
     fn register_engine_route(
@@ -1114,7 +1157,12 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
+        let network_engine = Arc::new(engine.network_engine());
+        let ingress = PythonServerStreamingIngress::for_engine_with_adapter(
+            network_engine,
+            python_payload::PythonIngressPayloadAdapter,
+        )
+        .map_err(to_pyerr)?;
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -1166,10 +1214,9 @@ impl Endpoint {
     /// `async def generate(request_stream, context)` coroutine that
     /// returns an async generator. `request_stream` is a
     /// [`PyAsyncRequestStream`] yielding inbound frames as plain Python
-    /// objects (dicts/lists/etc., the depythonization of
-    /// `serde_json::Value`). The generator yields response frames as
-    /// plain Python objects that are then pythonized back to JSON values
-    /// on the wire.
+    /// objects (dicts/lists/etc.) decoded directly from the configured
+    /// request-plane payload codec. The generator yields plain Python
+    /// response objects that are serialized directly to that codec.
     ///
     /// Request-stream end (when `__anext__` raises `StopAsyncIteration`)
     /// is *not* a cancellation signal: the caller has merely stopped
@@ -1187,8 +1234,9 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress: Arc<JsonBidirectionalIngress> =
-            Ingress::for_engine(engine).map_err(to_pyerr)?;
+        let ingress: Arc<PythonBidirectionalIngress> =
+            Ingress::for_engine_with_adapter(engine, python_payload::PythonIngressPayloadAdapter)
+                .map_err(to_pyerr)?;
 
         let builder = self
             .inner
@@ -1654,11 +1702,10 @@ impl AsyncResponseStream {
 }
 
 /// Python-visible inbound iterator for bidirectional engines. Wraps an
-/// mpsc receiver of pre-pythonized request frames; `__anext__` is a thin
+/// mpsc receiver of Python-owned request frames; `__anext__` is a thin
 /// `.recv()` that returns the next `PyObject` directly, with no per-frame
-/// GIL acquisition on the consumer side. The producer (the forwarder
-/// spawned by `PythonBidirectionalEngine::generate`) acquires the GIL
-/// once per frame and pushes the converted `PyObject` onto the channel.
+/// GIL acquisition or value conversion on the consumer side. The producer
+/// moves the object decoded by the ingress adapter onto the channel.
 ///
 /// Termination follows the same shape as `AsyncResponseStream`: when the
 /// channel returns `None`, `__anext__` raises `PyStopAsyncIteration` and
@@ -1687,7 +1734,7 @@ impl PyAsyncRequestStream {
     }
 
     /// Required by the `AsyncIterator` protocol. Returns an awaitable
-    /// resolving to the next pre-pythonized frame, or raises
+    /// resolving to the next Python-owned frame, or raises
     /// `StopAsyncIteration` when the inbound channel is closed.
     #[pyo3(name = "__anext__")]
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {

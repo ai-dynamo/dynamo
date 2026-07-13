@@ -141,7 +141,9 @@ class StandaloneRouterHandler:
             }
             yield llm_engine_output
 
-    async def best_worker_id(self, token_ids, router_config_override=None):
+    async def best_worker_id(
+        self, token_ids, router_config_override=None, cache_namespace=None
+    ):
         """
         Get the best worker ID for a given set of tokens without actually routing.
 
@@ -154,7 +156,9 @@ class StandaloneRouterHandler:
             raise RuntimeError("Router not initialized")
 
         (worker_id, _dp_rank, _overlap_blocks) = await self.kv_router.best_worker(
-            token_ids, router_config_override
+            token_ids,
+            router_config_override,
+            cache_namespace=cache_namespace,
         )
 
         yield worker_id
@@ -177,6 +181,7 @@ class StandaloneRouterHandler:
             request.get("block_mm_infos"),
             request.get("lora_name"),
             request.get("include_shared", True),
+            request.get("cache_namespace"),
         )
 
         yield scores
@@ -197,6 +202,7 @@ async def worker(runtime: DistributedRuntime):
     logger.debug(
         f"Configuration: endpoint={config.endpoint}, router_block_size={config.router_block_size}, "
         f"overlap_score_credit={config.overlap_score_credit}, "
+        f"overlap_score_credit_decay={config.overlap_score_credit_decay}, "
         f"prefill_load_scale={config.prefill_load_scale}, "
         f"router_temperature={config.router_temperature}, "
         f"use_kv_events={config.use_kv_events}, "

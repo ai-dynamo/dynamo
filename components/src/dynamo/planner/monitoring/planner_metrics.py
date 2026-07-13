@@ -119,6 +119,16 @@ class PlannerPrometheusMetrics:
             "Cumulative GPU hours consumed",
         )
 
+        # -- SLA targets (static: set once at planner startup) ------------
+        self.sla_target_ttft_ms = Gauge(
+            f"{PREFIX}_sla_target_ttft_ms",
+            "Configured SLA target for time to first token (ms)",
+        )
+        self.sla_target_itl_ms = Gauge(
+            f"{PREFIX}_sla_target_itl_ms",
+            "Configured SLA target for inter-token latency (ms)",
+        )
+
         # -- Diagnostics: estimated latencies -----------------------------
         self.estimated_ttft_ms = Gauge(
             f"{PREFIX}_estimated_ttft_ms",
@@ -287,8 +297,7 @@ class PluginFrameworkMetrics:
         self.constrain_capped_total = Counter(
             f"{PREFIX}_constrain_capped_total",
             "CONSTRAIN stage capped the final replica count (same meaning "
-            "as reconcile_clamped_total but fired by the CONSTRAIN pass; "
-            "expected contributor: builtin-budget-constrain).",
+            "as reconcile_clamped_total but fired by the CONSTRAIN pass).",
             labelnames=["sub_component_type", "source"],
             **kw,
         )
@@ -303,11 +312,9 @@ class PluginFrameworkMetrics:
 
         # ----- Tick scheduling metrics -----
         #
-        # These describe the orchestrator's tick loop behaviour —
+        # These describe the plugin pipeline's tick-loop behaviour —
         # how often plugins get deferred, how much latency the cache
-        # replay adds, and whether ticks meet their deadline.  Only
-        # lights up on the orchestrator path; PSM has no multi-cadence
-        # scheduling.
+        # replay adds, and whether ticks meet their deadline.
 
         self.tick_skipped_total = Counter(
             f"{PREFIX}_tick_skipped_total",

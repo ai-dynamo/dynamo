@@ -8,7 +8,6 @@ Unit tests for vLLM backend arguments.
 need to add more tests to cover different code paths of DynamoVllmConfig.
 """
 
-
 import pytest
 
 from dynamo.vllm.backend_args import DisaggregationMode, DynamoVllmConfig
@@ -18,6 +17,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
+    pytest.mark.multimodal,
 ]
 
 
@@ -40,6 +40,8 @@ def create_config() -> DynamoVllmConfig:
     config.enable_multimodal = False
     config.embedding_worker = False
     config.benchmark_mode = None
+    config.use_vllm_tokenizer = False
+    config.frontend_decoding = False
     return config
 
 
@@ -47,6 +49,16 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
     """
     Test suite for resolving disaggregation mode when legacy multimodal flags are set.
     """
+
+    def test_pd_alias_resolves_to_aggregated(self):
+        config = create_config()
+        config.disaggregation_mode = "pd"
+        config.is_prefill_worker = False
+        config.is_decode_worker = False
+
+        config._resolve_disaggregation_mode()
+
+        assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
 
     @pytest.mark.parametrize(
         "mode",
@@ -177,3 +189,134 @@ class TestEmbeddingWorkerExclusivity:
         config.embedding_worker = False
         config.benchmark_mode = "agg"
         config._validate_embedding_worker_exclusivity()
+
+
+class TestValidateCustomEncoder:
+    """--custom-encoder-class is an in-process, aggregated-only multimodal
+    component, so validation must require --enable-multimodal and reject any
+    non-aggregated disaggregation mode (where the custom-encoder branch is
+    never reached) up front.
+    """
+
+    def test_requires_enable_multimodal(self):
+        # Without the gate the custom encoder processes images while multimodal
+        # is disabled, bypassing the normal multimodal enable check.
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.enable_multimodal = False
+        with pytest.raises(ValueError, match="enable-multimodal"):
+            config._validate_custom_encoder()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_mode_rejected(self, mode):
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.enable_multimodal = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="agg"):
+            config._validate_custom_encoder()
+
+    def test_use_vllm_tokenizer_rejected(self):
+        # --use-vllm-tokenizer routes to text mode, which never invokes the
+        # custom encoder, so the encoder would load but sit unused. Reject it.
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.use_vllm_tokenizer = True
+        with pytest.raises(ValueError, match="use-vllm-tokenizer"):
+            config._validate_custom_encoder()
+
+    @pytest.mark.parametrize(
+        "role_flag",
+        [
+            "multimodal_worker",
+            "multimodal_encode_worker",
+            "multimodal_decode_worker",
+        ],
+    )
+    def test_legacy_multimodal_role_rejected(self, role_flag):
+        # The custom encoder is its own aggregated multimodal path; combining it
+        # with a legacy multimodal role flag sets up two conflicting multimodal
+        # paths (and --multimodal-worker resolves to agg, slipping past the
+        # disaggregation-mode check), so reject the combination up front.
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, role_flag, True)
+        with pytest.raises(ValueError, match="legacy multimodal role flags"):
+            config._validate_custom_encoder()
+
+    def test_frontend_decoding_rejected(self):
+        # --frontend-decoding pre-decodes images to tensors; the custom encoder
+        # consumes URLs, so the decoded inputs would fail extraction. Reject it.
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.frontend_decoding = True
+        with pytest.raises(ValueError, match="frontend-decoding"):
+            config._validate_custom_encoder()
+
+    def test_accepted_when_agg_and_multimodal(self):
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        # Must not raise.
+        config._validate_custom_encoder()
+
+    def test_no_op_when_unset(self):
+        # No custom encoder → validator must not touch unrelated configs.
+        config = create_config()
+        config.custom_encoder_class = None
+        config.enable_multimodal = False
+        config._validate_custom_encoder()
+
+
+class TestValidateBenchmarkConfig:
+    @pytest.mark.parametrize(
+        "axis",
+        [
+            "benchmark_prefill_kv_read_granularity",
+            "benchmark_prefill_batch_granularity",
+        ],
+    )
+    @pytest.mark.parametrize("value", [0, -1, 1025])
+    def test_rejects_out_of_range_grid_axis(self, axis, value):
+        config = create_config()
+        config.benchmark_mode = "prefill"
+        setattr(config, axis, value)
+
+        with pytest.raises(ValueError, match="must be between 1 and 1024"):
+            config._validate_benchmark_config()
+
+    def test_caps_prefill_cartesian_grid(self):
+        config = create_config()
+        config.benchmark_mode = "prefill"
+        config.benchmark_prefill_granularity = 16
+        config.benchmark_prefill_kv_read_granularity = 16
+        config.benchmark_prefill_batch_granularity = 16
+        config._validate_benchmark_config()
+
+        config.benchmark_prefill_batch_granularity = 17
+        with pytest.raises(ValueError, match="requests 4352 grid points"):
+            config._validate_benchmark_config()
+
+    def test_decode_mode_ignores_inactive_prefill_grid(self):
+        config = create_config()
+        config.benchmark_mode = "decode"
+        config.benchmark_prefill_granularity = 1024
+        config.benchmark_prefill_kv_read_granularity = 1024
+        config.benchmark_prefill_batch_granularity = 1024
+
+        config._validate_benchmark_config()

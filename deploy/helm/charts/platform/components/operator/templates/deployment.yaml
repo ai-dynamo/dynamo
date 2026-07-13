@@ -74,11 +74,15 @@ spec:
         args:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
+          - "--conversion-webhook-service-name={{ include "dynamo-operator.fullname" . }}-webhook-service"
+          - "--conversion-webhook-service-namespace={{ .Release.Namespace }}"
       {{- end }}
       containers:
       - args:
         - --config=/etc/dynamo-operator/config.yaml
         - --operator-version={{ .Chart.AppVersion }}
+        - {{ printf "--operator-image=%s:%s" .Values.controllerManager.manager.image.repository (.Values.controllerManager.manager.image.tag | default .Chart.AppVersion) | quote }}
+        - {{ printf "--operator-image-pull-policy=%s" (.Values.controllerManager.manager.image.pullPolicy | default "IfNotPresent") | quote }}
         command:
         - /manager
         env:

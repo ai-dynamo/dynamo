@@ -11,10 +11,13 @@ from tests.utils.payloads import (
     CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
+    ClearKVBlocksPayload,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
+    ElasticEPScalePayload,
     EmbeddingPayload,
     GuidedDecodingChatPayload,
+    ImagesPayload,
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
@@ -40,6 +43,17 @@ Aeloria holds a secret so profound that it has the potential to reshape the very
 will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. \
 Your Task: Character Background: Develop a detailed background for your character. Describe their motivations \
 for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends."""
+
+# Deliberately distinct from other cache-test prompts and long enough to span
+# multiple vLLM cache blocks.
+CLEAR_KV_BLOCKS_PROMPT = """This is the unified vLLM block-clearing verification prompt, identified by the unique \
+phrase cobalt-orchid-riverstone. Imagine a research station built beside a quiet polar observatory where engineers \
+catalog unusual signals from distant stars. Describe how the team prepares its instruments, checks redundant clocks, \
+records atmospheric conditions, and compares each observation with the previous night. Include the roles of the lead \
+astronomer, systems engineer, data archivist, and safety coordinator. Explain why repeatable procedures matter when a \
+faint signal could be caused by weather, hardware drift, software timing, or a genuine astronomical event. Then give a \
+brief account of the team's morning review, including how they preserve raw measurements, annotate anomalies, and plan \
+the next observation window. Keep the answer factual and concise while retaining the cobalt-orchid-riverstone marker."""
 
 
 def chat_payload_default(
@@ -136,6 +150,22 @@ def cached_tokens_chat_payload(
         or ["Aeloria", "Eldoria", "explorer", "ancient", "character", "background"],
         min_cached_tokens=min_cached_tokens,
         router_nvext_expectation=router_nvext_expectation,
+    )
+
+
+def clear_kv_blocks_payload(
+    max_tokens: int = 16,
+    timeout: int = 60,
+) -> ClearKVBlocksPayload:
+    """Create an admin-then-infer payload for unified vLLM cache clearing."""
+    return ClearKVBlocksPayload(
+        body={
+            "messages": [{"role": "user", "content": CLEAR_KV_BLOCKS_PROMPT}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        timeout=timeout,
     )
 
 
@@ -543,6 +573,49 @@ def make_completions_health_check(port: int, model: str):
     return _check_completions_endpoint
 
 
+def images_payload_default(
+    repeat_count: int = 1,
+    timeout: int = 60,
+) -> ImagesPayload:
+    """Default image-generation request for the raw-media (DiffusionEngine)
+    path. The sample diffusion engine returns a fixed 1x1 PNG whose base64
+    begins with the PNG signature ``iVBOR`` — the validation anchor."""
+    return ImagesPayload(
+        body={
+            "prompt": "a red balloon over green hills",
+            "n": 1,
+            "response_format": "b64_json",
+        },
+        expected_response=["iVBOR"],
+        expected_log=[],
+        repeat_count=repeat_count,
+        timeout=timeout,
+    )
+
+
+def make_images_health_check(port: int, model: str):
+    def _check_images_endpoint(remaining_timeout: float = 30.0) -> bool:
+        payload = images_payload_default(repeat_count=1).with_model(model)
+        payload.expected_response = []
+        payload.port = port
+        try:
+            resp = send_request(
+                payload.url(),
+                payload.body,
+                timeout=min(max(1.0, remaining_timeout), 5.0),
+                method=payload.method,
+                log_level=10,
+            )
+            out = payload.response_handler(resp)
+            if not out:
+                raise ValueError("")
+            return True
+        except Exception:
+            return False
+
+    return _check_images_endpoint
+
+
 def chat_payload_with_logprobs(
     content: Union[str, List[Dict[str, Any]]] = TEXT_PROMPT,
     repeat_count: int = 1,
@@ -722,4 +795,28 @@ def anthropic_messages_stream_payload_default(
         expected_log=expected_log or [],
         expected_response=expected_response
         or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+    )
+
+
+def elastic_ep_scale_payload(
+    new_data_parallel_size: int,
+    content: str = TEXT_PROMPT,
+    max_tokens: int = 64,
+    expected_response: Optional[List[str]] = None,
+    system_port: int = DefaultPort.SYSTEM1.value,
+    timeout: int = 300,
+) -> ElasticEPScalePayload:
+    """Scale the live data-parallel size, then verify a chat still completes."""
+    return ElasticEPScalePayload(
+        body={
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": max_tokens,
+            "temperature": 0.0,
+            "stream": False,
+        },
+        new_data_parallel_size=new_data_parallel_size,
+        system_port=system_port,
+        expected_response=expected_response
+        or ["AI", "knock", "joke", "think", "artificial", "intelligence"],
+        timeout=timeout,
     )

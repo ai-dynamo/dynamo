@@ -1,0 +1,384 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Compliance Extract'
+description: |
+  Extract the unified inline-compliance tree (flat NOTICES-<Eco>.txt + the
+  cross-ecosystem osrb-deps.csv + osrb.cdx.json delta SBOM) from an already-built
+  dynamo container image and upload it as a single `compliance-<git-sha>-<container>` artifact.
+
+  Designed to run as a step INSIDE each <framework>-build job (after
+  shared-build-image.yml's "Build and Push Image" step), reusing the
+  warm BuildKit cache the build just populated. Authoritative completeness
+  (did the generators miss anything shipped) is checked separately by the
+  <framework>-compliance-audit job, which syft-scans the pushed image.
+
+inputs:
+  framework:
+    description: 'Framework name (vllm, sglang, trtllm, dynamo)'
+    required: true
+  target:
+    description: 'Target docker stage (runtime, frontend, planner)'
+    required: true
+  platform:
+    description: 'Single platform string, e.g. linux/amd64'
+    required: true
+  cuda_version:
+    description: 'CUDA version string (e.g. 12.9, 13.0); empty for non-CUDA targets'
+    required: false
+    default: ''
+  builder_name:
+    description: 'Name of the existing buildx builder to reuse (set up by shared-build-image.yml)'
+    required: true
+  artifact_name_prefix:
+    description: 'Prefix for the uploaded compliance artifacts (typically the same as the build job target_tag_plain)'
+    required: true
+  archive_sources:
+    description: 'When "true", also extract the source archive (--target sources_archive). Set on post-merge / RC / release pipelines only; PR builds skip to avoid storage cost.'
+    required: false
+    default: 'false'
+  make_efa:
+    description: 'When "true", render with --make-efa so the licenses stage adds native EFA attribution (libfabric / aws-ofi-nccl via native_packages.yaml). MUST match the build job''s make_efa so the rendered Dockerfile (and thus the licenses-stage cache key) is identical — otherwise the extract cache-misses and rebuilds.'
+    required: false
+    default: 'false'
+  artifact_retention_days:
+    description: 'Retention (days) for the uploaded compliance artifact (NOTICES + CSV + CycloneDX). PR passes 7; post-merge / nightly default to 30. The /sources OSRB tarball keeps its own longer retention.'
+    required: false
+    default: '30'
+  git_sha:
+    description: 'Commit SHA used to name the per-arch OSRB files (osrb-<image>-<arch>-<sha8>.csv/.cdx.json). Pass the github.sha context value.'
+    required: false
+    default: ''
+  sccache_bucket:
+    description: 'SCCACHE S3 bucket — must equal what the build passed so wheel_builder_base''s SCCACHE_* ARGs/ENV match and the heavy Rust layer cache-hits. Normally the extract never runs sccache (everything cache-hits), but when the shared builder has evicted layers a stage re-runs here for real, so the extract also passes the IRSA secrets (see the buildx steps) to let that sccache authenticate.'
+    required: false
+    default: ''
+  sccache_region:
+    description: 'SCCACHE region (= aws_default_region the build passed). See sccache_bucket.'
+    required: false
+    default: ''
+  diff_base_sha:
+    description: |
+      Commit SHA of the baseline build to diff this build's OSRB CSV against
+      (resolved by container/compliance/resolve_diff_base.py in the caller).
+      Empty means "no baseline" — the diff step then writes a baseline_unavailable
+      marker instead of a real diff. resolve_diff_base.py also supplies the exact
+      artifact id used to fetch the prior build's CSV.
+    required: false
+    default: ''
+  diff_base_label:
+    description: 'Human label for the diff baseline (from resolve_diff_base.py); shown in the baseline_unavailable marker row when the baseline can''t be fetched.'
+    required: false
+    default: ''
+  diff_base_artifact_id:
+    description: 'Exact GitHub Actions artifact id resolved by resolve_diff_base.py.'
+    required: false
+    default: ''
+  diff_base_run_id:
+    description: 'Workflow run id that generated the baseline artifact; used for the link in BASELINE.md.'
+    required: false
+    default: ''
+  gh_token:
+    description: |
+      Token with `actions: read` used to download the baseline compliance
+      artifact from its (different) workflow run. Pass
+      secrets.GITHUB_TOKEN. When empty, the diff step skips the fetch and emits a
+      baseline_unavailable marker.
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Render Dockerfile
+      id: render
+      shell: bash
+      run: |
+        RENDER_ARGS="--framework ${{ inputs.framework }} --target ${{ inputs.target }} --platform ${{ inputs.platform }}"
+        if [ -n "${{ inputs.cuda_version }}" ]; then
+          RENDER_ARGS+=" --cuda-version ${{ inputs.cuda_version }}"
+        fi
+        # Mirror the build job's "Generate Dockerfile" step: EFA images render
+        # with --make-efa so the licenses stage attributes libfabric /
+        # aws-ofi-nccl. This must match the build render exactly, or the
+        # licenses-stage cache key differs and the extract rebuilds.
+        if [ "${{ inputs.make_efa }}" == "true" ]; then
+          RENDER_ARGS+=" --make-efa"
+        fi
+        # render.py prints an "INFO: Generated Dockerfile written to ..." line
+        # to stdout, so we can't capture its output as the path. With
+        # --output-short-filename the file is always written to
+        # container/rendered.Dockerfile (see render.py:render()), so just
+        # hardcode that path here.
+        python3 container/render.py ${RENDER_ARGS} --output-short-filename
+        echo "rendered=container/rendered.Dockerfile" >> $GITHUB_OUTPUT
+
+    # Unified compliance tree — flat NOTICES-<Eco>.txt + osrb-deps.csv +
+    # osrb.cdx.json. FROM scratch stage; export bounded by these files' size
+    # (a few MB) regardless of runtime image size. For a multi-platform build,
+    # buildx writes one subdir per platform (linux_amd64/, linux_arm64/).
+    - name: Extract /compliance/ (NOTICES + CSV + CycloneDX)
+      shell: bash
+      env:
+        SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
+        SCCACHE_REGION: ${{ inputs.sccache_region }}
+        GIT_SHA: ${{ inputs.git_sha }}
+      run: |
+        mkdir -p /tmp/compliance
+        # Reuse the warm cache the build just populated by matching ALL the
+        # cache-key-affecting build-args the build passed. Otherwise the shared
+        # stages rebuild here instead of cache-hitting:
+        #   - DYNAMO_COMMIT_SHA: pre_runtime does ENV DYNAMO_COMMIT_SHA=...; licenses
+        #     (and compliance_artifact) are FROM pre_runtime.
+        #   - USE_SCCACHE/SCCACHE_*: wheel_builder_base bakes them into an ENV, and
+        #     pre_runtime COPYs from wheel_builder. We pass the same VALUES so the
+        #     cache key lines up and the warm layers cache-hit.
+        # The warm cache is best-effort though: the shared buildkit pods GC under
+        # concurrent load, so a stage can legitimately re-run here (seen post-merge
+        # 2026-07-02). Pass the same IRSA secrets docker-remote-build passes so a
+        # re-run stage's sccache can still authenticate to S3 — without them
+        # `sccache --start-server` fails and the NIXL stage dies in meson's nvcc
+        # sanity check (meson wraps nvcc with the sccache it finds on PATH,
+        # sidestepping use-sccache.sh's no-server fallback). Secret values are not
+        # part of BuildKit's cache key, so this never invalidates the fast path.
+        # Only forward the credentials when S3 sccache is actually configured
+        # (bucket set) — a bucket-less caller's build has no use for them.
+        SECRET_ARGS=""
+        if [ -n "${SCCACHE_BUCKET:-}" ]; then
+          TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+          if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
+            SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
+          else
+            echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+          fi
+        fi
+        docker buildx build \
+            --builder ${{ inputs.builder_name }} \
+            --platform ${{ inputs.platform }} \
+            --target compliance_artifact \
+            --build-arg DYNAMO_COMMIT_SHA="${GIT_SHA}" \
+            --build-arg USE_SCCACHE=true \
+            --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
+            --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
+            --output type=local,dest=/tmp/compliance \
+            --progress=plain \
+            -f ${{ steps.render.outputs.rendered }} \
+            $SECRET_ARGS \
+            .
+
+    # Name the OSRB CSV + CycloneDX per-arch: osrb-<image>-<arch>-<sha8>.{csv,cdx.json}.
+    # The generator writes generic names (osrb-deps.csv / osrb.cdx.json); we add
+    # the image/arch/commit identity here (the action knows all three). The flat
+    # NOTICES-<Eco>.txt files keep their names.
+    - name: Name OSRB files per arch
+      shell: bash
+      run: |
+        IMG="${{ inputs.artifact_name_prefix }}"
+        if [ -n "${{ inputs.cuda_version }}" ]; then IMG="${IMG}-${{ inputs.cuda_version }}"; fi
+        SHA8=$(echo "${{ inputs.git_sha }}" | cut -c1-8)
+        [ -z "${SHA8}" ] && SHA8="nosha"
+        rename_dir() {  # $1 = dir, $2 = arch
+          [ -f "$1/osrb-deps.csv" ]  && mv "$1/osrb-deps.csv"  "$1/osrb-${IMG}-$2-${SHA8}.csv"
+          [ -f "$1/osrb.cdx.json" ]  && mv "$1/osrb.cdx.json"  "$1/osrb-${IMG}-$2-${SHA8}.cdx.json"
+        }
+        shopt -s nullglob
+        found=0
+        for d in /tmp/compliance/linux_*; do
+          [ -d "$d" ] || continue
+          found=1
+          rename_dir "$d" "$(basename "$d" | sed 's/^linux_//')"
+        done
+        if [ "${found}" -eq 0 ]; then  # single-platform: files directly under dest
+          rename_dir /tmp/compliance "$(echo "${{ inputs.platform }}" | sed 's|.*linux/||')"
+        fi
+        echo "Named OSRB files for ${IMG} @ ${SHA8}:"
+        find /tmp/compliance -name 'osrb-*' -print
+
+    # Download the baseline build's compliance artifact so we can diff against
+    # it. The resolver supplies the exact artifact id and generating run id, so
+    # this step downloads directly without searching the artifact list again.
+    # Any miss (expired retention, never built, no token) leaves
+    # /tmp/compliance-base empty — the diff step then writes a
+    # baseline_unavailable marker rather than failing the build.
+    - name: Fetch baseline compliance artifact
+      id: fetch-baseline
+      if: ${{ inputs.diff_base_artifact_id != '' && inputs.gh_token != '' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+        REPO: ${{ github.repository }}
+        ARTIFACT_ID: ${{ inputs.diff_base_artifact_id }}
+        BASE_RUN_ID: ${{ inputs.diff_base_run_id }}
+      run: |
+        set -euo pipefail
+        ARCHIVE="${RUNNER_TEMP}/compliance-baseline-${ARTIFACT_ID}.zip"
+        mkdir -p /tmp/compliance-base
+        if [ -n "${BASE_RUN_ID}" ]; then
+          echo "baseline_run_id=${BASE_RUN_ID}" >> "$GITHUB_OUTPUT"
+        fi
+        if gh api -X GET "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+          > "${ARCHIVE}" && unzip -q "${ARCHIVE}" -d /tmp/compliance-base; then
+          echo "Downloaded baseline artifact ${ARTIFACT_ID}."
+          echo "baseline_available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Baseline download failed; diff will mark it unavailable."
+          echo "baseline_available=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Emit osrb-<image>-<arch>-<sha8>.diff.csv next to each full CSV, comparing
+    # this build against the baseline, plus a self-describing baseline/ folder
+    # (metadata + a copy of the baseline CSV) so the archive documents exactly
+    # what the diff was taken against. Always runs so a diff file (real or a
+    # baseline_unavailable marker) always ships. The base CSV, if present, lives
+    # under /tmp/compliance-base/linux_<arch>/ with a different sha8 (matched by
+    # glob per arch).
+    - name: Compute OSRB diff
+      if: always()
+      shell: bash
+      env:
+        REPO: ${{ github.repository }}
+        BASE_SHA: ${{ inputs.diff_base_sha }}
+        BASE_LABEL: ${{ inputs.diff_base_label }}
+        BASE_RUN_ID: ${{ steps.fetch-baseline.outputs.baseline_run_id }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+
+        # Write baseline/ (metadata + baseline CSV copy) into an arch dir.
+        # $1 = arch dir, $2 = baseline CSV path ('' when unavailable).
+        write_baseline_folder() {
+          local dir="$1/baseline" base_csv="$2"
+          mkdir -p "${dir}"
+          {
+            echo "# OSRB diff baseline"
+            echo
+            echo "The \`*.diff.csv\` next to this folder compares this build's OSRB"
+            echo "dependency CSV against the baseline described below."
+            echo
+            echo "## How the baseline is chosen (by build context)"
+            echo "- PR targeting \`main\` -> PR merge-base (or nearest earlier commit with an artifact)"
+            echo "- Post-merge on \`main\` -> the previous commit on \`main\`"
+            echo "- PR / post-merge on \`release/*\` -> highest release tag \`vX.Y.Z\` strictly older than the current version (semver first, later publish date breaks same-version ties)"
+            echo "- Nightly -> the previous successful scheduled nightly run (manual runs excluded)"
+            echo
+            echo "## This build's baseline"
+            echo "- Label: ${BASE_LABEL:-(none)}"
+            if [ -n "${BASE_SHA}" ]; then
+              echo "- Baseline commit SHA: \`${BASE_SHA}\`"
+              echo "- Commit: https://github.com/${REPO}/commit/${BASE_SHA}"
+            else
+              echo "- Baseline commit SHA: (none — no baseline was available)"
+            fi
+            if [ -n "${BASE_RUN_ID:-}" ] && [ "${BASE_RUN_ID}" != "null" ]; then
+              echo "- Generating workflow run: https://github.com/${REPO}/actions/runs/${BASE_RUN_ID}"
+            fi
+            if [ -n "${base_csv}" ]; then
+              echo "- Baseline CSV (copied into this folder): \`$(basename "${base_csv}")\`"
+            else
+              echo "- Baseline CSV: unavailable (expired artifact, first build of the line, or no prior run)"
+            fi
+          } > "${dir}/BASELINE.md"
+          if [ -n "${base_csv}" ]; then cp "${base_csv}" "${dir}/"; fi
+          echo "Wrote baseline folder: ${dir}"
+        }
+
+        diff_one() {  # $1 = current CSV, $2 = arch dir name (e.g. linux_amd64)
+          local cur="$1" arch_dir="$2"
+          local out="${cur%.csv}.diff.csv"
+          local base_csv="" base_arg=()
+          # Pick the baseline's full CSV, skipping its own *.diff.csv sibling
+          # (baseline artifacts now ship a diff too, and osrb-*.csv would match it).
+          for cand in /tmp/compliance-base/"${arch_dir}"/osrb-*.csv; do
+            [ -f "${cand}" ] || continue
+            case "${cand}" in *.diff.csv) continue;; esac
+            base_csv="${cand}"
+            base_arg=(--base "${base_csv}")
+            break
+          done
+          python3 container/compliance/diff_osrb_csv.py \
+            --current "${cur}" \
+            "${base_arg[@]}" \
+            --baseline-label "${BASE_LABEL}" \
+            --output "${out}"
+          echo "Wrote diff: ${out}"
+          write_baseline_folder "$(dirname "${cur}")" "${base_csv}"
+        }
+        found=0
+        for d in /tmp/compliance/linux_*; do
+          [ -d "$d" ] || continue
+          for cur in "$d"/osrb-*.csv; do
+            [ -f "$cur" ] || continue
+            case "$cur" in *.diff.csv) continue;; esac
+            found=1
+            diff_one "$cur" "$(basename "$d")"
+          done
+        done
+        if [ "${found}" -eq 0 ]; then  # single-platform: files directly under dest
+          for cur in /tmp/compliance/osrb-*.csv; do
+            [ -f "$cur" ] || continue
+            case "$cur" in *.diff.csv) continue;; esac
+            diff_one "$cur" "."
+          done
+        fi
+
+    # /sources/ — reproducible tarball of source archives for everything we
+    # ship on top of the FROM base. Bigger than legal/sboms (typically
+    # 50-300 MB), so gated by archive_sources input. Skipped on PR builds.
+    - name: Extract /sources/ (post-merge / RC / release only)
+      if: ${{ inputs.archive_sources == 'true' }}
+      shell: bash
+      env:
+        SCCACHE_BUCKET: ${{ inputs.sccache_bucket }}
+        SCCACHE_REGION: ${{ inputs.sccache_region }}
+        GIT_SHA: ${{ inputs.git_sha }}
+      run: |
+        mkdir -p /tmp/sources
+        # ENABLE_SOURCE_ARCHIVAL=true to actually run sources_collect; the other
+        # build-args match the build so this shares the warm cache (same reason
+        # as the compliance_artifact extract above). Same IRSA secrets too, so a
+        # cache-missed stage rebuild can still authenticate sccache (see above).
+        SECRET_ARGS=""
+        if [ -n "${SCCACHE_BUCKET:-}" ]; then
+          TOKEN_FILE="${AWS_WEB_IDENTITY_TOKEN_FILE:-}"
+          if [ -n "$TOKEN_FILE" ] && [ -f "$TOKEN_FILE" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+            SECRET_ARGS+=" --secret id=aws-web-identity-token,src=${TOKEN_FILE}"
+            SECRET_ARGS+=" --secret id=aws-role-arn,env=AWS_ROLE_ARN"
+          else
+            echo "::warning::IRSA web identity token not available; a cache-missed extract rebuild will run without sccache credentials"
+          fi
+        fi
+        docker buildx build \
+            --builder ${{ inputs.builder_name }} \
+            --platform ${{ inputs.platform }} \
+            --target sources_archive \
+            --build-arg DYNAMO_COMMIT_SHA="${GIT_SHA}" \
+            --build-arg USE_SCCACHE=true \
+            --build-arg SCCACHE_BUCKET="${SCCACHE_BUCKET}" \
+            --build-arg SCCACHE_REGION="${SCCACHE_REGION}" \
+            --build-arg ENABLE_SOURCE_ARCHIVAL=true \
+            --output type=local,dest=/tmp/sources \
+            --progress=plain \
+            -f ${{ steps.render.outputs.rendered }} \
+            $SECRET_ARGS \
+            .
+
+    - name: Upload compliance artifact (NOTICES + CSV + CycloneDX)
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        # compliance-<git-sha>-<container>. artifact_name_prefix == target_tag_plain
+        # == the container name (e.g. vllm-runtime, vllm-runtime-efa, dynamo-planner);
+        # it already encodes the cuda variant, and the artifact holds both arches as
+        # linux_<arch>/ subdirs, so no cuda/arch suffix is needed.
+        name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}
+        path: /tmp/compliance/
+        retention-days: ${{ inputs.artifact_retention_days }}
+
+    - name: Upload /sources/ tarball (post-merge / RC / release only)
+      if: ${{ inputs.archive_sources == 'true' && always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}-sources
+        path: /tmp/sources/sources.zip
+        retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs

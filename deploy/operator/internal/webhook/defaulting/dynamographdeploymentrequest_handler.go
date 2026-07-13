@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -63,10 +64,15 @@ func NewDGDRDefaulter(operatorVersion string) *DGDRDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
-// Only called on CREATE (the webhook is not registered for UPDATE).
 // If spec.image is not set, derives a default image from the backend and operator version.
+// UPDATE requests are admitted unchanged so an omitted image is not rewritten after
+// creation.
 func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdrDefaultingWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
+		return err
+	}
 
 	dgdr, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeploymentRequest)
 	if !ok {

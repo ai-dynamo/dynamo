@@ -138,11 +138,12 @@ async def _check_start_populates_registration_metadata(started_engine):
     registration path reads — if any of them come back None, the model
     appears in /v1/models but fails to actually serve."""
     _engine, cfg = started_engine
-    assert cfg.context_length and cfg.context_length > 0
-    assert cfg.kv_cache_block_size and cfg.kv_cache_block_size > 0
-    assert cfg.total_kv_blocks and cfg.total_kv_blocks > 0
-    assert cfg.max_num_seqs and cfg.max_num_seqs > 0
-    assert cfg.max_num_batched_tokens and cfg.max_num_batched_tokens > 0
+    assert cfg.llm is not None
+    assert cfg.llm.context_length and cfg.llm.context_length > 0
+    assert cfg.llm.kv_cache_block_size and cfg.llm.kv_cache_block_size > 0
+    assert cfg.llm.total_kv_blocks and cfg.llm.total_kv_blocks > 0
+    assert cfg.llm.max_num_seqs and cfg.llm.max_num_seqs > 0
+    assert cfg.llm.max_num_batched_tokens and cfg.llm.max_num_batched_tokens > 0
 
 
 async def _check_generate_streams_chunks_with_coherent_final_usage(started_engine):

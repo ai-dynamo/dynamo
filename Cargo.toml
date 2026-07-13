@@ -6,8 +6,6 @@ members = [
     "lib/llm",
     "lib/rl",
     "lib/runtime",
-    "lib/tokenizers",
-    "lib/renderer",
     "lib/tokens",
     "lib/data-gen",
     "lib/kv-hashing",
@@ -21,11 +19,11 @@ members = [
     "lib/kvbm-consolidator",
     "lib/kvbm-logical",
     "lib/kvbm-physical",
-    "lib/protocols",
-    "lib/parsers",
     "lib/bench",
     "lib/backend-common",
     "lib/backend-common/examples/mocker",
+    "lib/vllm-rs-backend",
+    "lib/sglang-sidecar",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
@@ -47,16 +45,20 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 dynamo-runtime = { path = "lib/runtime", version = "1.3.0" }
 dynamo-llm = { path = "lib/llm", version = "1.3.0" }
 dynamo-rl = { path = "lib/rl", version = "1.3.0" }
-dynamo-tokenizers = { path = "lib/tokenizers", version = "1.3.0" }
-dynamo-renderer = { path = "lib/renderer", version = "1.3.0" }
+dynamo-tokenizers = { version = "=1.5.0" }
+dynamo-renderer = { version = "=1.3.8" }
 dynamo-tokens = { path = "lib/tokens", version = "1.3.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.3.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.3.0" }
 dynamo-memory = { path = "lib/memory", version = "1.3.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.3.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.3.0", features = ["metrics", "runtime-protocols"] }
-dynamo-protocols = { path = "lib/protocols", version = "1.3.0" }
-dynamo-parsers = { path = "lib/parsers", version = "1.3.0" }
+dynamo-protocols = { version = "=2.0.1" }
+dynamo-parsers = { version = "4.1.1" }
+# Published on crates.io. To see all available versions:
+#   web:          https://crates.io/crates/dynamo-parsers-v2/versions
+#   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
+dynamo-parsers-v2 = { version = "0.1.17" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.3.0" }
 fastokens = { version = "0.2.0" }
 
@@ -74,14 +76,14 @@ kvbm-physical = { path = "lib/kvbm-physical", version = "1.3.0" }
 velo = { version = "0.1.0" }
 
 # External dependencies
-aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "69b3cff352303b95e5196a28966ae1ee4a3a3955", package = "aiconfigurator-core" }
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core" }
 anyhow = { version = "1" }
-lru = { version = "0.12" }
-async-nats = { version = "0.45.0", features = ["service"] }
+lru = { version = "0.16" }
+async-nats = { version = "0.49.1", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 blake3 = { version = "1" }
-bytes = { version = "1" }
+bytes = { version = "1.9" }
 chrono = { version = "0.4", default-features = false, features = [
     "alloc",
     "std",
@@ -125,6 +127,7 @@ reqwest = { version = "0.12.24", default-features = false, features = [
 ] }
 rmp-serde = { version = "1" }
 serde_bytes = { version = "0.11" }
+seqlock = { version = "0.2.0" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
@@ -151,7 +154,13 @@ tracing-subscriber = { version = "0.3", features = [
 tracing-opentelemetry = { version = "0.32.0" }
 opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["trace", "logs", "grpc-tonic"] }
+opentelemetry-otlp = { version = "0.31.0", features = [
+    "trace",
+    "logs",
+    "grpc-tonic",
+    "http-proto",
+    "reqwest-rustls",
+] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
@@ -189,10 +198,3 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
-
-# Pin llm-multimodal + llm-tokenizer to the smg commit that switches
-# hf-hub from native-tls to rustls-tls (PR #1459, merged 2026-05-05).
-# Remove this block once llm-multimodal ≥1.6.0 is published on crates.io.
-[patch.crates-io]
-llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
-llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }

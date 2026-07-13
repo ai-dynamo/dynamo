@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test script for /engine/start_profile and /engine/stop_profile routes.
+Test script for /engine/control/start_profile and /engine/control/stop_profile routes.
 
 This script demonstrates the new custom engine route registration feature.
 It starts a simple sglang server with dynamo and tests the profiling endpoints.
@@ -146,17 +146,17 @@ def start_sglang_backend():
 
 
 def test_profiling_endpoints():
-    """Test the /engine/start_profile and /engine/stop_profile endpoints"""
+    """Test the /engine/control/start_profile and /engine/control/stop_profile endpoints"""
     base_url = f"http://{HOST}:{SYSTEM_PORT}"
 
     print("\n" + "=" * 60)
-    print("Testing /engine/start_profile and /engine/stop_profile")
+    print("Testing /engine/control/start_profile and /engine/control/stop_profile")
     print("=" * 60)
 
     # Test 1: Start profiling with parameters (no num_steps so we control stop manually)
     print("\n1. Starting profiling with parameters...")
     response = requests.post(
-        f"{base_url}/engine/start_profile",
+        f"{base_url}/engine/control/start_profile",
         json={
             "output_dir": PROFILER_OUTPUT_DIR,
             "activities": ["CPU", "GPU"],
@@ -196,7 +196,7 @@ def test_profiling_endpoints():
 
     # Test 2: Stop profiling
     print("\n4. Stopping profiling...")
-    response = requests.post(f"{base_url}/engine/stop_profile")
+    response = requests.post(f"{base_url}/engine/control/stop_profile")
     print(f"   Status: {response.status_code}")
     print(f"   Response: {response.json()}")
     assert response.status_code == 200, f"Expected 200, got {response.status_code}"
@@ -204,7 +204,7 @@ def test_profiling_endpoints():
 
     # Test 3: Test with empty body (GET-like POST)
     print("\n5. Starting profiling with empty body...")
-    response = requests.post(f"{base_url}/engine/start_profile")
+    response = requests.post(f"{base_url}/engine/control/start_profile")
     print(f"   Status: {response.status_code}")
     print(f"   Response: {response.json()}")
     assert response.status_code == 200, f"Expected 200, got {response.status_code}"
@@ -217,7 +217,7 @@ def test_profiling_endpoints():
     assert response.status_code == 404, f"Expected 404, got {response.status_code}"
 
     # Stop profiling again
-    response = requests.post(f"{base_url}/engine/stop_profile")
+    response = requests.post(f"{base_url}/engine/control/stop_profile")
 
     print("\n" + "=" * 60)
     print("✓ All tests passed!")

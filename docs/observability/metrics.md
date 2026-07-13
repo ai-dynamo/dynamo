@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Metrics
+subtitle: Reference for the Prometheus metrics Dynamo's runtime, frontend, and workers expose on the local system metrics endpoint.
 ---
 
 ## Overview
@@ -188,7 +189,7 @@ Values you will see in the `dynamo_endpoint` label on backend workers:
 | Value | Meaning |
 |-------|---------|
 | `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls (one per request the router routes through); on a decode worker this counts decode-stage `generate` calls. |
-| `clear_kv_blocks` | Admin RPC to flush the worker's KV cache. Registered on both prefill and decode workers. |
+| `clear_kv_blocks` | Legacy vLLM distributed admin RPC to flush the worker's KV cache, registered on prefill and decode workers. Unified vLLM workers expose the operation through `/engine/control/clear_kv_blocks` on the system server instead; that route is not a component endpoint and does not emit this `dynamo_endpoint` label. |
 | `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
 
 #### Component Error Types
@@ -223,6 +224,10 @@ The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_
 - `dynamo_frontend_disconnected_clients`: Number of disconnected clients (gauge)
 - `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
 - `dynamo_frontend_cached_tokens`: Number of cached tokens (prefix cache hits) per request (histogram)
+- `dynamo_frontend_tokenizer_cache_hits_total`: L1 tokenizer prefix-cache hits across all models (counter)
+- `dynamo_frontend_tokenizer_cache_misses_total`: L1 tokenizer prefix-cache misses across all models (counter)
+- `dynamo_frontend_tokenizer_cache_cached_tokens_total`: Tokens returned from the L1 tokenizer prefix cache (counter, label: `model`)
+- `dynamo_frontend_tokenizer_cache_uncached_tokens_total`: Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (counter, label: `model`)
 - `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
 - `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
 - `dynamo_frontend_output_tokens_total`: Total number of output tokens generated (counter)
@@ -235,6 +240,33 @@ The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_
 ```bash
 curl http://localhost:8000/metrics
 ```
+
+#### Tokenizer Cache Metrics
+
+The hit and miss counters record one cache outcome per encode operation across the frontend process.
+A batch encode records one outcome per item. The cached and uncached token counters report exact
+token totals for each served model. When L1 is active, a partial hit increments both token counters
+because it returns a cached prefix and freshly encodes the remaining suffix. A full hit increments
+only the cached-token counter, and a full miss increments only the uncached-token counter.
+
+Use the following PromQL expression to calculate the token reuse ratio for each model over five
+minutes:
+
+```promql
+sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+/
+(
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+  +
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_uncached_tokens_total[5m]))
+)
+```
+
+The ratio is meaningful only for a model with an active L1 cache and observed tokens. The token
+counters do not increment when `DYN_TOKENIZER_CACHE=0`, when encoding fails, or when the cache has no
+registered special-token boundaries. The tiktoken path currently has no registered boundaries, so it
+bypasses L1 and exposes zero-valued token counter series; its ratio remains undefined until the cache
+observes tokens.
 
 #### Stage and phase labels
 
@@ -401,13 +433,16 @@ Histograms (in milliseconds) tracking the time spent in each phase of the routin
 
 #### Router Queue Metrics (`dynamo_frontend_router_queue_*`)
 
-Gauge tracking the number of requests pending in the router's scheduler queue. Only registered when `--router-queue-threshold` is set. Labeled by `worker_type` to distinguish prefill vs. decode queues in disaggregated mode.
+Gauges track pending work in each router policy class. They are registered by the frontend and are populated when queueing is enabled through either `--router-queue-threshold` or `--router-policy-config`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
 | `dynamo_frontend_router_queue_pending_requests` | Gauge | Requests pending in the router scheduler queue |
+| `dynamo_frontend_router_queue_pending_isl_tokens` | Gauge | Raw input tokens pending in the router scheduler queue |
+| `dynamo_frontend_router_queue_pending_cached_tokens` | Gauge | Cached-token estimate snapshotted when each request is enqueued |
+| `dynamo_frontend_router_queue_backpressure_total` | Counter | Queue rejections by configured limit reason |
 
-**Labels:** `worker_type` (`prefill` or `decode`)
+**Labels:** `model`, `worker_type` (`prefill` or `decode`), and `policy_class`. With policy-family/cache-bucket YAML, `policy_class` is the resolved physical queue, not the family requested by the client. The rejection counter also has `reason`.
 
 #### KV Indexer Metrics
 
@@ -469,5 +504,5 @@ For the full list of metrics, configuration options, and architecture details, s
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
-- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (intended architecture; not available in the 1.2.0 SGLang runtime image)
+- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (requires the SGLang runtime to ship the upstream FPM module; available as of `sglang==0.5.13.post1`)
 - [Forward Pass Metrics RFC](../proposals/vllm-rfc-forward-pass-metrics.md) - Design rationale for per-iteration metrics

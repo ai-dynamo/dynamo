@@ -32,6 +32,69 @@ const FPM_VERSION: i32 = 1;
 /// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL`.
 const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
+fn report_fpm_trace_init(
+    result: anyhow::Result<Option<crate::fpm_trace::FpmTrace>>,
+) -> Option<crate::fpm_trace::FpmTrace> {
+    match result {
+        Ok(trace) => trace,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "FPM trace initialization failed; continuing without local persistence"
+            );
+            None
+        }
+    }
+}
+
+async fn init_fpm_trace(component: &Component) -> Option<crate::fpm_trace::FpmTrace> {
+    let namespace = component.namespace().name();
+    let component_name = component.name().to_string();
+    let producer_id = component.drt().connection_id().to_string();
+    let runtime_id = component.drt().runtime().id().to_string();
+    report_fpm_trace_init(
+        crate::fpm_trace::init_from_env_with_shutdown(
+            &runtime_id,
+            &namespace,
+            &component_name,
+            &producer_id,
+            component.drt().child_token(),
+            Some(component.drt().register_graceful_task()),
+        )
+        .await,
+    )
+}
+
+fn tap_relay_fpm_with<F>(payload: &bytes::Bytes, tap: F)
+where
+    F: FnOnce(bytes::Bytes),
+{
+    tap(payload.clone());
+}
+
+fn tap_relay_fpm(payload: &bytes::Bytes, trace: Option<&crate::fpm_trace::FpmTrace>) {
+    if let Some(trace) = trace {
+        tap_relay_fpm_with(payload, |payload| {
+            trace.publish_payload(payload);
+        });
+    }
+}
+
+fn tap_direct_fpm_with<F>(payload: &[u8], tap: F)
+where
+    F: FnOnce(bytes::Bytes),
+{
+    tap(bytes::Bytes::copy_from_slice(payload));
+}
+
+fn tap_direct_fpm(payload: &[u8], trace: Option<&crate::fpm_trace::FpmTrace>) {
+    if let Some(trace) = trace {
+        tap_direct_fpm_with(payload, |payload| {
+            trace.publish_payload(payload);
+        });
+    }
+}
+
 /// A relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
 /// to the Dynamo event plane.
 pub struct FpmEventRelay {
@@ -49,11 +112,13 @@ impl FpmEventRelay {
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
 
+        let trace = rt.block_on(init_fpm_trace(&component));
+
         let publisher =
             rt.block_on(async { EventPublisher::for_component(&component, FPM_TOPIC).await })?;
 
         rt.spawn(async move {
-            Self::relay_loop(zmq_endpoint, publisher, cancel_clone).await;
+            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
         });
 
         Ok(Self { cancel })
@@ -68,6 +133,7 @@ impl FpmEventRelay {
         zmq_endpoint: String,
         publisher: EventPublisher,
         cancel: CancellationToken,
+        trace: Option<crate::fpm_trace::FpmTrace>,
     ) {
         let socket = match connect_sub_socket(&zmq_endpoint, None).await {
             Ok(socket) => socket,
@@ -92,8 +158,9 @@ impl FpmEventRelay {
                             let mut frames = multipart_message(frames);
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
-                                let payload = frames.swap_remove(2);
-                                if let Err(e) = publisher.publish_bytes(payload).await {
+                                let payload = bytes::Bytes::from(frames.swap_remove(2));
+                                tap_relay_fpm(&payload, trace.as_ref());
+                                if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
                                 }
                             } else {
@@ -156,9 +223,9 @@ struct QueuedRequestMetricsSer {
 
 /// Top-level serialization struct matching Python `ForwardPassMetrics`.
 #[derive(Serialize)]
-struct ForwardPassMetricsSer {
+struct ForwardPassMetricsSer<'a> {
     version: i32,
-    worker_id: String,
+    worker_id: &'a str,
     dp_rank: i64,
     counter_id: i64,
     wall_time: f64,
@@ -166,15 +233,17 @@ struct ForwardPassMetricsSer {
     queued_requests: QueuedRequestMetricsSer,
 }
 
-fn serialize_fpm(
+fn serialize_fpm_into(
+    buffer: &mut Vec<u8>,
     snapshot: &ForwardPassSnapshot,
     worker_id: &str,
     dp_rank: u32,
     counter_id: i64,
-) -> Result<Vec<u8>> {
+) -> Result<()> {
+    buffer.clear();
     let metrics = ForwardPassMetricsSer {
         version: FPM_VERSION,
-        worker_id: worker_id.to_owned(),
+        worker_id,
         dp_rank: dp_rank as i64,
         counter_id,
         wall_time: snapshot.wall_time_secs,
@@ -196,7 +265,27 @@ fn serialize_fpm(
             var_decode_kv_tokens: snapshot.var_queued_decode_kv_tokens,
         },
     };
-    rmp_serde::to_vec_named(&metrics).map_err(|e| anyhow::anyhow!("FPM serialization failed: {e}"))
+    metrics
+        .serialize(&mut rmp_serde::Serializer::new(buffer).with_struct_map())
+        .map_err(|e| anyhow::anyhow!("FPM serialization failed: {e}"))
+}
+
+#[cfg(test)]
+fn serialize_fpm(
+    snapshot: &ForwardPassSnapshot,
+    worker_id: &str,
+    dp_rank: u32,
+    counter_id: i64,
+) -> Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    serialize_fpm_into(&mut buffer, snapshot, worker_id, dp_rank, counter_id)?;
+    Ok(buffer)
+}
+
+struct PendingFpm {
+    snapshot: ForwardPassSnapshot,
+    dp_rank: u32,
+    counter_id: i64,
 }
 
 /// Live FPM sink that forwards snapshots to the `FpmDirectPublisher`'s
@@ -241,23 +330,43 @@ impl FpmDirectPublisher {
         let cancel = CancellationToken::new();
 
         let publisher = EventPublisher::for_component(&component, FPM_TOPIC).await?;
+        let trace = init_fpm_trace(&component).await;
 
-        // Shared channel: per-dp_rank serialization tasks send bytes here,
-        // a single publisher task writes them to the event plane.
-        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // Shared channel: per-dp_rank tasks send snapshots here. A single publisher task
+        // serializes them into a reusable buffer and preserves event-plane publish ordering.
+        let (pub_tx, mut pub_rx) = mpsc::unbounded_channel::<PendingFpm>();
 
         // Publisher task
         let cancel_pub = cancel.clone();
+        let publisher_worker_id = worker_id.clone();
         rt.spawn(async move {
+            let mut payload = Vec::new();
             loop {
                 tokio::select! {
                     biased;
                     _ = cancel_pub.cancelled() => break,
                     result = pub_rx.recv() => {
                         match result {
-                            Some(payload) => {
-                                if let Err(e) = publisher.publish_bytes(payload).await {
-                                    tracing::warn!("FPM direct publisher: event plane publish failed: {e}");
+                            Some(pending) => {
+                                match serialize_fpm_into(
+                                    &mut payload,
+                                    &pending.snapshot,
+                                    &publisher_worker_id,
+                                    pending.dp_rank,
+                                    pending.counter_id,
+                                ) {
+                                    Ok(()) => {
+                                        tap_direct_fpm(&payload, trace.as_ref());
+                                        if let Err(e) = publisher.publish_bytes_ref(&payload).await {
+                                            tracing::warn!("FPM direct publisher: event plane publish failed: {e}");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "FPM serialization failed for dp_rank {}: {e}",
+                                            pending.dp_rank
+                                        );
+                                    }
                                 }
                             }
                             None => break,
@@ -280,7 +389,6 @@ impl FpmDirectPublisher {
             fpm_publishers.push(FpmPublisher::new(Some(sink)));
 
             let pub_tx = pub_tx.clone();
-            let worker_id = worker_id.clone();
             let cancel_ser = cancel.clone();
 
             rt.spawn(async move {
@@ -316,16 +424,11 @@ impl FpmDirectPublisher {
                     };
 
                     counter += 1;
-                    match serialize_fpm(&snapshot, &worker_id, dp_rank, counter) {
-                        Ok(bytes) => {
-                            let _ = pub_tx.send(bytes);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "FPM serialization failed for dp_rank {dp_rank}: {e}"
-                            );
-                        }
-                    }
+                    let _ = pub_tx.send(PendingFpm {
+                        snapshot,
+                        dp_rank,
+                        counter_id: counter,
+                    });
                 }
             });
         }
@@ -353,7 +456,48 @@ impl Drop for FpmDirectPublisher {
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+
+    #[test]
+    fn fpm_trace_initialization_errors_are_soft() {
+        // Trace persistence is auxiliary. Reporting an initialization failure
+        // must not turn it into a constructor error for either FPM publisher.
+        assert!(report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path"))).is_none());
+    }
+
+    #[test]
+    fn relay_and_direct_paths_tap_each_payload_exactly_once() {
+        let relay_calls = Cell::new(0);
+        let relay_payload = bytes::Bytes::from_static(b"relay");
+        tap_relay_fpm_with(&relay_payload, |payload| {
+            assert_eq!(payload.as_ref(), b"relay");
+            relay_calls.set(relay_calls.get() + 1);
+        });
+        assert_eq!(relay_calls.get(), 1);
+
+        let direct_calls = Cell::new(0);
+        tap_direct_fpm_with(b"direct", |payload| {
+            assert_eq!(payload.as_ref(), b"direct");
+            direct_calls.set(direct_calls.get() + 1);
+        });
+        assert_eq!(direct_calls.get(), 1);
+    }
+
+    #[test]
+    fn trace_tap_precedes_and_survives_event_plane_failure() {
+        let steps = RefCell::new(Vec::new());
+        let payload = bytes::Bytes::from_static(b"fpm");
+
+        tap_relay_fpm_with(&payload, |_| steps.borrow_mut().push("trace"));
+        let publish_result: anyhow::Result<()> = {
+            steps.borrow_mut().push("event-plane");
+            Err(anyhow::anyhow!("publish failed"))
+        };
+
+        assert!(publish_result.is_err());
+        assert_eq!(*steps.borrow(), ["trace", "event-plane"]);
+    }
 
     /// Verify that serialize_fpm produces valid msgpack that round-trips
     /// through deserialization with the exact field names and values
@@ -433,6 +577,40 @@ mod tests {
         assert_eq!(decoded.queued_requests.num_prefill_requests, 1);
         assert_eq!(decoded.queued_requests.sum_prefill_tokens, 128);
         assert_eq!(decoded.queued_requests.num_decode_requests, 0);
+    }
+
+    #[test]
+    fn test_serialize_fpm_into_reuses_buffer() {
+        let mut buffer = Vec::with_capacity(1024);
+        let allocation = buffer.as_ptr();
+        let capacity = buffer.capacity();
+
+        serialize_fpm_into(
+            &mut buffer,
+            &ForwardPassSnapshot::default(),
+            "worker-abc",
+            0,
+            1,
+        )
+        .unwrap();
+        serialize_fpm_into(
+            &mut buffer,
+            &ForwardPassSnapshot::default(),
+            "worker-abc",
+            0,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(buffer.as_ptr(), allocation);
+        assert_eq!(buffer.capacity(), capacity);
+
+        #[derive(Deserialize)]
+        struct Counter {
+            counter_id: i64,
+        }
+        let decoded: Counter = rmp_serde::from_slice(&buffer).unwrap();
+        assert_eq!(decoded.counter_id, 2);
     }
 
     /// Verify that worker_id and dp_rank can be extracted from the serialized

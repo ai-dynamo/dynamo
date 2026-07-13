@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
@@ -222,18 +225,20 @@ class WorkerState(_message.Message):
     def __init__(self, ready_prefill: _Optional[int] = ..., ready_decode: _Optional[int] = ..., expected_prefill: _Optional[int] = ..., expected_decode: _Optional[int] = ..., prefill_scaling_in_progress: bool = ..., decode_scaling_in_progress: bool = ...) -> None: ...
 
 class PredictionData(_message.Message):
-    __slots__ = ("predicted_num_req", "predicted_isl", "predicted_osl", "source", "predicted_kv_hit_rate")
+    __slots__ = ("predicted_num_req", "predicted_isl", "predicted_osl", "source", "predicted_kv_hit_rate", "predicted_accept_length")
     PREDICTED_NUM_REQ_FIELD_NUMBER: _ClassVar[int]
     PREDICTED_ISL_FIELD_NUMBER: _ClassVar[int]
     PREDICTED_OSL_FIELD_NUMBER: _ClassVar[int]
     SOURCE_FIELD_NUMBER: _ClassVar[int]
     PREDICTED_KV_HIT_RATE_FIELD_NUMBER: _ClassVar[int]
+    PREDICTED_ACCEPT_LENGTH_FIELD_NUMBER: _ClassVar[int]
     predicted_num_req: float
     predicted_isl: float
     predicted_osl: float
     source: str
     predicted_kv_hit_rate: float
-    def __init__(self, predicted_num_req: _Optional[float] = ..., predicted_isl: _Optional[float] = ..., predicted_osl: _Optional[float] = ..., source: _Optional[str] = ..., predicted_kv_hit_rate: _Optional[float] = ...) -> None: ...
+    predicted_accept_length: float
+    def __init__(self, predicted_num_req: _Optional[float] = ..., predicted_isl: _Optional[float] = ..., predicted_osl: _Optional[float] = ..., source: _Optional[str] = ..., predicted_kv_hit_rate: _Optional[float] = ..., predicted_accept_length: _Optional[float] = ...) -> None: ...
 
 class ScalingProposal(_message.Message):
     __slots__ = ("targets", "reason", "source")

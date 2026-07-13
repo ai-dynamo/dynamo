@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +19,7 @@ from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
-def _clear_admission_control_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clear_rejection_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
@@ -119,6 +120,17 @@ def test_overlap_score_credit_cli_uses_kv_router_config_field() -> None:
     assert args.overlap_score_weight is None
 
 
+def test_overlap_score_credit_decay_cli_uses_kv_router_config_field() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-kv-overlap-score-credit-decay", "0.5"])
+
+    assert args.overlap_score_credit_decay == 0.5
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert config.kv_router_kwargs()["overlap_score_credit_decay"] == 0.5
+
+
 def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -132,21 +144,6 @@ def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:
 
     config = KvRouterConfigBase.from_cli_args(args)
     assert config.kv_router_kwargs()["overlap_score_weight"] == 2.5
-
-
-def test_deprecated_overlap_score_weight_zero_cli_flows_to_binding_kwargs() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="overlap score weight is deprecated"):
-        args = parser.parse_args(["--router-kv-overlap-score-weight", "0"])
-
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 1.0
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
 
 
 def test_deprecated_overlap_score_weight_env_flows_to_binding_kwargs(
@@ -168,130 +165,39 @@ def test_deprecated_overlap_score_weight_env_flows_to_binding_kwargs(
     assert config.kv_router_kwargs()["overlap_score_weight"] == 2.5
 
 
-def test_deprecated_overlap_score_weight_zero_env_flows_to_binding_kwargs(
+@pytest.mark.parametrize(
+    ("canonical_env", "cli_args", "expected_credit", "expected_scale"),
+    [
+        (("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"), [], 1.0, 2.5),
+        (("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.5"), [], 0.5, 1.0),
+        (None, ["--router-prefill-load-scale", "3"], 1.0, 3.0),
+        (None, ["--router-kv-overlap-score-credit", "0.5"], 0.5, 1.0),
+    ],
+    ids=["scale-env", "credit-env", "scale-cli", "credit-cli"],
+)
+def test_deprecated_overlap_score_weight_env_coexists_with_canonical_settings(
     monkeypatch,
+    canonical_env,
+    cli_args,
+    expected_credit,
+    expected_scale,
 ) -> None:
     monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
+    if canonical_env is not None:
+        monkeypatch.setenv(*canonical_env)
 
     with pytest.warns(FutureWarning, match="deprecated"):
         parser = argparse.ArgumentParser()
         KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args([])
+    args = parser.parse_args(cli_args)
 
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 1.0
+    assert args.overlap_score_credit == expected_credit
+    assert args.prefill_load_scale == expected_scale
     assert args.overlap_score_weight == 0.0
 
     config = KvRouterConfigBase.from_cli_args(args)
     assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_env_overrides_new_scale_env(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-    monkeypatch.setenv("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 2.5
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_env_overrides_new_credit_env(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.5")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    assert args.overlap_score_credit == 0.5
-    assert args.prefill_load_scale == 1.0
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_env_overrides_new_scale_cli(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-prefill-load-scale", "3"])
-
-    assert args.overlap_score_credit == 1.0
-    assert args.prefill_load_scale == 3.0
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_env_overrides_new_credit_cli(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT", "0")
-
-    with pytest.warns(FutureWarning, match="deprecated"):
-        parser = argparse.ArgumentParser()
-        KvRouterArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-kv-overlap-score-credit", "0.5"])
-
-    assert args.overlap_score_credit == 0.5
-    assert args.prefill_load_scale == 1.0
-    assert args.overlap_score_weight == 0.0
-
-    config = KvRouterConfigBase.from_cli_args(args)
-    assert config.kv_router_kwargs()["overlap_score_weight"] == 0.0
-
-
-def test_deprecated_overlap_score_weight_cli_order_does_not_change_presence() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    with pytest.warns(FutureWarning, match="overlap score weight is deprecated"):
-        old_then_new = parser.parse_args(
-            [
-                "--router-kv-overlap-score-weight",
-                "0",
-                "--router-prefill-load-scale",
-                "3",
-            ]
-        )
-    with pytest.warns(FutureWarning, match="overlap score weight is deprecated"):
-        new_then_old = parser.parse_args(
-            [
-                "--router-prefill-load-scale",
-                "3",
-                "--router-kv-overlap-score-weight",
-                "0",
-            ]
-        )
-
-    assert old_then_new.overlap_score_weight == 0.0
-    assert old_then_new.prefill_load_scale == 3.0
-    assert new_then_old.overlap_score_weight == 0.0
-    assert new_then_old.prefill_load_scale == 3.0
 
 
 def test_prefill_load_scale_cli_uses_kv_router_config_field() -> None:
@@ -391,27 +297,19 @@ def test_load_aware_preserves_cache_hit_weights() -> None:
     assert kwargs["disk_cache_hit_weight"] == 0.1
 
 
-def test_kv_router_kwargs_preserves_explicit_queue_tiers() -> None:
+def test_policy_config_cli_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_policy_path = str(tmp_path / "env-policy.yaml")
+    explicit_policy_path = str(tmp_path / "explicit-policy.yaml")
+    monkeypatch.setenv("DYN_ROUTER_POLICY_CONFIG", env_policy_path)
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
-    config.router_queue_by_incoming_missing_isl = [(0, 2048), (2048, 512)]
+    args = parser.parse_args(["--router-policy-config", explicit_policy_path])
+    config = KvRouterConfigBase.from_cli_args(args)
 
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["router_queue_by_incoming_missing_isl"] == [(0, 2048), (2048, 512)]
-
-
-def test_kv_router_kwargs_uses_unbounded_queue_cap_by_default() -> None:
-    parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
-
-    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
-
-    kwargs = config.kv_router_kwargs()
-
-    assert kwargs["router_queue_by_incoming_missing_isl"] is None
+    assert config.kv_router_kwargs()["router_policy_config"] == explicit_policy_path
 
 
 def test_load_aware_clears_predicted_ttl() -> None:
@@ -459,78 +357,147 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     assert config.router_assume_kv_reuse is False
 
 
-def test_frontend_admission_control_defaults_to_none(monkeypatch) -> None:
-    """Default --admission-control is 'none': busy thresholds are cleared
-    even though the underlying threshold flags have non-None defaults."""
-    _clear_admission_control_env(monkeypatch)
+def test_frontend_rejection_thresholds_default_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
+    caplog.set_level("INFO")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    args = parser.parse_args([])
-
-    config = FrontendConfig.from_cli_args(args)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
 
-    assert config.admission_control == "none"
+    assert not hasattr(config, "admission_control")
     assert config.active_decode_blocks_threshold is None
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
     assert config.router_queue_threshold == 16.0
-
-
-def test_admission_control_token_capacity_preserves_busy_thresholds(
-    monkeypatch,
-) -> None:
-    """With --admission-control token-capacity, the configured busy thresholds
-    flow through to router_kwargs unchanged."""
-    _clear_admission_control_env(monkeypatch)
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--admission-control", "token-capacity"])
-
-    config = FrontendConfig.from_cli_args(args)
-    config.validate()
-
-    assert config.admission_control == "token-capacity"
-    assert config.active_decode_blocks_threshold == 1.0
-    assert config.active_prefill_tokens_threshold == 10_000_000
-    assert config.active_prefill_tokens_threshold_frac == 64.0
-    assert config.router_queue_threshold == 16.0
     assert config.router_kwargs() == {
-        "active_decode_blocks_threshold": 1.0,
-        "active_prefill_tokens_threshold": 10_000_000,
-        "active_prefill_tokens_threshold_frac": 64.0,
-        "enforce_disagg": False,
+        "active_decode_blocks_threshold": None,
+        "active_prefill_tokens_threshold": None,
+        "active_prefill_tokens_threshold_frac": None,
+        "session_affinity_ttl_secs": None,
     }
+    assert "busy-worker rejection disabled" in caplog.text
 
 
-def test_admission_control_token_capacity_with_custom_thresholds(
-    monkeypatch,
-) -> None:
-    _clear_admission_control_env(monkeypatch)
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(
-        [
-            "--admission-control",
-            "token-capacity",
+@pytest.mark.parametrize(
+    ("flag", "value", "field", "expected"),
+    [
+        (
             "--active-decode-blocks-threshold",
             "0.5",
+            "active_decode_blocks_threshold",
+            0.5,
+        ),
+        (
             "--active-prefill-tokens-threshold",
             "1000",
+            "active_prefill_tokens_threshold",
+            1000,
+        ),
+        (
             "--active-prefill-tokens-threshold-frac",
             "2.0",
-            "--router-queue-threshold",
-            "32.0",
-        ]
-    )
+            "active_prefill_tokens_threshold_frac",
+            2.0,
+        ),
+    ],
+)
+def test_each_cli_rejection_threshold_is_independently_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    flag: str,
+    value: str,
+    field: str,
+    expected: float | int,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
+    caplog.set_level("INFO")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
 
-    config = FrontendConfig.from_cli_args(args)
+    config = FrontendConfig.from_cli_args(parser.parse_args([flag, value]))
     config.validate()
 
-    assert config.admission_control == "token-capacity"
+    thresholds = {
+        "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
+        "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
+        "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
+    }
+    assert thresholds[field] == expected
+    assert all(value is None for name, value in thresholds.items() if name != field)
+    assert f"{flag}={expected}" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("env_var", "field", "expected"),
+    [
+        (
+            "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
+            "active_decode_blocks_threshold",
+            0.6,
+        ),
+        (
+            "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
+            "active_prefill_tokens_threshold",
+            2000,
+        ),
+        (
+            "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
+            "active_prefill_tokens_threshold_frac",
+            3.0,
+        ),
+    ],
+)
+def test_each_environment_rejection_threshold_is_independently_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+    env_var: str,
+    field: str,
+    expected: float | int,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
+    monkeypatch.setenv(env_var, str(expected))
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+
+    thresholds = {
+        "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
+        "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
+        "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
+    }
+    assert thresholds[field] == expected
+    assert all(value is None for name, value in thresholds.items() if name != field)
+
+
+def test_all_rejection_thresholds_and_queue_override_are_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--active-decode-blocks-threshold",
+                "0.5",
+                "--active-prefill-tokens-threshold",
+                "1000",
+                "--active-prefill-tokens-threshold-frac",
+                "2.0",
+                "--router-queue-threshold",
+                "32.0",
+            ]
+        )
+    )
+    config.validate()
+
     assert config.active_decode_blocks_threshold == 0.5
     assert config.active_prefill_tokens_threshold == 1000
     assert config.active_prefill_tokens_threshold_frac == 2.0
@@ -539,215 +506,171 @@ def test_admission_control_token_capacity_with_custom_thresholds(
         "active_decode_blocks_threshold": 0.5,
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
-        "enforce_disagg": False,
+        "session_affinity_ttl_secs": None,
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
 
-def test_admission_control_explicit_none_with_threshold_raises(
-    monkeypatch,
+def test_enforce_disagg_cli_is_deprecated_and_not_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Explicit --admission-control none combined with an explicit
-    threshold flag is a contradiction and must raise. The implicit-default
-    case (no --admission-control flag passed) auto-promotes instead — see
-    test_admission_control_default_none_with_explicit_threshold_auto_switches.
-    """
-    _clear_admission_control_env(monkeypatch)
+    monkeypatch.delenv("DYN_ENFORCE_DISAGG", raising=False)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(
-        [
-            "--admission-control",
-            "none",
-            "--active-decode-blocks-threshold",
-            "0.5",
-        ]
-    )
-
-    config = FrontendConfig.from_cli_args(args)
-    with pytest.raises(ValueError, match="cannot be combined with explicit"):
-        config.validate()
-
-
-def test_admission_control_explicit_none_without_thresholds_resolves_to_none(
-    monkeypatch,
-) -> None:
-    """Explicit --admission-control none with no threshold flags is a
-    legal config: admission disabled, queue threshold preserved."""
-    _clear_admission_control_env(monkeypatch)
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(
-        [
-            "--admission-control",
-            "none",
-            "--router-queue-threshold",
-            "32.0",
-        ]
-    )
-
-    config = FrontendConfig.from_cli_args(args)
+    config = FrontendConfig.from_cli_args(parser.parse_args(["--enforce-disagg"]))
     config.validate()
-
-    assert config.admission_control == "none"
-    assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
-    assert config.active_prefill_tokens_threshold_frac is None
-    assert config.router_queue_threshold == 32.0
-
-
-def test_admission_control_default_none_with_explicit_threshold_auto_switches(
-    monkeypatch,
-) -> None:
-    """Pre-v1.1.2 launch-config compatibility: passing a threshold flag
-    without --admission-control auto-promotes mode from the new 'none'
-    default to 'token-capacity' so the threshold actually fires.
-
-    User-set thresholds keep their values; unset thresholds receive
-    production defaults — same as passing --admission-control token-capacity
-    explicitly. This matches the v1.0.x/v1.1.x contract where setting any
-    threshold flag implicitly activated admission control with defaults
-    filling in the rest.
-    """
-    _clear_admission_control_env(monkeypatch)
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(
-        [
-            "--active-decode-blocks-threshold",
-            "0.85",
-            "--active-prefill-tokens-threshold",
-            "10000",
-        ]
-    )
-
-    config = FrontendConfig.from_cli_args(args)
-    config.validate()
-
-    assert config.admission_control == "token-capacity"
-    assert config.active_decode_blocks_threshold == 0.85
-    assert config.active_prefill_tokens_threshold == 10000
-    # _frac was not passed → filled in with production default 64.0
-    # (auto-switch matches --admission-control token-capacity).
-    assert config.active_prefill_tokens_threshold_frac == 64.0
-
-
-def test_admission_control_default_none_with_no_thresholds_stays_none(
-    monkeypatch,
-) -> None:
-    """When no threshold flag is explicitly set, the default 'none' is
-    preserved (no auto-switch). Already covered by
-    test_frontend_admission_control_defaults_to_none — this is the
-    explicit symmetry check next to the auto-switch tests above."""
-    _clear_admission_control_env(monkeypatch)
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    args = parser.parse_args(["--router-queue-threshold", "32.0"])
-
-    config = FrontendConfig.from_cli_args(args)
-    config.validate()
-
-    assert config.admission_control == "none"
-    assert config.active_decode_blocks_threshold is None
-    assert config.active_prefill_tokens_threshold is None
-    assert config.active_prefill_tokens_threshold_frac is None
-    assert config.router_queue_threshold == 32.0
-
-
-def test_admission_control_apply_is_idempotent(monkeypatch) -> None:
-    """``apply_admission_control()`` runs once in ``validate()`` and again
-    when ``router_kwargs()`` builds the worker config. The second call
-    must not raise the explicit-none contradiction against the ``None``
-    threshold values its first call normalized them to."""
-    _clear_admission_control_env(monkeypatch)
-    parser = argparse.ArgumentParser()
-    FrontendArgGroup().add_arguments(parser)
-
-    args = parser.parse_args([])
-
-    config = FrontendConfig.from_cli_args(args)
-    config.validate()  # first apply
-    # router_kwargs() runs apply_admission_control() again on the
-    # already-normalized state. Must not raise.
     kwargs = config.router_kwargs()
 
-    assert config.admission_control == "none"
-    assert kwargs["active_decode_blocks_threshold"] is None
-    assert kwargs["active_prefill_tokens_threshold"] is None
-    assert kwargs["active_prefill_tokens_threshold_frac"] is None
+    assert config.enforce_disagg is True
+    assert "enforce_disagg" not in kwargs
+    assert "deprecated and ignored" in caplog.text
 
 
-def test_admission_control_explicit_none_threshold_with_none_mode_ok(
-    monkeypatch,
+def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """``--admission-control none --active-decode-blocks-threshold None``
-    is consistent (both say disabled) — must not raise. Only a *numeric*
-    threshold value alongside explicit ``none`` is a contradiction."""
-    _clear_admission_control_env(monkeypatch)
+    monkeypatch.setenv("DYN_ENFORCE_DISAGG", "true")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(
-        [
-            "--admission-control",
-            "none",
-            "--active-decode-blocks-threshold",
-            "None",
-        ]
-    )
-
-    config = FrontendConfig.from_cli_args(args)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
+    kwargs = config.router_kwargs()
 
-    assert config.admission_control == "none"
-    assert config.active_decode_blocks_threshold is None
+    assert config.enforce_disagg is True
+    assert "enforce_disagg" not in kwargs
+    assert "deprecated and ignored" in caplog.text
 
 
-def test_admission_control_token_capacity_with_explicit_none_threshold_keeps_disabled(
-    monkeypatch,
+def test_admission_control_cli_flag_warns_and_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Explicit ``--<threshold> None`` keeps that specific check disabled
-    even in ``--admission-control token-capacity`` mode, matching the
-    "Pass 'None' on the CLI to disable this check" help text. The other
-    thresholds still receive production defaults."""
-    _clear_admission_control_env(monkeypatch)
+    _clear_rejection_threshold_env(monkeypatch)
+    caplog.set_level("WARNING")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(
-        [
-            "--admission-control",
-            "token-capacity",
-            "--active-decode-blocks-threshold",
-            "None",
-        ]
-    )
+    assert "--admission-control" not in parser.format_help()
 
-    config = FrontendConfig.from_cli_args(args)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--admission-control", "none"])
+    )
     config.validate()
 
-    assert config.admission_control == "token-capacity"
-    # Explicit `None` is preserved — the documented disable-this-check semantic.
+    assert not hasattr(config, "admission_control")
     assert config.active_decode_blocks_threshold is None
-    # Un-passed thresholds still receive their production defaults.
-    assert config.active_prefill_tokens_threshold == 10_000_000
-    assert config.active_prefill_tokens_threshold_frac == 64.0
+    assert config.active_prefill_tokens_threshold is None
+    assert config.active_prefill_tokens_threshold_frac is None
+    assert "--admission-control is no longer supported and is ignored" in caplog.text
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--admission-control", "bogus"])
 
 
-def test_admission_control_env_var(monkeypatch) -> None:
-    _clear_admission_control_env(monkeypatch)
+def test_removed_admission_control_environment_warns_and_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
     monkeypatch.setenv("DYN_ADMISSION_CONTROL", "token-capacity")
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    args = parser.parse_args([])
-
-    config = FrontendConfig.from_cli_args(args)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
 
-    assert config.admission_control == "token-capacity"
-    assert config.active_decode_blocks_threshold == 1.0
+    assert not hasattr(config, "admission_control")
+    assert config.active_decode_blocks_threshold is None
+    assert config.active_prefill_tokens_threshold is None
+    assert config.active_prefill_tokens_threshold_frac is None
+    assert "DYN_ADMISSION_CONTROL is no longer supported and is ignored" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--active-decode-blocks-threshold",
+        "--active-prefill-tokens-threshold",
+        "--active-prefill-tokens-threshold-frac",
+    ],
+)
+def test_explicit_none_keeps_rejection_threshold_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([flag, "None"]))
+    config.validate()
+
+    assert config.active_decode_blocks_threshold is None
+    assert config.active_prefill_tokens_threshold is None
+    assert config.active_prefill_tokens_threshold_frac is None
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--active-decode-blocks-threshold", "-0.1"),
+        ("--active-decode-blocks-threshold", "1.1"),
+        ("--active-decode-blocks-threshold", "nan"),
+        ("--active-prefill-tokens-threshold", "-1"),
+        ("--active-prefill-tokens-threshold-frac", "-0.1"),
+        ("--active-prefill-tokens-threshold-frac", "inf"),
+    ],
+)
+def test_rejection_threshold_validation_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    flag: str,
+    value: str,
+) -> None:
+    _clear_rejection_threshold_env(monkeypatch)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    config = FrontendConfig.from_cli_args(parser.parse_args([flag, value]))
+    with pytest.raises(ValueError, match=flag):
+        config.validate()
+
+
+def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+    assert config.session_affinity_ttl_secs is None
+    assert config.router_kwargs()["session_affinity_ttl_secs"] is None
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "600")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    config.validate()
+    assert config.session_affinity_ttl_secs == 600
+    assert config.router_kwargs()["session_affinity_ttl_secs"] == 600
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-ttl-secs", "900"])
+    )
+    config.validate()
+    assert config.session_affinity_ttl_secs == 900
+
+
+@pytest.mark.parametrize("ttl", [0, 31_536_001])
+def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-ttl-secs", str(ttl)])
+    )
+    with pytest.raises(ValueError, match="router-session-affinity-ttl-secs"):
+        config.validate()

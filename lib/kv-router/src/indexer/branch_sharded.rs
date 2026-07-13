@@ -334,6 +334,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         depth: usize,
     ) {
         let score = depth as u32;
+        scores.scores.reserve(active.len());
         for &worker in active {
             let entry = scores.scores.entry(worker).or_insert(0);
             *entry = (*entry).max(score);
@@ -341,7 +342,10 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     }
 
     fn collect_live_workers(node: &RoutingNode) -> FxHashSet<WorkerWithDpRank> {
-        node.live_workers.iter().map(|worker| *worker).collect()
+        let mut active =
+            FxHashSet::with_capacity_and_hasher(node.live_workers.len(), FxBuildHasher);
+        active.extend(node.live_workers.iter().map(|worker| *worker));
+        active
     }
 
     fn reconcile_active_workers(
@@ -357,6 +361,9 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             return;
         }
         let score = drop_depth as u32;
+        scores
+            .scores
+            .reserve(active.len().saturating_sub(node.live_workers.len()));
         active.retain(|worker| {
             if node.live_workers.contains(worker) {
                 true
@@ -371,7 +378,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     async fn dispatch_read(
         &self,
         node: Arc<RoutingNode>,
-        sequence: Vec<LocalBlockHash>,
+        sequence: &[LocalBlockHash],
         mut scores: OverlapScores,
         active: FxHashSet<WorkerWithDpRank>,
     ) -> Result<OverlapScores, KvRouterError> {
@@ -387,10 +394,10 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         let Some(anchor) = self.anchor_for_parent(&node) else {
             return Ok(scores);
         };
-        let suffix = if anchor.anchor_depth <= sequence.len() {
-            sequence[anchor.anchor_depth..].to_vec()
+        let suffix: &[LocalBlockHash] = if anchor.anchor_depth <= sequence.len() {
+            &sequence[anchor.anchor_depth..]
         } else {
-            Vec::new()
+            &[]
         };
         let shard = Arc::clone(&self.shards[shard_idx]);
         let mut shard_scores = shard
@@ -728,7 +735,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
                 #[cfg(feature = "bench")]
                 let t_shard = Instant::now();
                 let result = self
-                    .dispatch_read(node, sequence, router_scores, active)
+                    .dispatch_read(node, &sequence, router_scores, active)
                     .await;
                 #[cfg(feature = "bench")]
                 {
@@ -794,6 +801,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
         &self,
         tokens: &[u32],
         lora_name: Option<&str>,
+        cache_namespace: Option<&str>,
         is_eagle: Option<bool>,
     ) -> Result<OverlapScores, KvRouterError> {
         let sequence = compute_block_hash_for_seq(
@@ -801,6 +809,7 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
             self.kv_block_size,
             BlockHashOptions {
                 lora_name,
+                cache_namespace,
                 is_eagle,
                 block_mm_infos: None,
             },
@@ -954,16 +963,21 @@ impl<S: AsyncShardHandle> KvIndexerInterface for BranchShardedIndexer<S> {
 
             let timing = {
                 let calls = self.metrics.timing.calls.load(Ordering::Relaxed);
-                let avg_routing_ns = if calls > 0 {
-                    self.metrics.timing.routing_ns.load(Ordering::Relaxed) / calls
-                } else {
-                    0
-                };
-                let avg_shard_us = if calls > 0 {
-                    self.metrics.timing.shard_ns.load(Ordering::Relaxed) / calls / 1000
-                } else {
-                    0
-                };
+                let avg_routing_ns = self
+                    .metrics
+                    .timing
+                    .routing_ns
+                    .load(Ordering::Relaxed)
+                    .checked_div(calls)
+                    .unwrap_or(0);
+                let avg_shard_us = self
+                    .metrics
+                    .timing
+                    .shard_ns
+                    .load(Ordering::Relaxed)
+                    .checked_div(calls)
+                    .unwrap_or(0)
+                    / 1000;
                 format!("\n  avg routing = {avg_routing_ns}ns\n  avg shard = {avg_shard_us}µs")
             };
 
@@ -1345,8 +1359,9 @@ mod tests {
         KvIndexerInterface::apply_event(shard, direct_worker_event).await;
         index.flush().await;
 
+        let suffix = local_hashes(&[7]);
         let scores = index.shards[shard_idx]
-            .find_matches_from_anchor(anchor, local_hashes(&[7]))
+            .find_matches_from_anchor(anchor, &suffix)
             .await
             .unwrap();
         assert_eq!(score(&scores, worker(2)), Some(4));
@@ -1550,25 +1565,6 @@ mod tests {
 
         let c = child(&child(&child(&index.root, 1), 2), 3);
         assert_eq!(c.live_workers.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn cleanup_updates_router_state() {
-        let index = make_indexer(2, 4);
-        index
-            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3]))
-            .await;
-        index
-            .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 4]))
-            .await;
-
-        index.remove_worker_dp_rank(0, 0).await;
-        let after_dp_remove = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
-        assert_eq!(score(&after_dp_remove, WorkerWithDpRank::new(0, 0)), None);
-
-        index.apply_event(clear_event(0)).await;
-        let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
-        assert!(after_clear.scores.is_empty());
     }
 
     #[tokio::test]

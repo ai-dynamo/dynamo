@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Optional
@@ -42,6 +43,7 @@ from dynamo.common.backend.engine import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     LogitsProcessorSpec,
     is_generation_stage,
     logits_processors_for_request,
@@ -55,10 +57,11 @@ from dynamo.common.backend.health_check import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
-from dynamo.sglang._compat import get_scheduler_info
+from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -67,6 +70,7 @@ from dynamo.sglang._disagg import (
 )
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
     kv_metrics_block_values,
     local_dp_rank_bounds,
     runtime_capacity,
@@ -80,10 +84,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Bound on prefill drain during graceful shutdown. After this, force-cancel
-# any still-running consume tasks. Matches TRT-LLM's drain timeout.
-_PREFILL_DRAIN_TIMEOUT_S = 30.0
-
 # Operators can opt out of the prefill warmup for fast-iteration / smoke
 # environments where the warmup adds avoidable startup latency. The default
 # (`0`/unset) keeps warmup on; set to `1`/`true` to skip.
@@ -95,11 +95,19 @@ def _warmup_enabled() -> bool:
     return raw.strip().lower() not in ("1", "true", "yes", "on")
 
 
-def _get_runtime_data(server_args) -> dict[str, Any] | None:
+def _get_runtime_data(
+    server_args, scheduler_info: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    runtime_data: dict[str, Any] = {}
     worker_group_id = get_sglang_worker_group_id(server_args)
-    if worker_group_id is None:
-        return None
-    return {SGLANG_WORKER_GROUP_ID_KEY: worker_group_id}
+    if worker_group_id is not None:
+        runtime_data[SGLANG_WORKER_GROUP_ID_KEY] = worker_group_id
+    offloading_capacity = get_hicache_native_offloading_capacity(
+        server_args, scheduler_info or {}
+    )
+    if offloading_capacity is not None:
+        runtime_data[NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY] = offloading_capacity
+    return runtime_data or None
 
 
 def _local_dp_rank_range(server_args) -> tuple[int, int]:
@@ -129,6 +137,10 @@ class SglangLLMEngine(LLMEngine):
         # Background drain tasks for prefill stream after the bootstrap
         # chunk yields (Completed path only). Cancelled in cleanup().
         self._prefill_consume_tasks: set[asyncio.Task[Any]] = set()
+        # Prefill streams still draining their KV transfer, counted across both
+        # the bootstrap (inline) and completed (spawned) paths. is_quiescent()
+        # reads this. Single-threaded asyncio mutation, no lock needed.
+        self._inflight_prefill_streams: int = 0
         # Set by attach_snapshot_publisher when component_metrics_dp_ranks
         # is non-empty. `_metrics_pull_loop` pushes ComponentSnapshots into
         # it on every ZMQ message — event-driven, no framework polling.
@@ -149,7 +161,10 @@ class SglangLLMEngine(LLMEngine):
     async def from_args(
         cls, argv: list[str] | None = None
     ) -> tuple[SglangLLMEngine, WorkerConfig]:
-        config = await parse_args(argv if argv is not None else sys.argv[1:])
+        config = await parse_args(
+            argv if argv is not None else sys.argv[1:],
+            fpm_trace_relay_supported=False,
+        )
         server_args = config.server_args
         dynamo_args = config.dynamo_args
 
@@ -179,6 +194,10 @@ class SglangLLMEngine(LLMEngine):
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id  # SGLang bootstrap uses host/port/room triples
 
+        # SGLang's tokenizer_manager registers its own SIGTERM/SIGINT handlers
+        # via loop.add_signal_handler() (lazily, on warmup). The unified Worker
+        # shim suppresses those centrally (worker.py::_guard_loop_signal_handlers)
+        # so they can't override the Rust Worker's shutdown; nothing to do here.
         self.engine = sgl.Engine(server_args=self.server_args)
         self._pause_controller = SGLangEnginePauseController(self.engine)
 
@@ -214,7 +233,7 @@ class SglangLLMEngine(LLMEngine):
                     _DYN_SGLANG_SKIP_WARMUP_ENV,
                 )
 
-        scheduler_info = get_scheduler_info(self.engine)
+        scheduler_info = self.engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(self.server_args, scheduler_info)
         page_size = self.server_args.page_size
 
@@ -225,18 +244,20 @@ class SglangLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
-            context_length=self.server_args.context_length,
-            kv_cache_block_size=page_size,
-            total_kv_blocks=capacity.total_kv_blocks,
-            max_num_seqs=capacity.max_num_seqs,
-            max_num_batched_tokens=capacity.max_num_batched_tokens,
-            # Router needs the rank range to enumerate per-rank load.
-            data_parallel_size=self._dp_size,
-            data_parallel_start_rank=self._dp_start,
-            # Prefill-only — drives PrefillRouter's Bootstrap path.
-            bootstrap_host=self._bootstrap_host,
-            bootstrap_port=self._bootstrap_port,
-            runtime_data=_get_runtime_data(self.server_args),
+            runtime_data=_get_runtime_data(self.server_args, scheduler_info),
+            llm=LlmRegistration(
+                context_length=self.server_args.context_length,
+                kv_cache_block_size=page_size,
+                total_kv_blocks=capacity.total_kv_blocks,
+                max_num_seqs=capacity.max_num_seqs,
+                max_num_batched_tokens=capacity.max_num_batched_tokens,
+                # Router needs the rank range to enumerate per-rank load.
+                data_parallel_size=self._dp_size,
+                data_parallel_start_rank=self._dp_start,
+                # Prefill-only — drives PrefillRouter's Bootstrap path.
+                bootstrap_host=self._bootstrap_host,
+                bootstrap_port=self._bootstrap_port,
+            ),
         )
 
     def _logits_tokenizer(self) -> Any:
@@ -382,6 +403,7 @@ class SglangLLMEngine(LLMEngine):
             **input_param,
             sampling_params=sampling_params,
             stream=True,
+            **require_reasoning_kwargs(self.engine, request),
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
             **telemetry.engine_trace_kwargs(
@@ -428,6 +450,12 @@ class SglangLLMEngine(LLMEngine):
                 "index": 0,
                 "disaggregated_params": dict(bootstrap_kwargs),
             }
+            # Count this stream in-flight now, before the spawn/await below.
+            # Incrementing inside _consume_prefill_stream instead would leave a
+            # create_task -> first-run gap where is_quiescent() reads 0 and the
+            # drain exits early, cancelling a live transfer. Decrement is in
+            # _consume_prefill_stream's finally.
+            self._inflight_prefill_streams += 1
             # Bootstrap path (router-populated bootstrap_info): drain
             # inline so cancellation propagates to engine.abort().
             # Completed path: router awaits our stream end before
@@ -497,6 +525,11 @@ class SglangLLMEngine(LLMEngine):
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
+                    "prompt_tokens_details": (
+                        {"cached_tokens": meta_info["cached_tokens"]}
+                        if meta_info.get("cached_tokens") is not None
+                        else None
+                    ),
                 }
                 prompt_payload = (
                     _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(meta_info)
@@ -691,32 +724,16 @@ class SglangLLMEngine(LLMEngine):
             tokenizer_manager.abort_request(rid=rid, abort_all=False)
             logger.debug("Aborted request %s", rid)
 
-    async def drain(self) -> None:
-        """Await background prefill consume tasks before cleanup (#7319)."""
-        pending = [t for t in self._prefill_consume_tasks if not t.done()]
-        if not pending:
-            return
-        logger.info(
-            "Draining %d background prefill consume task(s) (timeout=%.1fs)",
-            len(pending),
-            _PREFILL_DRAIN_TIMEOUT_S,
-        )
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*pending, return_exceptions=True),
-                timeout=_PREFILL_DRAIN_TIMEOUT_S,
-            )
-            logger.info("All prefill consume tasks drained")
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Drain timeout (%.1fs) reached; cleanup() will cancel "
-                "remaining tasks — some NIXL transfers may not complete",
-                _PREFILL_DRAIN_TIMEOUT_S,
-            )
+    async def is_quiescent(self) -> Optional[bool]:
+        """``True`` when no prefill stream is still draining its KV transfer.
+        SGLang's ``async_generate`` stream stays alive through the transfer, so
+        the in-flight count tracks it directly."""
+        return self._inflight_prefill_streams == 0
 
     async def cleanup(self) -> None:
-        # Anything still running here either timed out in drain() or was
-        # never drained (e.g. start failed). Force-cancel.
+        # Anything still running here either outlasted the drain loop (the
+        # is_quiescent budget expired) or was never drained (e.g. start
+        # failed). Force-cancel.
         for task in self._prefill_consume_tasks:
             if not task.done():
                 task.cancel()
@@ -825,13 +842,15 @@ class SglangLLMEngine(LLMEngine):
         context: Context,
         rid: str | None,
     ) -> None:
-        """Drain a prefill engine stream after the bootstrap chunk has
-        been yielded. Awaited inline on the Bootstrap path, run as a
-        background task on the Completed path (see ``generate``).
+        """Drain a prefill engine stream after the bootstrap chunk is yielded.
+        Awaited inline on the bootstrap path, spawned as a task on the completed
+        path (see ``generate``).
 
-        On stream failure (NIXL transport error, engine crash) abort the
-        SGLang request so the decode peer's NIXL connect fails fast
-        instead of hanging on a KV transfer that will not arrive.
+        On stream failure, abort the SGLang request so the decode peer's NIXL
+        connect fails fast instead of hanging on a transfer that won't arrive.
+
+        ``generate`` increments ``_inflight_prefill_streams`` before this runs;
+        the ``finally`` here decrements it.
         """
         try:
             async for _ in stream:
@@ -849,6 +868,8 @@ class SglangLLMEngine(LLMEngine):
                 exc_info=True,
             )
             self._abort_sglang_request(rid)
+        finally:
+            self._inflight_prefill_streams -= 1
 
     def _abort_sglang_request(self, rid: Optional[str]) -> None:
         """Best-effort abort. Failures here are swallowed — SGLang is
@@ -983,7 +1004,21 @@ class SglangLLMEngine(LLMEngine):
         if isinstance(guided_decoding, dict):
             json_schema = guided_decoding.get("json")
             if json_schema is not None:
-                return {"json_schema": json.dumps(json_schema)}
+                if not isinstance(json_schema, str):
+                    json_schema = json.dumps(json_schema)
+                return {"json_schema": json_schema}
+            regex = guided_decoding.get("regex")
+            if regex is not None:
+                return {"regex": regex}
+            grammar = guided_decoding.get("grammar")
+            if grammar is not None:
+                return {"ebnf": grammar}
+            choice = guided_decoding.get("choice")
+            if choice:
+                valid_choices = [item for item in choice if item is not None]
+                if valid_choices:
+                    alternatives = "|".join(re.escape(item) for item in valid_choices)
+                    return {"regex": f"({alternatives})"}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
                 return {"structural_tag": serialize_structural_tag(structural_tag)}

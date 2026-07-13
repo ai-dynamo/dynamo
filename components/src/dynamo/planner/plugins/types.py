@@ -163,11 +163,9 @@ class TrafficMetrics(_ProtoMirror):
     isl: float = 0.0
     osl: float = 0.0
     # KV cache hit rate over the window.  ``Optional`` mirrors proto3
-    # field presence (``optional float kv_hit_rate = 5``) and matches the
-    # PSM-side ``TrafficObservation.kv_hit_rate`` semantic: ``None`` =
-    # Prometheus returned no datapoint; ``0.0`` = all-cold cache.  PSM
-    # throughput scaling consumes this; external throughput-propose
-    # plugins replicating PSM behaviour read it here.
+    # field presence (``optional double kv_hit_rate = 5``): ``None`` =
+    # Prometheus returned no datapoint; ``0.0`` = all-cold cache. Builtin
+    # and external throughput-propose plugins read it here.
     kv_hit_rate: Optional[float] = None
     # Speculative decode accept length over the window: visible output tokens
     # per decode request-forward, including the base token. ``None`` = no
@@ -197,7 +195,7 @@ class WorkerState(_ProtoMirror):
     ``ready_*`` / ``expected_*`` are replica counts.
     ``*_scaling_in_progress`` is true while a previously-issued scale
     operation has not yet landed (ready != expected); external load-
-    scaling plugins replicating PSM behaviour gate further scale-up on
+    scaling plugins gate further scale-up on
     these flags (otherwise the planner can chase a moving target and
     over-provision).  ``None`` means "not reported this tick"."""
 
@@ -216,7 +214,7 @@ class ObservationData(_ProtoMirror):
 
 
 class PredictionData(_ProtoMirror):
-    """All four prediction fields are ``Optional[float]``.
+    """All numeric prediction fields are ``Optional[float]``.
 
     ``chain_augment`` partial-merge uses field set/unset to distinguish
     "I assert this value (even 0.0)" vs "no opinion, preserve previous".
@@ -225,15 +223,16 @@ class PredictionData(_ProtoMirror):
     semantics — ``None`` means unset, any concrete float (including 0.0)
     means asserted.
 
-    ``predicted_kv_hit_rate`` mirrors the PSM-side
-    ``TickDiagnostics.predicted_kv_hit_rate``; external throughput-propose
-    plugins replicating PSM behaviour emit it here.
+    ``predicted_kv_hit_rate`` and ``predicted_accept_length`` are last-value
+    runtime metadata emitted by PREDICT so downstream stages do not need to
+    read predictor-owned state.
     """
 
     predicted_num_req: Optional[float] = None
     predicted_isl: Optional[float] = None
     predicted_osl: Optional[float] = None
     predicted_kv_hit_rate: Optional[float] = None
+    predicted_accept_length: Optional[float] = None
     source: str = ""
 
 

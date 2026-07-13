@@ -28,6 +28,7 @@ use crate::kv_router::{
 mod batching;
 mod dedup;
 mod event_processor;
+mod multimodal_embedding_cache;
 mod sinks;
 #[cfg(test)]
 mod tests;
@@ -41,6 +42,10 @@ use dedup::EventDedupFilter;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::{start_event_processor, start_event_processor_jetstream};
+pub use multimodal_embedding_cache::{
+    MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
+    MultimodalEmbeddingCacheUpdate,
+};
 use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
@@ -90,7 +95,7 @@ impl KvEventSource {
         kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
-        tx: mpsc::UnboundedSender<PlacementEvent>,
+        tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
@@ -140,7 +145,7 @@ pub struct KvEventPublisher {
     /// The ID of the local worker emitting placement events.
     worker_id: WorkerId,
     /// The channel to send events to.
-    tx: mpsc::UnboundedSender<PlacementEvent>,
+    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
 }
@@ -203,7 +208,7 @@ impl KvEventPublisher {
             })
             .map(|ms| ms.min(MAX_BATCHING_TIMEOUT_MS));
 
-        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let worker_id = worker_id.unwrap_or_else(|| component.drt().connection_id());
 
         let _ = KvPublisherMetrics::from_component(&component);
@@ -331,11 +336,7 @@ impl KvEventPublisher {
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
-        let placement_event = PlacementEvent::local_gpu(self.worker_id, event);
-        match self.tx.send(placement_event) {
-            Ok(()) => Ok(()),
-            Err(err) => Err(mpsc::error::SendError(err.0.event)),
-        }
+        self.send_singleton(PlacementEvent::local_gpu(self.worker_id, event))
     }
 
     pub fn publish_with_storage_tier(
@@ -347,10 +348,22 @@ impl KvEventPublisher {
             Placement::local_worker(self.worker_id, event.dp_rank, storage_tier),
             event,
         );
-        match self.tx.send(placement_event) {
-            Ok(()) => Ok(()),
-            Err(err) => Err(mpsc::error::SendError(err.0.event)),
-        }
+        self.send_singleton(placement_event)
+    }
+
+    fn send_singleton(
+        &self,
+        event: PlacementEvent,
+    ) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {
+        self.tx.send(vec![event]).map_err(|err| {
+            mpsc::error::SendError(
+                err.0
+                    .into_iter()
+                    .next()
+                    .expect("singleton publish returned an empty failed batch")
+                    .event,
+            )
+        })
     }
 
     pub fn next_event_id(&self) -> u64 {

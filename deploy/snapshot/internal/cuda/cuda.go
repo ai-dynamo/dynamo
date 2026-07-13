@@ -3,6 +3,7 @@ package cuda
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -104,43 +105,126 @@ func GetGPUUUIDsViaNvidiaSmi(ctx context.Context, hostProcPath string, pid int) 
 	return uuids, nil
 }
 
-// DiscoverGPUUUIDs resolves GPU UUIDs according to the pod's allocation mode:
-// DRA-backed pods use the DRA API, classic nvidia.com/gpu pods use PodResources,
-// and nvidia-smi remains the last fallback for either path.
+type visibleGPUDiscovery func(context.Context, string, int) ([]string, error)
+
+// DiscoverGPUUUIDs resolves GPU UUIDs in the container's runtime ordinal order.
 func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podName, podNamespace, containerName, hostProcPath string, pid int, log logr.Logger) ([]string, error) {
-	gpuUUIDs, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, log)
-	fallbackReason := "DRA API returned no GPU UUIDs"
+	return discoverGPUUUIDs(
+		ctx,
+		clientset,
+		podName,
+		podNamespace,
+		containerName,
+		hostProcPath,
+		pid,
+		GetGPUUUIDsViaNvidiaSmi,
+		log,
+	)
+}
+
+func discoverGPUUUIDs(
+	ctx context.Context,
+	clientset kubernetes.Interface,
+	podName,
+	podNamespace,
+	containerName,
+	hostProcPath string,
+	pid int,
+	discoverVisibleGPUs visibleGPUDiscovery,
+	log logr.Logger,
+) ([]string, error) {
+	gpuUUIDs, hasNVIDIADRAAllocation, err := GetGPUUUIDsViaDRAAPI(ctx, clientset, podName, podNamespace, containerName, log)
 	if err != nil {
+		if hasNVIDIADRAAllocation {
+			return nil, fmt.Errorf("DRA GPU UUID lookup failed: %w", err)
+		}
 		log.Error(
 			err,
 			"DRA API GPU UUID lookup failed, trying other discovery paths",
 			"pod", podNamespace+"/"+podName,
-			"has_nvidia_dra_allocation", hasNVIDIADRAAllocation,
 		)
 		gpuUUIDs = nil
-		fallbackReason = "DRA API GPU UUID lookup failed"
+	}
+
+	if hasNVIDIADRAAllocation {
+		if len(gpuUUIDs) == 0 {
+			return nil, errors.New(
+				"DRA GPU allocation has no resolvable UUIDs",
+			)
+		}
+		visibleGPUUUIDs, err := discoverVisibleGPUs(ctx, hostProcPath, pid)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"discover DRA GPUs in container ordinal order: %w",
+				err,
+			)
+		}
+		orderedUUIDs, err := orderDRAUUIDsByRuntime(gpuUUIDs, visibleGPUUUIDs)
+		if err != nil {
+			return nil, err
+		}
+		log.Info(
+			"resolved DRA GPU UUIDs in container ordinal order",
+			"uuids", orderedUUIDs,
+		)
+		return orderedUUIDs, nil
+	}
+
+	gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
+	if err != nil {
+		return nil, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
 	}
 	if len(gpuUUIDs) > 0 {
 		return gpuUUIDs, nil
 	}
-	if !hasNVIDIADRAAllocation {
-		gpuUUIDs, err = GetPodGPUUUIDs(ctx, podName, podNamespace, containerName)
-		if err != nil {
-			return nil, fmt.Errorf("PodResources GPU UUID lookup failed: %w", err)
-		}
-		if len(gpuUUIDs) > 0 {
-			return gpuUUIDs, nil
-		}
-		fallbackReason = "PodResources API returned no GPU UUIDs"
-	}
 
-	log.Info(fallbackReason+", falling back to nvidia-smi", "pid", pid)
-	gpuUUIDs, err = GetGPUUUIDsViaNvidiaSmi(ctx, hostProcPath, pid)
+	log.Info("PodResources API returned no GPU UUIDs, falling back to nvidia-smi", "pid", pid)
+	gpuUUIDs, err = discoverVisibleGPUs(ctx, hostProcPath, pid)
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi GPU UUID fallback failed: %w", err)
 	}
 	log.Info("nvidia-smi fallback discovered GPU UUIDs", "uuids", gpuUUIDs)
 	return gpuUUIDs, nil
+}
+
+func orderDRAUUIDsByRuntime(allocatedUUIDs, visibleUUIDs []string) ([]string, error) {
+	if len(allocatedUUIDs) != len(visibleUUIDs) {
+		return nil, fmt.Errorf(
+			"DRA allocation and container-visible GPU count differ: allocated=%d visible=%d",
+			len(allocatedUUIDs),
+			len(visibleUUIDs),
+		)
+	}
+
+	allocated := make(map[string]struct{}, len(allocatedUUIDs))
+	for _, uuid := range allocatedUUIDs {
+		if !gpuUUIDPattern.MatchString(uuid) {
+			return nil, fmt.Errorf("DRA allocation contains invalid GPU UUID %q", uuid)
+		}
+		if _, duplicate := allocated[uuid]; duplicate {
+			return nil, fmt.Errorf("DRA allocation contains duplicate GPU UUID %q", uuid)
+		}
+		allocated[uuid] = struct{}{}
+	}
+
+	seen := make(map[string]struct{}, len(visibleUUIDs))
+	for _, uuid := range visibleUUIDs {
+		if !gpuUUIDPattern.MatchString(uuid) {
+			return nil, fmt.Errorf("container reports invalid GPU UUID %q", uuid)
+		}
+		if _, duplicate := seen[uuid]; duplicate {
+			return nil, fmt.Errorf("container reports duplicate GPU UUID %q", uuid)
+		}
+		if _, ok := allocated[uuid]; !ok {
+			return nil, fmt.Errorf(
+				"container-visible GPU %q is not in the DRA allocation",
+				uuid,
+			)
+		}
+		seen[uuid] = struct{}{}
+	}
+
+	return append([]string(nil), visibleUUIDs...), nil
 }
 
 // FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
@@ -174,6 +258,8 @@ func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int 
 // When a source UUID exists in the target set, it maps to itself (identity mapping) to avoid
 // unnecessary cross-GPU restore on same-node restores where kubelet returns GPUs in different order.
 // Remaining unmatched source UUIDs are paired with remaining unmatched target UUIDs positionally.
+// If all mappings are identity mappings, it returns an empty string so same-GPU restores use the
+// default CUDA restore path instead of forcing the GPU migration path.
 func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string, error) {
 	if len(sourceUUIDs) != len(targetUUIDs) {
 		return "", fmt.Errorf("GPU count mismatch: source has %d, target has %d", len(sourceUUIDs), len(targetUUIDs))
@@ -211,6 +297,17 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
 			mapping[src] = remainingTargets[idx]
 			idx++
 		}
+	}
+
+	allIdentity := true
+	for _, src := range sourceUUIDs {
+		if mapping[src] != src {
+			allIdentity = false
+			break
+		}
+	}
+	if allIdentity {
+		return "", nil
 	}
 
 	pairs := make([]string, len(sourceUUIDs))

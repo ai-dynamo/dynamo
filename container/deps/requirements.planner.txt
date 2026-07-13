@@ -3,12 +3,12 @@
 
 # Dependencies required by the planner, profiler, and global_planner services.
 
-aiconfigurator[webapp]>=0.9.0
+aiconfigurator>=0.9.0
 aiofiles<=25.1.0
 aiohttp>=3.9.0,<4.0
 filterpy==1.4.5
-# gRPC + protobuf are runtime deps for the plugin-orchestrator transport
-# (use_orchestrator=true path). Pin in sync with requirements.common.txt.
+# gRPC + protobuf are runtime deps for the plugin-orchestrator transport.
+# Pin in sync with requirements.common.txt.
 grpcio>=1.63.0
 kubernetes==32.0.1
 kubernetes_asyncio==32.0.0

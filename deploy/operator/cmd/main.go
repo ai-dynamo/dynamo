@@ -24,7 +24,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -172,6 +171,7 @@ func initConfigScheme() {
 
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
 
 //nolint:gocyclo
 func main() {
@@ -180,9 +180,19 @@ func main() {
 
 	var configFile string
 	var operatorVersion string
+	var operatorImage string
+	var operatorImagePullPolicy string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
+	flag.StringVar(
+		&operatorImage,
+		"operator-image",
+		"",
+		"Operator image used to deliver version-matched helper binaries for DGD overrides",
+	)
+	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
+		"Image pull policy for operator helper init containers")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -194,7 +204,6 @@ func main() {
 		setupLog.Error(nil, "--config flag is required")
 		os.Exit(1)
 	}
-
 	// Load, default, and validate operator configuration
 	operatorCfg, err := LoadAndValidateOperatorConfig(configFile)
 	if err != nil {
@@ -210,6 +219,14 @@ func main() {
 		os.Exit(1)
 	}
 	setupLog.Info("Operator version configured", "version", operatorVersion)
+
+	pullPolicy := corev1.PullPolicy(operatorImagePullPolicy)
+	switch pullPolicy {
+	case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
+	default:
+		setupLog.Error(nil, "operator-image-pull-policy is invalid", "provided", operatorImagePullPolicy)
+		os.Exit(1)
+	}
 
 	// Initialize runtime config (will be populated after detection)
 	runtimeConfig := &commonController.RuntimeConfig{}
@@ -264,6 +281,11 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		// PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
+		// Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
+		mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
+			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
+		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
 		banner := strings.Repeat("=", 80)
@@ -300,7 +322,9 @@ func main() {
 		setupLog.Error(err, "unable to create cert manager")
 		os.Exit(1)
 	}
-	if err = certMgr.Setup(mainCtx, mgr); err != nil {
+	// Auto mode runs one synchronous certificate refresh with the direct client,
+	// then registers the cert-controller with the not-yet-started manager.
+	if err = certMgr.SetupAndRunOnce(mainCtx, mgr); err != nil {
 		setupLog.Error(err, "failed to setup webhook certificate management")
 		os.Exit(1)
 	}
@@ -433,6 +457,23 @@ func main() {
 		runtimeConfig.LWSEnabled = false
 	}
 
+	switch {
+	case operatorCfg.Orchestrators.VolcanoScheduler.Enabled == nil:
+		runtimeConfig.VolcanoSchedulerEnabled = false
+	case *operatorCfg.Orchestrators.VolcanoScheduler.Enabled:
+		if !volcanoDetected {
+			setupLog.Error(nil,
+				"Volcano scheduler integration is explicitly enabled in config but "+
+					"the Volcano API group was not detected in the cluster",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.VolcanoSchedulerEnabled = true
+	default:
+		setupLog.Info("Volcano scheduler integration is explicitly disabled via config override")
+		runtimeConfig.VolcanoSchedulerEnabled = false
+	}
+
 	// Detect Kai-scheduler availability using discovery client
 	setupLog.Info("Detecting Kai-scheduler availability...")
 	kaiSchedulerDetected := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
@@ -472,15 +513,34 @@ func main() {
 	}
 
 	setupLog.Info("Detecting Istio availability...")
-	runtimeConfig.IstioAvailable = commonController.DetectIstioAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.ServiceMesh.Enabled == nil:
+		setupLog.Info("Auto-detecting Istio availability")
+		runtimeConfig.IstioEnabled = commonController.DetectIstioDestinationRuleAvailability(mainCtx, mgr)
+	case *operatorCfg.ServiceMesh.Enabled:
+		setupLog.Info("Istio service mesh is explicitly enabled; verifying availability")
+		istioDetected := commonController.DetectIstioDestinationRuleAvailability(mainCtx, mgr)
+		if !istioDetected {
+			setupLog.Error(nil,
+				"Service mesh is explicitly enabled but the networking.istio.io"+
+					" DestinationRule API group was not detected in the cluster",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.IstioEnabled = true
+	default:
+		setupLog.Info("Istio service mesh is explicitly disabled via config override")
+		runtimeConfig.IstioEnabled = false
+	}
 
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,
 		"lws", runtimeConfig.LWSEnabled,
 		"volcano", volcanoDetected,
+		"volcano-scheduler", runtimeConfig.VolcanoSchedulerEnabled,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 		"dra", runtimeConfig.DRAEnabled,
-		"istio", runtimeConfig.IstioAvailable,
+		"istio", runtimeConfig.IstioEnabled,
 	)
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
@@ -490,11 +550,10 @@ func main() {
 	if restrictedNamespace == "" {
 		factory = informers.NewSharedInformerFactory(kubernetes.NewForConfigOrDie(mgr.GetConfig()), time.Hour*24)
 	} else {
-		factory = informers.NewFilteredSharedInformerFactory(
+		factory = informers.NewSharedInformerFactoryWithOptions(
 			kubernetes.NewForConfigOrDie(mgr.GetConfig()),
 			time.Hour*24,
-			restrictedNamespace,
-			nil,
+			informers.WithNamespace(restrictedNamespace),
 		)
 	}
 	secretInformer := factory.Core().V1().Secrets().Informer()
@@ -549,10 +608,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-		setupLog.Error(err, "initial docker secrets index refresh failed")
-		os.Exit(1)
+		setupLog.Error(err, "initial docker secrets index refresh completed with errors; continuing startup")
+	} else {
+		setupLog.Info("initial docker secrets index refreshed")
 	}
-	setupLog.Info("initial docker secrets index refreshed")
 	// launch a goroutine to refresh the docker secret indexer in any case every minute
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
@@ -562,11 +621,9 @@ func main() {
 			case <-mainCtx.Done():
 				return
 			case <-ticker.C:
-				setupLog.Info("refreshing docker secrets index...")
 				if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-					setupLog.Error(err, "unable to refresh docker secrets index")
+					setupLog.Error(err, "failed to refresh docker secrets index")
 				}
-				setupLog.Info("docker secrets index refreshed")
 			}
 		}
 	}()
@@ -577,15 +634,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	webhooksReady := make(chan struct{})
-	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
-		select {
-		case <-webhooksReady:
-			return nil
-		default:
-			return fmt.Errorf("webhook handlers not yet registered")
-		}
-	}); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -595,35 +644,53 @@ func main() {
 	if err := registerControllers(
 		mgr, operatorCfg, runtimeConfig,
 		dockerSecretRetriever, sshKeyManager,
+		operatorImage, pullPolicy,
 	); err != nil {
 		setupLog.Error(err, "failed to register controllers")
 		os.Exit(1)
 	}
 
-	// Webhooks require TLS certificates to serve HTTPS. Register them in a
-	// goroutine that blocks until the cert-controller has written the certs.
-	go func() {
-		certMgr.WaitReady()
+	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
+		setupLog.Error(err, "failed to register webhooks")
+		os.Exit(1)
+	}
 
-		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-			injector, err := internalcert.NewCABundleInjector(mgr.GetClient(), operatorCfg)
-			if err != nil {
-				setupLog.Error(err, "unable to create CA bundle injector")
-				os.Exit(1)
-			}
-			if err := injector.InjectAll(mainCtx); err != nil {
-				setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
-				os.Exit(1)
-			}
-		}
-
-		if err := registerWebhooks(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
-			setupLog.Error(err, "failed to register webhooks")
+	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS
+	// secrets before this point. Auto mode can therefore patch admission and
+	// conversion CAs immediately; manual mode waits for externally provided
+	// ca.crt and only patches conversion, leaving admission CA management
+	// out-of-band.
+	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create CA bundle injector")
+		os.Exit(1)
+	}
+	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+		if err := caInjector.InjectAll(mainCtx); err != nil {
+			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
 			os.Exit(1)
 		}
-		close(webhooksReady)
-	}()
+	} else {
+		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
+		// blocks startup instead of running with unauthenticated conversion.
+		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
+			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
+			os.Exit(1)
+		}
+	}
 
+	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
+	// synchronously. Secret API updates are not enough because kubelet projects
+	// them into already-running pods asynchronously.
+	if err := certMgr.WaitForMountedCertificate(mainCtx); err != nil {
+		setupLog.Error(err, "failed waiting for mounted webhook TLS certificate")
+		os.Exit(1)
+	}
+
+	// Kubernetes propagates webhook configuration asynchronously, especially
+	// with HA apiservers. A missing or stale CA must fail closed during manager
+	// cache startup rather than allowing the operator to run without conversion
+	// or admission.
 	setupLog.Info("starting manager")
 	if err := mgr.Start(mainCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
@@ -637,6 +704,8 @@ func registerControllers(
 	runtimeConfig *commonController.RuntimeConfig,
 	dockerSecretRetriever *secrets.DockerSecretIndexer,
 	sshKeyManager *secret.SSHKeyManager,
+	operatorImage string,
+	operatorPullPolicy corev1.PullPolicy,
 ) error {
 	if err := (&controller.DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
@@ -660,6 +729,7 @@ func registerControllers(
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                operatorCfg,
 		RuntimeConfig:         runtimeConfig,
+		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
 		SSHKeyManager:         sshKeyManager,
@@ -679,14 +749,16 @@ func registerControllers(
 	}
 
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:            mgr.GetClient(),
-		APIReader:         mgr.GetAPIReader(),
-		Recorder:          mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		Config:            operatorCfg,
-		RuntimeConfig:     runtimeConfig,
-		GPUDiscoveryCache: gpu.NewGPUDiscoveryCache(),
-		GPUDiscovery:      gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
-		RBACManager:       rbacManager,
+		Client:                  mgr.GetClient(),
+		APIReader:               mgr.GetAPIReader(),
+		Recorder:                mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Config:                  operatorCfg,
+		RuntimeConfig:           runtimeConfig,
+		GPUDiscoveryCache:       gpu.NewGPUDiscoveryCache(),
+		GPUDiscovery:            gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+		OperatorImage:           operatorImage,
+		OperatorImagePullPolicy: operatorPullPolicy,
+		RBACManager:             rbacManager,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
 	}
@@ -708,6 +780,15 @@ func registerControllers(
 		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
+	}
+
+	if err = (&controller.PodSnapshotReconciler{
+		Client:        mgr.GetClient(),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		Recorder:      mgr.GetEventRecorderFor("snapshot"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
 
 	if runtimeConfig.GroveEnabled {
@@ -733,7 +814,7 @@ func registerControllers(
 	return nil
 }
 
-func registerWebhooks(
+func registerWebhookHandlers(
 	mgr ctrl.Manager,
 	operatorCfg *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
@@ -794,26 +875,22 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeployment{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeployment{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoComponentDeployment{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentScalingAdapter conversion webhook: %w", err)
 	}
@@ -825,7 +902,7 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoComponentDeployment defaulting webhook: %w", err)
 	}
 
-	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
+	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion, runtimeConfig.GroveEnabled)
 	if err := dgdDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
 	}

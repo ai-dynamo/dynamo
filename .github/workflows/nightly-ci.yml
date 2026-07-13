@@ -26,6 +26,11 @@ on:
 
 permissions:
   contents: read
+  # Lets the build jobs' compliance-extract query the Actions API for the
+  # previous successful cron-triggered nightly run (manual runs are excluded)
+  # and download its baseline compliance artifact to diff the OSRB CSV against.
+  # A reusable workflow's token can't exceed the caller's.
+  actions: read
 
 
 env:
@@ -252,7 +257,16 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      # Source archival temporarily disabled until the wheel-builder build
+      # context includes deploy/inference-gateway/ext-proc (a cargo vendor
+      # workspace member).
+      archive_sources: false
+      # OSRB CSV diff baseline: nightly context -> diff against the previous
+      # successful scheduled nightly run's compliance artifacts; manual runs
+      # are excluded (see resolve_diff_base.py).
+      diff_event_context: nightly
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -267,7 +281,13 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      archive_sources: false
+      # OSRB CSV diff baseline: nightly context -> diff against the previous
+      # successful scheduled nightly run's compliance artifacts; manual runs
+      # are excluded (see resolve_diff_base.py).
+      diff_event_context: nightly
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
@@ -282,10 +302,26 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      inline_compliance: true
       build_timeout_minutes: 120
+      archive_sources: false
+      # OSRB CSV diff baseline: nightly context -> diff against the previous
+      # successful scheduled nightly run's compliance artifacts; manual runs
+      # are excluded (see resolve_diff_base.py).
+      diff_event_context: nightly
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
     secrets: inherit
+
+  # ============================================================================
+  # COMPLIANCE
+  # ============================================================================
+  # Compliance extract + verify now runs as an inline step INSIDE each build job
+  # (inline_compliance: true above), on the same warm builder — a cache hit + small
+  # scratch export instead of a cold full-image rebuild on the fresh builder. The
+  # build jobs currently set archive_sources: false (archival temporarily
+  # disabled — see above), so /sources.zip is not emitted; /legal + /sboms still
+  # upload at the default 30-day retention. A compliance failure fails the build.
 
   # ============================================================================
   # TEST JOBS
@@ -297,6 +333,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -322,6 +360,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -330,6 +370,9 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
+      # Includes elastic_ep, locally validated DP=2->4->2 on H200 GPUs with
+      # vLLM 0.24.0. That test remains pytest-skipped because this runner has
+      # 24 GiB/GPU, while its unquantized EPLB model needs >=80 GiB/GPU.
       gpu_test_markers: vllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -342,6 +385,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -351,7 +396,8 @@ jobs:
       enable_coverage: true
       run_cpu_only_tests: true
       cpu_only_test_markers: sglang and gpu_0
-      gpu_test_markers: sglang and gpu_1
+      # Exclude h100 tests: they need >24 GiB and run on the sglang-h100-test lane below.
+      gpu_test_markers: sglang and gpu_1 and not h100
       gpu_test_timeout_minutes: 240
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
@@ -368,6 +414,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -382,12 +430,37 @@ jobs:
       image_tag_suffix: '-nightly'
     secrets: inherit
 
+  sglang-h100-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: sglang
+      test_type: H100 Test
+      # 80 GiB H100 (aws-dev-02): sglang tests that exceed the 24 GiB gpu_1 lane.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_markers: sglang and h100 and gpu_1
+      gpu_test_timeout_minutes: 60
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -414,6 +487,8 @@ jobs:
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -439,7 +514,7 @@ jobs:
     uses: ./.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
-      pytest_markers: 'vllm and xpu_1'
+      pytest_markers: 'vllm'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
 
   # ============================================================================
@@ -555,6 +630,7 @@ jobs:
       - vllm-multi-gpu-test
       - sglang-test
       - sglang-multi-gpu-test
+      - sglang-h100-test
       - trtllm-test
       - trtllm-multi-gpu-test
       - dynamo-pipeline
@@ -581,7 +657,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     if: always()
     permissions:
       contents: read
@@ -806,52 +882,13 @@ jobs:
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
-    name: Notify Slack
-    runs-on: prod-default-v2
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     permissions:
       contents: read
-    steps:
-      - name: Get Failed jobs
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          JOBS_JSON=$(mktemp)
-          curl -sSL \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            >$JOBS_JSON
-
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
-          echo $FAILED_JOBS
-          {
-            echo "FAILED_JOBS<<EOF"
-            echo "$FAILED_JOBS"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
-      - name: Notify Slack
-        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
-        with:
-          webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            blocks:
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: ":alert: *Github Nightly Pipeline Failure*"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "<https://github.com/ai-dynamo/dynamo/actions/runs/${{ github.run_id }}|Workflow Summary>"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "${{ env.FAILED_JOBS }}"
-              - type: "section"
-                text:
-                  type: mrkdwn
-                  text: "@ops-support Please investigate the failures above."
+      actions: read   # grant the reusable notifier read access to list this run's jobs
+    uses: ./.github/workflows/notify-slack.yml
+    with:
+      pipeline_name: Nightly
+      runs_on: prod-default-v2
+    secrets: inherit

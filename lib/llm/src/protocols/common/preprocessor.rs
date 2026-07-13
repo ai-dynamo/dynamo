@@ -10,28 +10,13 @@ use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
 };
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use uuid::Uuid;
 
+use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::agents::context::AgentContext;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
-
-/// Router-specific parameters carried via `nvext.router`.
-///
-/// Consumed by router implementations such as the global router for
-/// hierarchical pool selection. Unknown to engines/backends.
-#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
-pub struct RouterParams {
-    /// Target time-to-first-token in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttft_target: Option<f64>,
-
-    /// Target inter-token latency in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub itl_target: Option<f64>,
-}
 
 /// Routing hints for directing requests to specific workers.
 /// These fields are extracted from nvext and used by the router to determine
@@ -69,11 +54,23 @@ pub struct RoutingHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_name: Option<String>,
 
+    /// Cache namespace for request-scoped KV cache isolation.
+    #[serde(
+        default,
+        rename = "cache_salt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cache_namespace: Option<String>,
+
     /// Priority jump in seconds for queue ordering.
     /// A positive value decreases the effective arrival time, moving the request
     /// ahead in the scheduler queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_jump: Option<f64>,
+
+    /// Strict router pending-queue priority tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_priority: Option<u32>,
 
     /// Backend engine scheduling priority forwarded to the generate call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,11 +84,6 @@ pub struct RoutingHints {
     /// Request routing constraints used for worker compatibility and soft preference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_constraints: Option<RoutingConstraints>,
-
-    /// Session control for subagent KV isolation and sticky routing.
-    /// Contains session_id (for affinity) and optional action (open/close).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_control: Option<crate::protocols::openai::nvext::SessionControl>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -104,6 +96,11 @@ pub struct BootstrapInfo {
 
     /// Unique room ID for this request's KV transfer session
     pub bootstrap_room: u64,
+
+    /// Stable mocker lifecycle identity. Role, backend, and wire version are
+    /// validated by the bootstrap registration and framing protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_id: Option<Uuid>,
 }
 
 /// Directional pointer to a predecessor worker's `engine.generate` span.
@@ -142,6 +139,11 @@ pub struct MmRoutingInfo {
     /// Block-level multimodal metadata aligned with routing_token_ids blocks.
     /// Use `None` entries for blocks without multimodal objects.
     pub block_mm_infos: Vec<Option<BlockExtraInfo>>,
+
+    /// Unpadded expanded prompt length. Use instead of `routing_token_ids.len()`
+    /// (which includes block-padding) when a real token count is needed.
+    #[serde(default)]
+    pub expanded_prompt_len: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -232,6 +234,20 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
 
+    /// Multimodal encoder handoff payload, set by the frontend when
+    /// forwarding a request from an Encode worker to a downstream
+    /// Prefill/Aggregated peer. Engine-opaque JSON object;
+    /// the framework neither inspects nor mutates the contents. Object-
+    /// only by contract (see Python `require_encoder_result` and the
+    /// Rust `LLMEngineOutput::encode_terminal` constructor).
+    #[builder(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_object"
+    )]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Directional link to a predecessor worker's `engine.generate` span.
     /// Set by `PrefillRouter` on the decode side (prefill→decode handoff)
     /// and by the migration `RetryManager` on retry attempts. Framework-
@@ -250,6 +266,13 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
+
+    /// Whether the backend should allow a reasoning phase before enforcing
+    /// guided output. SGLang consumes this as its per-request
+    /// `require_reasoning` engine argument.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_reasoning: bool,
 
     /// Router-specific parameters forwarded from `nvext.router`.
     /// Consumed by router implementations (e.g. the global router) and ignored
@@ -295,6 +318,27 @@ pub struct PreprocessedRequest {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub is_probe: bool,
+}
+
+/// Enforce the object-only `encoder_result` contract at the serde boundary.
+/// The handoff payload is engine-opaque but must be a JSON object at every hop;
+/// reject arrays/scalars here so a non-conforming (e.g. cross-language)
+/// producer fails fast instead of leaking a malformed shape downstream.
+fn deserialize_optional_object<'de, D>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    if let Some(v) = &value
+        && !v.is_object()
+    {
+        return Err(serde::de::Error::custom(
+            "encoder_result must be a JSON object",
+        ));
+    }
+    Ok(value)
 }
 
 impl PreprocessedRequest {
@@ -376,6 +420,29 @@ impl PreprocessedEmbeddingRequest {
 mod tests {
     use super::*;
 
+    #[test]
+    fn bootstrap_info_carries_only_stable_handoff_identity() {
+        let handoff_id = Uuid::from_u128(42);
+        let info = BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 1234,
+            bootstrap_room: 7,
+            handoff_id: Some(handoff_id),
+        };
+
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["handoff_id"], handoff_id.to_string());
+        assert!(value.get("mocker_handoff_protocol_version").is_none());
+        assert!(value.get("mocker_handoff_role").is_none());
+        assert!(value.get("mocker_handoff_engine_type").is_none());
+        assert_eq!(
+            serde_json::from_value::<BootstrapInfo>(value)
+                .unwrap()
+                .handoff_id,
+            Some(handoff_id)
+        );
+    }
+
     /// Covers the `is_probe` serde contract end-to-end: `rename = "_HEALTH_CHECK"`,
     /// `default`, and `skip_serializing_if`. Each assertion targets a distinct
     /// attribute; if any is removed the test fails.
@@ -406,6 +473,36 @@ mod tests {
         assert!(back.is_probe);
     }
 
+    /// Covers the wire contract for the backend reasoning gate: old payloads
+    /// default to false, false is omitted, and true survives serialization.
+    #[test]
+    fn require_reasoning_serde_round_trip() {
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+
+        let normal = serde_json::to_value(&req).unwrap();
+        assert!(
+            !normal
+                .as_object()
+                .unwrap()
+                .contains_key("require_reasoning")
+        );
+        let back: PreprocessedRequest = serde_json::from_value(normal).unwrap();
+        assert!(!back.require_reasoning);
+
+        req.require_reasoning = true;
+        let guided = serde_json::to_value(&req).unwrap();
+        assert_eq!(guided["require_reasoning"], true);
+        let back: PreprocessedRequest = serde_json::from_value(guided).unwrap();
+        assert!(back.require_reasoning);
+    }
+
     /// Canary payloads carry only engine-relevant fields. All other required
     /// fields (`model`, `stop_conditions`, `sampling_options`, etc.) must
     /// pick up `serde(default)` so the runtime's `JsonProbeAdapter` can
@@ -421,5 +518,73 @@ mod tests {
         assert_eq!(req.token_ids, vec![1]);
         assert!(req.is_probe);
         assert_eq!(req.model, "");
+    }
+
+    /// `encoder_result` is the multimodal encoder handoff payload set by
+    /// the frontend when forwarding a request to a downstream
+    /// Prefill/Aggregated worker. The wire shape is engine-opaque -- the
+    /// framework must round-trip the value byte-identical without
+    /// inspecting or wrapping it.
+    #[test]
+    fn encoder_result_round_trips_through_serde() {
+        let payload = serde_json::json!({
+            "embedding_handle": {
+                "shape": [1, 1024],
+                "dtype": "fp16",
+                "uri": "nixl://encoder-0/embedding-42",
+            },
+            "processed_token_ids": [128_000_u32, 200_001_u32, 200_002_u32],
+        });
+        let req = PreprocessedRequest::builder()
+            .model("test/model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .encoder_result(Some(payload.clone()))
+            .build()
+            .unwrap();
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["encoder_result"], payload);
+
+        let back: PreprocessedRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.encoder_result, Some(payload));
+    }
+
+    /// `encoder_result` defaults to `None` and is absent from the
+    /// serialized payload when unset (via `skip_serializing_if`), matching
+    /// the convention used by sibling optional fields like `prefill_result`.
+    #[test]
+    fn encoder_result_is_absent_when_none() {
+        let req = PreprocessedRequest::builder()
+            .model("test/model".to_string())
+            .token_ids(vec![1, 2, 3])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .unwrap();
+        assert!(req.encoder_result.is_none());
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("encoder_result"),
+            "encoder_result must be absent from wire when None; got {json}"
+        );
+    }
+
+    #[test]
+    fn routing_hints_cache_namespace_serializes_as_cache_salt() {
+        let hints = RoutingHints {
+            cache_namespace: Some("tenant-a".to_string()),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&hints).unwrap();
+
+        assert_eq!(value["cache_salt"], "tenant-a");
+        assert!(value.get("cache_namespace").is_none());
+
+        let decoded: RoutingHints = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.cache_namespace.as_deref(), Some("tenant-a"));
     }
 }

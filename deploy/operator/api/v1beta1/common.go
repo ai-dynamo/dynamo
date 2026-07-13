@@ -493,10 +493,17 @@ const (
 // KvTransferPolicy configures topology-aware routing for KV-cache transfers
 // between prefill and decode workers. This is a graph-wide concern placed
 // under `spec.experimental` while the API is incubating.
-// +kubebuilder:validation:XValidation:rule="has(self.labelKey)",message="labelKey is required until alternate topology sources are supported"
+// +kubebuilder:validation:XValidation:rule="(has(self.labelKey) && !has(self.clusterTopologyName)) || (!has(self.labelKey) && has(self.clusterTopologyName))",message="exactly one of labelKey or clusterTopologyName is required"
 // +kubebuilder:validation:XValidation:rule="!has(self.enforcement) || self.enforcement != 'preferred' || has(self.preferredWeight)",message="preferredWeight is required when enforcement is preferred"
 // +kubebuilder:validation:XValidation:rule="!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == 'preferred')",message="preferredWeight may only be set when enforcement is preferred"
 type KvTransferPolicy struct {
+	// clusterTopologyName references a Grove ClusterTopology CR. The operator
+	// reads the CR's topology levels and projects them through Dynamo-owned pod
+	// labels for worker topology metadata.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	ClusterTopologyName string `json:"clusterTopologyName,omitempty"`
+
 	// labelKey is a Kubernetes node label key (e.g.
 	// "topology.kubernetes.io/zone") whose value identifies the topology
 	// domain for each worker. The operator copies the node label onto worker
@@ -641,6 +648,13 @@ type ComponentReplicaStatus struct {
 	// +optional
 	ComponentNames []string `json:"componentNames,omitempty"`
 
+	// runtimeNamespace is the effective Dynamo runtime namespace for this
+	// component. Worker components may include a generation suffix; non-workers and
+	// Grove-backed workers use the base namespace. During rolling updates, worker
+	// status keeps the old active revision namespace until cutover completes.
+	// +optional
+	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
+
 	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0
 	Replicas int32 `json:"replicas"`
@@ -662,4 +676,19 @@ type ComponentReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AvailableReplicas *int32 `json:"availableReplicas,omitempty"`
+
+	// scheduledReplicas is the number of replicas the backend scheduler has
+	// scheduled, expressed strictly in Dynamo component-replica units (not
+	// raw backend pod counts). It is a diagnostic aid for distinguishing
+	// capacity/scheduling shortfalls from runtime readiness.
+	//
+	// It is optional and omitted (nil) when the active backend cannot derive
+	// it reliably in component-replica units — for example before the backing
+	// resource's status has been observed, or for backends that do not report
+	// a scheduling count. A nil value therefore means "not reported", never
+	// "zero scheduled"; consumers must not treat absence as a scheduling
+	// failure.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ScheduledReplicas *int32 `json:"scheduledReplicas,omitempty"`
 }

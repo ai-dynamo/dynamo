@@ -5,14 +5,12 @@
 for the plugin chain.
 
 Wraps ``LocalPlannerOrchestrator`` behind the same ``initial_tick`` /
-``tick`` / ``shutdown`` interface that the legacy ``_PSMEngineAdapter``
-exposes. ``NativePlannerBase`` selects between the two via
-``PlannerConfig.scheduling.use_orchestrator``.
+``tick`` / ``shutdown`` interface consumed by ``NativePlannerBase``.
 
 Architecture invariant: PipelineContext is the only input channel
 --------------------------------------------------------------------
-All plugins — both in-process builtins (follow-up PR) and external
-gRPC plugins — receive their per-tick inputs through
+All plugins — both in-process builtins and external gRPC plugins —
+receive their per-tick inputs through
 ``PipelineContext.observations`` exclusively. There is **no**
 ``prime_tick(...)`` side-channel, ``self._last_fpm``-style stash,
 or any other path that delivers observation data to a plugin instance
@@ -22,18 +20,16 @@ This invariant ensures:
   * Plugin API is uniform across in-process and over-wire transports.
   * Adding a new observation field requires touching one schema
     (``ObservationData``), not two delivery paths.
-  * Builtin plugins (follow-up PR) and external plugins receive
-    byte-identical input, so dual-path parity tests are meaningful.
+  * Builtin plugins and external plugins receive byte-identical input,
+    so public plugin behavior can be tested against the same context shape.
 
 Internal responsibilities
 -------------------------
 
 1. **Tick lifecycle cadence tracking**:
-   Owns ``_next_load_s`` / ``_next_throughput_s`` state and advances
-   them at tick boundaries the same way
-   ``PlannerStateMachine._next_scheduled_tick`` does, so the
-   ``next_tick`` field in ``PlannerEffects`` matches PSM's legacy
-   path bit-for-bit.
+   Owns the single ``scale_interval_seconds`` pipeline cadence. Plugin
+   ``execution_interval_seconds`` values decide which builtins or external
+   plugins fire on each pipeline tick.
 2. **TickInput → PipelineContext bridge**:
    Extracts ``traffic`` into ``TrafficMetrics``, ``worker_counts``
    (counts + scaling-in-progress flags) into ``WorkerState``, and
@@ -42,15 +38,16 @@ Internal responsibilities
    External plugins declaring ``needs=["observations.fpm"]`` receive
    the FPM map; an empty/absent submap means "no FPM this tick".
 3. **FPM regression observation**:
-   Before the orchestrator tick, feeds FPM into the orchestrator-owned
-   regression models (mirrors PSM's ``_observe_fpm``). This is a
-   planner-internal regression-fit path, distinct from delivering FPM
-   to plugins.
+   Before load-cadence ticks, feeds FPM into the shared scaling-state
+   regression models. This is a planner-internal regression-fit path,
+   distinct from delivering FPM to plugins that request
+   ``observations.fpm``.
 4. **PipelineOutcome → PlannerEffects projection**:
    Reads the orchestrator's ``final_proposal.targets``, detects "no
-   change" against ``worker_counts``, and projects to
-   ``PlannerEffects.scale_to``. ``diagnostics`` is empty — numeric
-   fields moved to Prometheus.
+   change" against ``worker_counts``, applies final min_endpoint / GPU
+   budget invariants, and projects to
+   ``PlannerEffects.scale_to`` and fills diagnostics from the shared
+   scaling state.
 
 Bootstrap API
 -------------
@@ -70,6 +67,11 @@ from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
 if TYPE_CHECKING:
     import grpc.aio
 
+from dynamo.planner.core.budget import (
+    proportional_clamp_pair,
+    proportional_clamp_single,
+)
+from dynamo.planner.core.state_machine import PlannerScalingState
 from dynamo.planner.core.types import (
     FpmObservations,
     PlannerEffects,
@@ -80,6 +82,11 @@ from dynamo.planner.core.types import (
     TrafficObservation,
     WorkerCapabilities,
     WorkerCounts,
+)
+from dynamo.planner.plugins.builtins import (
+    BuiltinLoadPredict,
+    BuiltinLoadPropose,
+    BuiltinThroughputPropose,
 )
 from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
 from dynamo.planner.plugins.merge.types import ComponentKey
@@ -102,13 +109,12 @@ log = logging.getLogger(__name__)
 
 
 class OrchestratorEngineAdapter:
-    """``EngineProtocol``-compatible wrapper around the 5-builtin chain.
+    """``EngineProtocol``-compatible wrapper around the builtin plugin chain.
 
     Lifecycle:
 
     1. ``OrchestratorEngineAdapter(config, capabilities)`` — builds
-       orchestrator + 5 plugins + registers them. No regression models
-       installed yet.
+       orchestrator + local-planner builtins + registers them.
     2. ``install_regressions(prefill=, decode=, agg=)`` — fill the
        orchestrator's shared regression store.
     3. ``await bootstrap_plugins(historical_traffic=)`` — warm predictor
@@ -143,13 +149,10 @@ class OrchestratorEngineAdapter:
         # ``scale_interval_seconds`` regardless of individual plugin
         # cadences.  Per-plugin throttling (via
         # ``RegisteredPlugin.execution_interval_seconds``) handles
-        # which plugins actually fire each tick.  See design doc §4 and
-        # ``test_decision_level_parity`` for how this matches PSM's
-        # observable scaling decisions while collapsing the legacy
-        # dual-cadence book-keeping into one base interval.
+        # which plugins actually fire each tick.
         self._scale_interval: float = float(config.scheduling.scale_interval_seconds)
         # ``_last_tick_s`` is wall-epoch (matches ``tick_input.now_s`` /
-        # PSM ``ScheduledTick.at_s``).  ``_last_tick_monotonic`` is the
+        # ``ScheduledTick.at_s``).  ``_last_tick_monotonic`` is the
         # clock-domain twin used by the lazy-traffic-pull due-check
         # against ``RegisteredPlugin.last_call_at`` — which the
         # ``PluginScheduler.record_evaluation`` path stores in
@@ -163,15 +166,8 @@ class OrchestratorEngineAdapter:
         # ``tick_input.now_s`` at the top of ``tick()``.
         self._last_tick_s: float = 0.0
         self._last_tick_monotonic: float = 0.0
-
-        # Legacy cadence fields preserved as a compatibility shim for
-        # any existing test that still reads them.  Not consulted by the
-        # scale_interval scheduling logic — pipeline tick selection runs
-        # entirely off ``self._last_tick_s + self._scale_interval``.
-        # Removed entirely once the PSM-parity test surface is rewritten
-        # to its decision-level form (see same design doc §11).
-        self._next_load_s: float = float("inf")
-        self._next_throughput_s: float = float("inf")
+        self._last_load_loop_monotonic: float = 0.0
+        self._last_throughput_loop_monotonic: float = 0.0
 
         # Plugin-framework metrics live alongside the adapter so they
         # share the orchestrator's lifecycle.  Use the default global
@@ -257,6 +253,7 @@ class OrchestratorEngineAdapter:
             capabilities=capabilities,
             metrics=self._plugin_framework_metrics,
         )
+        self._scaling_state = PlannerScalingState(config, capabilities)
 
         # Registration gateway lifecycle: populated lazily by
         # ``_maybe_start_gateway`` if config opts in; consumed by
@@ -264,14 +261,64 @@ class OrchestratorEngineAdapter:
         # disabled) deployment path zero-cost.
         self._gateway_server: Optional[grpc.aio.Server] = None
 
-        # Builtin plugins land in a follow-up PR. PR #1 ships only the
-        # infrastructure (orchestrator + pipeline + transport + registry
-        # + external-plugin wiring via both static config and the gRPC
-        # registration gateway); the orchestrator path will produce
-        # empty proposals on every tick until the follow-up adds builtin
-        # load/throughput/reconcile/budget plugins, OR external plugins
-        # fill the chain via either registration path.
-        self._builtins: dict = {}
+        self._builtins: dict[str, object] = {}
+        self._plugins_bootstrapped = False
+        self._in_process_plugins_loaded = False
+        self._register_builtin_plugins()
+
+    @property
+    def plugins_bootstrapped(self) -> bool:
+        return self._plugins_bootstrapped
+
+    def _register_builtin_plugins(self) -> None:
+        """Register the in-process builtins that implement local planning."""
+        cfg = self._config
+        throughput_interval = float(cfg.throughput_adjustment_interval_seconds)
+        load_interval = float(cfg.load_adjustment_interval_seconds)
+
+        if cfg.enable_throughput_scaling:
+            predict = BuiltinLoadPredict(cfg, self._capabilities)
+            self._builtins["load_predict"] = predict
+            self._orchestrator.register_internal(
+                plugin_id=predict.plugin_id,
+                plugin_type="predict",
+                priority=0,
+                instance=predict,
+                execution_interval_seconds=throughput_interval,
+                needs=["observations.traffic"],
+                observation_window_seconds=throughput_interval,
+            )
+
+            throughput = BuiltinThroughputPropose(cfg, self._scaling_state)
+            self._builtins["throughput_propose"] = throughput
+            self._orchestrator.register_internal(
+                plugin_id=throughput.plugin_id,
+                plugin_type="propose",
+                priority=20,
+                instance=throughput,
+                execution_interval_seconds=throughput_interval,
+                needs=["observations.traffic", "predictions"],
+                requires_produced_fields=["predictions"],
+                observation_window_seconds=throughput_interval,
+            )
+
+        if cfg.enable_load_scaling:
+            load = BuiltinLoadPropose(cfg, self._scaling_state)
+            self._builtins["load_propose"] = load
+            needs = ["observations.fpm", "observations.workers"]
+            observation_window = 0.0
+            if cfg.optimization_target == "sla" and not cfg.enable_throughput_scaling:
+                needs.append("observations.traffic")
+                observation_window = load_interval
+            self._orchestrator.register_internal(
+                plugin_id=load.plugin_id,
+                plugin_type="propose",
+                priority=10,
+                instance=load,
+                execution_interval_seconds=load_interval,
+                needs=needs,
+                observation_window_seconds=observation_window,
+            )
 
     # ------------------------------------------------------------------
     # Bootstrap API (delegates to orchestrator)
@@ -284,11 +331,25 @@ class OrchestratorEngineAdapter:
         decode: Optional[Any] = None,
         agg: Optional[Any] = None,
     ) -> None:
+        self._scaling_state.install_regressions(prefill=prefill, decode=decode, agg=agg)
         self._orchestrator.install_regressions(prefill=prefill, decode=decode, agg=agg)
+
+    def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
+        """Refresh worker capabilities after late runtime discovery."""
+        self._capabilities = capabilities
+        self._scaling_state.update_capabilities(capabilities)
+        self._orchestrator.update_capabilities(capabilities)
+        predict = self._builtins.get("load_predict")
+        update_predict_caps = getattr(predict, "update_capabilities", None)
+        if callable(update_predict_caps):
+            update_predict_caps(capabilities)
 
     async def bootstrap_plugins(
         self, *, historical_traffic: Optional[Sequence[TrafficObservation]] = None
     ) -> None:
+        if self._plugins_bootstrapped:
+            return
+        self._load_in_process_plugins_from_config()
         # Order matters: register static external plugins from config
         # **before** dispatching Bootstrap so they receive the same
         # ``warm_from_observations`` / ``Bootstrap`` RPC fan-out as the
@@ -309,6 +370,21 @@ class OrchestratorEngineAdapter:
             historical_traffic=historical_traffic
         )
         await self._maybe_start_gateway()
+        self._plugins_bootstrapped = True
+
+    def _load_in_process_plugins_from_config(self) -> None:
+        if self._in_process_plugins_loaded:
+            return
+        specs = list(self._config.plugin_registration.in_process_plugins)
+        if not specs:
+            self._in_process_plugins_loaded = True
+            return
+        from dynamo.planner.plugins.orchestrator.in_process_loader import (
+            load_in_process_plugins,
+        )
+
+        load_in_process_plugins(self._orchestrator, specs)
+        self._in_process_plugins_loaded = True
 
     async def _wire_external_plugins_from_config(self) -> None:
         """Register the static-config external plugin list.
@@ -371,13 +447,13 @@ class OrchestratorEngineAdapter:
     ) -> None:
         """One-shot pre-first-tick bootstrap from benchmark FPMs.
 
-        Mirrors PSM's ``load_benchmark_fpms`` + ``warm_load_predictors``
-        but through the plugin chain:
+        Loads benchmark FPMs and warms predictor plugins through the plugin
+        chain:
 
         1. ``install_regressions_from_fpms`` — in SLA mode, build the
            regression models from benchmark FPMs and install them on the
            orchestrator's shared store (easy mode skips — no regressions).
-        2. ``bootstrap_plugins`` — warm ``BuiltinLoadPredictor`` from
+        2. ``bootstrap_plugins`` — warm ``BuiltinLoadPredict`` from
            ``historical_traffic`` and fan out Bootstrap RPC.
 
         Replay uses these two steps separately (regressions are installed
@@ -399,28 +475,18 @@ class OrchestratorEngineAdapter:
     ) -> None:
         """Build regression models from benchmark FPMs and install them on
         the orchestrator's shared store. Synchronous; does NOT bootstrap
-        plugins. No-op in easy mode (no regression models are used).
-
-        Spins up a throwaway ``PlannerStateMachine`` as the regression
-        factory — it builds the model instances from benchmark FPMs the
-        same way PSM does internally (a future cleanup can extract that
-        construction into a standalone helper to drop the throwaway)."""
+        plugins. No-op in easy mode (no regression models are used)."""
         if self._config.optimization_target != "sla":
             return
-        # Import locally to avoid pulling PSM into module-level imports
-        # (the adapter's own tick path shouldn't know about PSM).
-        from dynamo.planner.core.state_machine import PlannerStateMachine
-
-        throwaway = PlannerStateMachine(self._config, self._capabilities)
-        throwaway.load_benchmark_fpms(
+        self._scaling_state.load_benchmark_fpms(
             prefill_fpms=list(prefill_fpms) if prefill_fpms else None,
             decode_fpms=list(decode_fpms) if decode_fpms else None,
             agg_fpms=list(agg_fpms) if agg_fpms else None,
         )
         self.install_regressions(
-            prefill=getattr(throwaway, "_prefill_regression", None),
-            decode=getattr(throwaway, "_decode_regression", None),
-            agg=getattr(throwaway, "_agg_regression", None),
+            prefill=getattr(self._scaling_state, "_prefill_regression", None),
+            decode=getattr(self._scaling_state, "_decode_regression", None),
+            agg=getattr(self._scaling_state, "_agg_regression", None),
         )
 
     # ------------------------------------------------------------------
@@ -431,22 +497,18 @@ class OrchestratorEngineAdapter:
         """First scheduled tick under the scale_interval cadence model.
 
         Pipeline fires at ``start_s + scale_interval`` regardless of
-        the legacy load / throughput interval configuration — those
-        intervals now live on individual plugin
+        load / throughput interval configuration — those intervals live
+        on individual plugin
         ``execution_interval_seconds`` values rather than on the
         pipeline cadence.
-
-        Legacy ``_next_load_s`` / ``_next_throughput_s`` still set for
-        any compatibility code still reading them (those reads are
-        scheduled for removal once decision-level parity is in place).
         """
         self._last_tick_s = start_s
         self._last_tick_monotonic = self._clock.monotonic()
-        self._next_load_s = start_s + self._config.load_adjustment_interval_seconds
-        if self._config.enable_throughput_scaling:
-            self._next_throughput_s = (
-                start_s + self._config.throughput_adjustment_interval_seconds
-            )
+        self._last_load_loop_monotonic = self._last_tick_monotonic
+        self._last_throughput_loop_monotonic = self._last_tick_monotonic
+        for plugin in self._orchestrator._registry.all_plugins():
+            if plugin.is_builtin and plugin.last_call_at == float("-inf"):
+                plugin.registered_at = self._last_tick_monotonic
         return self._compute_next_scheduled_tick()
 
     async def tick(
@@ -458,10 +520,8 @@ class OrchestratorEngineAdapter:
         # on top of ``ScheduledTick.run_*_scaling`` flags. Each plugin's
         # own config-toggle check (``if not self._config.enable_load_scaling:
         # return accept``) is already a per-tick no-op when the corresponding
-        # toggle is off; adding a secondary gate would only introduce
-        # divergence risk. Decision-level parity with PSM (same ``scale_to``
-        # sequence at the same wall-clock moments) is preserved by keeping
-        # those config toggles authoritative for plugin self-gating.
+        # toggle is off; those config toggles remain authoritative for
+        # plugin self-gating.
 
         # 0. Sync the shared clock to ``tick_input.now_s`` when we hold a
         #    manually-advanced clock (replay / test). Plugin scheduler
@@ -477,38 +537,36 @@ class OrchestratorEngineAdapter:
             if delta > 0:
                 self._clock.advance(delta)
 
-        # 1. Observe FPM into regressions (mirror PSM ``_observe_fpm``
-        #    before ``_advance_load``).
+        self._scaling_state.begin_tick()
+        if tick_input.worker_counts is not None:
+            self._scaling_state.observe_worker_counts(tick_input.worker_counts)
+
+        # 1. Observe FPM into regressions before load proposal consumes
+        #    the fitted perf models.
         is_easy = self._config.optimization_target != "sla"
         if (
             scheduled_tick.run_load_scaling
             and not is_easy
             and tick_input.fpm_observations is not None
         ):
-            self._observe_fpm(tick_input.fpm_observations)
+            self._scaling_state.observe_fpm(tick_input.fpm_observations)
 
-        # 2. Advance the scale_interval cadence pointer.  Under the new
+        # 2. Advance the scale_interval cadence pointer. Under the
         #    model there is one base interval; pipeline tick fires every
         #    ``scale_interval`` seconds and individual plugin cadences
         #    are handled inside the orchestrator by per-plugin
-        #    ``execution_interval_seconds`` throttling.  The legacy
-        #    ``_next_load_s`` / ``_next_throughput_s`` are kept current
-        #    only for shim compatibility — they no longer drive next-
-        #    tick selection.
+        #    ``execution_interval_seconds`` throttling.
         self._last_tick_s = tick_input.now_s
         # Monotonic twin — see ``__init__`` for why we keep both.  Read
         # *after* the optional VirtualClock sync above so replay sees
-        # ``last_tick_monotonic == tick_input.now_s`` (parity with PSM
-        # cadence math) and production wall-clock deployments see the
+        # ``last_tick_monotonic == tick_input.now_s`` and production
+        # wall-clock deployments see the
         # boot-relative value that plugin ``last_call_at`` is recorded in.
         self._last_tick_monotonic = self._clock.monotonic()
-        self._next_load_s = (
-            tick_input.now_s + self._config.load_adjustment_interval_seconds
-        )
-        if self._config.enable_throughput_scaling:
-            self._next_throughput_s = (
-                tick_input.now_s + self._config.throughput_adjustment_interval_seconds
-            )
+        if scheduled_tick.run_load_scaling:
+            self._last_load_loop_monotonic = self._last_tick_monotonic
+        if scheduled_tick.run_throughput_scaling:
+            self._last_throughput_loop_monotonic = self._last_tick_monotonic
 
         # 3. Build PipelineContext + baseline and drive the orchestrator.
         ctx = self._tick_input_to_context(tick_input)
@@ -520,10 +578,9 @@ class OrchestratorEngineAdapter:
             outcome, tick_input.worker_counts or WorkerCounts()
         )
 
-        # 5. Populate prediction fields on diagnostics. Consumed by the
-        #    diagnostics recorder for HTML reports + Prometheus
-        #    ``predicted_*`` gauges (mirrors PSM's behaviour).
-        diagnostics = TickDiagnostics()
+        # 5. Populate diagnostics from the shared scaling state. Consumed by
+        #    the diagnostics recorder for HTML reports + Prometheus gauges.
+        diagnostics = self._scaling_state.diagnostics()
         if (
             outcome.predict_outcome is not None
             and outcome.predict_outcome.prediction is not None
@@ -533,6 +590,19 @@ class OrchestratorEngineAdapter:
             diagnostics.predicted_isl = p.predicted_isl
             diagnostics.predicted_osl = p.predicted_osl
             diagnostics.predicted_kv_hit_rate = p.predicted_kv_hit_rate
+        elif (
+            scheduled_tick.run_throughput_scaling
+            and outcome.predict_outcome is not None
+            and diagnostics.throughput_decision_reason is None
+        ):
+            reasons = outcome.predict_outcome.reasons
+            if "predict_failed" in reasons:
+                diagnostics.throughput_decision_reason = "predict_failed"
+            elif "no_traffic_data" in reasons:
+                diagnostics.throughput_decision_reason = "no_traffic_data"
+
+        if scheduled_tick.run_load_scaling and not self._config.enable_load_scaling:
+            diagnostics.load_decision_reason = "disabled"
 
         # Surface pipeline execute_action / short_circuit_reason /
         # audit_events.  Same data is emitted as Prometheus
@@ -545,22 +615,6 @@ class OrchestratorEngineAdapter:
         diagnostics.short_circuit_reason = outcome.short_circuit_reason
         diagnostics.audit_events = list(outcome.audit_events)
 
-        # Surface builtin_load_propose's per-tick reason + estimates
-        # onto ``TickDiagnostics`` so orchestrator-path logs + Prometheus
-        # enum match the semantic detail PSM path has carried since v0.
-        # Plugin stores last decision on itself; we read
-        # ``_last_load_diagnostics`` and project to the appropriate
-        # legacy field (agg → aggregate ``load_decision_reason``;
-        # disagg/prefill/decode → per-component fields).
-        self._project_load_diagnostics(diagnostics)
-
-        # Same shape for builtin_throughput_propose. Without this
-        # projection, ``throughput_decision_reason`` stays None on the
-        # orchestrator path while PSM path populated it from
-        # ``_diag_throughput_reason`` — making it impossible to tell
-        # accept-with-decision from accept-skipped on dashboards.
-        self._project_throughput_diagnostics(diagnostics)
-
         return PlannerEffects(
             scale_to=scale_to,
             next_tick=self._compute_next_scheduled_tick(),
@@ -571,7 +625,7 @@ class OrchestratorEngineAdapter:
         """Read ``BuiltinLoadPropose._last_load_diagnostics`` and write
         to ``diagnostics.load_decision_reason*`` + ``estimated_*_ms``.
 
-        Mirrors PSM's diagnostic surface:
+        Mirrors the builtin planner diagnostic surface:
         - mode=agg → aggregate ``load_decision_reason``
         - mode=disagg → per-component ``load_decision_reason_prefill`` /
           ``_decode`` (and also the aggregate, set to whichever side
@@ -608,11 +662,9 @@ class OrchestratorEngineAdapter:
         """Read ``BuiltinThroughputPropose._last_throughput_diagnostics``
         and write to ``diagnostics.throughput_decision_reason*``.
 
-        Symmetric with ``_project_load_diagnostics``: PSM path populates
-        these fields from ``_diag_throughput_reason*``; this helper
-        keeps the orchestrator path's surface byte-equivalent at the
-        observability layer (decision outputs track PSM at the
-        decision level, locked by ``test_engine_adapter.py``).
+        Symmetric with ``_project_load_diagnostics``: throughput proposal
+        records per-component reasons and this helper projects them onto
+        the public ``TickDiagnostics`` fields.
 
         Mode mapping:
         - mode=agg → aggregate ``throughput_decision_reason``
@@ -647,7 +699,7 @@ class OrchestratorEngineAdapter:
         prefill_reason: Optional[str], decode_reason: Optional[str]
     ) -> Optional[str]:
         """Collapse two per-component reasons to a single aggregate
-        string.  Precedence mirrors PSM's convention: "a side scaled"
+        string. Precedence keeps "a side scaled"
         wins over "both stable", "stable with data" wins over "no
         data"."""
         priority = [
@@ -675,7 +727,7 @@ class OrchestratorEngineAdapter:
     ) -> Optional[str]:
         """Collapse two per-component throughput reasons. Vocabulary
         differs from load reasons (no scale_up/down enums on this
-        side); ranking mirrors PSM convention "stronger action wins":
+        side); ranking keeps "stronger action wins":
         ``scale`` > ``set_lower_bound`` > skip reasons."""
         priority = [
             "scale",
@@ -718,8 +770,7 @@ class OrchestratorEngineAdapter:
         """Next pipeline tick under the scale_interval cadence model.
 
         Pipeline fires at ``self._last_tick_s + scale_interval`` —
-        a single base cadence, no more dual ``_next_load_s`` /
-        ``_next_throughput_s`` merging.  Per-plugin
+        a single base cadence with no dual-cadence merge. Per-plugin
         ``execution_interval_seconds`` throttling (in
         ``PluginScheduler._is_due``) handles which plugins actually
         fire each tick.
@@ -728,7 +779,7 @@ class OrchestratorEngineAdapter:
         ``traffic_metrics_duration_s``) is gated on whether any
         registered plugin both lists ``observations.traffic`` in its
         ``needs`` AND would be due at the next tick.  This recovers
-        PSM's lazy-pull cost profile (one Prometheus query per
+        the lazy-pull cost profile (one Prometheus query per
         ``throughput_adjustment_interval_seconds`` in mixed mode)
         without leaking the cadence-type concept into the
         ScheduledTick API — plugins only see the window they
@@ -739,6 +790,19 @@ class OrchestratorEngineAdapter:
         # ``RegisteredPlugin.last_call_at`` lives in — NOT wall-epoch.
         # ``at_s`` (wall-epoch) is for ``ScheduledTick.at_s`` only.
         at_monotonic = self._last_tick_monotonic + self._scale_interval
+        load_loop_due = self._interval_due(
+            self._last_load_loop_monotonic,
+            float(self._config.load_adjustment_interval_seconds),
+            at_monotonic,
+        )
+        throughput_loop_due = (
+            self._config.enable_throughput_scaling
+            and self._interval_due(
+                self._last_throughput_loop_monotonic,
+                float(self._config.throughput_adjustment_interval_seconds),
+                at_monotonic,
+            )
+        )
 
         # Lazy traffic pull: only when some currently-registered,
         # currently-due plugin actually consumes
@@ -755,17 +819,25 @@ class OrchestratorEngineAdapter:
         # ``.`` in the prefix is load-bearing: it stops false-positives
         # on a sibling like ``"observations.traffic_legacy"`` (no such
         # field today but defensive against future schema additions).
-        traffic_consumers_due = [
-            p
-            for p in self._orchestrator._registry.all_plugins()
-            if any(
-                n == "observations.traffic" or n.startswith("observations.traffic.")
-                for n in p.needs
-            )
-            and self._orchestrator._scheduler._is_due(p, at_monotonic)
-        ]
+        def due_consumers(path: str):
+            prefix = f"{path}."
+            return [
+                p
+                for p in self._orchestrator._registry.all_plugins()
+                if any(n == path or n.startswith(prefix) for n in p.needs)
+                and self._orchestrator._scheduler._is_due(p, at_monotonic)
+            ]
+
+        traffic_consumers_due = due_consumers("observations.traffic")
         if traffic_consumers_due:
             need_traffic = True
+            use_full_traffic = any(
+                not (
+                    p.plugin_id == "builtin_load_propose"
+                    and not self._config.enable_throughput_scaling
+                )
+                for p in traffic_consumers_due
+            )
             # Aggregation window: max declared
             # ``observation_window_seconds`` across due consumers.
             # Declared 0.0 means "scale_interval freshness" — i.e. the
@@ -781,33 +853,40 @@ class OrchestratorEngineAdapter:
             )
         else:
             need_traffic = False
+            use_full_traffic = False
             traffic_duration_s = 0.0
 
+        fpm_consumers_due = due_consumers("observations.fpm")
+        internal_fpm_due = self._config.optimization_target == "sla" and load_loop_due
+
         # ``run_load_scaling`` / ``run_throughput_scaling`` flags are
-        # preserved on ScheduledTick for back-compat with PSM-path
-        # tests and the diagnostics-projection methods below.  Under
-        # scale_interval both are always True — every pipeline tick is
-        # treated as an opportunity for either type of plugin to fire
-        # (subject to its own throttle).
+        # preserved on ScheduledTick for back-compat observability: they
+        # mean the corresponding legacy builtin loop is due on this tick,
+        # not merely that the plugin pipeline fired.  Input collection is
+        # described by the separate need_* fields below.
         return ScheduledTick(
             at_s=at_s,
-            run_load_scaling=True,
-            run_throughput_scaling=True,
+            run_load_scaling=load_loop_due,
+            run_throughput_scaling=throughput_loop_due,
             need_worker_states=True,
-            need_worker_fpm=True,
+            need_worker_fpm=bool(fpm_consumers_due) or internal_fpm_due,
             need_traffic_metrics=need_traffic,
+            use_full_traffic_metrics=use_full_traffic,
             traffic_metrics_duration_s=traffic_duration_s,
         )
 
+    @staticmethod
+    def _interval_due(last_s: float, interval_s: float, at_s: float) -> bool:
+        return at_s - last_s >= interval_s - 1e-9
+
     def _observe_fpm(self, obs: FpmObservations) -> None:
-        """Mirror ``PlannerStateMachine._observe_fpm`` — feeds observations
+        """Mirror ``PlannerScalingState._observe_fpm`` — feeds observations
         into the orchestrator-owned regression models.
 
         ``obs.prefill`` / ``obs.decode`` are already
         ``dict[(worker_id, dp_rank) -> ForwardPassMetrics]`` — exactly the
         shape ``PlannerEnginePerfModel.add_observations`` consumes, so we
-        hand the whole dict over in one call (matching PSM
-        ``state_machine.py`` line-for-line). The regression model only
+        hand the whole dict over in one call. The regression model only
         exposes ``add_observations`` (plural, dict-based); there is no
         singular ``add_observation`` on this class.
         """
@@ -854,7 +933,7 @@ class OrchestratorEngineAdapter:
         # so cross-language plugins can decode without knowing about the
         # tuple key. Without this, external load-based plugins that
         # declare ``needs=["observations.fpm"]`` would always see None
-        # and could not implement PSM-equivalent load decisions through
+        # and could not implement load-based decisions through
         # the public PipelineContext API.
         fpm = self._encode_fpm(ti.fpm_observations)
         return PipelineContext(
@@ -914,7 +993,7 @@ class OrchestratorEngineAdapter:
         detection (``num_p == current_p``) would incorrectly report a
         scale-down; passing the worker counts as baseline lets the
         merge preserve the current value end-to-end so the projection
-        returns ``None`` (matching PSM's scale_to semantic for the
+        returns ``None`` (matching the planner's scale_to semantic for the
         "load plugin had no opinion" case).
         """
         if counts is None:
@@ -926,10 +1005,9 @@ class OrchestratorEngineAdapter:
             out[ComponentKey(sub_component_type="decode")] = counts.ready_num_decode
         return out
 
-    @staticmethod
-    def _project_scale_to(outcome, worker_counts: WorkerCounts):
+    def _project_scale_to(self, outcome, worker_counts: WorkerCounts):
         """Project the pipeline outcome onto ``PlannerEffects.scale_to``
-        with PSM-equivalent "no change → None" detection."""
+        with planner "no change -> None" detection."""
         if outcome.execute_action != "apply" or outcome.final_proposal is None:
             return None
 
@@ -947,7 +1025,79 @@ class OrchestratorEngineAdapter:
         if p_unchanged and d_unchanged:
             return None
 
+        num_p, num_d = self._apply_final_budget(num_p, num_d, worker_counts)
+
+        p_unchanged = (num_p is None) or (num_p == current_p)
+        d_unchanged = (num_d is None) or (num_d == current_d)
+        if p_unchanged and d_unchanged:
+            return None
+
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
+
+    def _apply_final_budget(
+        self,
+        num_p: Optional[int],
+        num_d: Optional[int],
+        worker_counts: WorkerCounts,
+    ) -> tuple[Optional[int], Optional[int]]:
+        min_endpoint = self._config.min_endpoint
+        min_gpus = self._config.min_gpu_budget
+        max_gpus = self._config.max_gpu_budget
+        mode = self._config.mode
+
+        def clamp_single(component: str, replicas: Optional[int]) -> Optional[int]:
+            if replicas is None:
+                return None
+            caps = (
+                self._capabilities.prefill
+                if component == "prefill"
+                else self._capabilities.decode
+            )
+            gpu = caps.num_gpu if caps else None
+            if gpu is None:
+                return max(replicas, min_endpoint)
+            return proportional_clamp_single(
+                max(replicas, min_endpoint),
+                gpu,
+                min_gpus,
+                max_gpus,
+                min_endpoint,
+            )
+
+        if mode == "prefill":
+            return clamp_single("prefill", num_p), num_d
+        if mode in ("decode", "agg"):
+            return num_p, clamp_single("decode", num_d)
+        if mode != "disagg":
+            return num_p, num_d
+
+        proposed_p = num_p is not None
+        proposed_d = num_d is not None
+        base_p = num_p if proposed_p else worker_counts.ready_num_prefill
+        base_d = num_d if proposed_d else worker_counts.ready_num_decode
+        if base_p is None or base_d is None:
+            return clamp_single("prefill", num_p), clamp_single("decode", num_d)
+
+        p_caps = self._capabilities.prefill
+        d_caps = self._capabilities.decode
+        p_gpu = p_caps.num_gpu if p_caps else None
+        d_gpu = d_caps.num_gpu if d_caps else None
+        if p_gpu is None or d_gpu is None:
+            return (
+                max(base_p, min_endpoint) if proposed_p else None,
+                max(base_d, min_endpoint) if proposed_d else None,
+            )
+
+        clamped_p, clamped_d = proportional_clamp_pair(
+            max(base_p, min_endpoint),
+            max(base_d, min_endpoint),
+            p_gpu,
+            d_gpu,
+            min_gpus,
+            max_gpus,
+            min_endpoint,
+        )
+        return clamped_p if proposed_p else None, clamped_d if proposed_d else None
 
 
 __all__ = ["OrchestratorEngineAdapter"]

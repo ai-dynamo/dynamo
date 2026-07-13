@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler Guide
+subtitle: Runs the AI Configurator-driven profiling pipeline that turns a model, SLA targets, and backend into a ready-to-deploy DGD.
 ---
 
 ## Overview
@@ -77,14 +78,18 @@ flowchart TD
 
 ### Rapid
 
-Uses AIC's performance simulation to estimate optimal configurations without deploying real engines. Completes in ~30 seconds.
+Uses AIC's performance simulation to estimate optimal configurations without
+deploying real engines. Completes in ~30 seconds; see the
+[AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/).
 
 ```yaml
 searchStrategy: rapid
 ```
 
 - Supports all backends: vLLM, SGLang, TensorRT-LLM
-- If the model/hardware/backend combination is not supported by AIC, falls back to a naive config (memory-fit TP calculation)
+- Falls back to a naive config (memory-fit TP calculation) only after DGDR
+  accepts the GPU SKU. Fallback sizing depends on AIC system metadata and does
+  not add support for additional GPU SKUs.
 - No GPU resources consumed during profiling
 
 ### Thorough
@@ -198,7 +203,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -215,7 +220,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 **Step 2: Apply the DGDR**
@@ -261,6 +266,33 @@ curl http://localhost:8000/v1/models
 
 > [!NOTE]
 > DGDRs are **immutable**. To update SLAs or configuration, delete the existing DGDR and create a new one.
+
+### Local Runs with DGD Overrides
+
+The operator supplies `dgd-apply-overrides` to Kubernetes profiling jobs when
+`overrides.dgd` is present. For a local run, put the matching binary on `PATH`.
+From a Dynamo checkout with Go installed, build and install it with:
+
+```bash
+go -C deploy/operator install ./cmd/dgd-apply-overrides
+python -m dynamo.profiler --config /path/to/dgdr-spec.yaml
+```
+
+`go install` writes the binary to `GOBIN`, or to `$(go env GOPATH)/bin` when
+`GOBIN` is unset. Add that directory to `PATH` if needed. Alternatively, set
+`DYNAMO_DGD_APPLY_OVERRIDES_BIN` to the binary's absolute path. The profiler
+does not download the binary at runtime. Runs without `overrides.dgd` do not
+require the helper.
+
+Use a binary from the same Dynamo release as the profiler. The profiler checks
+the binary protocol before applying an override and rejects incompatible versions.
+For supported DGD versions and merge behavior, see
+[Generated DGD Overrides](../../kubernetes/dgdr.md#generated-dgd-overrides).
+
+Registry credentials are namespace-scoped. The operator chart's
+`imagePullSecrets` pull the operator Pod only. A profiling Job that needs
+credentials for the operator image must receive them from its ServiceAccount or
+from `overrides.profilingJob.template.spec.imagePullSecrets` in the DGDR namespace.
 
 ## Profiling Method
 
@@ -372,7 +404,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.0"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   searchStrategy: rapid  # or thorough
   autoApply: true
@@ -436,13 +468,14 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    planner_min_endpoint: 2                    # Minimum endpoints to maintain
-    planner_adjustment_interval: 60            # Adjustment interval (seconds)
-    planner_load_predictor: linear             # Load prediction method
+    min_endpoint: 2                            # Minimum endpoints to maintain
+    load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
+    throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
+    load_predictor: linear                     # Load prediction method
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
+> Planner arguments use the `PlannerConfig` field names consumed by the planner service. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -640,14 +673,14 @@ SGLang workers expose profiling endpoints for runtime performance analysis:
 
 ```bash
 # Start profiling
-curl -X POST http://localhost:9090/engine/start_profile \
+curl -X POST http://localhost:9090/engine/control/start_profile \
   -H "Content-Type: application/json" \
   -d '{"output_dir": "/tmp/profiler_output"}'
 
 # Run inference requests...
 
 # Stop profiling
-curl -X POST http://localhost:9090/engine/stop_profile
+curl -X POST http://localhost:9090/engine/control/stop_profile
 ```
 
 View traces using Chrome's `chrome://tracing`, [Perfetto UI](https://ui.perfetto.dev/), or TensorBoard.

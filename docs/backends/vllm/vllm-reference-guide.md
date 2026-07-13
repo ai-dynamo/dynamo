@@ -29,6 +29,18 @@ The `--help` output is organized into the following groups:
 
 Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
 
+For reasoning models with structured output (`response_format`, JSON schema,
+or required/named tool choice), configure both reasoning parsers on the worker:
+
+```bash
+python -m dynamo.vllm --model <model> \
+  --reasoning-parser <vllm-parser> \
+  --dyn-reasoning-parser <dynamo-parser>
+```
+
+The vLLM parser delays grammar enforcement until reasoning ends; the Dynamo
+parser populates `reasoning_content`. Parser names can differ between registries.
+
 ### Priority Scheduling
 
 vLLM engine-level request priority is controlled by the upstream vLLM
@@ -51,7 +63,7 @@ also using the router queue, configure the frontend-side
 after a request reaches the worker.
 
 For the cross-layer behavior, see
-[Priority Scheduling](../../agents/priority-scheduling.md). For the upstream
+[Priority Scheduling](../../components/router/priority-scheduling.md). For the upstream
 flag definition, see the
 [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 

@@ -6,7 +6,7 @@
 //! Hosts an Axum HTTP server with `/register`, `/unregister`, `/query`,
 //! `/query_by_hash`, and peer-discovery routes that workers / gateways can
 //! call to drive cache-aware routing decisions. Each registered worker spawns
-//! a ZMQ listener that ingests its KV events into a per-(model, tenant)
+//! a ZMQ listener that ingests its KV events into a per-(model, routing group)
 //! [`backend::Indexer`].
 //!
 //! ## Multi-tier responses
@@ -25,11 +25,13 @@
 
 pub mod backend;
 pub mod listener;
+pub mod logging;
 pub mod metrics;
 pub mod recovery;
 pub mod registry;
 pub mod server;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,7 +39,9 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::min_initial_workers_from_env;
-use crate::services::zmq::validate_endpoint as validate_zmq_endpoint;
+use crate::services::common::zmq::validate_endpoint as validate_zmq_endpoint;
+use axum::http::header::HeaderName;
+use logging::AccessLogSink;
 use registry::WorkerRegistry;
 use server::{AppState, create_router};
 
@@ -47,8 +51,11 @@ pub struct IndexerConfig {
     pub threads: usize,
     pub workers: Option<String>,
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub peers: Option<String>,
+    pub access_log: Option<PathBuf>,
+    pub trace_id_header: HeaderName,
+    pub access_log_local_time: bool,
 }
 
 pub(super) fn validate_listener_endpoints(
@@ -123,13 +130,26 @@ pub async fn run_server(config: IndexerConfig) -> anyhow::Result<()> {
         port = config.port,
         threads = config.threads,
         model_name = %config.model_name,
-        tenant_id = %config.tenant_id,
+        routing_group = %config.routing_group,
         num_peers = peers.len(),
         "Starting standalone KV cache indexer (HTTP-only mode)"
     );
 
-    let registry = Arc::new(WorkerRegistry::new(config.threads));
-    run_common(&config, &registry, cancel_token).await
+    let mut state = AppState::new_with_cancel_token(config.threads, cancel_token.clone())?;
+    state.access_log_sink = match config.access_log {
+        Some(ref path) => {
+            let s = AccessLogSink::new(
+                path,
+                config.trace_id_header.clone(),
+                config.access_log_local_time,
+            )
+            .map_err(|e| anyhow::anyhow!("failed to open access log {}: {e}", path.display()))?;
+            Some(Arc::new(s))
+        }
+        None => None,
+    };
+    let state = Arc::new(state);
+    run_common(&config, state, cancel_token).await
 }
 
 async fn wait_for_min_initial_workers(
@@ -161,9 +181,11 @@ async fn wait_for_min_initial_workers(
 
 async fn run_common(
     config: &IndexerConfig,
-    registry: &Arc<WorkerRegistry>,
+    state: Arc<AppState>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let registry = &state.registry;
+
     if let Some(ref workers_str) = config.workers {
         let block_size = config.block_size.ok_or_else(|| {
             anyhow::anyhow!("--block-size is required when --workers is specified")
@@ -176,7 +198,7 @@ async fn run_common(
                     endpoint,
                     dp_rank,
                     config.model_name.clone(),
-                    config.tenant_id.clone(),
+                    config.routing_group.clone(),
                     block_size,
                     None,
                 )
@@ -209,19 +231,6 @@ async fn run_common(
     wait_for_min_initial_workers(registry, &cancel_token).await?;
     registry.signal_ready();
 
-    #[cfg(feature = "metrics")]
-    let prom_registry = {
-        let r = prometheus::Registry::new();
-        metrics::register(&r).expect("failed to register indexer metrics");
-        r
-    };
-
-    let state = Arc::new(AppState {
-        registry: registry.clone(),
-        #[cfg(feature = "metrics")]
-        prom_registry,
-    });
-
     let app = create_router(state);
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!("HTTP server listening on 0.0.0.0:{}", config.port);
@@ -246,11 +255,6 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], (1, 0, "tcp://host:5557".to_string()));
         assert_eq!(result[1], (2, 1, "tcp://host:5558".to_string()));
-    }
-
-    #[test]
-    fn test_parse_workers_empty() {
-        assert!(parse_workers("").unwrap().is_empty());
     }
 
     #[test]

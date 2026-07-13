@@ -6,7 +6,6 @@
 //! The `dynamo.llm` crate is a Rust library that provides a set of traits and types for building
 //! distributed LLM inference solutions.
 
-pub mod agents;
 pub mod backend;
 pub mod common;
 pub mod discovery;
@@ -14,11 +13,12 @@ pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
 pub mod fpm_publisher;
+pub mod fpm_trace;
+pub mod frontend_config;
 pub mod grpc;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;
-pub mod audit;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;
@@ -33,6 +33,7 @@ pub mod protocols;
 pub mod recorder;
 pub mod request_template;
 pub mod request_trace;
+pub mod session_affinity;
 pub mod telemetry;
 pub use dynamo_tokenizers as tokenizers;
 pub use dynamo_tokenizers::{file_json_field, log_json_err};

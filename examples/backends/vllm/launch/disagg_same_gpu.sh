@@ -41,6 +41,11 @@ fi
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+# Select legacy vs unified worker entry point. `--unified` routes workers
+# through dynamo.vllm.unified_main (the Rust backend-common Worker, which
+# owns the prefill drain loop); default stays on the legacy main.
+pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "Workers:     2 (prefill + decode, fraction is per worker)"
@@ -64,7 +69,7 @@ python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1:-5600} \
-python3 -m dynamo.vllm \
+python3 -m "$WORKER_MODULE" \
   --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode decode \
@@ -83,7 +88,8 @@ wait_for_ready "http://localhost:${DECODE_SYSTEM_PORT}/health" 45 || true
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2:-20097} \
-python3 -m dynamo.vllm \
+DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
+python3 -m "$WORKER_MODULE" \
   --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode prefill \

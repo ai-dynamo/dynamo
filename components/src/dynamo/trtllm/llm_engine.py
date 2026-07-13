@@ -43,6 +43,7 @@ from dynamo.common.backend.engine import (
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     LogitsProcessorSpec,
     is_generation_stage,
     logits_processors_for_request,
@@ -67,6 +68,10 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+from dynamo.trtllm.utils.request_utils import (
+    request_cache_salt,
+    stored_event_cache_salt,
+)
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 
 if TYPE_CHECKING:
@@ -76,10 +81,6 @@ if TYPE_CHECKING:
     from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
 logger = logging.getLogger(__name__)
-
-# Match legacy `trtllm/main.py` so prefill drain behaves the same.
-_DRAIN_TIMEOUT_S = 30.0
-_DRAIN_POLL_INTERVAL_S = 0.5
 
 # 1021 is the largest 10-bit prime — spreads machine_ids more evenly
 # under modulo than 1024 would. Matches legacy
@@ -252,6 +253,15 @@ class TrtllmLLMEngine(LLMEngine):
             "enable_iter_perf_stats": True,
         }
 
+        # Match the legacy worker path: select TRT-LLM's guided-decoding
+        # implementation at engine startup, before generic engine-arg overrides.
+        if config.guided_decoding_backend is not None:
+            engine_args["guided_decoding_backend"] = config.guided_decoding_backend
+            logger.info(
+                "Guided decoding enabled with backend: %s",
+                config.guided_decoding_backend,
+            )
+
         # Apply --extra-engine-args / --override-engine-args. Match the
         # legacy `dynamo.trtllm` path so profiler/parallel-scheduler
         # overrides behave the same way.
@@ -382,11 +392,13 @@ class TrtllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
-            context_length=self.max_seq_len,
-            kv_cache_block_size=self.kv_block_size,
-            max_num_seqs=self.max_batch_size,
-            max_num_batched_tokens=self.max_num_tokens,
-            data_parallel_size=self._attention_dp_size,
+            llm=LlmRegistration(
+                context_length=self.max_seq_len,
+                kv_cache_block_size=self.kv_block_size,
+                max_num_seqs=self.max_batch_size,
+                max_num_batched_tokens=self.max_num_tokens,
+                data_parallel_size=self._attention_dp_size,
+            ),
         )
 
     # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
@@ -588,6 +600,7 @@ class TrtllmLLMEngine(LLMEngine):
                 block_hashes,
                 parent_hash,
                 lora_name=data.get("lora_name"),
+                cache_salt=stored_event_cache_salt(data),
             )
         elif kind == "removed":
             partial = self._partial_block_hashes_by_rank.get(rank)
@@ -845,12 +858,14 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
+        cache_salt = request_cache_salt(request)
         generation_result = self._engine.llm.generate_async(
             inputs=token_ids,
             sampling_params=sampling_params,
             streaming=streaming,
             disaggregated_params=disaggregated_params,
             scheduling_params=scheduling_params,
+            cache_salt=cache_salt,
             **telemetry.engine_trace_kwargs(context),
         )
 
@@ -1055,51 +1070,11 @@ class TrtllmLLMEngine(LLMEngine):
             extras={"priority": 1.0},
         )
 
-    async def drain(self) -> None:
-        """Prefill-only: poll until in-flight requests finish so a
-        decode peer's NIXL pull doesn't see freed GPU memory (#7319).
-        Mirrors legacy `_make_drain_callback`."""
-        if (
-            self._engine is None
-            or self.disaggregation_mode != DisaggregationMode.PREFILL
-        ):
-            return
-
-        deadline = asyncio.get_running_loop().time() + _DRAIN_TIMEOUT_S
-        logger.info(
-            "Draining in-flight requests on prefill worker (timeout=%.1fs)",
-            _DRAIN_TIMEOUT_S,
-        )
-        # The stats stream can raise asyncio.TimeoutError when the engine
-        # has nothing fresh to report, or StopAsyncIteration when the
-        # underlying iterator is exhausted — both are benign and just mean
-        # "no signal this tick, try again". A wider `Exception` would
-        # swallow code bugs introduced later; the test stub raises
-        # RuntimeError to exercise the retry path.
-        _BENIGN_POLL = (asyncio.TimeoutError, StopAsyncIteration, RuntimeError)
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                stats_iter = self._engine.llm.get_stats_async(timeout=2)
-                stat = await anext(stats_iter)
-                active = stat.get("numActiveRequests", 0)
-                queued = stat.get("numQueuedRequests", 0)
-                if active + queued == 0:
-                    logger.info("All in-flight requests drained")
-                    return
-                logger.info(
-                    "Waiting for %d in-flight request(s) (active=%d, queued=%d)",
-                    active + queued,
-                    active,
-                    queued,
-                )
-            except _BENIGN_POLL as e:
-                logger.debug("Stats poll failed during drain: %s", e)
-            await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
-        logger.warning(
-            "Drain timeout (%.1fs) reached; proceeding with shutdown — "
-            "some NIXL transfers may still be in flight",
-            _DRAIN_TIMEOUT_S,
-        )
+    # TRT-LLM deliberately does not override is_quiescent (inherits None: wait
+    # the full drain budget). It has no signal for "pending KV transfers done":
+    # iteration stats stop arriving once the worker is idle, so active == 0 is
+    # never observed; and _active_requests is popped at handoff, before decode
+    # pulls the KV. The budget alone gives decode time to drain.
 
     async def cleanup(self) -> None:
         # Stop the publisher threads BEFORE engine shutdown so they don't
@@ -1113,6 +1088,15 @@ class TrtllmLLMEngine(LLMEngine):
         self._metrics_thread = None
         self._kv_publishers.clear()
         self._pause_controller = None
+        # Abort any still-tracked requests so llm.shutdown() runs on an idle
+        # engine. Mostly a no-op for prefill (popped at handoff); matters for
+        # decode/aggregated workers mid-generation.
+        for result in list(self._active_requests.values()):
+            try:
+                result.abort()
+            except Exception:
+                logger.debug("abort during cleanup failed", exc_info=True)
+        self._active_requests.clear()
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")

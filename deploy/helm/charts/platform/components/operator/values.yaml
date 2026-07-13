@@ -120,6 +120,9 @@ dynamo:
       # true=always create (use for helm template / GitOps workflows),
       # false=never create
       enabled: null
+      # -- Enable the NIXL telemetry metrics collection on workers.
+      # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
+      nixlTelemetry: false
 
   mpiRun:
     secretName: "mpi-run-ssh-secret"

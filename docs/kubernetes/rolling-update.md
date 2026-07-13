@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Rolling Updates
+subtitle: Updates DGD worker images, resources, and arguments with managed rolling updates across Deployment, Grove, and LWS backends.
 ---
 
 This guide covers how rolling updates work for `DynamoGraphDeployment` (DGD) resources. Rolling updates allow you to update worker configurations (images, resources, environment variables, etc.) with minimal downtime by gradually replacing old pods with new ones.
@@ -26,13 +27,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
     VllmDecodeWorker:
       componentType: worker
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command:
           - python3
           - -m
@@ -48,7 +49,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command:
           - python3
           - -m
@@ -74,13 +75,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
     VllmDecodeWorker:
       componentType: worker
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command:
           - python3
           - -m
@@ -98,7 +99,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command:
           - python3
           - -m
@@ -164,6 +165,40 @@ The following diagram illustrates the rolling update of the decode worker in a G
 │                                                                                    │
 └────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Grove Update Strategy Annotation
+
+For Grove-backed DGDs, set `nvidia.com/grove-update-strategy` on the `DynamoGraphDeployment` metadata to pass a Grove `PodCliqueSet` update strategy through to the generated `PodCliqueSet`. This annotation does not affect Deployment-backed or LWS-backed DGDs. For the Grove-side design, see [GREP-291: `OnDelete` update strategy for `PodCliqueSet`](https://github.com/ai-dynamo/grove/pull/403).
+
+Supported values are:
+
+| Value | Behavior |
+|-------|----------|
+| `RollingRecreate` | Use Grove's rolling recreate behavior. |
+| `OnDelete` | Create a new pod revision, but replace old pods only after you delete them. |
+
+If the annotation is omitted, Dynamo leaves the Grove update strategy unset and Grove uses its default behavior. Invalid values are rejected. Values must match Grove's exact spelling, including case.
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/grove-update-strategy: OnDelete
+```
+
+Inspect the generated Grove strategy:
+
+```bash
+kubectl get podcliqueset -n dynamo vllm-disagg -o jsonpath='{.spec.updateStrategy.type}'
+```
+
+For `OnDelete`, delete old Grove-managed pods when you are ready to replace them:
+
+```bash
+kubectl get pods -n dynamo -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg
+kubectl delete pod -n dynamo <old-pod-name>
+```
+
+Use `OnDelete` for updates that require manual coordination, such as incompatible worker versions or maintenance windows. Because old and new workers still share the same Dynamo namespace, `OnDelete` gives you control over when pods are replaced but does not provide namespace isolation.
 
 ### Implications for Disaggregated Deployments
 
@@ -323,7 +358,7 @@ This provides a holistic view of the deployment's health during the transition.
 | Update mechanism | Native resource rolling update | Operator-managed with DCD lifecycle |
 | Namespace isolation | No — old and new share the same namespace | Yes — hash-based namespace separation |
 | Cross-generation discovery | Possible — old and new workers can see each other | Prevented — new workers only discover new workers |
-| maxSurge / maxUnavailable | Fixed (`maxUnavailable: 1`, `maxSurge: 0` for Grove) | Configurable per service via annotations |
+| maxSurge / maxUnavailable | Grove uses its native strategy. `nvidia.com/grove-update-strategy: OnDelete` can require manual pod deletion. | Configurable per service via annotations |
 | Status tracking | Native resource status | DGD `.status.rollingUpdate` with phase and per-service tracking |
 | Multinode support | Yes | No (single-node only) |
 

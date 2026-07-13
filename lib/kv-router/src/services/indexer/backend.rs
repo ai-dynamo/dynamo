@@ -4,13 +4,14 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::ConcurrentRadixTreeCompressed;
 use crate::ThreadPoolIndexer;
 use crate::indexer::{
-    KvIndexer, KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers, MatchDetails,
-    TieredMatchDetails, query_lower_tiers,
+    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
+    MatchDetails, TieredMatchDetails, TieredMatchProvider, query_lower_tiers,
 };
 use crate::protocols::{KvCacheEventData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId};
 
@@ -156,7 +157,7 @@ impl Indexer {
     pub async fn find_tiered_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
-    ) -> Result<TieredMatchDetails> {
+    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
         match self {
             Indexer::Single {
                 primary,
@@ -219,6 +220,16 @@ impl Indexer {
             }
         }
         Ok(out)
+    }
+}
+
+#[async_trait]
+impl TieredMatchProvider for Indexer {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+        self.find_tiered_matches(sequence.to_vec()).await
     }
 }
 
@@ -470,22 +481,34 @@ mod tests {
 }
 
 pub fn create_indexer(block_size: u32, num_threads: usize) -> Indexer {
+    create_indexer_with_metrics(
+        block_size,
+        num_threads,
+        Arc::new(KvIndexerMetrics::new_unregistered()),
+    )
+}
+
+pub fn create_indexer_with_metrics(
+    block_size: u32,
+    num_threads: usize,
+    metrics: Arc<KvIndexerMetrics>,
+) -> Indexer {
     if num_threads > 1 {
         Indexer::Concurrent {
-            primary: Arc::new(ThreadPoolIndexer::new(
+            primary: Arc::new(ThreadPoolIndexer::new_with_metrics(
                 ConcurrentRadixTreeCompressed::new(),
                 num_threads,
                 block_size,
+                Some(metrics),
             )),
             lower_tier: LowerTierIndexers::new(num_threads, block_size),
         }
     } else {
         Indexer::Single {
-            primary: KvIndexer::new_with_frequency(
+            primary: KvIndexer::new_with_pruning(
                 CancellationToken::new(),
-                None,
                 block_size,
-                Arc::new(KvIndexerMetrics::new_unregistered()),
+                metrics,
                 None,
             ),
             lower_tier: LowerTierIndexers::new(1, block_size),

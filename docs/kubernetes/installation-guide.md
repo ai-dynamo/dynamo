@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Installation Guide
+subtitle: Installs the GPU Operator and Dynamo Platform Helm charts along with optional Grove, RDMA, and Prometheus add-ons.
 ---
 
 This guide walks you through installing everything needed to deploy models with Dynamo on Kubernetes. Follow the steps in order — each builds on the previous one.
@@ -82,7 +83,7 @@ Set your environment variables:
 
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.0.2  # match a version from https://github.com/ai-dynamo/dynamo/releases
+export RELEASE_VERSION=1.2.1  # match a version from https://github.com/ai-dynamo/dynamo/releases
 ```
 
 ```bash
@@ -154,6 +155,10 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > |-----------------|---------------|-------|
 > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
+> | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
+> | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
+>
+> Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
 #### LWS + Volcano
 

@@ -196,8 +196,24 @@ async fn connection_monitor(
 pub fn monitor_for_disconnects(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+    )
+}
+
+fn monitor_for_disconnects_with_timeout(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
+    inactivity_timeout: Option<Duration>,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
 
@@ -206,12 +222,12 @@ pub fn monitor_for_disconnects(
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
 
-    // Read the backend inactivity timeout once at stream construction time.
-    // None means the timeout arm in select! will never fire (std::future::pending).
-    let inactivity_timeout = backend_stream_timeout();
-
     async_stream::try_stream! {
         tokio::pin!(stream);
+        // Keep the context's watch-backed cancellation future alive across body frames.
+        // Recreating it for every token repeatedly clones a receiver and churns Notify state.
+        let stopped = context.stopped();
+        tokio::pin!(stopped);
         loop {
             tokio::select! {
                 event = stream.next() => {
@@ -257,7 +273,7 @@ pub fn monitor_for_disconnects(
                         }
                     }
                 }
-                _ = context.stopped() => {
+                _ = &mut stopped => {
                     // Mark as cancelled when context is stopped (client disconnect or timeout)
                     inflight_guard.mark_error(ErrorType::Cancelled);
                     // Token counts (input_tokens, output_tokens) are recorded on
@@ -310,15 +326,28 @@ mod tests {
     use super::*;
     use crate::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
     use futures::StreamExt;
-    use serial_test::serial;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Debug)]
-    struct MockContext;
+    #[derive(Debug, Default)]
+    struct MockContext {
+        stopped_polls: AtomicUsize,
+        killed: std::sync::atomic::AtomicBool,
+        track_kill: bool,
+    }
+
     impl MockContext {
         fn new() -> Self {
-            Self
+            Self::default()
+        }
+
+        fn with_kill_tracking() -> Self {
+            Self {
+                track_kill: true,
+                ..Default::default()
+            }
         }
     }
+
     #[async_trait::async_trait]
     impl dynamo_runtime::engine::AsyncEngineContext for MockContext {
         fn id(&self) -> &str {
@@ -326,14 +355,19 @@ mod tests {
         }
         fn stop(&self) {}
         fn stop_generating(&self) {}
-        fn kill(&self) {}
+        fn kill(&self) {
+            if self.track_kill {
+                self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
         fn is_stopped(&self) -> bool {
             false
         }
         fn is_killed(&self) -> bool {
-            false
+            self.track_kill && self.killed.load(std::sync::atomic::Ordering::SeqCst)
         }
         async fn stopped(&self) {
+            self.stopped_polls.fetch_add(1, Ordering::Relaxed);
             std::future::pending::<()>().await;
         }
         async fn killed(&self) {
@@ -362,11 +396,9 @@ mod tests {
         }
     }
 
-    // SAFETY: env mutation is safe — all tests are single-threaded (#[serial] + tokio::test).
     fn setup_test(
         model: &str,
         req_id: &str,
-        timeout_secs: &str,
     ) -> (
         Arc<Metrics>,
         InflightGuard,
@@ -381,24 +413,108 @@ mod tests {
         let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
-        unsafe { std::env::set_var(BACKEND_STREAM_TIMEOUT_ENV, timeout_secs) };
         (metrics, guard, context, handle)
     }
 
-    fn cleanup_env() {
-        unsafe { std::env::remove_var(BACKEND_STREAM_TIMEOUT_ENV) };
+    #[tokio::test]
+    async fn test_monitor_reuses_stopped_future_across_events() {
+        let model = "reuse-stopped-future";
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "req-reuse",
+        );
+        let context = Arc::new(MockContext::new());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+        let stream = futures::stream::unfold(0, |index| async move {
+            tokio::task::yield_now().await;
+            (index < 4).then(|| {
+                (
+                    Ok(Event::default().data(format!("token-{index}"))),
+                    index + 1,
+                )
+            })
+        });
+
+        let monitored =
+            monitor_for_disconnects_with_timeout(stream, engine_context, guard, handle, None);
+        tokio::pin!(monitored);
+        while monitored.next().await.is_some() {}
+
+        assert_eq!(
+            context.stopped_polls.load(Ordering::Relaxed),
+            1,
+            "the same stopped future should remain pending across all response events"
+        );
+    }
+
+    fn generate_cancellation_labels() -> CancellationLabels {
+        CancellationLabels {
+            model: "test-model".to_string(),
+            endpoint: Endpoint::Generate.to_string(),
+            request_type: "unary".to_string(),
+        }
+    }
+
+    async fn wait_for_kill(context: &Arc<MockContext>) {
+        for _ in 0..100 {
+            if context.is_killed() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn armed_handle_drop_kills_generate_context() {
+        let context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (connection_handle, stream_handle) =
+            create_connection_monitor(engine_context, None, generate_cancellation_labels()).await;
+
+        drop(connection_handle);
+        drop(stream_handle);
+
+        wait_for_kill(&context).await;
+        assert!(context.is_killed());
+    }
+
+    #[tokio::test]
+    async fn disarmed_handle_does_not_kill_generate_context() {
+        let context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (mut connection_handle, stream_handle) =
+            create_connection_monitor(engine_context, None, generate_cancellation_labels()).await;
+
+        connection_handle.disarm();
+        drop(connection_handle);
+        drop(stream_handle);
+
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!context.is_killed());
     }
 
     /// Zombie backend with hanging stream is terminated by inactivity timeout.
     #[tokio::test(start_paused = true)]
-    #[serial]
     async fn test_backend_inactivity_timeout_releases_inflight_gauge() {
         let model = "zombie-model";
         // Config value "1" → HTTP-layer timeout is 2s (2x safety-net multiplier)
-        let (metrics, guard, context, handle) = setup_test(model, "req-zombie", "1");
+        let (metrics, guard, context, handle) = setup_test(model, "req-zombie");
         assert_eq!(metrics.get_inflight_count(model), 1);
 
-        let monitored = monitor_for_disconnects(hanging_stream(), context, guard, handle);
+        let monitored = monitor_for_disconnects_with_timeout(
+            hanging_stream(),
+            context,
+            guard,
+            handle,
+            Some(Duration::from_secs(2)),
+        );
         tokio::pin!(monitored);
 
         tokio::time::advance(Duration::from_secs(3)).await;
@@ -407,8 +523,6 @@ mod tests {
             while monitored.next().await.is_some() {}
         })
         .await;
-
-        cleanup_env();
 
         completed.expect("stream did not terminate — backend inactivity timeout is broken");
         assert_eq!(
@@ -444,21 +558,21 @@ mod tests {
 
     /// Inactivity timeout resets on each token; only fires after a true gap.
     #[tokio::test(start_paused = true)]
-    #[serial]
     async fn test_inactivity_timeout_resets_on_each_token() {
         let model = "reset-model";
 
         // Phase 1: tokens arrive every 2s with a 5s config (10s HTTP timeout after 2x multiplier)
         // — stream completes normally because each token resets the timer.
-        let (metrics, guard_1, ctx_1, handle_1) = setup_test(model, "phase1", "5");
+        let (metrics, guard_1, ctx_1, handle_1) = setup_test(model, "phase1");
         assert_eq!(metrics.get_inflight_count(model), 1);
 
         let token_count = 5;
-        let monitored_1 = monitor_for_disconnects(
+        let monitored_1 = monitor_for_disconnects_with_timeout(
             timed_token_stream(token_count, Duration::from_secs(2)),
             ctx_1,
             guard_1,
             handle_1,
+            Some(Duration::from_secs(10)),
         );
         tokio::pin!(monitored_1);
 
@@ -488,7 +602,13 @@ mod tests {
         let (tx_2, _rx_2) = tokio::sync::oneshot::channel();
         let handle_2 = ConnectionHandle::create_disabled(tx_2);
 
-        let monitored_2 = monitor_for_disconnects(hanging_stream(), ctx_2, guard_2, handle_2);
+        let monitored_2 = monitor_for_disconnects_with_timeout(
+            hanging_stream(),
+            ctx_2,
+            guard_2,
+            handle_2,
+            Some(Duration::from_secs(10)),
+        );
         tokio::pin!(monitored_2);
 
         // Config "5" → HTTP timeout 10s (2x multiplier). Advance past it.
@@ -498,8 +618,6 @@ mod tests {
             while monitored_2.next().await.is_some() {}
         })
         .await;
-
-        cleanup_env();
 
         assert!(
             phase2.is_ok(),
@@ -620,28 +738,24 @@ mod tests {
     /// Upstream worker killed mid-stream → mpsc channel reports `Disconnected` to the
     /// HTTP layer. Client MUST receive structured error + `[DONE]`.
     #[tokio::test]
-    #[serial]
     async fn test_simulate_worker_kill_emits_structured_error_and_done() {
-        let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk", "0");
+        let (_metrics, guard, ctx, handle) = setup_test("worker-kill-model", "req-wk");
         let backend_detail = "Disconnected: Stream ended before generation completed";
         let stream = simulate_mid_stream_error(3, backend_detail);
-        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
-        cleanup_env();
         assert_fault_contract("worker_kill", &body, backend_detail);
     }
 
     /// Python chat-processor raises mid-stream → Rust→Python `tx.send()` fails with
     /// `SendError`. Client MUST receive structured error + `[DONE]`.
     #[tokio::test]
-    #[serial]
     async fn test_simulate_python_consumer_drop_emits_structured_error_and_done() {
-        let (_metrics, guard, ctx, handle) = setup_test("py-drop-model", "req-py", "0");
+        let (_metrics, guard, ctx, handle) = setup_test("py-drop-model", "req-py");
         let backend_detail = "Failed to send response: SendError { .. }";
         let stream = simulate_mid_stream_error(3, backend_detail);
-        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
-        cleanup_env();
         assert_fault_contract("python_consumer_drop", &body, backend_detail);
     }
 
@@ -649,14 +763,12 @@ mod tests {
     /// Python exception details) MUST NOT reach the streaming client. The client
     /// receives only the sanitized static frame; the detail stays server-side.
     #[tokio::test]
-    #[serial]
     async fn test_mid_stream_error_does_not_leak_internal_details() {
-        let (_metrics, guard, ctx, handle) = setup_test("leak-model", "req-leak", "0");
+        let (_metrics, guard, ctx, handle) = setup_test("leak-model", "req-leak");
         let backend_detail = "panicked at '/opt/dynamo/lib/python3.12/site-packages/engine/worker.py:512: ValueError: secret tensor shape mismatch'";
         let stream = simulate_mid_stream_error(2, backend_detail);
-        let monitored = monitor_for_disconnects(stream, ctx, guard, handle);
+        let monitored = monitor_for_disconnects_with_timeout(stream, ctx, guard, handle, None);
         let body = collect_sse_body(monitored).await;
-        cleanup_env();
         assert_fault_contract("internal_detail_leak", &body, backend_detail);
         // Spot-check the most damaging fragments explicitly.
         assert!(!body.contains("site-packages"), "leaked a filesystem path");

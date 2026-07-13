@@ -18,7 +18,7 @@ COPY --chmod=775 components/src/dynamo/frontend /workspace_src/components/src/dy
 COPY --chmod=775 components/src/dynamo/trtllm /workspace_src/components/src/dynamo/trtllm
 COPY --chmod=775 components/src/dynamo/mocker /workspace_src/components/src/dynamo/mocker
 COPY --chmod=775 lib /workspace_src/lib
-COPY --chmod=664 ATTRIBUTION* LICENSE /workspace_src/
+COPY --chmod=664 LICENSE /workspace_src/
 
 # Transport stage for dynamo_base artifacts. uv/uvx go to /usr/bin (not /bin)
 # because upstream is usrmerged and cross-stage COPY chokes on the symlink.
@@ -28,12 +28,13 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /usr/bin/uv
 COPY --from=dynamo_base /bin/uvx /usr/bin/uvx
 
-{% if target == "runtime" %}
+{% if target in ("runtime", "dev", "local-dev") %}
 # Renamed `runtime` → `runtime_full` so the final stage can re-FROM upstream
-# and overlay our changes as a single layer (cuts depth for downstream wrappers).
+# and overlay our changes as a single layer (cuts depth for downstream wrappers,
+# incl. the dev image, which otherwise overflows overlay2's ~128-layer cap).
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime_full
 {% else %}
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG ENABLE_KVBM
@@ -160,7 +161,7 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 
-# Pull /workspace_src (incl. ATTRIBUTION/LICENSE) from the transport stage and
+# Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
     --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
@@ -181,11 +182,11 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 ENTRYPOINT []
 CMD ["/bin/bash"]
 
-{% if target == "runtime" %}
+{% if target in ("runtime", "dev", "local-dev") %}
 # Rebase on upstream so this stage inherits upstream's image config
 # (ENV/WORKDIR/USER/CMD) and then overlay runtime_full's filesystem as a
 # single layer. Only Dynamo-specific env needs redeclaring below.
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
 # without this, upstream's /workspace, /home/ubuntu, and single-file
 # /usr/local/bin/etcd would leak alongside our content.
@@ -194,6 +195,16 @@ COPY --from=runtime_full / /
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
+# dev/local-dev create their own venv in a later stage, so the venv ENV is left
+# out for them — keeps this config identical to the unsquashed dev path.
+{% if target in ("dev", "local-dev") %}
+ENV DYNAMO_HOME=/workspace \
+    HOME=/home/dynamo \
+    PATH=/usr/local/bin/etcd:${PATH} \
+    IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+{% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
@@ -201,6 +212,7 @@ ENV DYNAMO_HOME=/workspace \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+{% endif %}
 
 WORKDIR /workspace
 
@@ -211,4 +223,18 @@ USER dynamo
 
 ENTRYPOINT []
 CMD ["/bin/bash"]
+{% endif %}
+
+
+{# Compliance is skipped for dev/local-dev: those images are not shipped (release
+   ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
+   already skips them, and their pre_runtime carries no dynamo venv to scan. #}
+{% if target not in ("dev", "local-dev") %}
+{% include "templates/compliance.Dockerfile" %}
+{% endif %}
+
+
+FROM pre_runtime AS runtime
+{% if target not in ("dev", "local-dev") %}
+COPY --from=licenses /legal /legal
 {% endif %}

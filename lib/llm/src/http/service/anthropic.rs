@@ -24,7 +24,6 @@ use axum::{
     },
     routing::{get, post},
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use tracing::Instrument;
@@ -32,7 +31,10 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
+    metrics::{
+        CancellationLabels, Endpoint,
+        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
+    },
     service_v2,
 };
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
@@ -41,9 +43,13 @@ use crate::protocols::anthropic::types::{
     AnthropicErrorBody, AnthropicErrorResponse, SystemContent,
     chat_completion_to_anthropic_response,
 };
+use crate::protocols::common::extensions::{
+    AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
+    apply_header_routing_overrides, session_affinity_from_headers,
+};
 use crate::protocols::openai::chat_completions::{
-    NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
-    aggregator::ChatCompletionAggregator,
+    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+    NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
 };
 use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
@@ -51,7 +57,7 @@ use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::SanitizedError;
-use super::metadata::extract_metadata_from_http;
+use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id};
 
 // ---------------------------------------------------------------------------
@@ -130,7 +136,7 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<AnthropicCreateMessageRequest>,
+    Json(mut request): Json<AnthropicCreateMessageRequest>,
 ) -> Result<Response, Response> {
     // Validate required fields
     if request.messages.is_empty() {
@@ -147,13 +153,19 @@ async fn handler_anthropic_messages(
             "max_tokens: must be greater than 0",
         ));
     }
+    gate_anthropic_nvext(&mut request, state.nvext_enabled());
 
     // Create request context
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.stream;
     let resolved_model = resolve_request_model(&request.model, template.as_ref());
+    // Canonicalize alias → primary for the metric label (see anthropic_messages).
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::AnthropicMessages.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
@@ -164,7 +176,14 @@ async fn handler_anthropic_messages(
             &err.to_string(),
         )
     })?;
-    let request = Context::with_id_and_metadata(request, request_id, metadata);
+    let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    attach_x_request_id(&mut request, &headers);
+    if let Some(agent_context) = agent_context_from_headers(&headers) {
+        request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+    }
+    if let Some(session_affinity) = session_affinity_from_headers(&headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     let context = request.context();
 
     // Create connection handles
@@ -175,15 +194,16 @@ async fn handler_anthropic_messages(
     )
     .await;
 
-    let response =
-        tokio::spawn(anthropic_messages(state, template, request, stream_handle).in_current_span())
-            .await
-            .map_err(|e| {
-                anthropic_sanitized_error_with_details(
-                    SanitizedError::Internal,
-                    format!("Failed to await Anthropic messages task: {e:?}"),
-                )
-            })?;
+    let response = tokio::spawn(
+        anthropic_messages(state, template, request, headers, stream_handle).in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        anthropic_sanitized_error_with_details(
+            SanitizedError::Internal,
+            format!("Failed to await Anthropic messages task: {e:?}"),
+        )
+    })?;
 
     connection_handle.disarm();
     response
@@ -195,6 +215,7 @@ async fn anthropic_messages(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<AnthropicCreateMessageRequest>,
+    headers: HeaderMap,
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, Response> {
     let streaming = request.stream;
@@ -215,8 +236,16 @@ async fn anthropic_messages(
     }
 
     // Strip Claude Code billing preamble from system prompt if enabled
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
+    }
+
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (matching the OpenAI handlers). Non-aliases pass through.
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
     }
 
     let model = request.model.clone();
@@ -230,30 +259,41 @@ async fn anthropic_messages(
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
-        .map_err(|_| {
-            anthropic_error(
+        .map_err(|e| match e {
+            // Registered but not ready to serve yet → retryable 503 (mapped to
+            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+            // canonical, customer-facing message so both APIs report the same
+            // text. Anything else is a genuine missing model → 404.
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => anthropic_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                &super::openai::model_not_ready_message(&model),
+            ),
+            _ => anthropic_error(
                 StatusCode::NOT_FOUND,
                 "not_found_error",
                 &format!("Model '{}' not found", model),
-            )
+            ),
         })?;
 
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
+
+    // Anthropic exposes input usage in `message_start`, before the backend's
+    // authoritative count is available. Seed the stream with the same
+    // best-effort estimate as `/count_tokens`; the converter replaces it when
+    // the backend reports final usage.
+    let estimated_input_tokens = if streaming {
+        estimate_input_tokens(&orig_request)
+    } else {
+        0
+    };
 
     // Check if the Anthropic request explicitly disabled thinking.
     let thinking_explicitly_disabled = orig_request
         .thinking
         .as_ref()
         .is_some_and(|t| t.thinking_type == "disabled");
-
-    // Estimate input tokens before consuming the request via try_into().
-    // Only used in the streaming path to populate message_start.
-    let estimated_input_tokens = if streaming {
-        estimate_input_tokens(&orig_request)
-    } else {
-        0
-    };
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -274,7 +314,7 @@ async fn anthropic_messages(
     // etc.) that the stream converter needs for faithful response reconstruction.
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
-
+    apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
@@ -312,6 +352,14 @@ async fn anthropic_messages(
 
     let request = context.map(|_req| chat_request);
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // Create inflight_guard early to ensure all errors are counted
@@ -329,6 +377,18 @@ async fn anthropic_messages(
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Overloaded,
+                format!("{e:#}"),
+            );
+        }
+        if super::metrics::request_was_unavailable(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Unavailable,
+                format!("{e:#}"),
+            );
         }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
@@ -497,10 +557,10 @@ async fn anthropic_messages(
 /// Handler for POST /v1/messages/count_tokens.
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
-    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
     let tokens = request.estimate_tokens();
@@ -550,12 +610,20 @@ fn model_env_overrides() -> (Option<u64>, Option<u64>) {
 }
 
 /// Resolve context_window for a model: env override takes precedence over MDC.
+/// Aliases have no card of their own (the map is keyed by the primary's
+/// display_name), so fall back to the primary's context length.
 fn resolve_context_window(
+    state: &service_v2::State,
     model_name: &str,
     card_map: &std::collections::HashMap<String, u32>,
     env_override: Option<u64>,
 ) -> Option<u64> {
-    env_override.or_else(|| card_map.get(model_name).map(|&cl| cl as u64))
+    env_override.or_else(|| {
+        card_map
+            .get(model_name)
+            .or_else(|| card_map.get(&state.manager().resolve_canonical_name(model_name)))
+            .map(|&cl| cl as u64)
+    })
 }
 
 /// List all models. Returns Anthropic format when `anthropic-version` header
@@ -570,7 +638,10 @@ async fn list_models(
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let models: HashSet<String> = state.manager().model_display_names();
+    // Only advertise models whose worker set is complete in at least one
+    // namespace, matching the OpenAI `/v1/models` gate. A registered-but-broken
+    // deployment (e.g. decode-only with no prefill peer) stays hidden.
+    let models: HashSet<String> = state.manager().serving_ready_display_names();
     let card_map = build_model_context_map(&state);
     let (cw_override, mot_override) = model_env_overrides();
 
@@ -588,7 +659,7 @@ async fn list_models(
                     "type": "model",
                     "created_at": created_at,
                 });
-                if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+                if let Some(cw) = resolve_context_window(&state, name, &card_map, cw_override) {
                     obj["max_input_tokens"] = serde_json::json!(cw);
                 }
                 if let Some(mot) = mot_override {
@@ -620,7 +691,7 @@ async fn list_models(
                 "created": created,
                 "owned_by": "nvidia",
             });
-            if let Some(cw) = resolve_context_window(name, &card_map, cw_override) {
+            if let Some(cw) = resolve_context_window(&state, name, &card_map, cw_override) {
                 obj["context_window"] = serde_json::json!(cw);
             }
             if let Some(mot) = mot_override {
@@ -656,13 +727,17 @@ async fn get_model(
         return Err(super::openai::ErrorMessage::model_not_found());
     }
 
+    // Registered but incomplete worker set → 503, mirroring the OpenAI retrieve
+    // path so an incomplete deployment isn't reported as retrievable.
+    super::openai::check_model_serving_ready(&state, model_id)?;
+
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let card_map = build_model_context_map(&state);
     let (cw_override, mot_override) = model_env_overrides();
-    let context_window = resolve_context_window(model_id, &card_map, cw_override);
+    let context_window = resolve_context_window(&state, model_id, &card_map, cw_override);
 
     if headers.contains_key("anthropic-version") {
         let created_at = chrono::DateTime::from_timestamp(created as i64, 0)
@@ -719,21 +794,42 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
     }
 }
 
-/// Estimate input token count for an Anthropic request.
+/// Estimate input usage for a streaming `message_start` event.
 ///
-/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
-/// (sum character lengths / 3). This populates `input_tokens` in the streaming
-/// `message_start` event, since the engine only reports prompt token counts on
-/// the final chunk.
+/// The backend's rendered prompt and cache-hit split are not available when
+/// the event is emitted. Final `message_delta` usage replaces this estimate.
 fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
-    // Build a temporary count-tokens request to reuse the existing estimator.
-    let count_req = AnthropicCountTokensRequest {
+    AnthropicCountTokensRequest {
         model: req.model.clone(),
         messages: req.messages.clone(),
         system: req.system.clone(),
         tools: req.tools.clone(),
-    };
-    count_req.estimate_tokens()
+    }
+    .estimate_tokens()
+}
+
+fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabled: bool) {
+    if nvext_enabled {
+        return;
+    }
+
+    if request.nvext.is_some() {
+        tracing::warn!(
+            endpoint = "anthropic_messages",
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
+        );
+    }
+    request.nvext = None;
+}
+
+fn apply_anthropic_header_routing_overrides(
+    request: &mut NvCreateChatCompletionRequest,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) {
+    if nvext_enabled {
+        request.nvext = apply_header_routing_overrides(request.nvext.take(), headers);
+    }
 }
 
 /// Build an Anthropic-formatted error response from a canonical
@@ -788,4 +884,88 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Respo
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::extensions::parse_nvext;
+
+    fn request_with_nvext() -> AnthropicCreateMessageRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {
+                "agent_hints": {
+                    "priority": 5
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_preserves_when_enabled() {
+        let mut request = request_with_nvext();
+        gate_anthropic_nvext(&mut request, true);
+        let nvext = parse_nvext(request.nvext).unwrap();
+
+        assert_eq!(
+            nvext.and_then(|ext| ext.agent_hints.and_then(|hints| hints.priority)),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_strips_when_disabled() {
+        let mut request = request_with_nvext();
+        gate_anthropic_nvext(&mut request, false);
+
+        assert!(request.nvext.is_none());
+    }
+
+    #[test]
+    fn anthropic_nvext_rejects_agent_context() {
+        let err = parse_nvext(Some(serde_json::json!({
+            "agent_context": {
+                "session_id": "run-123"
+            }
+        })))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn anthropic_header_routing_overrides_apply_when_enabled() {
+        let request = request_with_nvext();
+        let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-prefill-instance-id", "7".parse().unwrap());
+        headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
+
+        apply_anthropic_header_routing_overrides(&mut chat_request, &headers, true);
+        let nvext = chat_request.nvext.unwrap();
+
+        assert_eq!(nvext.backend_instance_id, Some(42));
+        assert_eq!(nvext.decode_worker_id, Some(42));
+        assert_eq!(nvext.prefill_worker_id, Some(7));
+        assert_eq!(nvext.dp_rank, Some(3));
+    }
+
+    #[test]
+    fn anthropic_header_routing_overrides_skip_when_disabled() {
+        let request = request_with_nvext();
+        let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+
+        apply_anthropic_header_routing_overrides(&mut chat_request, &headers, false);
+        let nvext = chat_request.nvext.unwrap();
+
+        assert_eq!(nvext.backend_instance_id, None);
+        assert_eq!(nvext.decode_worker_id, None);
+    }
 }

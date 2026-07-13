@@ -598,6 +598,109 @@ class CachedTokensChatPayload(ChatPayload):
 
 
 @dataclass
+class ClearKVBlocksPayload(ChatPayload):
+    """Warm the prefix cache, clear it through the system server, and infer.
+
+    The two warm-up requests happen before the request driven by the regular
+    serve-test harness. The second warm-up must report a cache hit; the harness
+    request then proves the clear removed that prefix without breaking serving.
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        timeout: int = 60,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=1,
+            expected_response=[],
+            expected_log=[],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self._cleared = False
+
+    @staticmethod
+    def _cached_tokens(response: Any, phase: str) -> int:
+        result = response.json()
+        usage = result.get("usage")
+        prompt_tokens = (usage or {}).get("prompt_tokens")
+        if usage is None or prompt_tokens is None or prompt_tokens <= 0:
+            raise AssertionError(
+                f"{phase}: response carried no prompt-token usage evidence: "
+                f"{usage!r}"
+            )
+        details = usage.get("prompt_tokens_details")
+        if not isinstance(details, dict) or "cached_tokens" not in details:
+            raise AssertionError(
+                f"{phase}: response did not report cached_tokens: {usage!r}"
+            )
+        cached_tokens = details["cached_tokens"]
+        if not isinstance(cached_tokens, int):
+            raise AssertionError(
+                f"{phase}: cached_tokens was not an integer: {cached_tokens!r}"
+            )
+        return cached_tokens
+
+    def _warm_then_clear(self) -> None:
+        if self._cleared:
+            return
+
+        inference_url = super().url()
+        warm_responses = []
+        for request_number in (1, 2):
+            response = requests.post(
+                inference_url,
+                json=self.body,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            ChatPayload.extract_content(response)
+            warm_responses.append(response)
+            logger.info(
+                "KV-clear warm-up request %d reported %d cached tokens",
+                request_number,
+                self._cached_tokens(response, f"warm-up request {request_number}"),
+            )
+
+        second_cached_tokens = self._cached_tokens(
+            warm_responses[1], "second warm-up request"
+        )
+        if second_cached_tokens <= 0:
+            raise AssertionError(
+                "Second warm-up request did not report cached tokens; "
+                "prefix caching is not active"
+            )
+
+        clear_url = (
+            f"http://{self.host}:{self.system_ports[0]}"
+            "/engine/control/clear_kv_blocks"
+        )
+        response = requests.post(clear_url, json={}, timeout=self.timeout)
+        response.raise_for_status()
+        result = response.json()
+        expected = {"status": "success", "message": "KV cache cleared"}
+        if result != expected:
+            raise AssertionError(f"Unexpected clear_kv_blocks response: {result}")
+        self._cleared = True
+
+    def url(self) -> str:
+        self._warm_then_clear()
+        return super().url()
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        cached_tokens = self._cached_tokens(response, "first post-clear request")
+        if cached_tokens != 0:
+            raise AssertionError(
+                "First post-clear request unexpectedly reused "
+                f"{cached_tokens} cached tokens"
+            )
+
+
+@dataclass
 class LoraTestChatPayload(ChatPayload):
     """
     Chat payload that loads a LoRA adapter before sending inference requests.
@@ -685,6 +788,71 @@ class LoraTestChatPayload(ChatPayload):
 
 
 @dataclass
+class ElasticEPScalePayload(ChatPayload):
+    """Scales the vLLM data-parallel size live, then verifies the worker still
+    serves a chat request post-scale.
+
+    POSTs ``/engine/control/scale_elastic_ep`` on the worker's system port
+    before the chat request (mirroring LoraTestChatPayload's admin-then-infer
+    pattern), so a single payload exercises both the scale control and that
+    generation survives the reconfigure. Requires a worker started with the Ray
+    DP backend + ePLB (see ``examples/backends/vllm/launch/elastic_ep.sh``).
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        new_data_parallel_size: int,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        repeat_count: int = 1,
+        expected_response: Optional[list] = None,
+        expected_log: Optional[list] = None,
+        timeout: int = 300,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=repeat_count,
+            expected_response=expected_response or [],
+            expected_log=expected_log or [],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self.new_data_parallel_size = new_data_parallel_size
+        self._scaled = False
+
+    def _ensure_scaled(self) -> None:
+        """Drive the scale control once before the first chat request."""
+        if self._scaled:
+            return
+        scale_url = (
+            f"http://{self.host}:{self.system_ports[0]}"
+            "/engine/control/scale_elastic_ep"
+        )
+        logger.info(
+            "Scaling elastic EP to data_parallel_size=%s via %s",
+            self.new_data_parallel_size,
+            scale_url,
+        )
+        response = requests.post(
+            scale_url,
+            json={"new_data_parallel_size": self.new_data_parallel_size},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if result.get("status") != "ok":
+            raise RuntimeError(f"scale_elastic_ep failed: {result}")
+        if result.get("new_data_parallel_size") != self.new_data_parallel_size:
+            raise RuntimeError(f"unexpected scale_elastic_ep result: {result}")
+        self._scaled = True
+
+    def url(self) -> str:
+        """Scale before the first chat request, then return the chat URL."""
+        self._ensure_scaled()
+        return super().url()
+
+
+@dataclass
 class CompletionPayload(BasePayload):
     """Payload for completions endpoint."""
 
@@ -704,6 +872,32 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class ImagesPayload(BasePayload):
+    """Payload for the image-generation endpoint (raw-media / DiffusionEngine).
+
+    Targets ``/v1/images/generations`` and validates the OpenAI-shaped
+    response: a non-empty ``data`` list whose first item carries either a
+    ``b64_json`` or a ``url``.
+    """
+
+    endpoint: str = "/v1/images/generations"
+
+    @staticmethod
+    def extract_image(response):
+        response.raise_for_status()
+        result = response.json()
+        assert "data" in result, "Missing 'data' in image response"
+        assert len(result["data"]) > 0, "Empty 'data' in image response"
+        item = result["data"][0]
+        # Return whichever representation the engine produced — either is a
+        # valid image result.
+        return item.get("b64_json") or item.get("url") or ""
+
+    def response_handler(self, response: Any) -> str:
+        return ImagesPayload.extract_image(response)
 
 
 @dataclass

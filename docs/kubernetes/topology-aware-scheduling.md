@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Topology Aware Scheduling
+subtitle: Packs prefill, decode, and routing pods within the same rack or zone to reduce inter-node latency.
 ---
 
 Topology Aware Scheduling (TAS) lets you control where Dynamo places inference workload pods relative to the cluster's network topology. By packing related pods within the same rack, block, or other topology domain, you reduce inter-node latency and improve throughput — especially for disaggregated serving where prefill, decode, and routing components communicate frequently.

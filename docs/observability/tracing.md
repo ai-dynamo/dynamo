@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Tracing
+subtitle: OpenTelemetry distributed tracing for Dynamo running locally via Docker Compose, exporting spans to Tempo and visualizing them in Grafana.
 ---
 
 ## Overview
@@ -10,7 +11,7 @@ Dynamo supports OpenTelemetry-based distributed tracing for visualizing request 
 
 **Requirements:** Set `DYN_LOGGING_JSONL=true` and `OTEL_EXPORT_ENABLED=true` to export traces to Tempo.
 
-**Note:** When OTLP export is enabled, Dynamo exports both **traces and logs**. Traces are sent to Tempo and logs are sent to Loki (via the OpenTelemetry Collector). To send logs to a separate endpoint, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`; otherwise it defaults to the traces endpoint. See [Logging](logging.md#otlp-log-export) for details.
+**Note:** When OTLP export is enabled, Dynamo exports both **traces and logs**. Traces are sent to Tempo and logs are sent to Loki (via the OpenTelemetry Collector). To send logs to a separate endpoint, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`; otherwise it falls back to the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then the protocol default — it does **not** follow the traces endpoint. See [Logging](logging.md#otlp-log-export) for details.
 
 This guide covers single GPU demo setup using Docker Compose. For Kubernetes deployments, see [Kubernetes Deployment](#kubernetes-deployment).
 
@@ -22,8 +23,11 @@ This guide covers single GPU demo setup using Docker Compose. For Kubernetes dep
 |----------|-------------|---------|---------|
 | `DYN_LOGGING_JSONL` | Enable JSONL logging format (required for tracing) | `false` | `true` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces | `http://localhost:4317` | `http://tempo:4317` |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP gRPC endpoint for logs (defaults to traces endpoint) | same as traces | `http://localhost:4317` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Default OTLP endpoint for traces and logs when signal-specific endpoints are unset | `http://localhost:4317` (`grpc`) / `http://localhost:4318` (`http/protobuf`) | `http://otel-collector:4317` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Override endpoint for traces, used as-is | unset | `http://tempo:4317` |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override endpoint for logs, used as-is (does not fall back to the traces endpoint) | unset | `http://loki-collector:4317` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | OTLP transport protocol: `grpc` or `http/protobuf` | `grpc` | `http/protobuf` |
+| `OTEL_TRACES_SAMPLE_RATIO` | Trace head-sampling ratio in `[0.0, 1.0]`; unset exports every trace | unset (export all) | `0.01` |
 | `OTEL_SERVICE_NAME` | Service name for identifying components | `dynamo` | `dynamo-frontend` |
 
 ## Getting Started Quickly

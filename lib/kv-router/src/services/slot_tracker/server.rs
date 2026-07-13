@@ -16,16 +16,16 @@ use serde::{Deserialize, Deserializer};
 
 use crate::protocols::WorkerWithDpRank;
 use crate::sequences::SequenceError;
+use crate::services::common::replica_sync::PeerManager;
+use crate::services::common::replica_sync_http;
 
 use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry, TrackerKey};
-use super::replica_sync::{PeerError, PeerManager};
 
 pub struct AppState {
     pub registry: Arc<SlotTrackerRegistry>,
-    pub(crate) peer_manager: Option<PeerManager>,
 }
 
-fn default_tenant() -> String {
+fn default_routing_group() -> String {
     "default".to_string()
 }
 
@@ -33,8 +33,8 @@ fn default_tenant() -> String {
 struct RegisterRequest {
     worker_id: u64,
     model_name: String,
-    #[serde(default = "default_tenant")]
-    tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
     block_size: u32,
     dp_start: u32,
     dp_size: u32,
@@ -44,15 +44,15 @@ struct RegisterRequest {
 struct UnregisterRequest {
     worker_id: u64,
     model_name: String,
-    #[serde(default = "default_tenant")]
-    tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
 }
 
 #[derive(Deserialize)]
 struct AddRequest {
     model_name: String,
-    #[serde(default = "default_tenant")]
-    tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
     request_id: String,
     worker_id: u64,
     dp_rank: u32,
@@ -65,16 +65,16 @@ struct AddRequest {
 #[derive(Deserialize)]
 struct LifecycleRequest {
     model_name: String,
-    #[serde(default = "default_tenant")]
-    tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
     request_id: String,
 }
 
 #[derive(Deserialize)]
 struct PotentialLoadsRequest {
     model_name: String,
-    #[serde(default = "default_tenant")]
-    tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    routing_group: String,
     #[serde(deserialize_with = "deserialize_sequence_hashes")]
     sequence_hashes: Vec<SequenceHash>,
     #[serde(default)]
@@ -84,12 +84,7 @@ struct PotentialLoadsRequest {
 #[derive(Deserialize)]
 struct FilterQuery {
     model_name: Option<String>,
-    tenant_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct PeerRequest {
-    url: String,
+    routing_group: Option<String>,
 }
 
 fn deserialize_sequence_hashes<'de, D>(deserializer: D) -> Result<Vec<SequenceHash>, D::Error>
@@ -128,7 +123,7 @@ async fn register(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.tenant_id));
+    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
     match state.registry.register(
         key,
         req.worker_id,
@@ -149,7 +144,7 @@ async fn unregister(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.tenant_id));
+    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
     match state.registry.unregister(&key, req.worker_id) {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => registry_error(error),
@@ -160,11 +155,10 @@ async fn list_workers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<FilterQuery>,
 ) -> Response {
-    Json(
-        state
-            .registry
-            .list_workers(params.model_name.as_deref(), params.tenant_id.as_deref()),
-    )
+    Json(state.registry.list_workers(
+        params.model_name.as_deref(),
+        params.routing_group.as_deref(),
+    ))
     .into_response()
 }
 
@@ -176,7 +170,7 @@ async fn add(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.tenant_id));
+    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
 
     // Lifecycle delivery is intentionally arrival-ordered. Consumers should
     // normally await /add before sending /prefill_complete or /free.
@@ -200,7 +194,7 @@ async fn prefill_complete(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.tenant_id));
+    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
     match state.registry.mark_prefill_completed(&key, &req.request_id) {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => service_error(error),
@@ -215,7 +209,7 @@ async fn free(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.tenant_id));
+    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
     match state.registry.free(&key, &req.request_id) {
         Ok(()) => json_ok(StatusCode::OK),
         Err(error) => service_error(error),
@@ -226,11 +220,10 @@ async fn list_loads(
     State(state): State<Arc<AppState>>,
     Query(params): Query<FilterQuery>,
 ) -> Response {
-    Json(
-        state
-            .registry
-            .list_loads(params.model_name.as_deref(), params.tenant_id.as_deref()),
-    )
+    Json(state.registry.list_loads(
+        params.model_name.as_deref(),
+        params.routing_group.as_deref(),
+    ))
     .into_response()
 }
 
@@ -242,7 +235,7 @@ async fn potential_loads(
         Ok(payload) => payload,
         Err(error) => return json_rejection(error),
     };
-    let key = TrackerKey::new(req.model_name, Some(req.tenant_id));
+    let key = TrackerKey::new(req.model_name, Some(req.routing_group));
     match state
         .registry
         .potential_loads(&key, &req.sequence_hashes, req.new_isl_tokens)
@@ -250,53 +243,6 @@ async fn potential_loads(
         Ok(loads) => Json(loads).into_response(),
         Err(error) => registry_error(error),
     }
-}
-
-async fn register_peer(
-    State(state): State<Arc<AppState>>,
-    payload: Result<Json<PeerRequest>, JsonRejection>,
-) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
-    let Some(peer_manager) = &state.peer_manager else {
-        return json_error(StatusCode::CONFLICT, "replica sync is disabled");
-    };
-    match peer_manager.register_peer(req.url).await {
-        Ok(true) => json_ok(StatusCode::CREATED),
-        Ok(false) => json_ok(StatusCode::OK),
-        Err(error) => peer_error(error),
-    }
-}
-
-async fn deregister_peer(
-    State(state): State<Arc<AppState>>,
-    payload: Result<Json<PeerRequest>, JsonRejection>,
-) -> Response {
-    let Json(req) = match payload {
-        Ok(payload) => payload,
-        Err(error) => return json_rejection(error),
-    };
-    let Some(peer_manager) = &state.peer_manager else {
-        return json_error(StatusCode::CONFLICT, "replica sync is disabled");
-    };
-    match peer_manager.deregister_peer(req.url).await {
-        Ok(true) => json_ok(StatusCode::OK),
-        Ok(false) => json_error(StatusCode::NOT_FOUND, "peer not found"),
-        Err(error) => peer_error(error),
-    }
-}
-
-async fn list_peers(State(state): State<Arc<AppState>>) -> Response {
-    Json(
-        state
-            .peer_manager
-            .as_ref()
-            .map(PeerManager::list_peers)
-            .unwrap_or_default(),
-    )
-    .into_response()
 }
 
 async fn health() -> StatusCode {
@@ -358,15 +304,10 @@ fn service_error(error: ServiceError) -> Response {
     }
 }
 
-fn peer_error(error: PeerError) -> Response {
-    let status = match &error {
-        PeerError::InvalidEndpoint(_) | PeerError::SelfEndpoint => StatusCode::BAD_REQUEST,
-        PeerError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-    };
-    json_error(status, error)
-}
-
-pub fn create_router(state: Arc<AppState>) -> Router {
+pub(crate) fn create_router(
+    state: Arc<AppState>,
+    peer_manager: Option<Arc<PeerManager>>,
+) -> Router {
     Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
@@ -376,13 +317,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/free", post(free))
         .route("/loads", get(list_loads))
         .route("/potential_loads", post(potential_loads))
-        .route("/register_peer", post(register_peer))
-        .route("/deregister_peer", post(deregister_peer))
-        .route("/peers", get(list_peers))
         .route("/health", get(health))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
+        .merge(replica_sync_http::router(peer_manager))
 }
 
 #[cfg(test)]
@@ -395,10 +334,12 @@ mod tests {
     use super::*;
 
     fn app() -> Router {
-        create_router(Arc::new(AppState {
-            registry: Arc::new(SlotTrackerRegistry::new(CancellationToken::new())),
-            peer_manager: None,
-        }))
+        create_router(
+            Arc::new(AppState {
+                registry: Arc::new(SlotTrackerRegistry::new(CancellationToken::new())),
+            }),
+            None,
+        )
     }
 
     async fn response_json(response: Response) -> serde_json::Value {
@@ -406,20 +347,6 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&body).expect("response JSON")
-    }
-
-    fn potential_loads_body(min_len: usize) -> String {
-        let mut body = String::from(r#"{"model_name":"model","sequence_hashes":["#);
-        let mut first = true;
-        while body.len() < min_len {
-            if !first {
-                body.push(',');
-            }
-            first = false;
-            body.push('0');
-        }
-        body.push_str("]}");
-        body
     }
 
     #[tokio::test]
@@ -438,6 +365,21 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(response_json(response).await["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn replica_sync_routes_are_mounted() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/replica_sync/peers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -466,36 +408,6 @@ mod tests {
             .unwrap();
         assert_eq!(method_response.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert!(response_json(method_response).await["error"].is_string());
-    }
-
-    #[tokio::test]
-    async fn peer_routes_report_disabled_replica_sync() {
-        let app = app();
-        let peers_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/peers")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(peers_response.status(), StatusCode::OK);
-        assert_eq!(response_json(peers_response).await, serde_json::json!([]));
-
-        let register_response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/register_peer")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"url":"tcp://127.0.0.1:8092"}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(register_response.status(), StatusCode::CONFLICT);
     }
 
     #[tokio::test]
@@ -549,57 +461,5 @@ mod tests {
         assert_eq!(loads_response.status(), StatusCode::OK);
         let loads = response_json(loads_response).await;
         assert_eq!(loads[0]["potential_decode_blocks"], 1);
-    }
-
-    #[tokio::test]
-    async fn sizable_hash_array_under_default_body_limit_is_accepted() {
-        let app = app();
-        let register_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/register")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"worker_id":1,"model_name":"model","block_size":16,"dp_start":0,"dp_size":1}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(register_response.status(), StatusCode::CREATED);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/potential_loads")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(potential_loads_body(256 * 1024)))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn oversized_json_body_returns_json_error() {
-        let response = app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/potential_loads")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(potential_loads_body(2 * 1024 * 1024 + 1)))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(response_json(response).await["error"].is_string());
     }
 }

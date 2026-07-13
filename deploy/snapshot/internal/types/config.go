@@ -72,6 +72,14 @@ func (c *AgentConfig) Validate() error {
 			Message: "tcpClose and tcpEstablished cannot both be true",
 		}
 	}
+	switch strings.ToLower(strings.TrimSpace(c.CRIU.ImageIoMode)) {
+	case "", "writeback", "direct":
+	default:
+		return &ConfigError{
+			Field:   "criu.imageIoMode",
+			Message: fmt.Sprintf("unsupported imageIoMode %q; expected %q, %q, or empty", c.CRIU.ImageIoMode, "writeback", "direct"),
+		}
+	}
 	return c.Restore.Validate()
 }
 
@@ -122,6 +130,7 @@ type CRIUSettings struct {
 	LinkRemap         bool   `yaml:"linkRemap"`
 	ExtMasters        bool   `yaml:"extMasters"`
 	ManageCgroupsMode string `yaml:"manageCgroupsMode"`
+	ImageIoMode       string `yaml:"imageIoMode"`
 	RstSibling        bool   `yaml:"rstSibling"`
 	MntnsCompatMode   bool   `yaml:"mntnsCompatMode"`
 	EvasiveDevices    bool   `yaml:"evasiveDevices"`
