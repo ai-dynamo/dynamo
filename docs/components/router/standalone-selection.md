@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Standalone Selection Service
 subtitle: Select workers and account for reservations without forwarding inference requests
@@ -39,6 +39,24 @@ Launch the service from the repository root:
 The service binds to `0.0.0.0` and does not provide authentication. Run it on a
 trusted internal network or place it behind an appropriate network policy.
 
+## Embedded Rust API
+
+Use `SelectionServiceBuilder` to embed selection without the HTTP server. The
+resulting `SelectionService` owns worker registration, KV-event listeners,
+indexer recovery, replica synchronization, and shutdown. It exposes the same
+worker, selection, bookkeeping, inspection, peer-membership, and recovery
+operations as the standalone HTTP service.
+
+`SelectionCore::new_local` creates an intentionally unsynchronized core for
+tests and local-only use. Production integrations should use
+`SelectionServiceBuilder` so startup recovery, readiness, and background-task
+lifecycle remain consistent with the standalone service.
+
+The C and Go bindings do not currently expose `SelectionService`. An EPP
+integration requires separate FFI lifecycle, error-mapping, worker, and peer
+APIs. Those bindings should wrap `SelectionService` rather than construct
+`SelectionCore` directly.
+
 ### CLI
 
 | Flag | Default | Description |
@@ -64,7 +82,7 @@ Content-Type: application/json
 {
   "worker_id": 1,
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "endpoint": "http://worker:8000",
   "block_size": 16,
   "data_parallel_start_rank": 0,
@@ -79,7 +97,7 @@ Content-Type: application/json
 
 `POST /workers` returns `201`. `PATCH /workers/{worker_id}` updates supplied
 fields, `DELETE /workers/{worker_id}` removes the worker, and `GET /workers`
-lists catalog state. `model_name` and `tenant_id` scope all selection, indexer,
+lists catalog state. `model_name` and `routing_group` scope all selection, indexer,
 and load state; both default to `"default"` when omitted.
 
 `GET /health` is process liveness. `GET /ready` returns `200` only after at
@@ -95,7 +113,7 @@ Select a worker without booking active load:
 {
   "selection_id": "select-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512
@@ -105,14 +123,13 @@ Select a worker without booking active load:
 ### `POST /select_and_reserve`
 
 Select and atomically book load in the receiving selector process. Supply a
-globally unique `reservation_id`, or allow the service to generate one:
+globally unique `selection_id`, or allow the service to generate one:
 
 ```json
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
   "isl_tokens": 512
@@ -124,9 +141,8 @@ Both endpoints return the same selection shape:
 ```json
 {
   "selection_id": "select-123",
-  "reservation_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "worker_id": 1,
   "dp_rank": 0,
   "endpoint": "http://worker:8000",
@@ -142,7 +158,7 @@ Both endpoints return the same selection shape:
 }
 ```
 
-`selection_id` and `reservation_id` are omitted when absent. All `overlap`
+`selection_id` is omitted when absent. All `overlap`
 values are matched token counts. `gpu`, `cpu`, and `disk` use the cumulative
 Mooncake tier semantics documented in the standalone indexer's
 [per-instance tier breakdown](standalone-indexer.md#per-instance-tier-breakdown).
@@ -164,9 +180,9 @@ Ray can keep model invocation separate from selector admission:
 
 1. Call `POST /select`.
 2. Send the request to the returned `endpoint` and `dp_rank`.
-3. Call `POST /reservations` with a globally unique reservation ID, selected
-   worker identity, the same prompt representation, and the returned
-   `effective_prefill_tokens`.
+3. Call `POST /reservations` with a `selection_id` (globally unique; reuse the
+   one from `/select`), the selected worker identity, the same prompt
+   representation, and the returned `effective_prefill_tokens`.
 4. Report prefill completion and request completion through the lifecycle API.
 
 ```http
@@ -174,9 +190,9 @@ POST /reservations
 Content-Type: application/json
 
 {
-  "reservation_id": "request-123",
+  "selection_id": "request-123",
   "model_name": "model",
-  "tenant_id": "default",
+  "routing_group": "default",
   "worker_id": 1,
   "dp_rank": 0,
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
@@ -193,9 +209,9 @@ reservation API does not accept or derive accounting from overlap fields.
 ## Reservation Lifecycle
 
 ```http
-POST /reservations/{reservation_id}/prefill_complete
-POST /reservations/{reservation_id}/output_block
-DELETE /reservations/{reservation_id}
+POST /reservations/{selection_id}/prefill_complete
+POST /reservations/{selection_id}/output_block
+DELETE /reservations/{selection_id}
 ```
 
 `prefill_complete` clears active prefill load. `output_block` updates only the
@@ -213,7 +229,7 @@ The selector has two independent peer configurations:
 | Plane | Transport | Flags | Purpose |
 |-------|-----------|-------|---------|
 | Indexer recovery | HTTP | `--indexer-peers` | Fetch a compatible `/dump` during startup and replay KV events into the local indexer. |
-| Replica synchronization | ZMQ | `--replica-sync-port`, `--replica-sync-peers` | Share admission, prefill-complete, and free events by model and tenant. |
+| Replica synchronization | ZMQ | `--replica-sync-port`, `--replica-sync-peers` | Share admission, prefill-complete, and free events by model and routing group. |
 
 Example:
 
@@ -250,8 +266,12 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
   dropped events, and temporary active-load divergence are accepted.
 - There is no sequencing, acknowledgement, replay, backpressure, or
   resynchronization for replica lifecycle events.
-- Unknown worker, model, tenant, DP-rank, and block-size events are dropped.
+- Unknown worker, model, routing-group, DP-rank, and block-size events are dropped.
   Register the same worker catalog on every selector before routing traffic.
+- The v1 replica envelope uses `routing_group` and is incompatible with binaries that
+  send `tenant_id`. Drain active reservations and lifecycle traffic, upgrade all connected
+  selectors together, re-register worker catalogs, and then resume traffic. Active advisory
+  state is not migrated.
 - Admission, prefill-complete, and free are synchronized. Output-block growth
   remains local to avoid excessive network bandwidth.
 - Startup recovery waits for recovered events to be submitted to the indexer,
@@ -265,7 +285,7 @@ replica-sync peers. They do not alter the HTTP indexer-recovery peers.
 ## Inspection APIs
 
 - `GET /loads` returns active-load snapshots, optionally filtered by
-  `model_name` and `tenant_id`.
+  `model_name` and `routing_group`.
 - `POST /potential_loads` estimates worker load for a prompt without selection.
 - `POST /overlap_scores` returns per-worker/per-rank tiered overlap rows.
 - `GET /dump` returns the compatible indexer recovery snapshot.

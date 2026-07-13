@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, Optional, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.inputs import TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -73,6 +72,10 @@ from dynamo.vllm.capacity import per_rank_kv_blocks
 
 from .handlers import (
     VllmEnginePauseController,
+    _apply_nvext_cache_salt,
+    _engine_generate_reasoning_kwargs,
+    _request_reasoning_metadata,
+    build_prompt_tokens_details,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -80,6 +83,9 @@ from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
 )
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
+from .multimodal_utils.request_processor import VllmMultimodalRequestProcessor
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -174,6 +180,10 @@ class VllmLLMEngine(LLMEngine):
         dyn_tool_call_parser: Optional[str] = None,
         dyn_reasoning_parser: Optional[str] = None,
         enable_rl: bool = False,
+        enable_multimodal: bool = False,
+        frontend_decoding: bool = False,
+        multimodal_embedding_cache_capacity_gb: float = 0.0,
+        namespace: str = "dynamo",
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
@@ -182,6 +192,12 @@ class VllmLLMEngine(LLMEngine):
         self._dyn_tool_call_parser = dyn_tool_call_parser
         self._dyn_reasoning_parser = dyn_reasoning_parser
         self.enable_rl = enable_rl
+        self.enable_multimodal = enable_multimodal
+        self.frontend_decoding = frontend_decoding
+        self.multimodal_embedding_cache_capacity_gb = (
+            multimodal_embedding_cache_capacity_gb
+        )
+        self._namespace = namespace
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -201,6 +217,7 @@ class VllmLLMEngine(LLMEngine):
         self._stat_logger_factory: Optional[_UnifiedStatLoggerFactory] = None
         self._logits_processor_spec: LogitsProcessorSpec | None = None
         self._pause_controller: VllmEnginePauseController | None = None
+        self._multimodal_request_processor: VllmMultimodalRequestProcessor | None = None
         self._pause_lock = asyncio.Lock()
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
@@ -233,7 +250,7 @@ class VllmLLMEngine(LLMEngine):
         # don't re-parse (idempotent, but avoids a duplicate argparse + doubled
         # vLLM deprecation warnings at startup).
         if config is None:
-            config = parse_args(argv)
+            config = parse_args(argv, fpm_trace_relay_supported=False)
 
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
             raise NotImplementedError(
@@ -250,6 +267,13 @@ class VllmLLMEngine(LLMEngine):
                 "--headless must be launched via `python -m dynamo.vllm.unified_main` "
                 "(or the legacy `python -m dynamo.vllm`); it is not supported when "
                 "driving the unified Worker directly"
+            )
+
+        if config.route_to_encoder:
+            raise NotImplementedError(
+                "--route-to-encoder is not supported by the unified vLLM entry "
+                "point yet; use `python -m dynamo.vllm` until the separate "
+                "unified encode worker is available"
             )
 
         if not config.served_model_name:
@@ -272,12 +296,23 @@ class VllmLLMEngine(LLMEngine):
             dyn_tool_call_parser=config.dyn_tool_call_parser,
             dyn_reasoning_parser=config.dyn_reasoning_parser,
             enable_rl=config.enable_rl,
+            enable_multimodal=config.enable_multimodal,
+            frontend_decoding=config.frontend_decoding,
+            multimodal_embedding_cache_capacity_gb=(
+                config.multimodal_embedding_cache_capacity_gb
+            ),
+            namespace=config.namespace,
+        )
+        media_decoder, media_fetcher = create_frontend_media_config(
+            config.frontend_decoding
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
         )
         return engine, worker_config
 
@@ -301,6 +336,14 @@ class VllmLLMEngine(LLMEngine):
 
         self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
 
+        configure_multimodal_embedding_cache(
+            self.engine_args,
+            route_to_encoder=False,
+            capacity_gb=self.multimodal_embedding_cache_capacity_gb,
+            namespace=self._namespace,
+            component=self._component,
+        )
+
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
@@ -317,6 +360,14 @@ class VllmLLMEngine(LLMEngine):
             usage_context=UsageContext.OPENAI_API_SERVER,
             stat_loggers=[self._stat_logger_factory],
         )
+        self._multimodal_request_processor = VllmMultimodalRequestProcessor(
+            model=self.engine_args.model,
+            engine_client=self.engine_client,
+            enable_multimodal=self.enable_multimodal,
+            enable_frontend_decoding=self.frontend_decoding,
+        )
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            self._multimodal_request_processor.initialize_prefill_handoff()
         # Resolve once the tokenizer is available (see logits_processor_spec()).
         self._logits_processor_spec = await self.logits_processor_spec()
         self._pause_controller = VllmEnginePauseController(self.engine_client)
@@ -364,12 +415,22 @@ class VllmLLMEngine(LLMEngine):
 
         request_id = context.id()
 
-        token_ids = request.get("token_ids", [])
-        prompt = TokensPrompt(prompt_token_ids=token_ids)
-
-        # TODO: remove dict() once build_sampling_params accepts GenerateRequest
-        sampling_params = build_sampling_params(
+        multimodal_processor = self._multimodal_request_processor
+        if multimodal_processor is None:
+            raise RuntimeError("VllmLLMEngine.start() must complete before generate()")
+        prepared_prompt = await multimodal_processor.prepare_prompt(
             dict(request),
+            request_id,
+            context,
+            self.disaggregation_mode,
+        )
+        prompt = prepared_prompt.prompt
+        _apply_nvext_cache_salt(prepared_prompt.request, prompt)
+
+        # Multimodal decode may replace token_ids with the expanded prefill
+        # sequence. Sampling limits must use that same effective request.
+        sampling_params = build_sampling_params(
+            prepared_prompt.request,
             self._default_sampling_params,
             self._model_max_len,
             enable_rl=self.enable_rl,
@@ -378,6 +439,7 @@ class VllmLLMEngine(LLMEngine):
         # vLLM's KV transfer is internal to NixlConnector
         # (--kv-transfer-config). Dispatch only sets connector hints and
         # forwards the prefill→decode handoff payload.
+        prefill_prompt_tokens_details = None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
@@ -400,6 +462,7 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             prefill_result = require_prefill_result(request, self.disaggregation_mode)
+            prefill_prompt_tokens_details = prefill_result.get("prompt_tokens_details")
             # `disaggregated_params` may be present-but-None (prefill error path
             # / _build_disaggregated_params returning None), so use `or {}` — a
             # .get default only applies when the key is absent. A None value then
@@ -440,6 +503,7 @@ class VllmLLMEngine(LLMEngine):
         # model resolves to None. With LoRA enabled, an unknown adapter name
         # raises rather than silently falling back to the base model.
         lora_request = self._resolve_lora_request(request.get("model"))
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         gen = self.engine_client.generate(
             prompt,
@@ -447,6 +511,11 @@ class VllmLLMEngine(LLMEngine):
             request_id,
             data_parallel_rank=local_dp_rank,
             lora_request=lora_request,
+            **_engine_generate_reasoning_kwargs(
+                self.engine_client,
+                reasoning_ended,
+                reasoning_parser_kwargs,
+            ),
             **telemetry.engine_trace_kwargs(context),
         )
 
@@ -525,19 +594,33 @@ class VllmLLMEngine(LLMEngine):
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
                     completion_tokens = sum(total_output_tokens_by_index.values())
+                    prompt_tokens_details = prefill_prompt_tokens_details
+                    if prompt_tokens_details is None:
+                        prompt_tokens_details = build_prompt_tokens_details(
+                            getattr(res, "num_cached_tokens", None)
+                        )
                     out["completion_usage"] = {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
+                        "prompt_tokens_details": prompt_tokens_details,
                     }
                     # Stamp the connector's transfer handle on the
                     # prefill terminal so PrefillRouter can forward it.
                     if is_prefill:
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
+                        handoff_params: dict[str, Any] = {}
                         if kv_transfer_params is not None:
-                            out["disaggregated_params"] = {
-                                "kv_transfer_params": kv_transfer_params,
-                            }
+                            handoff_params["kv_transfer_params"] = kv_transfer_params
+                        embedding_params = multimodal_processor.build_prefill_handoff(
+                            multi_modal_data=prepared_prompt.multi_modal_data,
+                            prompt_token_ids=list(res.prompt_token_ids or []),
+                            mm_processor_kwargs=prepared_prompt.mm_processor_kwargs,
+                        )
+                        if embedding_params is not None:
+                            handoff_params["embedding_params"] = embedding_params
+                        if handoff_params:
+                            out["disaggregated_params"] = handoff_params
 
                 yield out
 
@@ -630,7 +713,13 @@ class VllmLLMEngine(LLMEngine):
         )
 
     def supported_controls(self) -> set[str]:
-        controls = {"start_profile", "stop_profile", "sleep", "wake_up"}
+        controls = {
+            "start_profile",
+            "stop_profile",
+            "sleep",
+            "wake_up",
+            "clear_kv_blocks",
+        }
         if self.engine_client is not None and hasattr(
             self.engine_client, "scale_elastic_ep"
         ):
@@ -643,6 +732,7 @@ class VllmLLMEngine(LLMEngine):
             "stop_profile": self.stop_profile,
             "sleep": self.sleep,
             "wake_up": self.wake_up,
+            "clear_kv_blocks": self.clear_kv_blocks,
         }
         if self.engine_client is not None and hasattr(
             self.engine_client, "scale_elastic_ep"
@@ -1221,6 +1311,19 @@ class VllmLLMEngine(LLMEngine):
             logger.error("Failed to stop profiling: %s", e)
             return {"status": "error", "message": str(e)}
 
+    async def clear_kv_blocks(self, _body: dict) -> dict:
+        """Clear KV blocks; the control request body is intentionally ignored."""
+        if self.engine_client is None:
+            return {"status": "error", "message": "Engine is not running"}
+        try:
+            cleared = await self.engine_client.reset_prefix_cache(reset_connector=True)
+            if cleared is False:
+                return {"status": "error", "message": "KV cache reset failed"}
+            return {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            logger.error("Failed to clear KV cache: %s", e)
+            return {"status": "error", "message": str(e)}
+
     async def scale_elastic_ep(self, body: dict) -> dict:
         body = body or {}
         if self.engine_client is None:
@@ -1314,6 +1417,7 @@ class VllmLLMEngine(LLMEngine):
         finally:
             self.engine_client = None
             self._pause_controller = None
+            self._multimodal_request_processor = None
             # Drop the serving endpoint and dynamic-LoRA bookkeeping so a
             # shut-down engine holds no dangling endpoint reference and no
             # stale adapter state. Discovery cards published for the worker are

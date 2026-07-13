@@ -7,13 +7,13 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
+import importlib.util
 import json
 from types import SimpleNamespace
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
-from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
 from dynamo.frontend.prepost import _prepare_request
 
@@ -24,6 +24,23 @@ from dynamo.frontend.prepost import _prepare_request
 # collection, which breaks the pytest-marker-report pre-commit hook (its vllm
 # stub list does not cover those submodules).
 
+HAS_QWEN3_TOOL_PARSER = (
+    importlib.util.find_spec("vllm.tool_parsers.qwen3_engine_tool_parser") is not None
+    or importlib.util.find_spec("vllm.tool_parsers.qwen3coder_tool_parser") is not None
+)
+
+
+def _resolve_qwen3_tool_parser_class():
+    try:
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+        return Qwen3EngineToolParser
+    except ImportError:
+        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+
+        return Qwen3CoderToolParser
+
+
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
@@ -33,6 +50,10 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
+    pytest.mark.skipif(
+        not HAS_QWEN3_TOOL_PARSER,
+        reason="requires vllm qwen3 tool parser",
+    ),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -520,11 +541,60 @@ class TestRoutedEnginePath:
 
         assert envelope["event"] == "llm_metrics"
         assert len(envelope["comment"]) == 1
+        # Zero counts are omitted (text-only request), mirroring the Rust skip-zero behavior.
         assert json.loads(envelope["comment"][0]) == {
             "input_tokens": 3,
             "output_tokens": 1,
             "chunk_tokens": 1,
         }
+
+    @pytest.mark.asyncio
+    async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
+        # The Rust postprocessor is bypassed on this path, so the processor must
+        # emit per-request multimodal content-part counts itself.
+        routed_engine = _FakeRoutedEngine(
+            [{"token_ids": [101], "index": 0, "finish_reason": None}]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        request = {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "compare"},
+                        {"type": "image_url", "image_url": {"url": "http://x/a.png"}},
+                        {"type": "image_url", "image_url": {"url": "http://x/b.png"}},
+                        {"type": "video_url", "video_url": {"url": "http://x/c.mp4"}},
+                    ],
+                }
+            ],
+        }
+        preproc = _base_preproc()
+        chunks = [
+            item
+            async for item in processor._generate_and_stream(
+                "request-id",
+                request,
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-request",
+                    external_req_id=None,
+                ),
+                {0: _FakePostProcessor()},
+                mm_routing_info=None,
+                context=None,
+            )
+        ]
+
+        metrics = json.loads(chunks[0]["comment"][0])
+        assert metrics["image_count"] == 2
+        assert metrics["video_count"] == 1
+        # audio has zero parts, so the key is omitted from the emitted metrics.
+        assert metrics.get("audio_count") is None
 
 
 OBJECT_TYPED_TOOL_REQUEST = {
@@ -582,7 +652,7 @@ class TestSchemaAwareToolParser:
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=Qwen3EngineToolParser,
+            tool_parser_class=_resolve_qwen3_tool_parser_class(),
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 

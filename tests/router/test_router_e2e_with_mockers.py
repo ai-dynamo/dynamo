@@ -23,7 +23,6 @@ from tests.router.common import (
     _test_disagg_direct_mode,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
-    _test_distributed_session_affinity,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
@@ -32,6 +31,7 @@ from tests.router.common import (
     _test_router_query_instance_id,
     _test_router_threshold_none_disables_rejection,
     _test_router_two_routers,
+    _test_session_affinity,
 )
 from tests.router.e2e_harness import (
     allocate_frontend_ports,
@@ -44,6 +44,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import (
     generate_random_suffix,
     get_runtime,
+    managed_runtime,
     poll_for_worker_instances,
     topology_env,
 )
@@ -59,25 +60,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = ROUTER_MODEL_NAME
 COUNTER_WORKER_SCRIPT = os.path.join(os.path.dirname(__file__), "counter_worker.py")
-
-
-@pytest.fixture(autouse=True)
-def _pin_nats_event_plane_for_mocker(request, monkeypatch):
-    """Pin the NATS event plane for etcd-backed mocker tests.
-
-    The mock engine publishes KV cache events instantly -- before the in-process
-    router's ZMQ subscription has connected (ZMQ slow-joiner) -- so on the (now
-    default) ZMQ event plane the router observes zero events and the routing
-    assertions fail. Real engines start slowly enough to avoid this, so the
-    vLLM/SGLang router e2e tests cover the ZMQ default; only the fast mocker needs
-    NATS here. file-backed variants keep the ZMQ default, and an explicitly set
-    DYN_EVENT_PLANE (e.g. via durable_kv_events) is left untouched.
-    """
-    callspec = getattr(request.node, "callspec", None)
-    store_backend = callspec.params.get("store_backend", "etcd") if callspec else "etcd"
-    if store_backend != "file" and not os.environ.get("DYN_EVENT_PLANE"):
-        monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
-    yield
 
 
 pytestmark = [
@@ -493,20 +475,14 @@ def test_mocker_two_kv_router(
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 @pytest.mark.timeout(180)
-def test_mocker_distributed_session_affinity(
+def test_mocker_session_affinity(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
-    monkeypatch,
 ):
-    """Shared claims override conflicting KV-prefix routing on another frontend."""
-    current_log = os.environ.get("DYN_LOG", "info")
-    monkeypatch.setenv(
-        "DYN_LOG",
-        f"{current_log},dynamo_llm::session_affinity::coordinator=debug",
-    )
+    """One frontend keeps a session pinned despite conflicting KV-prefix placement."""
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
@@ -519,11 +495,11 @@ def test_mocker_distributed_session_affinity(
         num_mockers=NUM_MOCKERS,
         store_backend=store_backend,
     ) as mockers:
-        _test_distributed_session_affinity(
+        _test_session_affinity(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
             request=request,
-            router_ports=allocate_frontend_ports(request, 2),
+            frontend_port=allocate_frontend_ports(request, 1)[0],
             test_payload=TEST_PAYLOAD,
             store_backend=store_backend,
         )
@@ -625,18 +601,20 @@ def test_kv_router_bindings(
         "durable_kv_events": durable_kv_events,
     }
 
-    with MockerProcess(
-        request,
-        mocker_args=mocker_args,
-        num_mockers=NUM_MOCKERS,
-        request_plane=request_plane,
-    ) as mockers:
+    with (
+        MockerProcess(
+            request,
+            mocker_args=mocker_args,
+            num_mockers=NUM_MOCKERS,
+            request_plane=request_plane,
+        ) as mockers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
         # Start mocker instances
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")
         logger.info(f"All mockers using endpoint: {mockers.endpoint}")
 
         # Get runtime and create endpoint
-        runtime = get_runtime(request_plane=request_plane)
         endpoint = runtime.endpoint(
             f"{mockers.namespace}.{mockers.component_name}.generate"
         )
@@ -717,7 +695,7 @@ def test_indexers_sync(
         engine_process_kwargs={
             "num_mockers": NUM_MOCKERS,
             "store_backend": store_backend,
-            "zmq_kv_events": True,
+            "raw_kv_events": True,
             "zmq_replay": True,
             "standalone_indexer": True,
             "model_name": MODEL_NAME,
@@ -764,28 +742,31 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,zmq_kv_events,use_remote_indexer,router_predicted_ttl_secs",
+    "durable_kv_events,use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
     [
-        (True, True, False, False, None),  # JetStream mode with KV events
+        (True, True, False, False, None, None),  # JetStream mode with KV events
         (
             False,
             True,
             False,
             False,
+            None,
             None,
         ),  # NATS Core mode with local indexer (default)
-        (False, True, False, False, 5.0),  # NATS Core mode with local side indexer
-        (False, True, False, True, None),  # NATS Core mode with a served remote indexer
-        (False, True, False, True, 5.0),  # Remote indexer plus local side indexer
-        (False, False, False, False, None),  # Approximate mode (--no-kv-events)
+        (False, True, False, False, 5.0, None),  # NATS Core with local side indexer
+        (False, True, False, True, None, None),  # NATS Core with remote indexer
+        (False, True, False, True, 5.0, None),  # Remote plus local side indexer
+        (False, False, False, False, None, None),  # Approximate (--no-kv-events)
         (
             False,
             False,
             False,
             True,
             None,
+            None,
         ),  # Approximate mode with a singleton served remote indexer
-        (False, True, True, False, None),  # ZMQ mode: mocker → ZMQ PUB → relay → NATS
+        # Raw engine ZMQ → relay → ZMQ event plane, with no NATS service.
+        (False, True, True, False, None, "zmq"),
     ],
     ids=[
         "jetstream",
@@ -795,9 +776,9 @@ def test_query_instance_id_returns_worker_and_tokens(
         "nats_core_remote_predict_on_route",
         "no_kv_events",
         "no_kv_events_remote",
-        "zmq",
+        "zmq_nats_free",
     ],
-    indirect=["durable_kv_events"],
+    indirect=["durable_kv_events", "event_plane"],
 )
 def test_router_decisions(
     request,
@@ -806,9 +787,10 @@ def test_router_decisions(
     durable_kv_events,
     use_kv_events,
     request_plane,
-    zmq_kv_events,
+    raw_kv_events,
     use_remote_indexer,
     router_predicted_ttl_secs,
+    event_plane,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
@@ -819,14 +801,21 @@ def test_router_decisions(
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
       based on routing decisions with TTL-based expiration and pruning
     - Approximate mode with a singleton served remote indexer
+    - NATS-free ZMQ mode: raw engine and Dynamo event-plane hops both use ZMQ
     """
+    if event_plane == "zmq":
+        nats_process, _ = runtime_services_dynamic_ports
+        assert nats_process is None
+        assert "NATS_SERVER" not in os.environ
+
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s",
+        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, event_plane=%s",
         durable_kv_events,
         use_kv_events,
         use_remote_indexer,
         router_predicted_ttl_secs,
+        event_plane,
     )
 
     # Create mocker args dictionary with dp_size=4
@@ -840,9 +829,9 @@ def test_router_decisions(
 
     process_kwargs = {
         "num_mockers": NUM_MOCKERS,
-        "zmq_kv_events": zmq_kv_events,
-        "standalone_indexer": zmq_kv_events,
-        "standalone_selector": zmq_kv_events,
+        "raw_kv_events": raw_kv_events,
+        "standalone_indexer": raw_kv_events,
+        "standalone_selector": raw_kv_events,
         "model_name": MODEL_NAME,
     }
     if use_remote_indexer:

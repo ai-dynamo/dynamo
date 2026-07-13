@@ -18,6 +18,13 @@
 # Slow from GitHub runners and not part of Dynamo-owned documentation.
 ^https://martinfowler\.com/articles/practical-test-pyramid\.html
 
+# Helm artifact repository; its root endpoint intermittently returns 503.
+^https://charts\.bitnami\.com/bitnami/?$
+
 # Served by Netlify and intermittently fails from GitHub runners.
 ^https://etcd\.io/?$
 ^https://etcd\.io/docs/v3\.5/install/?$
+^https://book\.kubebuilder\.io/cronjob-tutorial/webhook-implementation\.html$
+
+# NGC intermittently returns 503 for this version-filtered page from GitHub runners.
+^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend\?version=1\.2\.1$

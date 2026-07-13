@@ -245,7 +245,8 @@ impl OutputBlockTracker {
 
 /// Coordinates scheduler cleanup, observability, and streamed load tracking.
 ///
-/// Session-affinity lifetime is separate: `ResolvedAffinity` owns the binding lease.
+/// Session-affinity lifetime is separate: `AffinityAcquire` and
+/// `AffinityLease` own binding commit, release, and invalidation.
 pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,

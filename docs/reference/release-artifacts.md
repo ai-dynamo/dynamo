@@ -996,8 +996,8 @@ uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo-runtim
 
 | Chart | NGC |
 |-------|-----|
-| `dynamo-platform-1.1.0-dev.1` | [NGC Helm: dynamo-platform 1.1.0-dev.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform?version=1.1.0-dev.1) |
-| `snapshot-1.1.0-dev.1` | [NGC Helm: snapshot 1.1.0-dev.1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/snapshot?version=1.1.0-dev.1) |
+| `dynamo-platform-1.1.0-dev.1` | [NGC Helm: dynamo-platform 1.1.0-dev.1](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/helm-charts/dynamo-platform/1.1.0-dev.1) |
+| `snapshot-1.1.0-dev.1` | [NGC Helm: snapshot 1.1.0-dev.1](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/helm-charts/snapshot/1.1.0-dev.1) |
 
 #### Rust Crates
 

@@ -13,6 +13,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -27,6 +28,7 @@ from dynamo.llm import (
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
+    get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     model_card_dp_rank_bounds,
     runtime_capacity,
@@ -482,11 +484,27 @@ async def _get_runtime_config(
                 f"{unpublished} will not be published; SGLang will use its internal defaults."
             )
 
-        return runtime_config
-
     except Exception as e:
         logging.warning(f"Failed to get runtime config: {e}. Proceeding without it.")
         return runtime_config
+
+    try:
+        offloading_capacity = get_hicache_native_offloading_capacity(
+            server_args, scheduler_info
+        )
+        if offloading_capacity is not None:
+            runtime_config.set_engine_specific(
+                NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY,
+                json.dumps(offloading_capacity),
+            )
+            logging.info("Published native offloading capacity from SGLang HiCache.")
+    except Exception as e:
+        logging.warning(
+            "Failed to attach native offloading capacity from SGLang HiCache: %s",
+            e,
+        )
+
+    return runtime_config
 
 
 async def register_model_with_readiness_gate(

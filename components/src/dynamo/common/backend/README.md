@@ -6,7 +6,10 @@ metrics + Prometheus bridging, KV event publishing, KV-aware (DP-rank)
 routing, health-check canaries, OpenTelemetry tracing, and request-side
 guided decoding / structural tag.
 
-> **Work in progress.** Multimodal, diffusion (image/video/DLLM),
+> **Work in progress.** Multimodal support is backend-specific: vLLM supports
+> aggregated and prefill/decode image and video inference, while separate
+> encode workers and SGLang / TRT-LLM multimodal execution remain on their
+> non-unified paths. Diffusion (image/video/DLLM),
 > LoRA (SGLang / TRT-LLM — vLLM is supported),
 > engine routes (pause/resume, profiling, weight updates),
 > text-in-text-out, and snapshot/CRIU are still on the non-unified
@@ -532,6 +535,14 @@ Lifecycle and runtime:
 - **Sleep/wake (vLLM)** — `sleep` / `wake_up` controls via
   `VllmEnginePauseController` (discovery unregister before sleep,
   re-register after wake; `worker.rs` `engine_control_policy`)
+- **KV block clearing (vLLM)** — `POST /engine/control/clear_kv_blocks`
+  on the unified worker's system port,
+  with an empty JSON object (`{}`). The control resets both the prefix
+  cache and connector cache in aggregated, prefill, and decode modes. It
+  returns `{"status":"success","message":"KV cache cleared"}` on
+  success and HTTP 200 with `status:"error"` on semantic failure. The
+  control runs directly without pausing generation or draining requests;
+  if blocks are still in use, retry after the active requests finish.
 - **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
   with the legacy handler: `new_data_parallel_size` validation, a
   single-flight lock (concurrent scales rejected, not queued), and the
@@ -565,6 +576,11 @@ Lifecycle and runtime:
   here). vLLM/TRT-LLM share an extractor; SGLang has a cumulative-array
   variant. The sample engine and Rust mocker emit synthetic logprobs
   when `output_options.logprobs` is set.
+- **Multimodal (vLLM)** — image and video inference in aggregated and
+  prefill/decode deployments, frontend-rendered `mm_kwargs` transfer over
+  shared memory or NIXL, stable frontend hash forwarding, CPU embedding cache,
+  and Qwen-VL decode metadata reconstruction. Separate encode workers are not
+  supported by the unified vLLM entry point.
 
 Observability:
 - **Health-check canary** — `health_check_payload()` + operator
@@ -590,14 +606,13 @@ Observability:
 
 Request handling:
 - **Guided decoding / structured outputs** — wired per-engine on the
-  request side, with engine-specific coverage:
+  request side with JSON schema, regex, grammar, and choice coverage:
   - vLLM (`build_sampling_params` → `StructuredOutputsParams`):
     JSON schema, regex, grammar, choice.
   - TRT-LLM (`GuidedDecodingParams`): JSON schema, regex, grammar,
     choice, `json_object`.
-  - SGLang (`_get_guided_decoding_params`): JSON schema only;
-    regex / grammar / choice are silently dropped (see SGLang gaps
-    below).
+  - SGLang (`_get_guided_decoding_params`): JSON schema, regex,
+    grammar through `ebnf`, and choice through an escaped regex.
 - **Structural tag generation** — `WorkerConfig.structural_tag_{mode,
   scope, schema}` + `serialize_structural_tag` helper
 - **Custom Jinja chat templates** — `WorkerConfig.custom_jinja_template`
@@ -606,12 +621,12 @@ Request handling:
 - **Tool / reasoning parsers** — `WorkerConfig.tool_call_parser`,
   `reasoning_parser`, `exclude_tools_when_tool_choice_none`
 
-### Common gaps (all engines)
+### Remaining feature gaps
 
 | Feature | Description |
 |---------|-------------|
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
-| Multimodal | The shared request and `encoder_result` contract, Encode role, and discovery wiring are available. Frontend Encode-to-Prefill/Aggregated request routing and backend-specific encoder implementations remain separate work. |
+| Multimodal parity | The shared request and encoder-handoff contract are available. vLLM supports aggregated and prefill/decode image and video inference; SGLang / TRT-LLM execution and separate encode workers remain separate work. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
@@ -622,13 +637,12 @@ Request handling:
 |---------|-------------|
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
-| KV block clearing | Prefix cache reset endpoint |
 | `VllmEngineMonitor` | Background `EngineDeadError` detection task |
 | Instrumented scheduler + FPM relay | Per-forward-pass `ForwardPassMetrics` ZMQ telemetry |
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
 | `--benchmark-mode` family | The `--benchmark-*` flag family (mode, prefill/decode granularities, warmup, output path, timeout) injects into `vllm_config.additional_config` |
 | "Omni" alternative entry point | `dynamo.vllm.omni.*` parallel mode for alternative tensor workflows |
-| Multimodal (vLLM) | NIXL embedding transfer (`EmbeddingTransferMode`, `--embedding-transfer-mode`), embedding LRU cache (`--multimodal-embedding-cache-capacity-gb`), Qwen VL mRoPE, `EncodeWorkerHandler`, `--route-to-encoder` |
+| Separate multimodal encode worker | The unified entry point rejects `--disaggregation-mode encode` and `--route-to-encoder`. Encoder-managed embedding transfer remains on the legacy worker path. P/D video requests also reload raw media on decode because the handoff carries image metadata only. |
 
 ### SGLang-specific gaps
 
@@ -648,7 +662,6 @@ Request handling:
 | `protocol.py` Pydantic models | `EmbeddingRequest`, `DisaggPreprocessedRequest`, multimodal content types |
 | `--disagg-config` YAML override | `--disagg-config` / `--disagg-config-key` for YAML-based disagg config |
 | `--enable-rl` | RL support via `call_tokenizer_manager` route |
-| Guided-decoding constraint coverage | `_get_guided_decoding_params` forwards only `json` (and `structural_tag`); `regex` / `grammar` / `choice` are silently dropped on the unified path even though SGLang's engine accepts them |
 
 ### TRT-LLM-specific gaps
 
@@ -678,10 +691,9 @@ For users picking what to land next on the unified path:
    (engine updates `/engine/update/load_lora|unload_lora|list_loras` + a
    `/v1/loras` compatibility alias; see [What works today](#what-works-today)).
    Remaining: SGLang and TRT-LLM, which advertise no LoRA updates yet.
-3. **Engine routes / lifecycle endpoints** — weight updates, KV block
-   clearing, prefix cache reset. (Profiling, sleep/wake, elastic-EP
-   scaling, and headless multi-node already landed.) Visible in operator
-   workflows.
+3. **Engine routes / lifecycle endpoints** — weight updates. (Profiling,
+   sleep/wake, KV block clearing, elastic-EP scaling, and headless
+   multi-node already landed.) Visible in operator workflows.
 4. **Snapshot / CRIU** — production checkpoint support.
 5. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.
