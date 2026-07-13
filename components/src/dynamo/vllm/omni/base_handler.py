@@ -50,9 +50,7 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
             f"with model: {config.model}"
         )
 
-        self._prometheus_temp_dir = ensure_prometheus_multiproc_dir(
-            "vllm_prometheus_"
-        )
+        self._prometheus_temp_dir = ensure_prometheus_multiproc_dir("vllm_prometheus_")
         omni_kwargs = self._build_omni_kwargs(config)
         self.engine_client = AsyncOmni(**omni_kwargs)
 
