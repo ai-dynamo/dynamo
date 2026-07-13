@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_tokens::SequenceHash;
-use rand::Rng;
 use serde::Deserialize;
 
 use crate::protocols::{
@@ -56,7 +55,7 @@ impl PromptRequest {
         tracking: TrackingHashInput<'_>,
     ) -> Result<NormalizedPrompt, SelectionError> {
         if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
-            return Ok(normalize_tokens(
+            return Ok(normalize_tokens_for_selection(
                 token_ids,
                 self.lora_name.as_deref(),
                 self.cache_namespace.as_deref(),
@@ -84,18 +83,14 @@ impl PromptRequest {
         tracking: TrackingHashInput<'_>,
     ) -> Result<NormalizedReservation, SelectionError> {
         if let Some((token_ids, block_mm_infos)) = self.routing_tokens_and_mm_infos() {
-            let normalized = normalize_tokens(
+            return Ok(normalize_tokens_for_reservation(
                 token_ids,
                 self.lora_name.as_deref(),
                 self.cache_namespace.as_deref(),
                 block_mm_infos,
                 self.is_eagle.unwrap_or(default_is_eagle),
                 tracking,
-            );
-            return Ok(NormalizedReservation {
-                sequence_hashes: normalized.sequence_hashes,
-                isl_tokens: normalized.isl_tokens,
-            });
+            ));
         }
 
         let sequence_hashes = self.sequence_hashes.as_ref().ok_or_else(|| {
@@ -158,7 +153,7 @@ impl PromptRequest {
     }
 }
 
-fn normalize_tokens(
+fn normalize_tokens_for_selection(
     token_ids: &[u32],
     lora_name: Option<&str>,
     cache_namespace: Option<&str>,
@@ -166,36 +161,50 @@ fn normalize_tokens(
     is_eagle: bool,
     tracking: TrackingHashInput<'_>,
 ) -> NormalizedPrompt {
-    let block_hashes = compute_block_hash_for_seq(
-        token_ids,
-        tracking.scope.block_size,
-        BlockHashOptions {
-            block_mm_infos,
-            lora_name,
-            cache_namespace,
-            is_eagle: Some(is_eagle),
-        },
-    );
-    let sequence_hashes = if tracking.assume_kv_reuse {
-        tracking.context.compute_sequence_hashes(
-            tracking.scope,
-            token_ids,
-            BlockHashOptions {
-                block_mm_infos,
-                lora_name,
-                cache_namespace,
-                is_eagle: Some(is_eagle),
-            },
-            Some(&block_hashes),
-        )
-    } else {
-        let mut rng = rand::rng();
-        (0..block_hashes.len())
-            .map(|_| rng.random::<SequenceHash>())
-            .collect()
+    let hash_options = BlockHashOptions {
+        block_mm_infos,
+        lora_name,
+        cache_namespace,
+        is_eagle: Some(is_eagle),
     };
+    let block_hashes =
+        compute_block_hash_for_seq(token_ids, tracking.scope.block_size, hash_options);
+    let sequence_hashes = tracking.context.compute_sequence_hashes_for_tracking(
+        tracking.scope,
+        token_ids,
+        hash_options,
+        tracking.assume_kv_reuse,
+        Some(&block_hashes),
+    );
     NormalizedPrompt {
         block_hashes,
+        sequence_hashes,
+        isl_tokens: token_ids.len(),
+    }
+}
+
+fn normalize_tokens_for_reservation(
+    token_ids: &[u32],
+    lora_name: Option<&str>,
+    cache_namespace: Option<&str>,
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+    is_eagle: bool,
+    tracking: TrackingHashInput<'_>,
+) -> NormalizedReservation {
+    let hash_options = BlockHashOptions {
+        block_mm_infos,
+        lora_name,
+        cache_namespace,
+        is_eagle: Some(is_eagle),
+    };
+    let sequence_hashes = tracking.context.compute_sequence_hashes_for_tracking(
+        tracking.scope,
+        token_ids,
+        hash_options,
+        tracking.assume_kv_reuse,
+        None,
+    );
+    NormalizedReservation {
         sequence_hashes,
         isl_tokens: token_ids.len(),
     }

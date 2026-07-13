@@ -94,6 +94,23 @@ pub fn compute_block_hash_for_seq(
     compute_block_hash_for_seq_with_seed(tokens, kv_block_size, options, block_hash_seed(options))
 }
 
+/// Count complete canonical blocks for normal and Eagle token windows.
+pub(crate) fn complete_block_count(
+    token_count: usize,
+    kv_block_size: u32,
+    is_eagle: bool,
+) -> usize {
+    let stride = kv_block_size as usize;
+    if stride == 0 {
+        return 0;
+    }
+    if is_eagle {
+        token_count.saturating_sub(1) / stride
+    } else {
+        token_count / stride
+    }
+}
+
 /// Compute local block hashes with an explicit XXH3 seed while preserving the
 /// canonical token, multimodal, and Eagle encodings used by the public hash path.
 pub(crate) fn compute_block_hash_for_seq_with_seed(
@@ -109,11 +126,7 @@ pub(crate) fn compute_block_hash_for_seq_with_seed(
     let is_eagle_flag = options.is_eagle.unwrap_or(false);
     let stride = kv_block_size as usize;
     let window_size = if is_eagle_flag { stride + 1 } else { stride };
-    let estimated_blocks = if is_eagle_flag {
-        tokens.len().saturating_sub(1) / stride
-    } else {
-        tokens.len() / stride
-    };
+    let estimated_blocks = complete_block_count(tokens.len(), kv_block_size, is_eagle_flag);
     let mut hashes = Vec::with_capacity(estimated_blocks);
     let mut bytes = Vec::with_capacity(window_size * std::mem::size_of::<u32>());
     let mut mm_hashes = Vec::new();

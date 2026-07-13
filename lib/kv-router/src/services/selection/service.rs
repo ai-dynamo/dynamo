@@ -76,6 +76,13 @@ impl SelectionServiceBuilder {
             &self.replica_sync_peers,
             cancel_token.child_token(),
         )?;
+        if replica_runtime.is_some() {
+            tracing::info!(
+                router_tracking_hash = %tracking_hash.algorithm(),
+                router_tracking_key_id = ?tracking_hash.key_id(),
+                "Selection replica synchronization initialized"
+            );
+        }
         let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
         let core = Arc::new(SelectionCore::new_managed(
             self.kv_router_config,
