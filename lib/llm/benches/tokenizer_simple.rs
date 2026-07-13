@@ -142,10 +142,12 @@ pub fn tiktoken_decode(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 // Tokenizer backend benchmarks
 //
-// By default these use the in-tree TinyLlama tokenizer. Override with a
-// production-size tokenizer for more realistic numbers:
-//   TOKENIZER_PATH=/path/to/tokenizer.json cargo bench -- fastokens
-//   TOKENIZER_PATH=Qwen/Qwen3-0.6B        cargo bench -- fastokens
+// These benchmarks download a production-size tokenizer from Hugging Face,
+// so they are opt-in (RUN_BENCH=1) to avoid network access under
+// `cargo test --all-targets` in CI, matching tokenizer_dataset.rs:
+//   RUN_BENCH=1 cargo bench -- fastokens
+//   RUN_BENCH=1 TOKENIZER_PATH=/path/to/tokenizer.json cargo bench -- fastokens
+//   RUN_BENCH=1 TOKENIZER_PATH=Qwen/Qwen3-0.6B        cargo bench -- fastokens
 // ---------------------------------------------------------------------------
 
 /// Default HuggingFace model to download when TOKENIZER_PATH is not set.
@@ -178,6 +180,11 @@ fn resolve_tokenizer_path() -> String {
 const FASTOKENS_BATCH_SIZE: usize = 64;
 
 pub fn fastokens_encode(c: &mut Criterion) {
+    if std::env::var("RUN_BENCH").is_err() {
+        eprintln!("[skip] fastokens_encode benchmark skipped. Set RUN_BENCH=1 to run it.");
+        return;
+    }
+
     let tokenizer_path = resolve_tokenizer_path();
     let test_str: &str = &INPUT_STR.repeat(TARGET_ISL / INPUT_STR.len());
 
@@ -212,6 +219,11 @@ pub fn fastokens_encode(c: &mut Criterion) {
 }
 
 pub fn fastokens_batch_encode(c: &mut Criterion) {
+    if std::env::var("RUN_BENCH").is_err() {
+        eprintln!("[skip] fastokens_batch_encode benchmark skipped. Set RUN_BENCH=1 to run it.");
+        return;
+    }
+
     let tokenizer_path = resolve_tokenizer_path();
     let batch: Vec<&str> = (0..FASTOKENS_BATCH_SIZE).map(|_| INPUT_STR).collect();
     let total_bytes: u64 = batch.iter().map(|s| s.len() as u64).sum();
