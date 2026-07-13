@@ -19,6 +19,19 @@ This module implements ThunderAgent as one `PolicyClassAdmissionStrategy`. It co
 | `session_retention_seconds` | `1800` | Retain quiescent placement and footprint state after the last successful turn. |
 | `scheduler_interval_seconds` | `5` | Minimum interval between reconciliation passes. |
 
+## Differences from upstream ThunderAgent
+
+The comparison target is `ThunderAgent-org/ThunderAgent` at `7ddc861027`, primarily `scheduler/router.py` and `backend/state.py`. This implementation retains upstream's global new-program fairness gate, smallest-ACTING-first and deferred-REASONING pause, three resume-priority groups, largest-first packing, and starvation timeout; the intentional differences are:
+
+| Change | Why |
+|---|---|
+| Require a stable `session_id`; bypass sessionless traffic instead of grouping it under a default program. | Identity is the working-set ownership key, and bypass keeps unrelated non-agent traffic out of ThunderAgent state. |
+| Preserve the assigned worker across normal pressure suspension; upstream clears the backend and BFD may resume elsewhere. Structural worker removal and the starvation timeout remain escape paths. | In the matched replay this removed 219 migrations, improved turns by 12.4%, and raised physical cache reuse by 2.26 percentage points. |
+| Trigger pressure at 0.95, drain to 0.80, and also use 0.80 as the resume ceiling; upstream pauses only after projected overflow and resumes against remaining capacity. | The proactive high/low pair avoids engine-cache saturation, while earlier pausing and a separate resume ceiling both lost throughput or reuse. |
+| Account exact live logical context from `RequestProgress` against device plus native-offload capacity; omit upstream's character estimate, shared-token discount, per-program buffer, ACTING weight, and optional decay. | Exact Dynamo observations remove interacting heuristics; the buffer ablation did not help, and no retained decision required decay or polled residency. |
+| Expire quiescent state after a 30-minute inactivity lease instead of requiring upstream's explicit `/programs/release` call. | Immediate terminal cleanup admitted too much live context and hurt reuse; the lease bounded retained state while matching or improving the no-expiry control. |
+| Encode only `Running`, `IdleResident`, and `Suspended`, with waiters and rollback owned by native queue admission. | This removes invalid status/lifecycle combinations and gives cancellation and same-session concurrency one authoritative owner without changing the retained pause/resume policy. |
+
 ## State model
 
 ThunderAgent keys state by `session_id`. The ID must remain stable across a trajectory's turns; a fresh per-request ID creates unrelated programs and defeats continuation admission and affinity.
