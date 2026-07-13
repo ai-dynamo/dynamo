@@ -439,14 +439,14 @@ impl OpenAIPreprocessor {
             }
         });
         let is_structured_response = Self::has_structured_response_format(request);
-        if !is_guided_tool_choice
-            && !(is_structured_response
-                && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser))
-        {
-            return false;
-        }
+        let structured_response_requires_reasoning = is_structured_response
+            && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
 
-        Self::sglang_effective_reasoning_enabled(reasoning_parser, request.chat_template_args())
+        (is_guided_tool_choice || structured_response_requires_reasoning)
+            && Self::sglang_effective_reasoning_enabled(
+                reasoning_parser,
+                request.chat_template_args(),
+            )
     }
 
     fn structured_response_supports_sglang_reasoning_gate(reasoning_parser: Option<&str>) -> bool {
