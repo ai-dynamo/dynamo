@@ -25,7 +25,7 @@ from tests.fault_tolerance.cancellation.utils import (
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
-from tests.utils.constants import DynamoPortRange, FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.device import (
     build_nixl_kv_transfer_config_json,
     get_default_vllm_block_size,

@@ -171,7 +171,9 @@ class VLLMProcess(ManagedEngineProcessMixin):
             else []
         )
         self._indexer_ports = (
-            allocate_ports(2, DynamoPortRange.ROUTER.value) if standalone_indexer else []
+            allocate_ports(2, DynamoPortRange.ROUTER.value)
+            if standalone_indexer
+            else []
         )
         if standalone_indexer:
             self._standalone_indexer_port = self._indexer_ports[0]

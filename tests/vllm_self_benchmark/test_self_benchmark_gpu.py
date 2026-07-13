@@ -64,7 +64,7 @@ from pathlib import Path
 import pytest
 
 from tests.utils.client import send_request
-from tests.utils.constants import DynamoPortRange, FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
