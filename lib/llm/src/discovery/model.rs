@@ -15,6 +15,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+use crate::local_model::runtime_config::VLLM_EXACT_MM_ROUTING_CAPABILITY;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -716,6 +717,30 @@ impl Model {
     pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.generate_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+
+    /// Select a generate engine and its routing metadata atomically from the
+    /// same WorkerSet. Request-side KV hashing must use the block size and LoRA
+    /// identity advertised by the worker set that will route the request.
+    pub fn get_generate_engine_with_routing_metadata(
+        &self,
+    ) -> Result<(GenerateStreamingEngine, u32, Option<String>, bool), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.generate_engine.clone().map(|engine| {
+                (
+                    engine,
+                    ws.card().kv_cache_block_size,
+                    ws.card().lora.as_ref().map(|lora| lora.name.clone()),
+                    ws.card()
+                        .runtime_config
+                        .runtime_data
+                        .get(VLLM_EXACT_MM_ROUTING_CAPABILITY)
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                )
+            })
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
