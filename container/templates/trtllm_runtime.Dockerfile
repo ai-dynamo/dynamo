@@ -161,6 +161,19 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
     ldconfig
 ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 
+# Drop upstream's preinstalled opencv-python-headless (and the libav*/ffmpeg
+# copies its wheel vendors under opencv_python_headless.libs/). TRT-LLM made
+# cv2 an optional video extra (NVIDIA/TensorRT-LLM#16206) and its imports are
+# already function-local in 1.3.x, so nothing in the image needs it at import
+# time; video-decode users can install it explicitly per upstream docs.
+# Must run via the system interpreter: with VIRTUAL_ENV set, plain `pip`
+# targets the venv and exits 0 WITHOUT touching the system-site install.
+# The guards fail the build if the package survives. Mirrored by the
+# pre_runtime whiteout below — the squash COPY cannot represent deletions.
+RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-headless && \
+    ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
+    [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
+
 # Pull /workspace_src (incl. LICENSE) from the transport stage and
 # wire up the launch screen in a single RUN — saves the standalone workspace COPY layer.
 RUN --mount=type=bind,from=workspace_files,source=/workspace_src,target=/tmp/workspace_src \
@@ -188,9 +201,14 @@ CMD ["/bin/bash"]
 # single layer. Only Dynamo-specific env needs redeclaring below.
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 # Whiteout paths runtime_full removed — COPY can't represent deletions, so
-# without this, upstream's /workspace, /home/ubuntu, and single-file
-# /usr/local/bin/etcd would leak alongside our content.
-RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd
+# without this, upstream's /workspace, /home/ubuntu, single-file
+# /usr/local/bin/etcd, and preinstalled opencv (cv2/ + vendored
+# opencv_python_headless.libs/ + dist-info) would leak alongside our content.
+# Keep this list in sync with any deletion RUNs in the stages above.
+RUN rm -rf /workspace /home/ubuntu /usr/local/bin/etcd \
+    /usr/local/lib/python3.12/dist-packages/cv2 \
+    /usr/local/lib/python3.12/dist-packages/opencv_python_headless* && \
+    ! /usr/bin/python3 -c "import cv2" 2>/dev/null
 COPY --from=runtime_full / /
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
