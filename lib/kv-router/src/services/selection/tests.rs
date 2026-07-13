@@ -286,6 +286,8 @@ async fn select_echoes_selection_id_and_does_not_book_load() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["selection_id"], "sel-a");
+    assert_eq!(body["routing_group"], "default");
+    assert!(body.get("tenant_id").is_none());
     assert_eq!(body["worker_id"], 1);
     assert_eq!(body["effective_prefill_tokens"], 4);
     assert_eq!(body["overlap"]["longest_matched"], 0);
@@ -365,12 +367,12 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let response = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-a"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-a"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["reservation_id"], "res-a");
+    assert_eq!(body["selection_id"], "res-a");
     assert_eq!(body["effective_prefill_tokens"], 4);
 
     let loads_response = app
@@ -389,7 +391,7 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
     let duplicate = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-a"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-a"}"#,
     )
     .await;
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
@@ -448,7 +450,7 @@ policy_classes:
     let reserved = post_with_policy_class(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"latency-active"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"latency-active"}"#,
         Some("latency"),
     )
     .await;
@@ -489,7 +491,7 @@ async fn output_block_endpoint_updates_reserved_load() {
     let response = post(
         app.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"res-output"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"res-output"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -560,7 +562,7 @@ async fn explicit_reservation_books_after_select() {
 
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-b",
+        "selection_id": "res-b",
         "worker_id": selected["worker_id"],
         "dp_rank": selected["dp_rank"],
         "sequence_hashes": [1],
@@ -596,7 +598,7 @@ async fn explicit_reservation_rejects_effective_prefill_above_isl() {
     );
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-too-large",
+        "selection_id": "res-too-large",
         "worker_id": 1,
         "sequence_hashes": [1],
         "isl_tokens": 4,
@@ -632,7 +634,7 @@ async fn explicit_reservation_rejects_unschedulable_worker() {
 
     let reservation = serde_json::json!({
         "model_name": "model",
-        "reservation_id": "res-unschedulable",
+        "selection_id": "res-unschedulable",
         "worker_id": 1,
         "sequence_hashes": [1],
         "isl_tokens": 4
@@ -687,7 +689,7 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
     let response = post(
         app_a.clone(),
         "/select_and_reserve",
-        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"replicated"}"#,
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"replicated"}"#,
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);

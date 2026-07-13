@@ -3208,10 +3208,13 @@ def _test_router_cache_salt_isolation(
 
         worker_a = (worker_ids[0], 0)
         worker_b = (worker_ids[1], 0)
-        token_ids = [random.randint(1, 10_000) for _ in range(block_size * 2)]
+        token_ids = list(range(1_000, 1_000 + block_size * 2))
         expected_blocks = len(token_ids) // block_size
 
-        async def generate(cache_salt: str, worker_id: int) -> None:
+        async def generate(cache_salt: str, worker_id: Optional[int] = None) -> None:
+            routing: dict[str, Any] = {"cache_salt": cache_salt}
+            if worker_id is not None:
+                routing["backend_instance_id"] = worker_id
             request = {
                 "model": model_name,
                 "token_ids": token_ids,
@@ -3220,10 +3223,7 @@ def _test_router_cache_salt_isolation(
                 "output_options": {},
                 "eos_token_ids": [],
                 "extra_args": {"nvext": {"cache_salt": cache_salt}},
-                "routing": {
-                    "backend_instance_id": worker_id,
-                    "cache_salt": cache_salt,
-                },
+                "routing": routing,
             }
             stream = await kv_router.generate_from_request(request)
             terminal = None
@@ -3270,6 +3270,31 @@ def _test_router_cache_salt_isolation(
                 f"cache_salt={cache_salt!r}: expected {expected}, got {last_scores}"
             )
 
+        async def wait_for_worker(cache_salt: str, expected: tuple[int, int]) -> None:
+            deadline = time.monotonic() + 10
+            last_selection: tuple[int, int, int] | None = None
+            while time.monotonic() < deadline:
+                last_selection = await kv_router.best_worker(
+                    token_ids,
+                    cache_namespace=cache_salt,
+                )
+                if (
+                    last_selection[:2] == expected
+                    and last_selection[2] == expected_blocks
+                ):
+                    logger.info(
+                        "cache_salt=%r selected worker=%s with %d overlap blocks",
+                        cache_salt,
+                        expected,
+                        expected_blocks,
+                    )
+                    return
+                await asyncio.sleep(0.25)
+            raise AssertionError(
+                f"cache_salt={cache_salt!r}: expected worker {expected} with "
+                f"{expected_blocks} overlap blocks, got {last_selection}"
+            )
+
         await generate("tenant-a", worker_a[0])
         await wait_for_scores("tenant-a", {worker_a: expected_blocks})
         await wait_for_scores("tenant-b", {})
@@ -3279,6 +3304,16 @@ def _test_router_cache_salt_isolation(
         await wait_for_scores("tenant-b", {worker_b: expected_blocks})
         await wait_for_scores("tenant-a", {worker_a: expected_blocks})
         await wait_for_scores(None, {})
+        await wait_for_worker("tenant-a", worker_a)
+        await wait_for_worker("tenant-b", worker_b)
+
+        # Unpinned requests use the same selection path as production. Repeating
+        # each namespace must preserve its worker-local cache footprint; routing
+        # either request to the other worker would publish a second nonzero score.
+        await generate("tenant-a")
+        await generate("tenant-b")
+        await wait_for_scores("tenant-a", {worker_a: expected_blocks})
+        await wait_for_scores("tenant-b", {worker_b: expected_blocks})
 
     asyncio.run(test_sync())
 
