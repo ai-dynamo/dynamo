@@ -182,6 +182,7 @@ struct SchedulerQueueActor<
     admission: PolicyClassAdmissionController,
     tracked_admissions: HashMap<String, TrackedAdmission>,
     cleanup: Arc<AdmissionCleanup>,
+    queueing_enabled: bool,
     profile: PolicyProfile,
     queue_recheck_interval: Duration,
     next_queue_recheck: Instant,
@@ -383,6 +384,7 @@ impl<
             admission,
             tracked_admissions: HashMap::new(),
             cleanup: Arc::clone(&cleanup),
+            queueing_enabled,
             profile,
             queue_recheck_interval,
             next_queue_recheck: now + queue_recheck_interval,
@@ -674,11 +676,14 @@ impl<
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
         let mut commands_since_cleanup = 0usize;
         while let Some(command) = rx.recv().await {
-            commands_since_cleanup += 1;
-            let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
-            if drain_cleanup {
-                commands_since_cleanup = 0;
-            }
+            let drain_cleanup = self.queueing_enabled && {
+                commands_since_cleanup += 1;
+                let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
+                if drain_cleanup {
+                    commands_since_cleanup = 0;
+                }
+                drain_cleanup
+            };
             match command {
                 AdmissionCommand::Enqueue {
                     request,
