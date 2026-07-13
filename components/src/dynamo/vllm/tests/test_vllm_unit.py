@@ -1377,6 +1377,40 @@ def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
     assert sp.max_tokens == remaining
 
 
+def test_explicit_max_tokens_budget_error_uses_prompt_and_completion_budget():
+    from dynamo.vllm.handlers import _explicit_max_tokens_budget_error
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 98},
+        "output_options": {},
+    }
+
+    error = _explicit_max_tokens_budget_error(request, model_max_len=100)
+
+    assert error is not None
+    assert "maximum context length is 100 tokens" in error
+    assert "requested 101 tokens (3 in the messages, 98 in the completion)" in error
+
+
+def test_explicit_max_tokens_budget_error_uses_expanded_prompt_tokens():
+    from dynamo.vllm.handlers import _explicit_max_tokens_budget_error
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {"max_tokens": 6},
+        "output_options": {},
+        "extra_args": {"expanded_token_ids": list(range(95))},
+    }
+
+    error = _explicit_max_tokens_budget_error(request, model_max_len=100)
+
+    assert error is not None
+    assert "requested 101 tokens (95 in the messages, 6 in the completion)" in error
+
+
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {
@@ -1764,6 +1798,7 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
     handler = SimpleNamespace(
         input_param_manager=InputParams(),
         default_sampling_params={},
+        model_max_len=100,
         config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
         engine_client=EngineClient(),
         _deferred_aborts={},
@@ -1787,3 +1822,127 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
 
     assert chunks
     assert captured["prompt"]["cache_salt"] == "dynamo-cache-salt:tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_rejects_explicit_max_tokens_over_context():
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    class InputParams:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            return [1, 2, 3]
+
+    class EngineClient:
+        def __init__(self):
+            self.generate_called = False
+
+        def generate(self, *args, **kwargs):
+            self.generate_called = True
+            raise AssertionError("engine should not be called")
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    engine_client = EngineClient()
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        model_max_len=100,
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=engine_client,
+        _deferred_aborts={},
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    context = SimpleNamespace(trace_headers=lambda: {})
+    request = {
+        "id": "chatcmpl-test",
+        "model": "test-model",
+        "prompt": "ignored after tokenization",
+        "max_tokens": 98,
+    }
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert chunks[0]["id"] == "chatcmpl-test"
+    assert chunks[0]["model"] == "test-model"
+    assert chunks[0]["choices"][0]["finish_reason"] == (
+        "error: This model's maximum context length is 100 tokens. "
+        "However, you requested 101 tokens "
+        "(3 in the messages, 98 in the completion). "
+        "Please reduce the length of the messages or completion."
+    )
+    assert engine_client.generate_called is False
+
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_rejects_string_prompt_over_context():
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    class Tokenizer:
+        def encode(self, text):
+            assert text == "rendered chat prompt"
+            return [1, 2, 3]
+
+    class InputParams:
+        tokenizer = Tokenizer()
+
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            return "rendered chat prompt"
+
+    class EngineClient:
+        def __init__(self):
+            self.generate_called = False
+
+        def generate(self, *args, **kwargs):
+            self.generate_called = True
+            raise AssertionError("engine should not be called")
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    engine_client = EngineClient()
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        model_max_len=100,
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=engine_client,
+        _deferred_aborts={},
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    context = SimpleNamespace(trace_headers=lambda: {})
+    request = {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": 98,
+    }
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert chunks[0]["choices"][0]["finish_reason"] == (
+        "error: This model's maximum context length is 100 tokens. "
+        "However, you requested 101 tokens "
+        "(3 in the messages, 98 in the completion). "
+        "Please reduce the length of the messages or completion."
+    )
+    assert engine_client.generate_called is False

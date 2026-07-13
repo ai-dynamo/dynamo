@@ -10,6 +10,7 @@ mod catalog;
 mod core;
 mod error;
 mod input;
+mod pending;
 mod server;
 mod service;
 mod types;
@@ -20,6 +21,7 @@ mod tests;
 pub use crate::services::common::replica_sync::ReplicaPeerError;
 pub use core::{SelectionCore, SelectionServiceConfig};
 pub use error::SelectionError;
+pub use pending::SelectionCacheConfig;
 pub use server::{AppState, run_server};
 pub use service::{SelectionService, SelectionServiceBuilder};
 pub use types::{

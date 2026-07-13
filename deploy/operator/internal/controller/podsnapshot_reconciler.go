@@ -32,10 +32,12 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -388,16 +390,32 @@ func (sr *PodSnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiac
 }
 
 // SetupWithManager wires the controller: it owns Snapshots and watches SnapshotContents,
-// mapping a PodSnapshotContent back to its bound PodSnapshot via spec.snapshotRef.
+// mapping a PodSnapshotContent back to its bound PodSnapshot via spec.snapshotRef. The namespace
+// filter is applied per source: the cluster-scoped PodSnapshotContent watch must be filtered by the
+// bound PodSnapshot's namespace, not its own (always empty) one, or restricted mode drops every
+// content event before the mapper runs.
 func (sr *PodSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1alpha1.PodSnapshot{}).
+		For(&nvidiacomv1alpha1.PodSnapshot{},
+			builder.WithPredicates(commonController.EphemeralDeploymentEventFilter(sr.Config, sr.RuntimeConfig))).
 		Watches(
 			&nvidiacomv1alpha1.PodSnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(podSnapshotContentToPodSnapshot),
+			builder.WithPredicates(podSnapshotContentEventFilter(sr.Config, sr.RuntimeConfig)),
 		).
-		WithEventFilter(commonController.EphemeralDeploymentEventFilter(sr.Config, sr.RuntimeConfig)).
 		Complete(sr)
+}
+
+// podSnapshotContentEventFilter admits PodSnapshotContent events by the namespace of the bound
+// PodSnapshot (spec.podSnapshotRef.namespace).
+func podSnapshotContentEventFilter(config *configv1alpha1.OperatorConfiguration, runtimeConfig *commonController.RuntimeConfig) predicate.Predicate {
+	return predicate.NewPredicateFuncs(func(o client.Object) bool {
+		content, ok := o.(*nvidiacomv1alpha1.PodSnapshotContent)
+		if !ok {
+			return false
+		}
+		return commonController.NamespaceAllowed(config, runtimeConfig, o, content.Spec.PodSnapshotRef.Namespace)
+	})
 }
 
 // podSnapshotContentToPodSnapshot maps a PodSnapshotContent (including a delete-event tombstone) back

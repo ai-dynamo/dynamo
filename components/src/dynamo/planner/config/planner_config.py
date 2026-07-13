@@ -514,7 +514,8 @@ class PlannerConfig(BaseModel):
         validate_default=True,
         description=(
             "Path to a CA bundle for verifying the upstream Prometheus TLS certificate. "
-            "No-op unless ssl_verify is enabled."
+            "Setting this field enables TLS verification against the given bundle, "
+            "regardless of ssl_verify."
         ),
     )
 

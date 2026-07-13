@@ -243,16 +243,14 @@ impl Stream for DeduplicatingStream {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     // Decode envelope to extract publisher_id and sequence
-                    match self.codec.decode_envelope(&bytes) {
-                        Ok(envelope) => {
-                            let key = (envelope.publisher_id, envelope.sequence);
-
+                    match self.codec.decode_envelope_identity(&bytes) {
+                        Ok(key) => {
                             // Check if we've seen this event before
                             if self.seen_events.contains(&key) {
                                 // Duplicate - skip and continue loop
                                 tracing::debug!(
-                                    publisher_id = envelope.publisher_id,
-                                    sequence = envelope.sequence,
+                                    publisher_id = key.0,
+                                    sequence = key.1,
                                     "Filtered duplicate event from multi-broker setup"
                                 );
                                 continue;
