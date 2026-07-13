@@ -185,7 +185,7 @@ fn convert_user_blocks(
                     ChatCompletionRequestMessageContentPartText { text: text.clone() },
                 ));
             }
-            AnthropicContentBlock::Image { source } => {
+            AnthropicContentBlock::Image { source, .. } => {
                 if source.source_type != "base64" {
                     anyhow::bail!(
                         "unsupported image source type {:?}; only base64 is supported",
@@ -1875,6 +1875,7 @@ mod tests {
                                 media_type: "image/png".into(),
                                 data: "iVBORw0KGgo=".into(), // tiny valid-ish base64
                             },
+                            cache_control: None,
                         },
                     ],
                 },
@@ -2015,6 +2016,7 @@ mod tests {
                                     media_type: "image/jpeg".into(),
                                     data: "/9j/4AAQ".into(),
                                 },
+                                cache_control: None,
                             },
                             AnthropicContentBlock::ToolResult {
                                 tool_use_id: "tool_1".into(),

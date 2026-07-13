@@ -173,6 +173,43 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
+_KV_RETENTION_TTL_CONTEXT_KEY = "dynamo.llm.kv_retention_ttl_seconds"
+
+
+def kv_hint_kwargs(
+    engine: Any, request: Mapping[str, Any], context: Any | None = None
+) -> dict[str, Any]:
+    """Forward provider-neutral KV hints from the payload or wire metadata."""
+    kv_hints = request.get("kv_hints")
+    if not kv_hints and context is not None:
+        metadata = getattr(context, "metadata", None)
+        ttl = (
+            metadata.get(_KV_RETENTION_TTL_CONTEXT_KEY)
+            if metadata is not None
+            else None
+        )
+        if ttl is not None:
+            try:
+                ttl_seconds = int(ttl)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"invalid {_KV_RETENTION_TTL_CONTEXT_KEY}: {ttl!r}"
+                ) from error
+            if ttl_seconds > 0:
+                kv_hints = {
+                    "retain_full_prompt": {"ttl_seconds": ttl_seconds},
+                }
+    if not kv_hints:
+        return {}
+    kwargs = filter_supported_async_generate_kwargs(engine, {"kv_hints": kv_hints})
+    if "kv_hints" not in kwargs:
+        raise RuntimeError(
+            "This request requires programmatic KV retention, but the installed "
+            "SGLang Engine.async_generate does not support kv_hints"
+        )
+    return kwargs
+
+
 @lru_cache(maxsize=32)
 def _start_profile_accepts_request_object(start_profile: Any) -> bool:
     """Return whether TokenizerManager.start_profile expects a ProfileReq."""
@@ -231,6 +268,7 @@ __all__ = [
     "ensure_sglang_tensor_image_size",
     "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "kv_hint_kwargs",
     "require_reasoning_kwargs",
     "start_profile_compat",
 ]

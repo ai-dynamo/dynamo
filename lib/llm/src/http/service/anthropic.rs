@@ -37,6 +37,7 @@ use super::{
     },
     service_v2,
 };
+use crate::preprocessor::KV_RETENTION_TTL_CONTEXT_KEY;
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicCountTokensRequest, AnthropicCountTokensResponse, AnthropicCreateMessageRequest,
@@ -153,6 +154,17 @@ async fn handler_anthropic_messages(
             "max_tokens: must be greater than 0",
         ));
     }
+    let retention_ttl_seconds =
+        match super::anthropic_cache_control::cache_retention_ttl_seconds(&request) {
+            Ok(ttl) => ttl,
+            Err(message) => {
+                return Err(anthropic_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    message,
+                ));
+            }
+        };
     gate_anthropic_nvext(&mut request, state.nvext_enabled());
 
     // Create request context
@@ -177,6 +189,9 @@ async fn handler_anthropic_messages(
         )
     })?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
+    if let Some(ttl_seconds) = retention_ttl_seconds {
+        request.insert_metadata(KV_RETENTION_TTL_CONTEXT_KEY, ttl_seconds.to_string());
+    }
     attach_x_request_id(&mut request, &headers);
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
@@ -351,7 +366,6 @@ async fn anthropic_messages(
     }
 
     let request = context.map(|_req| chat_request);
-
     // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
     // streaming gate (required/named + structural-tag stay on the v1 finalize path).
     let parsing_options = parsing_options.with_experimental_v2_batch_eligible(

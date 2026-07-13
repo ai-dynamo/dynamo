@@ -46,7 +46,7 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
-use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
+use crate::preprocessor::{KV_RETENTION_TTL_CONTEXT_KEY, PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
     agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
@@ -71,6 +71,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::PromptCacheMode;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -2352,13 +2353,12 @@ async fn responses(
         // from the request becomes a one-line change here.
         presence_penalty: None,
         frequency_penalty: None,
-        // Pass-through metadata — accepted on the request, echoed back on the
-        // response so the caller can confirm receipt. Dynamo doesn't act on
-        // these; see `validate_response_unsupported_fields` for rationale.
+        // Metadata echoed back on the response.
         prompt_cache_key: request.inner.prompt_cache_key.clone(),
         prompt_cache_retention: request.inner.prompt_cache_retention,
         safety_identifier: request.inner.safety_identifier.clone(),
     };
+    let retention_ttl_seconds = response_kv_retention_ttl_seconds(&request);
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
@@ -2396,6 +2396,9 @@ async fn responses(
         });
 
     let mut request = context.map(|mut _req| chat_request);
+    if let Some(ttl_seconds) = retention_ttl_seconds {
+        request.insert_metadata(KV_RETENTION_TTL_CONTEXT_KEY, ttl_seconds.to_string());
+    }
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
@@ -2570,6 +2573,15 @@ async fn responses(
     }
 }
 
+fn response_kv_retention_ttl_seconds(request: &NvCreateResponse) -> Option<u32> {
+    request
+        .inner
+        .prompt_cache_options
+        .as_ref()
+        .filter(|options| options.mode == PromptCacheMode::Implicit)
+        .map(|options| options.ttl.seconds())
+}
+
 /// Checks for unsupported fields in the request.
 /// Returns Some(response) if unsupported fields are present.
 pub fn validate_response_unsupported_fields(
@@ -2613,16 +2625,20 @@ pub fn validate_response_unsupported_fields(
     // see `max_tool_calls: null` in the response, assuming their limit was
     // honored. Fail loud until real enforcement lands.
     //
-    // Pass-through metadata fields (`prompt_cache_key`,
-    // `prompt_cache_retention`, `safety_identifier`) are deliberately
-    // accepted and echoed back on the response instead. They're hints for
-    // OpenAI's caching/moderation backends, not directives — Codex sends
-    // `prompt_cache_key` on every request — and the OpenResponses spec
-    // includes them on the response body, so echoing the caller's value
-    // makes receipt observable without needing a real backend.
+    // Metadata fields are accepted and echoed back on the response. Codex
+    // sends `prompt_cache_key` on every request, so it remains pass-through.
     if inner.max_tool_calls.is_some() {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`max_tool_calls` is not supported.",
+        ));
+    }
+    if inner
+        .prompt_cache_options
+        .is_some_and(|options| options.mode == PromptCacheMode::Explicit)
+    {
+        return Some(ErrorMessage::not_implemented_error(
+            VALIDATION_PREFIX.to_string()
+                + "`prompt_cache_options.mode: \"explicit\"` is not supported.",
         ));
     }
     None
@@ -3517,7 +3533,9 @@ mod tests {
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
-    use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
+    use dynamo_protocols::types::responses::{
+        CreateResponse, Input, PromptCacheOptions, PromptConfig,
+    };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
@@ -4088,11 +4106,7 @@ mod tests {
         }
     }
 
-    /// Pass-through metadata fields (`prompt_cache_key`,
-    /// `prompt_cache_retention`, `safety_identifier`) are accepted at the
-    /// validation layer; the response serializer echoes them back so the
-    /// caller can confirm receipt. Codex sends `prompt_cache_key` on every
-    /// request — rejecting it broke `codex exec` end-to-end.
+    /// Legacy metadata remains pass-through only. It does not produce a KV hint.
     #[test]
     fn test_validate_unsupported_fields_accepts_passthrough_metadata() {
         #[allow(clippy::type_complexity)]
@@ -4123,6 +4137,45 @@ mod tests {
                 "Expected `{field}` to be accepted as pass-through metadata"
             );
         }
+    }
+
+    #[test]
+    fn prompt_cache_options_maps_implicit_mode_only() {
+        let mut request = make_base_request();
+        assert_eq!(response_kv_retention_ttl_seconds(&request), None);
+
+        request.inner.prompt_cache_options = Some(PromptCacheOptions::default());
+        assert_eq!(response_kv_retention_ttl_seconds(&request), Some(1_800));
+
+        request.inner.prompt_cache_options = Some(PromptCacheOptions {
+            mode: PromptCacheMode::Explicit,
+            ..Default::default()
+        });
+        assert_eq!(response_kv_retention_ttl_seconds(&request), None);
+    }
+
+    #[test]
+    fn legacy_prompt_cache_retention_does_not_map_to_kv_hint() {
+        let mut request = make_base_request();
+        request.inner.prompt_cache_retention =
+            Some(dynamo_protocols::types::responses::PromptCacheRetention::Hours24);
+
+        assert_eq!(
+            response_kv_retention_ttl_seconds(&request),
+            None,
+            "the deprecated field must not cross the normalization boundary"
+        );
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_rejects_explicit_prompt_cache_mode() {
+        let mut request = make_base_request();
+        request.inner.prompt_cache_options = Some(PromptCacheOptions {
+            mode: PromptCacheMode::Explicit,
+            ..Default::default()
+        });
+
+        assert!(validate_response_unsupported_fields(&request).is_some());
     }
 
     #[test]

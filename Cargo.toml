@@ -180,6 +180,10 @@ tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
 
+[patch.crates-io]
+# Replace with the released protocol version before this PR leaves draft.
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "9ac258904fc4b3569eb0661e959285882e045c4d" }
+
 [profile.dev.package]
 insta.opt-level = 3
 

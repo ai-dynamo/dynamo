@@ -46,11 +46,15 @@ fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'sta
 fn shared_replay_metrics(
     token_ids: &[crate::protocols::TokenIdType],
     trace_block_size: usize,
+    kv_hints: Option<&crate::protocols::common::preprocessor::KvHintEnvelope>,
 ) -> Option<Arc<RequestReplayMetrics>> {
     if trace_block_size == 0 {
         return None;
     }
-    super::replay_metrics(token_ids, trace_block_size).map(Arc::new)
+    super::replay_metrics(token_ids, trace_block_size).map(|mut metrics| {
+        metrics.kv_hints = kv_hints.cloned();
+        Arc::new(metrics)
+    })
 }
 
 pub(crate) fn build_request_end_trace_state(
@@ -102,7 +106,11 @@ fn build_request_end_trace_state_for_policy(
         }
     };
 
-    let replay_metrics = match shared_replay_metrics(&common_request.token_ids, trace_block_size) {
+    let replay_metrics = match shared_replay_metrics(
+        &common_request.token_ids,
+        trace_block_size,
+        common_request.kv_hints.as_ref(),
+    ) {
         Some(metrics) => metrics,
         None => {
             tracing::warn!(
@@ -211,6 +219,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::common::extensions::AgentContext;
+    use crate::protocols::common::preprocessor::{KvHintEnvelope, KvRetentionHint};
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
@@ -284,10 +293,16 @@ mod tests {
 
     #[test]
     fn replay_hashing_requires_block_size() {
-        assert!(shared_replay_metrics(&[1, 2, 3], 0).is_none());
+        assert!(shared_replay_metrics(&[1, 2, 3], 0, None).is_none());
 
-        let replay = shared_replay_metrics(&[1, 2, 3], 2).unwrap();
+        let replay = shared_replay_metrics(&[1, 2, 3], 2, None).unwrap();
         assert_eq!(replay.input_sequence_hashes.len(), 2);
+
+        let hints = KvHintEnvelope {
+            retain_full_prompt: Some(KvRetentionHint { ttl_seconds: 3600 }),
+        };
+        let replay = shared_replay_metrics(&[1, 2, 3], 2, Some(&hints)).unwrap();
+        assert_eq!(replay.kv_hints.as_ref(), Some(&hints));
     }
 
     #[test]
@@ -295,11 +310,11 @@ mod tests {
         let token_ids = (0..131_072_u32).collect::<Vec<_>>();
 
         let started = Instant::now();
-        let request_only = shared_replay_metrics(&token_ids, 64).unwrap();
+        let request_only = shared_replay_metrics(&token_ids, 64, None).unwrap();
         let request_elapsed = started.elapsed();
 
         let started = Instant::now();
-        let repeated = shared_replay_metrics(&token_ids, 64).unwrap();
+        let repeated = shared_replay_metrics(&token_ids, 64, None).unwrap();
         let repeated_elapsed = started.elapsed();
 
         eprintln!(
@@ -326,6 +341,7 @@ mod tests {
                     trace_block_size: 2,
                     input_length: 2,
                     input_sequence_hashes: vec![11],
+                    kv_hints: None,
                 }),
             },
         };
@@ -382,6 +398,7 @@ mod tests {
                     trace_block_size: 2,
                     input_length: 2,
                     input_sequence_hashes: vec![11],
+                    kv_hints: None,
                 }),
             },
         };

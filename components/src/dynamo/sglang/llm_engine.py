@@ -61,7 +61,7 @@ from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_K
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
-from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang._compat import kv_hint_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -404,6 +404,7 @@ class SglangLLMEngine(LLMEngine):
             sampling_params=sampling_params,
             stream=True,
             **require_reasoning_kwargs(self.engine, request),
+            **kv_hint_kwargs(self.engine, request, context),
             rid=context.trace_id,
             data_parallel_rank=sgl_dp_rank,
             **telemetry.engine_trace_kwargs(

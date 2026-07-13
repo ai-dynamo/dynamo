@@ -17,6 +17,7 @@ from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
+    kv_hint_kwargs,
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import Config
@@ -392,6 +393,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
+                **kv_hint_kwargs(self.engine, request, context),
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
@@ -462,6 +464,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
+                **kv_hint_kwargs(self.engine, request, context),
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,

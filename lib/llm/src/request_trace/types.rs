@@ -123,6 +123,8 @@ pub struct RequestReplayMetrics {
     pub trace_block_size: usize,
     pub input_length: usize,
     pub input_sequence_hashes: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hints: Option<crate::protocols::common::preprocessor::KvHintEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -336,6 +338,7 @@ mod tests {
                     trace_block_size: 2,
                     input_length: 4,
                     input_sequence_hashes: vec![11, 22],
+                    kv_hints: None,
                 }),
                 finish_reason_metadata: None,
             }),

@@ -1165,7 +1165,7 @@ mod tests {
         FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent,
         InputImageContent, InputItem, InputMessage, InputOutputMessage, InputOutputMessageContent,
         InputOutputTextContent, InputParam, InputRole, InputTextContent, Item, MessageItem,
-        Role as ResponseRole, Tool,
+        PromptCacheOptions, Role as ResponseRole, Tool,
     };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
@@ -1190,6 +1190,41 @@ mod tests {
                 ..Default::default()
             }),
         }
+    }
+
+    #[test]
+    fn prompt_cache_options_accepts_latest_contract() {
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "input": "hello",
+            "prompt_cache_options": {}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            request.inner.prompt_cache_options,
+            Some(PromptCacheOptions::default())
+        );
+
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "input": "hello",
+            "prompt_cache_options": {"mode": "implicit", "ttl": "30m"}
+        }))
+        .unwrap();
+        assert_eq!(
+            request.inner.prompt_cache_options,
+            Some(PromptCacheOptions::default())
+        );
+    }
+
+    #[test]
+    fn prompt_cache_options_rejects_legacy_ttl() {
+        let error = serde_json::from_value::<NvCreateResponse>(serde_json::json!({
+            "input": "hello",
+            "prompt_cache_options": {"ttl": "24h"}
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown variant `24h`"));
     }
 
     #[test]

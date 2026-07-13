@@ -26,6 +26,7 @@ pub(crate) fn replay_metrics(
         trace_block_size,
         input_length: token_ids.len(),
         input_sequence_hashes: input_sequence_hashes(token_ids, trace_block_size),
+        kv_hints: None,
     })
 }
 
