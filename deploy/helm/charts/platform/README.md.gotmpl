@@ -33,7 +33,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## 📋 Prerequisites
 
-- Kubernetes cluster (v1.20+)
+- Kubernetes cluster (v1.33+)
 - Helm 3.8+
 - Sufficient cluster resources for your deployment scale
 - Container registry access (if using private images)
