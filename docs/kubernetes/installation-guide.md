@@ -11,10 +11,10 @@ This guide walks you through installing everything needed to deploy models with 
 
 Before you begin, make sure you have:
 
-- A **Kubernetes cluster (v1.33+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
+- A **Kubernetes cluster (v1.32+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
   - [Amazon EKS](cloud-providers/eks/eks.md) | [Azure AKS](cloud-providers/aks/aks.md) | [Google GKE](cloud-providers/gke/gke.md)
   - For local development: [Minikube Setup](deployment/minikube.md)
-- **kubectl** v1.33+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
+- **kubectl** v1.32+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
 - **Helm** v3.0+ — [Install Helm](https://helm.sh/docs/intro/install/)
 
 > [!IMPORTANT]
@@ -23,7 +23,7 @@ Before you begin, make sure you have:
 Verify your tools:
 
 ```bash
-kubectl version --client  # Should show v1.33+
+kubectl version --client  # Should show v1.32+
 helm version              # Should show v3.0+
 ```
 

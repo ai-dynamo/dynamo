@@ -9,7 +9,7 @@ This guide covers installing and configuring the [Azure Lustre CSI driver](https
 ## Prerequisites
 
 **AKS cluster requirements**
-- Kubernetes 1.33 or later
+- Kubernetes 1.32 or later
 - Node pools must use the **Ubuntu** OS SKU — Windows and Azure Linux (CBL Mariner) nodes are not supported
 - AKS is the only supported Kubernetes distribution (self-managed clusters are not supported)
 

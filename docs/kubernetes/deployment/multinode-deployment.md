@@ -18,7 +18,7 @@ Dynamo supports multinode deployments through the `multinode` section in resourc
 
 ## Basic requirements
 
-- **Kubernetes Cluster**: Version 1.33 or later
+- **Kubernetes Cluster**: Version 1.32 or later
 - **GPU Nodes**: Multiple nodes with NVIDIA GPUs
 - **High-Speed Networking**: InfiniBand, RoCE, or high-bandwidth Ethernet (recommended for optimal performance)
 

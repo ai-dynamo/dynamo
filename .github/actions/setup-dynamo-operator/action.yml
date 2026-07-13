@@ -37,7 +37,7 @@ inputs:
   vcluster_k8s_version:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
-    default: 'v1.33.0'
+    default: 'v1.32.13'
   vcluster_host_priority_class:
     description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-01 or aws-dev-02; use an empty value to disable.'
     required: false
