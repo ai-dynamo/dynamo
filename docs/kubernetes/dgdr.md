@@ -238,60 +238,6 @@ direct profiler runs, install the matching helper as described in
 > `overrides.profilingJob` only customizes the profiling Job. Use
 > `overrides.dgd` for settings that must appear on the deployed worker pods.
 
-### Remote Model Code
-
-Some Hugging Face models reference repository-supplied Python through `auto_map` in `config.json`. vLLM and SGLang
-load that code only when worker arguments include `--trust-remote-code`. A generated argument list can already contain
-the flag because of model-specific configuration generation, so its presence is not evidence of explicit operator
-consent. Treat the flag as permission to execute the selected model repository's code.
-
-Review the complete generated DGD before deploying a remote model:
-
-1. Follow [Review Before Deploy](dgdr-examples.md#review-before-deploy-autoapply-false) to set `spec.autoApply: false`
-   and export `.status.profilingResults.selectedConfig` as `generated-dgd.yaml`.
-2. Inspect every worker's `main` container argument list. Pin the model and its custom code before retaining or adding
-   `--trust-remote-code`. For [vLLM](../backends/vllm/vllm-reference-guide.md#argument-reference), set `--revision` and
-   `--code-revision` to immutable commit SHAs. For
-   [SGLang](../backends/sglang/sglang-reference-guide.md#argument-reference), set `--revision` to an immutable commit SHA.
-3. Apply the reviewed `generated-dgd.yaml` directly. Leave `autoApply` disabled so DGDR does not also create its
-   unreviewed result.
-
-The selected configuration is a complete `nvidia.com/v1beta1` DGD. When you instead use a `v1beta1` DGD override,
-copy the complete generated `args` list for each affected `main` container, then add the revision and trust flags.
-Container `args` is atomic in `v1beta1`; an override containing only these added flags removes the generated model,
-server, parallelism, and other arguments. If profiling stops before producing `selectedConfig`, start from a reviewed
-direct DGD rather than reconstructing generated arguments in a partial override.
-
-For example, a reviewed vLLM override has this shape. Replace both argument placeholders with the complete generated
-list, in its original order:
-
-```yaml
-spec:
-  overrides:
-    dgd:
-      apiVersion: nvidia.com/v1beta1
-      kind: DynamoGraphDeployment
-      spec:
-        components:
-          - name: <generated-worker-name>
-            podTemplate:
-              spec:
-                containers:
-                  - name: main
-                    args:
-                      - <first-generated-argument>
-                      # Include every remaining generated argument here.
-                      - <last-generated-argument>
-                      - --revision
-                      - <immutable-hugging-face-commit-sha>
-                      - --code-revision
-                      - <immutable-hugging-face-code-commit-sha>
-                      - --trust-remote-code
-```
-
-If the generated worker uses `command: [sh, -c]` with one string in `args`, preserve that shape and add the flags
-inside the existing string.
-
 ### Routing
 
 DGDR-generated deployments include a standalone `Frontend` component. That

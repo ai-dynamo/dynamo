@@ -272,8 +272,11 @@ process.
 
 Generated worker arguments can already contain `--trust-remote-code`, including arguments supplied by model-specific
 configuration generation. The flag permits code execution; its presence does not record who approved that execution.
-Before deploying a remote model, inspect the complete generated worker arguments and pin the model to an immutable
-revision. For DGDR deployments, follow the [Remote Model Code](dgdr.md#remote-model-code) review workflow.
+DGDR does not expose first-class fields for remote-code consent or an immutable remote model revision. Do not replace
+DGDR-generated worker arguments to add the flag: `v1beta1` container `args` are atomic, so an override would discard
+profiler-generated settings. When custom model code is required, use a reviewed, pinned
+[local snapshot](model-caching.md#find-the-snapshot-path) or author a reviewed [direct DGD](deployment/create-deployment.md)
+instead.
 
 ## Production Detail: Model Caching
 
