@@ -1889,6 +1889,33 @@ async fn response_format_gemma4_bare_json_stays_content() {
     assert_eq!(content, json);
 }
 
+/// MiniMax append-think is a force-reasoning parser that is not yet proven to
+/// preserve native reasoning before guided JSON. Structured bare JSON should
+/// therefore use the legacy guided-output bypass and remain assistant content.
+#[tokio::test]
+async fn response_format_minimax_append_think_bare_json_stays_content() {
+    let json = r#"{"country":"France","capital":"Paris"}"#;
+    let preprocessor = build_preprocessor(Some("minimax_append_think"), Some("minimax_m2"));
+    let request = streaming_json_schema_request(true);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
+    );
+    assert_eq!(content, json);
+}
+
 /// GPT-OSS/Harmony guided structured output may be emitted as bare JSON from
 /// token 0. The reasoning parser should preserve that JSON as assistant
 /// content instead of dropping it while waiting for Harmony channel markers.

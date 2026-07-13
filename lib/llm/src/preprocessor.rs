@@ -25,7 +25,7 @@ use anyhow::{Result, bail};
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionToolChoiceOption, EncodingFormat, ResponseFormat,
+    ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_renderer::OAIPromptFormatter;
 use dynamo_runtime::error::{DynamoError, ErrorType};
@@ -438,12 +438,7 @@ impl OpenAIPreprocessor {
                 None => true,
             }
         });
-        let is_structured_response = request.response_format().is_some_and(|format| {
-            format
-                .get_attr("type")
-                .ok()
-                .is_some_and(|kind| kind.as_str().is_some_and(|kind| kind != "text"))
-        });
+        let is_structured_response = Self::has_structured_response_format(request);
         if !is_guided_tool_choice
             && !(is_structured_response
                 && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser))
@@ -462,11 +457,13 @@ impl OpenAIPreprocessor {
         !matches!(reasoning_parser, Some("gpt_oss"))
     }
 
-    fn has_structured_response_format(request: &NvCreateChatCompletionRequest) -> bool {
-        matches!(
-            request.inner.response_format,
-            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
-        )
+    fn has_structured_response_format<R: OAIChatLikeRequest>(request: &R) -> bool {
+        request.response_format().is_some_and(|format| {
+            format
+                .get_attr("type")
+                .ok()
+                .is_some_and(|kind| kind.as_str().is_some_and(|kind| kind != "text"))
+        })
     }
 
     /// Match the rendered prompt's reasoning mode before selecting SGLang NativeGrammar.
