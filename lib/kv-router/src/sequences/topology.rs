@@ -110,6 +110,7 @@ pub(super) struct WorkerTable {
 }
 
 impl WorkerTable {
+    /// Creates test worker slots with the default stale-request expiry duration.
     #[cfg(test)]
     pub(super) fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
         Self::new_with_expiry_duration(block_size, dp_range, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION)
@@ -132,6 +133,7 @@ impl WorkerTable {
         Self::new_with_expiry(block_size, dp_range, None)
     }
 
+    /// Builds worker slots from an optional stale-request expiry policy.
     fn new_with_expiry(
         block_size: usize,
         dp_range: &HashMap<u64, (u32, u32)>,

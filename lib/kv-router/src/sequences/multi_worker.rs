@@ -260,7 +260,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// # Panics
     ///
-    /// Panics if `expiry_duration` is zero.
+    /// Panics if `expiry_duration` or `block_size` is zero.
     pub fn new_with_expiry_duration(
         publisher: P,
         block_size: usize,
@@ -312,6 +312,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         )
     }
 
+    /// Builds a tracker from resolved replica-admission and expiry policies.
     fn new_with_options(
         publisher: P,
         block_size: usize,

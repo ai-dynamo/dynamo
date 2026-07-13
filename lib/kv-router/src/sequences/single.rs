@@ -139,6 +139,7 @@ impl ActiveSequences {
         Self::new_with_expiry(block_size, None)
     }
 
+    /// Builds a tracker from an optional stale-request expiry policy.
     fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
 
@@ -714,7 +715,6 @@ mod tests {
         assert!(seq_manager.requests.is_empty());
     }
 
-    /// Verifies that force-expiry honors a custom cleanup duration.
     #[tokio::test(start_paused = true)]
     async fn test_force_expiry() {
         let block_size = 4;
@@ -780,6 +780,7 @@ mod tests {
         seq_manager.assert_consistent();
     }
 
+    /// Verifies that force-expiry honors a custom cleanup duration.
     #[tokio::test(start_paused = true)]
     async fn test_force_expiry_uses_custom_duration() {
         let block_size = 4;
