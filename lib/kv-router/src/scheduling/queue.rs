@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -103,16 +103,21 @@ struct TrackedAdmission {
 #[derive(Default)]
 struct AdmissionCleanup {
     dirty: Mutex<HashMap<String, RequestOutcome>>,
+    pending: AtomicBool,
     notify: Notify,
 }
 
 impl AdmissionCleanup {
     fn enqueue(&self, request_id: String, outcome: RequestOutcome) {
         self.dirty.lock().unwrap().insert(request_id, outcome);
+        self.pending.store(true, AtomicOrdering::Release);
         self.notify.notify_one();
     }
 
     fn drain(&self) -> HashMap<String, RequestOutcome> {
+        if !self.pending.swap(false, AtomicOrdering::AcqRel) {
+            return HashMap::new();
+        }
         std::mem::take(&mut *self.dirty.lock().unwrap())
     }
 }
