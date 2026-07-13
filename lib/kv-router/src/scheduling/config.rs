@@ -52,6 +52,14 @@ const fn default_overlap_score_credit_decay() -> f64 {
     0.0
 }
 
+const fn default_decode_block_guard_frac() -> f64 {
+    1.0
+}
+
+const fn default_max_kv_cache_tokens() -> Option<usize> {
+    None
+}
+
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
     "overlap_score_credit must be between 0.0 and 1.0";
 pub const OVERLAP_SCORE_CREDIT_MIGRATION_ERROR: &str = concat!(
@@ -125,6 +133,30 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
         })
     }
 
+    fn parse_usize(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<usize> {
+        get_env(key).and_then(|value| value.parse().ok())
+    }
+
+    fn parse_dp_rank_list(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<Vec<u32>> {
+        let value = get_env(key)?;
+        let mut ranks = Vec::new();
+        for part in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+            if let Some((start, end)) = part.split_once('-') {
+                let start = start.trim().parse::<u32>().ok()?;
+                let end = end.trim().parse::<u32>().ok()?;
+                if end < start {
+                    return None;
+                }
+                ranks.extend(start..=end);
+            } else {
+                ranks.push(part.parse::<u32>().ok()?);
+            }
+        }
+        ranks.sort_unstable();
+        ranks.dedup();
+        if ranks.is_empty() { None } else { Some(ranks) }
+    }
+
     let mut config = KvRouterConfig::default();
 
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
@@ -176,6 +208,18 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
         config.router_predicted_ttl_secs = Some(value);
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_BLOCK_GUARD_FRAC") {
+        config.decode_block_guard_frac = value;
+    }
+    if let Some(value) = parse_usize(&get_env, "DYN_ROUTER_POOL_LONG_ISL_THRESHOLD") {
+        config.pool_long_isl_threshold = Some(value);
+    }
+    if let Some(value) = parse_dp_rank_list(&get_env, "DYN_ROUTER_POOL_SHORT_DP_RANKS") {
+        config.pool_short_dp_ranks = Some(value);
+    }
+    if let Some(value) = parse_usize(&get_env, "DYN_ROUTER_MAX_KV_CACHE_TOKENS") {
+        config.max_kv_cache_tokens = Some(value);
     }
 
     config
@@ -410,6 +454,10 @@ struct KvRouterConfigSerde {
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
+    decode_block_guard_frac: f64,
+    pool_long_isl_threshold: Option<usize>,
+    pool_short_dp_ranks: Option<Vec<u32>>,
+    max_kv_cache_tokens: Option<usize>,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -444,6 +492,10 @@ impl Default for KvRouterConfigSerde {
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
+            decode_block_guard_frac: config.decode_block_guard_frac,
+            pool_long_isl_threshold: config.pool_long_isl_threshold,
+            pool_short_dp_ranks: config.pool_short_dp_ranks.clone(),
+            max_kv_cache_tokens: config.max_kv_cache_tokens,
         }
     }
 }
@@ -586,6 +638,34 @@ pub struct KvRouterConfig {
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub router_predicted_ttl_secs: Option<f64>,
+
+    /// Fraction of a decode worker's `total_kv_blocks` usable before the router
+    /// stops routing new requests to it (hard memory admission guard).
+    /// 1.0 (default) disables the guard. Only applied to decode workers that
+    /// report `total_kv_blocks`.
+    #[validate(range(min = 0.0, max = 1.0))]
+    #[serde(default = "default_decode_block_guard_frac")]
+    pub decode_block_guard_frac: f64,
+
+    /// ISL (in tokens) at or above which a request is routed to the "long" pool.
+    /// When set together with `pool_short_dp_ranks`, decode dp ranks are split
+    /// into a short pool (the listed ranks) and a long pool (the complement).
+    /// `None` (default) disables length-based pooling.
+    #[serde(default)]
+    pub pool_long_isl_threshold: Option<usize>,
+
+    /// dp_ranks that form the "short" request pool. Requests with
+    /// `isl < pool_long_isl_threshold` are confined to these ranks; longer
+    /// requests go to the complementary ranks. `None` (default) disables pooling.
+    #[serde(default)]
+    pub pool_short_dp_ranks: Option<Vec<u32>>,
+
+    /// Override the max KV cache size (in tokens) used by the memory guard.
+    /// When set, replaces the worker-reported `total_kv_blocks` for guard
+    /// calculations. Useful when the worker-reported value is inaccurate.
+    /// `None` (default) uses the worker-reported value.
+    #[serde(default = "default_max_kv_cache_tokens")]
+    pub max_kv_cache_tokens: Option<usize>,
 }
 
 impl Default for KvRouterConfig {
@@ -620,6 +700,10 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
+            decode_block_guard_frac: default_decode_block_guard_frac(),
+            pool_long_isl_threshold: None,
+            pool_short_dp_ranks: None,
+            max_kv_cache_tokens: default_max_kv_cache_tokens(),
         }
     }
 }
@@ -669,6 +753,10 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
+            decode_block_guard_frac: compat.decode_block_guard_frac,
+            pool_long_isl_threshold: compat.pool_long_isl_threshold,
+            pool_short_dp_ranks: compat.pool_short_dp_ranks,
+            max_kv_cache_tokens: compat.max_kv_cache_tokens,
         })
     }
 }

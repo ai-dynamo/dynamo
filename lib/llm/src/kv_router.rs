@@ -796,6 +796,7 @@ where
                 prefill_load_hint,
                 worker,
                 lora_name,
+                isl_tokens,
             })
             .await
         {

@@ -478,6 +478,7 @@ mod tests {
                     initial_effective_prefill_tokens: 12,
                     expected_prefill_duration: None,
                 }),
+                0,
                 Instant::now(),
             );
             assert_eq!(outcome.membership_delta.stores[0].path, vec![1, 2, 3]);

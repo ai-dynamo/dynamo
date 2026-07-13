@@ -143,6 +143,7 @@ pub struct SequenceRequest {
     pub prefill_load_hint: Option<PrefillLoadHint>,
     pub worker: WorkerWithDpRank,
     pub lora_name: Option<String>,
+    pub isl_tokens: usize,
 }
 
 /// Multi-worker extension of [`ActiveSequences`] with per-worker `parking_lot::RwLock` for
@@ -384,6 +385,137 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.remote_state_update_count.load(Ordering::Relaxed)
     }
 
+    async fn run_replica_sync<S: SequenceSubscriber>(
+        &self,
+        mut subscriber: S,
+        cancel_token: CancellationToken,
+    ) -> anyhow::Result<()> {
+        loop {
+            tokio::select! {
+                result = subscriber.next_event() => {
+                    let Some(result) = result else {
+                        break;
+                    };
+
+                    let Ok(event) = result else {
+                        tracing::error!(
+                            "Error receiving active sequence event: {}",
+                            result.unwrap_err()
+                        );
+                        continue;
+                    };
+
+                    if event.router_id == self.router_id {
+                        continue;
+                    }
+
+                    // TODO: ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
+                    // Peer routers still approximate decay anchoring with local receive time.
+                    let decay_now = Instant::now();
+                    let mut remote_capacity_changed = false;
+                    match &event.data {
+                        ActiveSequenceEventData::AddRequest {
+                            token_sequence,
+                            track_prefill_tokens,
+                            expected_output_tokens,
+                            prefill_load_hint,
+                            isl_tokens,
+                        } => {
+                            self.ensure_worker_registered(event.worker);
+                            let table = self.workers.read();
+                            if let Some(&idx) = table.index.get(&event.worker) {
+                                self.request_index.set_request(
+                                    event.request_id.clone(),
+                                    event.worker,
+                                    event.lora_name.clone(),
+                                );
+                                let (expired_request_ids, load) = {
+                                    let slot = &table.slots[idx];
+                                    let mut seq = slot.sequences.write();
+                                    let outcome = seq.add_request_with_prefill_tracking(
+                                        event.request_id.clone(),
+                                        token_sequence.clone(),
+                                        *expected_output_tokens,
+                                        *track_prefill_tokens,
+                                        *prefill_load_hint,
+                                        *isl_tokens,
+                                        decay_now,
+                                    );
+                                    let load = seq.worker_load_snapshot();
+                                    self.prompt_registry.apply_membership_delta_and_load(
+                                        event.worker,
+                                        &slot.trie_lookup,
+                                        outcome.membership_delta,
+                                        load,
+                                    );
+                                    (outcome.expired_request_ids, load)
+                                };
+                                drop(table);
+                                self.request_index.remove_requests(expired_request_ids.iter());
+                                self.publish_worker_load_snapshot(event.worker, load, decay_now);
+                                continue;
+                            } else {
+                                tracing::warn!(
+                                    "Worker {:?} not found, cannot process AddRequest",
+                                    event.worker
+                                );
+                            }
+                        }
+                        ActiveSequenceEventData::Free => {
+                            if let Some(worker) = self.request_index.remove_request(&event.request_id) {
+                                let table = self.workers.read();
+                                if let Some(&idx) = table.index.get(&worker) {
+                                    let load = {
+                                        let slot = &table.slots[idx];
+                                        let mut seq = slot.sequences.write();
+                                        let delta = seq.free(&event.request_id, decay_now);
+                                        let load = seq.worker_load_snapshot();
+                                        self.prompt_registry.apply_membership_delta_and_load(
+                                            worker,
+                                            &slot.trie_lookup,
+                                            delta,
+                                            load,
+                                        );
+                                        load
+                                    };
+                                    drop(table);
+                                    self.publish_worker_load_snapshot(worker, load, decay_now);
+                                    remote_capacity_changed = true;
+                                }
+                            }
+                        }
+                        ActiveSequenceEventData::MarkPrefillCompleted => {
+                            let worker = self.request_index.worker_for(&event.request_id);
+                            if let Some(worker) = worker {
+                                let table = self.workers.read();
+                                if let Some(&idx) = table.index.get(&worker) {
+                                    {
+                                        let mut seq = table.slots[idx].sequences.write();
+                                        seq.mark_prefill_completed(&event.request_id, decay_now);
+                                        let load = seq.worker_load_snapshot();
+                                        self.prompt_registry.replace_worker_load_state(worker, load);
+                                    }
+                                    drop(table);
+                                    remote_capacity_changed = true;
+                                }
+                            }
+                        }
+                    }
+
+                    if remote_capacity_changed {
+                        let _ = self.remote_state_updates.send(());
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    tracing::debug!("Subscription task cancelled");
+                    break;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Register one worker and reject duplicate worker IDs.
     pub fn register_worker(&self, range: WorkerDpRange) -> Result<(), WorkerTopologyError> {
         let change = {
@@ -527,6 +659,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
                 prefill_load_hint: req.prefill_load_hint,
+                isl_tokens: req.isl_tokens,
             },
             router_id: self.router_id,
             lora_name: req.lora_name.clone(),
@@ -715,6 +848,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.active_blocks()
     }
 
+    /// Query all workers for their current number of active (running) requests, i.e. batch size.
+    pub fn active_requests(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.prompt_registry.active_requests()
+    }
+
+    /// Query all workers for the sum of ISL tokens across their active requests.
+    pub fn active_isl_tokens(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.prompt_registry.active_isl_tokens()
+    }
+
     /// Query all workers for their current number of active tokens.
     pub fn active_tokens(&self, decay_now: Instant) -> HashMap<WorkerWithDpRank, usize> {
         self.prompt_registry.active_tokens(decay_now)
@@ -873,6 +1016,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             prefill_load_hint,
             worker,
             lora_name,
+            isl_tokens,
         } = req;
 
         let mut attempted_lazy_registration = false;
@@ -905,6 +1049,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 expected_output_tokens,
                 track_prefill_tokens,
                 prefill_load_hint,
+                isl_tokens,
                 decay_now,
             );
             let load = seq.worker_load_snapshot();
@@ -1435,6 +1580,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -1603,6 +1749,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker: worker_a,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -1624,6 +1771,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker: worker_b,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -1680,6 +1828,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -1716,6 +1865,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: worker_a,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -1730,6 +1880,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: worker_b,
                     lora_name: Some("adapter-a".to_string()),
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -1776,6 +1927,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: worker_a,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -1790,6 +1942,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: worker_b,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -1848,6 +2001,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 Instant::now(),
             )
@@ -1927,6 +2081,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 Instant::now(),
             )
@@ -1944,6 +2099,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 Instant::now(),
             )
@@ -2208,6 +2364,7 @@ mod tests {
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
                         prefill_load_hint: tracking_hint(12),
+                    isl_tokens: 0,
                     },
                     router_id: 99,
                     lora_name: None,
@@ -2433,6 +2590,7 @@ mod tests {
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
+                    isl_tokens: 0,
                 },
                 router_id: 99,
                 lora_name: None,
@@ -2531,6 +2689,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -2608,6 +2767,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 decay_now,
             )
@@ -2659,6 +2819,7 @@ mod tests {
                     }),
                     worker,
                     lora_name: None,
+                    isl_tokens: 0,
                 },
                 start,
             )
