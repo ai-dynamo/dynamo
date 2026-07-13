@@ -53,8 +53,9 @@ user-facing security boundary.
   references.
 - [ ] **Keep standalone router services private.** The [KV indexer](../components/router/standalone-indexer.md),
   [selection service](../components/router/standalone-selection.md), and
-  [slot tracker](../components/router/standalone-slot-tracker.md) do not authenticate callers. Their tenant fields
-  partition state; they do not establish caller identity.
+  [slot tracker](../components/router/standalone-slot-tracker.md) do not authenticate callers. Their caller-controlled
+  `routing_group` values partition state; they do not establish caller identity. The indexer ignores compatibility
+  `tenant_id` values, and the other services do not support that field.
 - [ ] **Protect KV cache metadata.** KV events contain token IDs and cumulative block hashes. Restrict publishers,
   subscribers, and diagnostic endpoints as described in
   [KV Event Security Considerations](../integrations/kv-events-custom-engines.md#security-considerations).

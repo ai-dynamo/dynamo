@@ -35,8 +35,9 @@ The indexer maintains one radix tree per `(model_name, routing_group)` pair. Wor
 - **`routing_group`** (optional, defaults to `"default"`): Identifies a statically assigned worker pool within the model. Omit it when the model does not need independently selectable pools.
 - **`block_size`** is per-indexer: the first `/register` call for a given `(model_name, routing_group)` sets the block size. Subsequent registrations for the same pair must use the same block size or the request will fail.
 
-`tenant_id` partitions index state but does not authenticate the caller. Set it only from trusted identity metadata
-or isolate mutually untrusted tenants into separate services.
+`routing_group` is caller-controlled state partitioning, not caller authentication. Set it only from trusted identity
+metadata, and isolate mutually untrusted tenants into separate services. The compatibility `tenant_id` input is
+ignored, as described in the [HTTP API](#http-api).
 
 ## Compatibility
 

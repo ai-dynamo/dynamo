@@ -270,13 +270,10 @@ Some Hugging Face models ship custom Python referenced by the `auto_map` field i
 require `--trust-remote-code` to load these models; enabling it permits model-supplied code to execute in the serving
 process.
 
-For DGDR-generated vLLM and SGLang deployments, the profiler automatically adds this flag only when the resolved
-model path is a local directory, including a PVC-mounted snapshot. It refuses automatic injection for mutable remote
-Hugging Face model IDs and reports an error that requires explicit opt-in.
-
-To opt in for a remote model, add `--trust-remote-code` to the worker arguments using
-[generated DGD overrides](dgdr.md#generated-dgd-overrides). Review and pin the exact model revision before enabling
-remote code.
+Generated worker arguments can already contain `--trust-remote-code`, including arguments supplied by model-specific
+configuration generation. The flag permits code execution; its presence does not record who approved that execution.
+Before deploying a remote model, inspect the complete generated worker arguments and pin the model to an immutable
+revision. For DGDR deployments, follow the [Remote Model Code](dgdr.md#remote-model-code) review workflow.
 
 ## Production Detail: Model Caching
 
