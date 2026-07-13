@@ -27,6 +27,7 @@ use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
 };
+use crate::router_hint::RouterHintRootCandidates;
 
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
@@ -168,6 +169,7 @@ impl LowerTierContinuation {
 pub struct LowerTierMatchDetails {
     pub hits: FxHashMap<WorkerWithDpRank, usize>,
     pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
+    pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
 }
 
 /// Standalone lower-tier continuation index.
@@ -335,34 +337,73 @@ impl LowerTierIndexer {
             .unwrap_or_default()
     }
 
-    /// Walk the edge chain owned by `worker` starting from `parent_hash`,
-    /// returning each step's child block hash in order. The result may be
-    /// shorter than `local_hashes` if the source evicts blocks while the
-    /// router is preparing a hint.
-    pub fn chain_block_hashes_for_worker(
+    pub fn root_chain_candidates(
         &self,
-        worker: WorkerWithDpRank,
-        parent_hash: Option<ExternalSequenceBlockHash>,
         local_hashes: &[LocalBlockHash],
-    ) -> Vec<ExternalSequenceBlockHash> {
+    ) -> Option<RouterHintRootCandidates> {
+        let mut current_parent = None;
+        let mut active: Option<WorkerSet> = None;
         let mut chain = Vec::with_capacity(local_hashes.len());
-        let mut current_parent = parent_hash;
+        let mut owner_prefix_blocks = FxHashMap::default();
+
         for &local_hash in local_hashes {
             let key = TransitionKey {
                 parent_hash: current_parent,
                 local_hash,
             };
             let Some(edge) = self.edges.get(&key) else {
+                if let Some(active) = active.take() {
+                    for worker in active {
+                        owner_prefix_blocks.insert(worker, chain.len());
+                    }
+                }
                 break;
             };
-            if !edge.contains(&worker) {
+
+            let next_active = match active.take() {
+                Some(active_workers) => {
+                    let mut next_active = WorkerSet::default();
+                    for worker in active_workers {
+                        if edge.contains(&worker) {
+                            next_active.insert(worker);
+                        } else if !chain.is_empty() {
+                            owner_prefix_blocks.insert(worker, chain.len());
+                        }
+                    }
+                    next_active
+                }
+                None => edge.collect_workers().into_iter().collect(),
+            };
+
+            if next_active.is_empty() {
                 break;
             }
+
             let child_hash = edge.child_hash();
             chain.push(child_hash);
             current_parent = Some(child_hash);
+            active = Some(next_active);
         }
-        chain
+
+        if let Some(active) = active {
+            for worker in active {
+                owner_prefix_blocks.insert(worker, chain.len());
+            }
+        }
+
+        let mut owner_prefix_blocks: Vec<_> = owner_prefix_blocks
+            .into_iter()
+            .filter(|(_, blocks)| *blocks > 0)
+            .collect();
+        if chain.is_empty() || owner_prefix_blocks.is_empty() {
+            return None;
+        }
+        owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
+
+        Some(RouterHintRootCandidates {
+            kv_block_hashes: chain,
+            owner_prefix_blocks,
+        })
     }
 
     /// Reconstruct store events from the per-worker block index. Each block
@@ -932,23 +973,33 @@ mod tests {
     }
 
     #[test]
-    fn chain_block_hashes_for_worker_returns_external_hashes() {
+    fn root_chain_candidates_record_owner_prefix_lengths() {
         let mut index = TestLowerTierIndex::new();
-        let worker = WorkerWithDpRank::new(7, 0);
         index
             .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
             .unwrap();
+        index
+            .apply_event(store_event(8, 0, 1, None, &[11, 12, 13], &[101, 102, 103]))
+            .unwrap();
 
-        let chain =
-            index
-                .index
-                .chain_block_hashes_for_worker(worker, None, &local_hashes(&[11, 12]));
+        let candidates = index
+            .index
+            .root_chain_candidates(&local_hashes(&[11, 12, 13, 14]))
+            .unwrap();
 
         assert_eq!(
-            chain,
+            candidates.kv_block_hashes,
             vec![
                 ExternalSequenceBlockHash(101),
-                ExternalSequenceBlockHash(102)
+                ExternalSequenceBlockHash(102),
+                ExternalSequenceBlockHash(103),
+            ]
+        );
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![
+                (WorkerWithDpRank::new(7, 0), 2),
+                (WorkerWithDpRank::new(8, 0), 3)
             ]
         );
     }

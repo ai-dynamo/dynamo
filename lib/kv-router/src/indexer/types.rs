@@ -195,9 +195,8 @@ impl From<WireOverlapScores> for OverlapScores {
 
 /// Wire-friendly lower-tier match payload for JSON serialization.
 ///
-/// Mirrors `LowerTierMatchDetails.hits`. `next_continuations` is server-side
-/// intermediate state (used only while walking the tier chain) and is not
-/// carried over the wire.
+/// Mirrors `LowerTierMatchDetails.hits`. `next_continuations` and router hint
+/// candidates are server-side intermediate state and are not carried over the wire.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct WireLowerTierMatchDetails {
     pub hits: Vec<(WorkerWithDpRank, usize)>,
@@ -219,6 +218,7 @@ impl From<WireLowerTierMatchDetails> for super::lower_tier::LowerTierMatchDetail
         Self {
             hits: w.hits.into_iter().collect(),
             next_continuations: Default::default(),
+            router_hint_root_candidates: None,
         }
     }
 }

@@ -11,10 +11,10 @@ use dynamo_kv_router::{
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
-        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        RouterRequest, RouterResponse, RoutingConstraints, StorageTier, TokensWithHashes,
+        WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
-    router_hint::{RouterHint, RouterHintSourceSelectionInput, select_router_hint_source},
+    router_hint::{RouterHint, RouterHintRootCandidates},
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
@@ -69,7 +69,9 @@ use crate::{
     },
     local_model::runtime_config::ModelRuntimeConfig,
 };
-use route_lookup::{TieredLookupResult, query_tiered_matches, split_retained_block_hashes};
+use route_lookup::{
+    TieredLookupOptions, TieredLookupResult, query_tiered_matches, split_retained_block_hashes,
+};
 
 pub enum FindBestMatchOutcome {
     Routed {
@@ -405,73 +407,41 @@ where
 
     fn router_hint_for_selection(
         &self,
-        request_id: Option<&str>,
         target: WorkerWithDpRank,
-        local_block_hashes: Option<&[LocalBlockHash]>,
-        tiered_matches: &indexer::TieredMatchDetails,
+        candidates: Option<&RouterHintRootCandidates>,
     ) -> Option<RouterHint> {
         if !self.kv_router_config.router_hints {
             return None;
         }
-        let local_block_hashes = local_block_hashes?;
+        let candidates = candidates?;
 
-        let (selected, source_control_endpoint) = {
+        let (kv_block_hashes, source_control_endpoint) = {
             let configs = self.workers_with_configs.borrow();
             let target_config = configs.get(&target.worker_id)?;
             if !target_config.supports_router_hints() {
                 return None;
             }
 
-            let selected = select_router_hint_source(RouterHintSourceSelectionInput {
-                target,
-                local_block_hashes,
-                tiered_matches,
+            let (source, kv_block_hashes) = candidates.best_source(|worker| {
+                worker != target
+                    && configs.get(&worker.worker_id).is_some_and(|config| {
+                        config.router_hint_source_control_endpoint().is_some()
+                    })
             })?;
             let source_control_endpoint = configs
-                .get(&selected.source.worker_id)?
+                .get(&source.worker_id)?
                 .router_hint_source_control_endpoint()?
                 .to_string();
-            (selected, source_control_endpoint)
+            (kv_block_hashes, source_control_endpoint)
         };
 
-        let source_start = selected.source_start_block_index as usize;
-        let hint_start = selected.start_block_index as usize;
-        let hint_blocks = selected.planned_prefix_blocks as usize;
-        let hint_end = hint_start.checked_add(hint_blocks)?;
-        if source_start > hint_start || hint_end > local_block_hashes.len() {
-            return None;
-        }
-
-        let parent_hash = if source_start == 0 {
-            None
-        } else {
-            Some(
-                *tiered_matches
-                    .device
-                    .last_matched_hashes
-                    .get(&selected.source)?,
-            )
-        };
-        let chain = self.indexer.chain_block_hashes_for_host_pinned(
-            selected.source,
-            parent_hash,
-            &local_block_hashes[source_start..hint_end],
-        );
-        let offset = hint_start - source_start;
-        if chain.len() <= offset {
-            return None;
-        }
-        let available_blocks = chain.len() - offset;
-        let planned_blocks = hint_blocks.min(available_blocks);
-        if planned_blocks == 0 {
+        if kv_block_hashes.is_empty() {
             return None;
         }
 
         Some(RouterHint {
-            request_id: request_id.unwrap_or_default().to_string(),
             source_control_endpoint,
-            kv_block_hashes: chain[offset..offset + planned_blocks].to_vec(),
-            start_block_index: selected.start_block_index,
+            kv_block_hashes,
         })
     }
 
@@ -633,10 +603,6 @@ where
 
         let block_hashes = tracing::info_span!("kv_router.compute_block_hashes")
             .in_scope(|| compute_block_hash_for_seq(tokens, self.block_size, hash_options));
-        let router_hint_block_hashes = self
-            .kv_router_config
-            .router_hints
-            .then(|| block_hashes.clone());
         log_routing_input_hashes(context_id, self.block_size, tokens, &block_hashes);
         let hash_elapsed = start.elapsed();
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
@@ -652,8 +618,7 @@ where
         let seq_hash_elapsed = start.elapsed();
 
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
-        let retain_block_hashes =
-            supports_overlap_refresh || return_routing_hashes || self.kv_router_config.router_hints;
+        let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
 
         let TieredLookupResult {
             tiered_matches,
@@ -667,8 +632,11 @@ where
             tokens,
             self.block_size,
             block_hashes,
-            cache_namespace.as_deref(),
-            retain_block_hashes,
+            TieredLookupOptions {
+                cache_namespace: cache_namespace.as_deref(),
+                retain_block_hashes,
+                retain_router_hint_chain: self.kv_router_config.router_hints,
+            },
         )
         .await?;
 
@@ -731,12 +699,12 @@ where
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
-        let router_hint = self.router_hint_for_selection(
-            context_id,
-            response.best_worker,
-            router_hint_block_hashes.as_deref(),
-            &tiered_matches,
-        );
+        let router_hint_root_candidates = tiered_matches
+            .lower_tier
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref());
+        let router_hint =
+            self.router_hint_for_selection(response.best_worker, router_hint_root_candidates);
 
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);

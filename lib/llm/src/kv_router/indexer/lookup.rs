@@ -4,12 +4,10 @@
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     indexer::{
-        KvIndexer, KvRouterError, LowerTierIndexers, MatchDetails, ThreadPoolIndexer,
-        TieredMatchProvider, query_lower_tiers,
+        KvIndexer, KvRouterError, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
+        ThreadPoolIndexer, TieredMatchProvider, query_lower_tiers_with_options,
     },
-    protocols::{
-        ExternalSequenceBlockHash, LocalBlockHash, OverlapScores, StorageTier, WorkerWithDpRank,
-    },
+    protocols::{LocalBlockHash, OverlapScores},
 };
 use dynamo_runtime::pipeline::async_trait;
 
@@ -116,8 +114,17 @@ impl Indexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_by_tier_with_options(sequence, LowerTierQueryOptions::default())
+            .await
+    }
+
+    pub(crate) async fn find_matches_by_tier_with_options(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        lower_tier_options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
         self.lookup_pipeline()
-            .find_matches_by_tier(HashInput::Owned(sequence))
+            .find_matches_by_tier(HashInput::Owned(sequence), lower_tier_options)
             .await
     }
 
@@ -125,27 +132,18 @@ impl Indexer {
         &self,
         sequence: &[LocalBlockHash],
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        self.lookup_pipeline()
-            .find_matches_by_tier(HashInput::Borrowed(sequence))
+        self.find_matches_by_tier_ref_with_options(sequence, LowerTierQueryOptions::default())
             .await
     }
 
-    pub(crate) fn chain_block_hashes_for_host_pinned(
+    pub(crate) async fn find_matches_by_tier_ref_with_options(
         &self,
-        worker: WorkerWithDpRank,
-        parent_hash: Option<ExternalSequenceBlockHash>,
-        local_hashes: &[LocalBlockHash],
-    ) -> Vec<ExternalSequenceBlockHash> {
-        let lower_tier = match self {
-            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => lower_tier,
-            Self::Remote { .. } | Self::None => return Vec::new(),
-        };
-        let Some(indexer) = lower_tier.get(StorageTier::HostPinned) else {
-            return Vec::new();
-        };
-        indexer
-            .backend()
-            .chain_block_hashes_for_worker(worker, parent_hash, local_hashes)
+        sequence: &[LocalBlockHash],
+        lower_tier_options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.lookup_pipeline()
+            .find_matches_by_tier(HashInput::Borrowed(sequence), lower_tier_options)
+            .await
     }
 
     pub(crate) async fn find_primary_matches_by_tier(
@@ -192,6 +190,7 @@ impl<'a> LookupPipeline<'a> {
     async fn find_matches_by_tier(
         &self,
         sequence: HashInput<'_>,
+        lower_tier_options: LowerTierQueryOptions,
     ) -> Result<TieredMatchDetails, KvRouterError> {
         match self.primary {
             PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
@@ -204,7 +203,12 @@ impl<'a> LookupPipeline<'a> {
                 // hits and break the score/hash lockstep `query_lower_tiers`
                 // expects.
                 let primary_device = self.primary.find_match_details_retained(&sequence).await?;
-                let lt = query_lower_tiers(lower_tier, sequence.as_slice(), &primary_device);
+                let lt = query_lower_tiers_with_options(
+                    lower_tier,
+                    sequence.as_slice(),
+                    &primary_device,
+                    lower_tier_options,
+                );
                 let device = merge_side_or_warn(self.side, primary_device, sequence).await;
 
                 Ok(TieredMatchDetails {
@@ -246,7 +250,12 @@ impl<'a> LookupPipeline<'a> {
                     return Ok(TieredMatchDetails::default());
                 };
                 let device = self.primary.find_match_details_retained(&sequence).await?;
-                let lt = query_lower_tiers(lower_tier, sequence.as_slice(), &device);
+                let lt = query_lower_tiers_with_options(
+                    lower_tier,
+                    sequence.as_slice(),
+                    &device,
+                    LowerTierQueryOptions::default(),
+                );
                 Ok(TieredMatchDetails {
                     device,
                     lower_tier: lt,
