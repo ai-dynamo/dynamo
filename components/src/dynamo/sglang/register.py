@@ -152,6 +152,7 @@ async def _register_model_with_runtime_config(
         else None
     )
 
+    aliases = list(getattr(dynamo_args, "served_model_aliases", []) or [])
     try:
         await register_model(
             input_type,
@@ -168,6 +169,7 @@ async def _register_model_with_runtime_config(
             needs=needs,
             ignore_weights=use_modelexpress_remote_instance(server_args),
             max_gpu_lora_count=max_gpu_lora_count,
+            model_aliases=aliases or None,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True

@@ -874,6 +874,11 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora: Option<LoraInfo>,
 
+    /// Additional names this model responds to (aliases).
+    /// Requests using any of these names will be routed to this worker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
@@ -1092,6 +1097,25 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
 
+                // Aliases participate in the checksum. Every worker in a
+                // deployment carries the same static --served-model-name list,
+                // so their checksums still match and they share one WorkerSet;
+                // changing the alias list rolls a new WorkerSet (consistent per
+                // set) rather than mutating a live one in place. `aliases` holds
+                // only the alternate names (the primary is `display_name`, hashed
+                // above), so order within the list still matters — hash in order.
+                // Skipped entirely when empty so a card without aliases keeps the
+                // same checksum as before this field existed (no spurious
+                // WorkerSet split on upgrade); this is the last hashed field, so
+                // omission is unambiguous.
+                if !self.aliases.is_empty() {
+                    bytes_to_hash.extend((self.aliases.len() as u32).to_be_bytes());
+                    for alias in &self.aliases {
+                        bytes_to_hash.extend((alias.len() as u32).to_be_bytes());
+                        bytes_to_hash.extend(alias.as_bytes());
+                    }
+                }
+
                 // TODO: Do we want any of user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
@@ -1281,6 +1305,11 @@ impl ModelDeploymentCard {
 
     pub fn source_path(&self) -> &str {
         self.source_path.as_ref().unwrap_or(&self.display_name)
+    }
+
+    /// Set additional names (aliases) this model responds to.
+    pub fn set_aliases(&mut self, aliases: Vec<String>) {
+        self.aliases = aliases;
     }
 
     /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
@@ -1627,6 +1656,7 @@ impl ModelDeploymentCard {
             worker_type: Default::default(), // set later
             needs: Default::default(),       // set later
             lora: None,
+            aliases: Vec::new(),
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
             tensor_model_config: None,

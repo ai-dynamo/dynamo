@@ -18,6 +18,10 @@ on:
 
 permissions:
   contents: read
+  # Lets the build jobs' compliance-extract download a PRIOR run's baseline
+  # compliance artifact (cross-run) to diff the OSRB CSV against. A reusable
+  # workflow's token can't exceed the caller's, so this must be granted here.
+  actions: read
 
 jobs:
   # ============================================================================
@@ -187,6 +191,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
@@ -225,6 +233,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
@@ -244,6 +256,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
@@ -282,6 +298,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
@@ -301,6 +321,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
@@ -339,6 +363,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
