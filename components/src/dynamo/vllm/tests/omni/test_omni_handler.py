@@ -42,6 +42,7 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.enable_lora = False  # Disable LoRA for tests unless explicitly set
     handler.config = config
 
     defaults = []
@@ -66,6 +67,10 @@ def _make_handler(stage_types=("diffusion",)):
     handler.loaded_loras = handler._lora_state.loaded_loras
     handler._lora_load_locks = handler._lora_state.lora_load_locks
     handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard
+
+    # Add attributes required by _resolve_lora_request() (called by _resolve_and_apply_lora)
+    handler._served_model_name = config.served_model_name or config.model
+    handler.engine_args = SimpleNamespace(model=config.model)
 
     return handler
 
