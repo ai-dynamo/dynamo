@@ -81,7 +81,7 @@ packages:
   # and copied into vllm/sglang runtime (container/templates/vllm_runtime.Dockerfile
   # + sglang_runtime.Dockerfile). Replaces the purged GPL apt ffmpeg.
   - name: ffmpeg
-    version: "8.1"
+    version: "8.1.2"
     license: LGPL-2.1-or-later
     source: https://ffmpeg.org/
     images:
