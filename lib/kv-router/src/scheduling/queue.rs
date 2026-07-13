@@ -579,6 +579,9 @@ impl<
     }
 
     pub(crate) fn cancellation_guard(&self, request_id: Option<&str>) -> Option<AdmissionLease> {
+        if !self.queueing_enabled {
+            return None;
+        }
         let request_id = request_id?.to_owned();
         Some(AdmissionLease {
             cleanup: Arc::clone(&self.cleanup),
@@ -2584,6 +2587,13 @@ policy_classes:
             self.events.fetch_add(1, Ordering::Relaxed);
             Vec::new()
         }
+    }
+
+    #[tokio::test]
+    async fn disabled_queueing_has_no_cancellation_lease() {
+        let (queue, _slots) = make_queue(1, 16, 64, None);
+
+        assert!(queue.cancellation_guard(Some("default-path")).is_none());
     }
 
     #[tokio::test]
