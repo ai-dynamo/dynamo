@@ -999,15 +999,18 @@ impl<
         let mut ready_by_class: HashMap<usize, FxHashSet<_>> = HashMap::new();
         let mut unmanaged_request_ids = FxHashSet::default();
         for (request_id, outcome) in dirty {
-            let owned_request_id = request_id.clone();
-            if self.slots.request_worker(&owned_request_id).is_some() {
-                if let Err(error) = self.slots.free(&owned_request_id, Instant::now()) {
-                    tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
+            let tracked = self.tracked_admissions.get(&request_id).copied();
+            if tracked.is_none_or(|tracked| tracked.worker.is_some()) {
+                let owned_request_id = request_id.clone();
+                if self.slots.request_worker(&owned_request_id).is_some() {
+                    if let Err(error) = self.slots.free(&owned_request_id, Instant::now()) {
+                        tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
+                    }
+                    made_ready = true;
                 }
-                made_ready = true;
             }
 
-            let Some(tracked) = self.tracked_admissions.get(&request_id).copied() else {
+            let Some(tracked) = tracked else {
                 unmanaged_request_ids.insert(request_id);
                 continue;
             };
