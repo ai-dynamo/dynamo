@@ -13,7 +13,9 @@ use vllm_engine_core_client::protocol::{
     logprobs::Logprobs as VllmLogprobs,
     output::StopReason as VllmStopReason,
     sampling::EngineCoreSamplingParams,
-    structured_outputs::{StructuredOutputConstraint, StructuredOutputOptions, StructuredOutputsParams},
+    structured_outputs::{
+        StructuredOutputConstraint, StructuredOutputOptions, StructuredOutputsParams,
+    },
 };
 use vllm_llm::{FinishReason as VllmFinishReason, GenerateOutput, GenerateRequest};
 
@@ -254,7 +256,9 @@ fn structured_outputs_from_guided_decoding(
         StructuredOutputConstraint::Choice(choice)
     } else if let Some(grammar) = guided.grammar.clone() {
         StructuredOutputConstraint::Grammar(grammar)
-    } else if let Some(structural_tag) = guided.structural_tag.as_ref().map(structural_tag_to_string) {
+    } else if let Some(structural_tag) =
+        guided.structural_tag.as_ref().map(structural_tag_to_string)
+    {
         StructuredOutputConstraint::StructuralTag(structural_tag)
     } else {
         StructuredOutputConstraint::JsonObject
