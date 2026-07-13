@@ -21,6 +21,10 @@ on:
         description: 'Build and push the matching snapshot agent'
         type: boolean
         default: false
+      build_gms_loader_experiment:
+        description: 'Build the experimental GMS loader overlay'
+        type: boolean
+        default: false
       build_sglang:
         description: 'Build and push sglang image, tagged with branch name'
         type: boolean
@@ -273,6 +277,51 @@ jobs:
             CUDA_CHECKPOINT_REF=00d5cce84c628088d6caa203fc4af40c1538b6f7
             CUDA_CHECKPOINT_SHA=00d5cce84c628088d6caa203fc4af40c1538b6f7
 
+  gms-loader-experiment:
+    name: Experimental GMS Loader
+    needs: [init]
+    if: inputs.build_gms_loader_experiment
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
+        with:
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          flavor: general
+          arch: linux/amd64
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build and push experimental GMS loader
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ github.sha }}-gms-loader-experiment-run-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          image="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${IMAGE_TAG}"
+          docker buildx build \
+            --push \
+            --platform linux/amd64 \
+            --tag "${image}" \
+            --file deploy/gms-loader-experiment/Dockerfile \
+            .
+          {
+            echo "### Experimental GMS Loader"
+            echo
+            echo "| Image URI |"
+            echo "|-----|"
+            echo "| \`${image}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   snapshot-placeholder-vllm:
     name: vLLM Snapshot Placeholder
     needs: [init, vllm-copy-to-acr]
@@ -379,7 +428,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-base-sbom, vllm-build, vllm-copy-to-acr, sglang-build, sglang-copy-to-acr, trtllm-build, trtllm-copy-to-acr, snapshot-agent, snapshot-placeholder-vllm, operator]
+    needs: [init, vllm-base-sbom, vllm-build, vllm-copy-to-acr, sglang-build, sglang-copy-to-acr, trtllm-build, trtllm-copy-to-acr, snapshot-agent, snapshot-placeholder-vllm, gms-loader-experiment, operator]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
