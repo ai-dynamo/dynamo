@@ -137,7 +137,7 @@ W0 wins because it combines device-local reuse with shared-pool hits beyond that
 ## Requirements
 
 <Info>
-Tier-aware shared cache routing requires SGLang 0.5.11 or later. SGLang 0.5.11 includes [sgl-project/sglang#22894](https://github.com/sgl-project/sglang/pull/22894) ("fix(hicache): emit KV events for L2 host cache insertions"), which adds the host-tier KV events used by the router. The Dynamo 1.3.0 SGLang runtime image ships with SGLang 0.5.14 and satisfies this requirement.
+Tier-aware shared cache routing requires SGLang 0.5.11 or later. SGLang 0.5.11 includes [sgl-project/sglang#22894](https://github.com/sgl-project/sglang/pull/22894) ("fix(hicache): emit KV events for L2 host cache insertions"), which adds the host-tier KV events used by the router. The Dynamo 1.3.0 SGLang runtime image ships with SGLang 0.5.15 and satisfies this requirement.
 </Info>
 
 Earlier SGLang versions do not emit `medium=CPU_PINNED` for Host-tier residency, so the router can only track GPU events regardless of Mooncake configuration.
