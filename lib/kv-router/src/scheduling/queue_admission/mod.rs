@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use rustc_hash::FxHashSet;
 use serde::Deserialize;
-use serde_yaml::Mapping;
 
 use crate::protocols::WorkerWithDpRank;
 
@@ -190,15 +189,15 @@ pub enum AdmissionAction {
 ///
 /// The host calls [`Self::admit`] exactly once for each tracked request, using
 /// a unique ID. A bypassed request receives no lifecycle events. A ready
-/// request may receive one `Dispatched` event and every tracked request
-/// receives exactly one terminal `Completed` or `Aborted` event while the host
-/// remains alive. A deferred request receives no `Dispatched` event until the
-/// first valid `MakeReady` action is accepted. Duplicate or unknown actions
-/// are ignored. While any request is deferred, `Reconcile` is delivered at
-/// least once per configured queue recheck interval and may also be delivered
-/// after lifecycle or capacity changes. Host shutdown drops the strategy and
-/// its requests together, so no terminal events are delivered after shutdown
-/// begins.
+/// request may receive one `Dispatched` event. Every request that returns
+/// `Ready` or `Defer` receives exactly one terminal `Completed` or `Aborted`
+/// event while the host remains alive. A deferred request receives no
+/// `Dispatched` event until the first valid `MakeReady` action is accepted.
+/// Duplicate or unknown actions are ignored. While any request is deferred,
+/// `Reconcile` is delivered at least once per configured queue recheck
+/// interval and may also be delivered after lifecycle or capacity changes.
+/// Host shutdown drops the strategy and its requests together, so no terminal
+/// events are delivered after shutdown begins.
 pub trait PolicyClassAdmissionStrategy: Send {
     fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision;
 
@@ -206,18 +205,17 @@ pub trait PolicyClassAdmissionStrategy: Send {
         Vec::new()
     }
 
-    /// Maximum time requested between reconciliation opportunities.
+    /// Maximum time requested between reconciliation opportunities. A returned
+    /// interval must be nonzero.
     fn reconcile_interval(&self) -> Option<Duration> {
         None
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct QueueAdmissionConfig {
-    #[serde(rename = "type")]
-    pub strategy: String,
-    #[serde(flatten)]
-    pub options: Mapping,
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QueueAdmissionConfig {
+    SessionAware {},
 }
 
 #[cfg(test)]

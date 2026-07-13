@@ -19,5 +19,5 @@ The public contract in `lib/kv-router/src/scheduling/queue_admission/` is the na
 - A strategy owns algorithm state only. It must not own `SchedulingRequest`, request payloads, queue ordering, worker slots, or final selection.
 - Exact placement constrains the existing selector; it does not bypass structural validation, scoring, or booking.
 - Add request facts as typed accessors only after a concrete strategy proves they are necessary. Expose changing system state through a narrow read-only capability instead of copying actor state or adding an untyped metadata bag.
-- Keep algorithm-specific configuration in flattened `QueueAdmissionConfig::options`; the generic router validates only the strategy name and container shape.
+- Land algorithm-specific configuration and its concrete registration atomically; configuration must not accept strategy names or options that no composition root can validate.
 - This is a Rust dependency-inversion boundary, not a stable dynamic-plugin ABI. Built-in implementations should live outside `dynamo-kv-router` and use explicit registration at a composition root.

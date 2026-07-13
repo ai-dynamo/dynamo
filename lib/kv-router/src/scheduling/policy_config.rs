@@ -454,9 +454,6 @@ fn resolve_policy_class(
             raw.name
         )));
     }
-    if let Some(admission) = &raw.queue_admission {
-        validate_identifier(&admission.strategy, "queue admission strategy", location)?;
-    }
     if raw
         .prefill_busy_threshold_frac
         .is_some_and(|value| !value.is_finite() || value < 0.0)
@@ -693,7 +690,7 @@ models:
     }
 
     #[test]
-    fn accepts_generic_queue_admission_config() {
+    fn accepts_session_aware_admission() {
         let config = RouterPolicyConfig::from_yaml(
             r#"
 default_policy_family: standard
@@ -709,7 +706,6 @@ policy_classes:
     queue_policy: wspt
     queue_admission:
       type: session_aware
-      pause_threshold: 0.7
     quantum: 1
 "#,
         )
@@ -717,9 +713,10 @@ policy_classes:
 
         let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
         let agents = profile.class(profile.resolve_class_index(Some("agents"), 0));
-        let admission = agents.queue_admission.as_ref().unwrap();
-        assert_eq!(admission.strategy, "session_aware");
-        assert_eq!(admission.options["pause_threshold"], 0.7);
+        assert!(matches!(
+            agents.queue_admission,
+            Some(QueueAdmissionConfig::SessionAware {})
+        ));
     }
 
     #[test]
@@ -755,9 +752,16 @@ policy_classes:
     }
 
     #[test]
-    fn rejects_invalid_queue_admission_strategy_name() {
-        let error = RouterPolicyConfig::from_yaml(
-            r#"
+    fn rejects_unknown_queue_admission_config() {
+        for (admission, expected) in [
+            ("type: misspelled", "unknown variant"),
+            (
+                "type: session_aware\n      pause_threshold: 0.7",
+                "unknown field `pause_threshold`",
+            ),
+        ] {
+            let yaml = format!(
+                r#"
 default_policy_family: standard
 uncached_isl_buckets:
   - min_tokens: 0
@@ -767,17 +771,13 @@ policy_classes:
     policy_family: standard
     cache_bucket: all
     queue_admission:
-      type: ""
+      {admission}
     quantum: 1
-"#,
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("queue admission strategy name \"\" must match"),
-            "{error}"
-        );
+"#
+            );
+            let error = RouterPolicyConfig::from_yaml(&yaml).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]
