@@ -72,7 +72,8 @@ fn request_conversion_forwards_sampling_routing_and_stopping() {
         cache_namespace: Some("tenant".to_string()),
         ..Default::default()
     });
-    let converted = convert::build_generate_request(&request, "r1", "served", false).unwrap();
+    let converted =
+        convert::build_generate_request(&request, "r1", "served", false, false).unwrap();
     assert_eq!(converted.model, "served");
     assert_eq!(converted.priority, Some(9));
     assert_eq!(converted.lora_name, "adapter");
@@ -102,11 +103,12 @@ fn multimodal_order_and_media_options_follow_original_messages() {
         "messages": [{"content": [
             {"type": "audio_url", "audio_url": {"url": "ignored"}},
             {"type": "image_url", "image_url": {"url": "ignored"}}
-        ]}]
+        ]}],
+        "formatted_prompt": "<audio><image>describe them"
     }));
     request.mm_processor_kwargs = Some(serde_json::json!({"num_frames": 8}));
 
-    let converted = convert::build_generate_request(&request, "r1", "served", false).unwrap();
+    let converted = convert::build_generate_request(&request, "r1", "served", false, true).unwrap();
     assert_eq!(
         pb::Modality::try_from(converted.media[0].modality).unwrap(),
         pb::Modality::Audio
@@ -118,6 +120,17 @@ fn multimodal_order_and_media_options_follow_original_messages() {
     assert!(matches!(
         converted.media[0].source,
         Some(pb::media_item::Source::DataUri(_))
+    ));
+    assert!(matches!(
+        converted.input,
+        Some(pb::generate_request::Input::Prompt(ref prompt))
+            if prompt == "<audio><image>describe them"
+    ));
+    let token_only =
+        convert::build_generate_request(&request, "r2", "served", false, false).unwrap();
+    assert!(matches!(
+        token_only.input,
+        Some(pb::generate_request::Input::TokenIds(_))
     ));
     let options = convert::prost_struct_to_json(converted.media_options.as_ref().unwrap());
     assert_eq!(options["audio"]["num_frames"], 8);
@@ -144,7 +157,7 @@ fn decoded_media_fails_closed() {
         "image_url".to_string(),
         vec![MultimodalData::Decoded(descriptor)],
     )]));
-    assert!(convert::build_generate_request(&request, "r1", "m", false).is_err());
+    assert!(convert::build_generate_request(&request, "r1", "m", false, false).is_err());
 }
 
 #[test]
@@ -159,7 +172,8 @@ fn decode_handoff_preserves_media_and_media_options_for_mrope() {
         disaggregated_params: trt_handoff(2, "42", None),
         prompt_tokens_details: None,
     });
-    let converted = convert::build_generate_request(&request, "r1", "served", false).unwrap();
+    let converted =
+        convert::build_generate_request(&request, "r1", "served", false, false).unwrap();
     assert_eq!(converted.media.len(), 1);
     assert!(converted.media_options.is_some());
     assert_eq!(converted.kv.unwrap().session.unwrap().session_id, "ctx");
@@ -273,7 +287,8 @@ fn token_delta_preserves_text_logprobs_and_output_index() {
 
 #[test]
 fn runtime_trace_metadata_is_merged_into_generate_request() {
-    let mut converted = convert::build_generate_request(&request(), "r1", "served", false).unwrap();
+    let mut converted =
+        convert::build_generate_request(&request(), "r1", "served", false, false).unwrap();
     convert::merge_context_metadata(
         &mut converted,
         &BTreeMap::from([
@@ -338,6 +353,7 @@ impl Default for FakeState {
                 model_id: "model".into(),
                 served_model_name: "model".into(),
                 supports_token_ids_input: Some(true),
+                supports_text_input: Some(true),
                 supports_lora: Some(true),
                 kv_block_size: Some(16),
                 generation: Some(pb::GenerationCapabilities {
@@ -849,7 +865,7 @@ async fn fake_tonic_server_discovery_and_aggregate_stream() {
     use futures::StreamExt;
 
     let state = Arc::new(FakeState::default());
-    let server = FakeServer::start(state).await;
+    let server = FakeServer::start(state.clone()).await;
     let (engine, config) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
     assert_eq!(config.model_name, "model");
     let started = engine.start(1).await.unwrap();
@@ -868,6 +884,40 @@ async fn fake_tonic_server_discovery_and_aggregate_stream() {
     let terminal = outputs[1].as_ref().unwrap();
     assert!(terminal.finish_reason.is_some());
     assert_eq!(terminal.completion_usage.as_ref().unwrap().total_tokens, 4);
+
+    // Some multimodal processors (notably Phi-4 audio) require the rendered
+    // text prompt so they can expand media placeholders. Preserve it when the
+    // frontend supplies it instead of forcing token-only input.
+    let mut multimodal = request();
+    multimodal.multi_modal_data = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl("https://host/image.png".to_string())],
+    )]));
+    multimodal.extra_args = Some(serde_json::json!({
+        "messages": [{"content": [
+            {"type": "image_url", "image_url": {"url": "https://host/image.png"}}
+        ]}],
+        "formatted_prompt": "<image>describe it"
+    }));
+    let formatted_outputs = engine
+        .generate(
+            multimodal,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(formatted_outputs.len(), 2);
+    let forwarded = state.requests.lock();
+    assert_eq!(forwarded.last().unwrap().media.len(), 1);
+    assert!(matches!(
+        forwarded.last().unwrap().input,
+        Some(pb::generate_request::Input::Prompt(ref prompt))
+            if prompt == "<image>describe it"
+    ));
+    drop(forwarded);
+
     let mut bypass = request();
     bypass.extra_args = Some(serde_json::json!({"bypass_prefix_cache": true}));
     assert!(
@@ -879,6 +929,76 @@ async fn fake_tonic_server_discovery_and_aggregate_stream() {
             .await
             .is_err()
     );
+    engine.cleanup().await.unwrap();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_tonic_health_probe_bypasses_decode_handoff() {
+    use futures::StreamExt;
+
+    let state = Arc::new(FakeState::default());
+    state.engine.lock().role = pb::EngineRole::Decode as i32;
+    let server = FakeServer::start(state.clone()).await;
+    let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
+    engine.start(1).await.unwrap();
+
+    assert!(engine.health_check_payload().await.unwrap().is_some());
+    let mut probe = request();
+    probe.is_probe = true;
+    let outputs = engine
+        .generate(
+            probe,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(outputs.len(), 1);
+    assert!(outputs[0].is_ok());
+    assert!(state.requests.lock().is_empty());
+
+    engine.cleanup().await.unwrap();
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fake_tonic_token_only_multimodal_uses_token_ids() {
+    use futures::StreamExt;
+
+    let state = Arc::new(FakeState::default());
+    state.model.lock().supports_text_input = None;
+    let server = FakeServer::start(state.clone()).await;
+    let (engine, _) = build_sidecar(server.address, "tensorrt_llm").await.unwrap();
+    engine.start(1).await.unwrap();
+
+    let mut multimodal = request();
+    multimodal.multi_modal_data = Some(HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl("https://host/image.png".to_string())],
+    )]));
+    multimodal.extra_args = Some(serde_json::json!({
+        "messages": [{"content": [
+            {"type": "image_url", "image_url": {"url": "https://host/image.png"}}
+        ]}],
+        "formatted_prompt": "<image>describe it"
+    }));
+    let outputs = engine
+        .generate(
+            multimodal,
+            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
+        )
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(outputs.len(), 2);
+    assert!(matches!(
+        state.requests.lock().last().unwrap().input.as_ref(),
+        Some(pb::generate_request::Input::TokenIds(_))
+    ));
+
     engine.cleanup().await.unwrap();
     server.stop().await;
 }
@@ -1321,6 +1441,10 @@ async fn fake_tonic_lora_lifecycle_publishes_and_removes_model_cards() {
         .unwrap();
     assert_eq!(first["status"], "ok");
     assert_eq!(engine.lora_card_count().await, 1);
+    assert_eq!(
+        engine.lora_card_display_name("adapter").await.as_deref(),
+        Some("adapter")
+    );
     let repeated = engine
         .engine_update("load_lora".into(), load)
         .await

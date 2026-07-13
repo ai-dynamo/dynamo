@@ -209,6 +209,17 @@ impl OpenEngineSidecar {
             None => 0,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn lora_card_display_name(&self, name: &str) -> Option<String> {
+        let discovery = self.lora_discovery.get()?;
+        discovery
+            .models
+            .lock()
+            .await
+            .get(name)
+            .map(|model| model.display_name().to_string())
+    }
 }
 
 #[async_trait]
@@ -270,6 +281,26 @@ impl LLMEngine for OpenEngineSidecar {
             .discovery
             .get()
             .ok_or_else(|| client::engine_shutdown("generate called before discovery"))?;
+        if request.is_probe {
+            let prompt_tokens = request.token_ids.len() as u32;
+            let response = tokio::time::timeout(
+                self.transport.connect_timeout,
+                pool.control_client().health(health_request()),
+            )
+            .await
+            .map_err(|_| client::engine_shutdown("OpenEngine Health probe timed out"))?
+            .map_err(|status| client::status_to_dynamo("Health probe", status))?;
+            let state = pb::HealthState::try_from(response.into_inner().state)
+                .unwrap_or(pb::HealthState::Unspecified);
+            if state != pb::HealthState::Ready {
+                return Err(client::engine_shutdown(format!(
+                    "OpenEngine Health probe returned {state:?}"
+                )));
+            }
+            return Ok(Box::pin(futures::stream::once(async move {
+                Ok(LLMEngineOutput::stop().with_usage(usage(prompt_tokens, 0)))
+            })));
+        }
         if self.disaggregation_mode.is_decode() && request.prefill_result.is_none() {
             return Err(client::invalid_arg(
                 "decode worker requires a context-first prefill_result",
@@ -286,8 +317,13 @@ impl LLMEngine for OpenEngineSidecar {
         } else {
             discovery.model.served_model_name.as_str()
         };
-        let mut grpc_request =
-            convert::build_generate_request(&request, &request_id, remote_model, is_prefill)?;
+        let mut grpc_request = convert::build_generate_request(
+            &request,
+            &request_id,
+            remote_model,
+            is_prefill,
+            discovery.model.supports_text_input == Some(true),
+        )?;
         validate_decode_handoff(discovery, &grpc_request, self.disaggregation_mode)?;
         convert::merge_context_metadata(&mut grpc_request, ctx.metadata());
         let mut grpc_client = pool.stream_client();
@@ -810,10 +846,6 @@ impl LLMEngine for OpenEngineSidecar {
     }
 
     async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
-        // A decode canary cannot synthesize a valid engine-owned handoff.
-        if self.disaggregation_mode.is_decode() || self.disaggregation_mode.is_prefill() {
-            return Ok(None);
-        }
         Ok(Some(serde_json::json!({
             "token_ids": [1],
             "stop_conditions": {"max_tokens": 1, "ignore_eos": true},
@@ -1214,11 +1246,17 @@ fn validate_request_capabilities(
         let object = extra
             .as_object()
             .ok_or_else(|| client::invalid_arg("extra_args must be an object"))?;
-        for key in object.keys() {
-            if !matches!(
+        for (key, value) in object {
+            let is_supported = matches!(
                 key.as_str(),
                 "messages" | "bypass_prefix_cache" | "disable_prefix_cache"
-            ) {
+            ) || (key == "formatted_prompt"
+                && request
+                    .multi_modal_data
+                    .as_ref()
+                    .is_some_and(|media| media.values().any(|items| !items.is_empty()))
+                && value.as_str().is_some_and(|prompt| !prompt.is_empty()));
+            if !is_supported {
                 return Err(client::invalid_arg(format!(
                     "OpenEngine sidecar cannot preserve extra_args field `{key}`"
                 )));

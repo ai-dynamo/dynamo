@@ -24,6 +24,7 @@ pub fn build_generate_request(
     request_id: &str,
     model: &str,
     is_prefill: bool,
+    supports_text_input: bool,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_arg(
@@ -42,6 +43,18 @@ pub fn build_generate_request(
     // modalities before this conversion runs.
     let media = build_media(request)?;
     let media_options = build_media_options(request, &media)?;
+    let input = request
+        .extra_args
+        .as_ref()
+        .filter(|_| supports_text_input && !media.is_empty())
+        .and_then(|args| args.get("formatted_prompt"))
+        .and_then(serde_json::Value::as_str)
+        .map(|prompt| pb::generate_request::Input::Prompt(prompt.to_string()))
+        .unwrap_or_else(|| {
+            pb::generate_request::Input::TokenIds(pb::TokenIds {
+                ids: request.token_ids.clone(),
+            })
+        });
     let sampling = &request.sampling_options;
     let stopping = &request.stop_conditions;
     let conditions = stopping
@@ -85,9 +98,7 @@ pub fn build_generate_request(
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
         model: model.to_string(),
-        input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-            ids: request.token_ids.clone(),
-        })),
+        input: Some(input),
         sampling: Some(pb::SamplingParams {
             temperature: sampling.temperature.map(f64::from),
             top_p: sampling.top_p.map(f64::from),
