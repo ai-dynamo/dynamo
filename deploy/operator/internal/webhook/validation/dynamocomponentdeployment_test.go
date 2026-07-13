@@ -39,6 +39,10 @@ const (
 	dcdAdmissionVLLMBackend   = "vllm"
 )
 
+// dcdAdmissionCustomMainName is the non-default main-container name used by
+// the immutability transition cases.
+const dcdAdmissionCustomMainName = "engine"
+
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamocomponentdeployments.yaml")
 
@@ -794,21 +798,169 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 		// Pair shared pod-template validation across both served source versions.
 		{
-			name: "v1beta1 sidecar without image is rejected by CEL",
+			name: "v1beta1 mainContainerNameOverride change is rejected by CEL",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:latest"}},
+				}}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = "engine2"
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "engine2", Image: "engine:latest"}},
+				}}
+			}),
+			wantCELErr: "spec: Invalid value: mainContainerNameOverride is immutable after creation",
+		},
+		{
+			name: "v1beta1 mainContainerNameOverride added after creation is rejected by CEL",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "engine:latest"}},
+				}}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:latest"}},
+				}}
+			}),
+			wantCELErr: "spec: Invalid value: mainContainerNameOverride is immutable after creation",
+		},
+		{
+			name: "v1beta1 mainContainerNameOverride removed after creation is rejected by CEL",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:latest"}},
+				}}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "engine:latest"}},
+				}}
+			}),
+			wantCELErr: "spec: Invalid value: mainContainerNameOverride is immutable after creation",
+		},
+		{
+			name: "v1beta1 unchanged mainContainerNameOverride update is admitted",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:latest"}},
+				}}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:v2"}},
+				}}
+			}),
+		},
+		{
+			// A v1alpha1 update that drops the hub-preservation annotation
+			// converts to an empty override; the v1beta1 CEL rule never sees
+			// the alpha request, so the version-agnostic webhook check must
+			// reject the silent rename.
+			name:          "v1alpha1 update dropping the preservation annotation cannot rename the main container",
+			oldDeployment: alphaDCDWithPreservedMainContainerName(t, dcdAdmissionCustomMainName),
+			deployment:    alphaDCDForAdmission(nil),
+			wantWebhookErrs: []string{
+				`spec.mainContainerNameOverride: Invalid value: "": is immutable after creation`,
+			},
+		},
+
+		// Standalone v1beta1 DCDs get the same mainContainerNameOverride shared-spec
+		// validation as DynamoGraphDeployment components.
+		{
+			name: "v1beta1 custom mainContainerNameOverride is admitted by the v1beta1 webhook",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:latest"}},
+				}}
+			}),
+		},
+		{
+			name: "v1beta1 ambiguous mainContainerNameOverride is rejected by the v1beta1 webhook",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: dcdAdmissionCustomMainName, Image: "engine:latest"},
+						{Name: consts.MainContainerName, Image: "main:latest"},
+					},
+				}}
+			}),
+			wantWebhookErrs: []string{`spec.mainContainerNameOverride: Invalid value: "engine": is ambiguous: podTemplate.spec.containers also declares a container named "main", which would be treated as a sidecar; rename that container or drop mainContainerNameOverride`},
+		},
+		{
+			name: "v1beta1 frontendSidecar naming the main container is rejected by the v1beta1 webhook",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.FrontendSidecar = k8sptr.To(dcdAdmissionCustomMainName)
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName, Image: "engine:latest"}},
+				}}
+			}),
+			wantWebhookErrs: []string{`spec.frontendSidecar: Invalid value: "engine": must designate a container other than the main container "engine"`},
+		},
+		{
+			name: "v1beta1 mainContainerNameOverride colliding with a failover engine name is rejected by the v1beta1 webhook",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = "engine-0"
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "engine-0",
+						Image: "engine:latest",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+							},
+						},
+					}},
+				}}
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{},
+					Failover:         &nvidiacomv1beta1.FailoverSpec{Mode: nvidiacomv1beta1.GMSModeIntraPod},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.mainContainerNameOverride: Invalid value: "engine-0": must not collide with a reserved intra-pod failover engine container name`},
+		},
+		{
+			// The main container (image injected by the operator) is exempt;
+			// the imageless sidecar is rejected by the webhook, which resolves
+			// the effective main-container name a CRD item-scoped CEL rule
+			// cannot.
+			name: "v1beta1 sidecar without image is rejected by the webhook",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: consts.MainContainerName}, {Name: "metrics"}},
 				}}
 			}),
-			wantCELErr: "spec.podTemplate.spec.containers[1]: Invalid value: sidecar containers must specify a non-empty image",
+			wantWebhookErrs: []string{`spec.podTemplate.spec.containers[1].image: Required value: is required for sidecar container "metrics"`},
 		},
 		{
-			name: "v1alpha1 sidecar without image reaches the webhook",
+			// With a custom main-container name the imageless main is still
+			// exempt (operator injects its image) while the literal "main"
+			// becomes an ordinary sidecar that must carry an image.
+			name: "v1beta1 imageless custom main is admitted while imageless sidecar is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.MainContainerNameOverride = dcdAdmissionCustomMainName
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: dcdAdmissionCustomMainName}, {Name: "metrics", Image: "metrics:latest"}},
+				}}
+			}),
+		},
+		{
+			name: "v1alpha1 sidecar without image is rejected by the webhook",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "metrics"}},
 				}}
 			}),
+			wantWebhookErrs: []string{`spec.podTemplate.spec.containers[1].image: Required value: is required for sidecar container "metrics"`},
 		},
 		{
 			name: "v1beta1 init container without image is rejected by CEL",
@@ -1058,6 +1210,26 @@ func assertDCDWebhookErrors(t *testing.T, err error, want []string) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("webhook errors = %v, want %v", got, want)
 	}
+}
+
+// alphaDCDWithPreservedMainContainerName returns a v1alpha1 DCD whose
+// hub-preservation annotation carries mainContainerNameOverride=name, as if it
+// had been created via v1beta1 and stored. Converting it back to the hub
+// yields the override; an update that drops the annotation converts to an
+// empty override, which the webhook must reject as an immutable rename.
+func alphaDCDWithPreservedMainContainerName(t *testing.T, name string) *nvidiacomv1alpha1.DynamoComponentDeployment {
+	t.Helper()
+	beta := betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+		dcd.Spec.MainContainerNameOverride = name
+		dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: name, Image: "engine:latest"}},
+		}}
+	})
+	alpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+	if err := alpha.ConvertFrom(beta); err != nil {
+		t.Fatalf("convert beta DCD to v1alpha1: %v", err)
+	}
+	return alpha
 }
 
 func alphaDCDForAdmission(

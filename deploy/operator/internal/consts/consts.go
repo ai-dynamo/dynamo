@@ -223,6 +223,18 @@ const (
 	MainContainerName            = "main"
 	FrontendSidecarContainerName = "sidecar-frontend"
 
+	// DynamoMainContainerEnvVar tells the runtime which container name carries
+	// main-container (pod-level) identity, so components with a custom
+	// spec.mainContainerName keep the same discovery identity as the default
+	// "main". Injected alongside CONTAINER_NAME in container-discovery mode.
+	DynamoMainContainerEnvVar = "DYN_MAIN_CONTAINER_NAME"
+
+	// KubeAnnotationDynamoMainContainerName records the component's effective
+	// main-container name on rendered pods so discovery watchers resolve a
+	// remote pod's main container from the pod itself rather than from the
+	// observer's own environment. Only stamped for non-default names.
+	KubeAnnotationDynamoMainContainerName = "nvidia.com/dynamo-main-container-name"
+
 	RestartAnnotation = "nvidia.com/restartAt"
 
 	// Resource type constants - match Kubernetes Kind names

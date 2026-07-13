@@ -150,6 +150,9 @@ func CreateOrGetAutoCheckpoint(
 		return nil, err
 	}
 	if targetContainerName == "" {
+		// Operator callers (DGD createCheckpointCR) pass the component's
+		// resolved main-container name explicitly, so this literal default only
+		// applies to spec-less callers.
 		targetContainerName = commonconsts.MainContainerName
 	}
 

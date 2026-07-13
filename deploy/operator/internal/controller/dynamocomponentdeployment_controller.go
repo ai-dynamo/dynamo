@@ -489,7 +489,7 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 	leaderPodTemplateSpec.ObjectMeta.Labels["role"] = "leader"
 	delete(leaderPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
-	err = checkMainContainer(&leaderPodTemplateSpec.Spec)
+	err = checkMainContainer(&leaderPodTemplateSpec.Spec, opt.dynamoComponentDeployment.Spec.GetMainContainerName())
 
 	if err != nil {
 		return nil, errors.Wrap(err, "generateLeaderPodTemplateSpec: failed to check main container")
@@ -498,7 +498,21 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 	return leaderPodTemplateSpec, nil
 }
 
-func checkMainContainer(spec *corev1.PodSpec) error {
+// resolveCheckpointRestoreTargets defaults the checkpoint restore targets for
+// the component: the failover engine containers when intra-pod failover is
+// enabled, otherwise the component's resolved main container (so custom
+// mainContainerName specs are honored).
+func resolveCheckpointRestoreTargets(info *checkpoint.CheckpointInfo, component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+	if dynamo.IsIntraPodFailoverEnabled(component) {
+		info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+		return
+	}
+	if len(info.RestoreTargetContainers) == 0 {
+		info.RestoreTargetContainers = []string{component.GetMainContainerName()}
+	}
+}
+
+func checkMainContainer(spec *corev1.PodSpec, mainContainerName string) error {
 
 	if len(spec.Containers) == 0 {
 		return errors.New("No containers found in pod spec")
@@ -506,7 +520,7 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 
 	mainContainerFound := false
 	for _, container := range spec.Containers {
-		if container.Name != commonconsts.MainContainerName {
+		if container.Name != mainContainerName {
 			continue
 		}
 
@@ -523,7 +537,7 @@ func checkMainContainer(spec *corev1.PodSpec) error {
 	}
 
 	if !mainContainerFound {
-		return errors.New("main container not found in pod spec")
+		return errors.Errorf("main container %q not found in pod spec", mainContainerName)
 	}
 
 	return nil
@@ -539,7 +553,7 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	workerPodTemplateSpec.ObjectMeta.Labels["role"] = "worker"
 	delete(workerPodTemplateSpec.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
 
-	err = checkMainContainer(&workerPodTemplateSpec.Spec)
+	err = checkMainContainer(&workerPodTemplateSpec.Spec, opt.dynamoComponentDeployment.Spec.GetMainContainerName())
 
 	if err != nil {
 		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
@@ -979,9 +993,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
-		if dynamo.IsIntraPodFailoverEnabled(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec) {
-			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
-		}
+		resolveCheckpointRestoreTargets(info, component)
 		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
 			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
 		}

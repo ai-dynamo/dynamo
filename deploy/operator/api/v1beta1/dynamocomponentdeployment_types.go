@@ -71,6 +71,7 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="has(oldSelf.mainContainerNameOverride) == has(self.mainContainerNameOverride) && (!has(self.mainContainerNameOverride) || self.mainContainerNameOverride == oldSelf.mainContainerNameOverride)",message="mainContainerNameOverride is immutable after creation"
 type DynamoComponentDeploymentSharedSpec struct {
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
@@ -106,16 +107,45 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// podTemplate is the pod template used to create the component's pods.
 	// The operator injects its defaults (image, command, env, ports, probes,
-	// resources, volume mounts) into the container named `"main"` inside
+	// resources, volume mounts) into the main container (named `"main"` by
+	// default, or `mainContainerNameOverride` when set) inside
 	// `podTemplate.spec.containers`, merging user overrides by name. If no
-	// container named `"main"` is present, the operator auto-generates it
-	// with standard defaults. All other containers in `podTemplate.spec.containers`
-	// are treated as user-managed sidecars: the operator does not inject
-	// defaults into them, so sidecars must specify required fields (e.g. `image`)
-	// themselves. The validation webhook rejects pod templates where a
-	// non-`"main"` container is missing a required field such as `image`.
+	// container with the main container's name is present, the operator
+	// auto-generates it with standard defaults. All other containers in
+	// `podTemplate.spec.containers` are treated as user-managed sidecars: the
+	// operator does not inject defaults into them, so sidecars must specify
+	// their own `image`. A sidecar missing `image` is rejected at admission.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+
+	// mainContainerNameOverride sets the name of this component's main
+	// container -- the container the operator injects its defaults into and
+	// which carries the pod's runtime discovery identity. When unset, the
+	// main container is named `"main"`. When set, the main container takes
+	// this name; the value must be a valid container name (DNS-1123 label),
+	// must differ from `frontendSidecar`, and the `podTemplate` must not
+	// also declare a container literally named `"main"` (which would be
+	// ambiguous). Setting it lets integrations align the primary container
+	// name with platform conventions such as log routing, terminal attach,
+	// or per-container metrics. The main container keeps its semantics
+	// regardless of name: default injection, first position in
+	// `containers`, and runtime discovery identity.
+	//
+	// This field is immutable: it cannot be added, removed, or changed after
+	// creation. Renaming a live component's main container would demote the
+	// previously-named container to a sidecar mid-rollout and churn its
+	// discovery identity; create a new component to use a different name.
+	//
+	// In container-scoped kubernetes discovery mode the operator records a
+	// non-default name on each rendered pod via the annotation
+	// `nvidia.com/dynamo-main-container-name`, so discovery watchers resolve
+	// a pod's main container from the pod itself; components with different
+	// main-container names remain mutually discoverable.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	MainContainerNameOverride string `json:"mainContainerNameOverride,omitempty"`
 
 	// replicas is the desired number of Pods for this component. When
 	// `scalingAdapter` is set on this component, this field is managed by
@@ -297,6 +327,18 @@ func (s *DynamoComponentDeployment) IsMultinode() bool {
 // GetNumberOfNodes returns the configured node count, defaulting to 1.
 func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
 	return s.Spec.GetNumberOfNodes()
+}
+
+// GetMainContainerName returns the effective name of this component's main
+// container: `mainContainerNameOverride` when set, the well-known default
+// `"main"` otherwise. Rendering, validation, and any consumer that needs to
+// identify the main container must use this resolver instead of the
+// MainContainerName constant so per-component overrides are honored.
+func (s *DynamoComponentDeploymentSharedSpec) GetMainContainerName() string {
+	if s == nil || s.MainContainerNameOverride == "" {
+		return MainContainerName
+	}
+	return s.MainContainerNameOverride
 }
 
 // IsMultinode reports whether this shared spec is configured with more than one node.

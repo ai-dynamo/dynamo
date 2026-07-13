@@ -12633,6 +12633,35 @@ spec:
                           namespace rather than the per-deployment namespace derived from the
                           DGD name.
                         type: boolean
+                      mainContainerNameOverride:
+                        description: |-
+                          mainContainerNameOverride sets the name of this component's main
+                          container -- the container the operator injects its defaults into and
+                          which carries the pod's runtime discovery identity. When unset, the
+                          main container is named `"main"`. When set, the main container takes
+                          this name; the value must be a valid container name (DNS-1123 label),
+                          must differ from `frontendSidecar`, and the `podTemplate` must not
+                          also declare a container literally named `"main"` (which would be
+                          ambiguous). Setting it lets integrations align the primary container
+                          name with platform conventions such as log routing, terminal attach,
+                          or per-container metrics. The main container keeps its semantics
+                          regardless of name: default injection, first position in
+                          `containers`, and runtime discovery identity.
+
+                          This field is immutable: it cannot be added, removed, or changed after
+                          creation. Renaming a live component's main container would demote the
+                          previously-named container to a sidecar mid-rollout and churn its
+                          discovery identity; create a new component to use a different name.
+
+                          In container-scoped kubernetes discovery mode the operator records a
+                          non-default name on each rendered pod via the annotation
+                          `nvidia.com/dynamo-main-container-name`, so discovery watchers resolve
+                          a pod's main container from the pod itself; components with different
+                          main-container names remain mutually discoverable.
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
                       minAvailable:
                         description: |-
                           minAvailable maps to Grove PodClique minAvailable for single-node and
@@ -12701,14 +12730,14 @@ spec:
                         description: |-
                           podTemplate is the pod template used to create the component's pods.
                           The operator injects its defaults (image, command, env, ports, probes,
-                          resources, volume mounts) into the container named `"main"` inside
+                          resources, volume mounts) into the main container (named `"main"` by
+                          default, or `mainContainerNameOverride` when set) inside
                           `podTemplate.spec.containers`, merging user overrides by name. If no
-                          container named `"main"` is present, the operator auto-generates it
-                          with standard defaults. All other containers in `podTemplate.spec.containers`
-                          are treated as user-managed sidecars: the operator does not inject
-                          defaults into them, so sidecars must specify required fields (e.g. `image`)
-                          themselves. The validation webhook rejects pod templates where a
-                          non-`"main"` container is missing a required field such as `image`.
+                          container with the main container's name is present, the operator
+                          auto-generates it with standard defaults. All other containers in
+                          `podTemplate.spec.containers` are treated as user-managed sidecars: the
+                          operator does not inject defaults into them, so sidecars must specify
+                          their own `image`. A sidecar missing `image` is rejected at admission.
                         properties:
                           metadata:
                             description: |-
@@ -15090,9 +15119,6 @@ spec:
                                   required:
                                     - name
                                   type: object
-                                  x-kubernetes-validations:
-                                    - rule: self.name == "main" || (has(self.image) && self.image != "")
-                                      message: sidecar containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -20900,6 +20926,8 @@ spec:
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                      - message: mainContainerNameOverride is immutable after creation
+                        rule: has(oldSelf.mainContainerNameOverride) == has(self.mainContainerNameOverride) && (!has(self.mainContainerNameOverride) || self.mainContainerNameOverride == oldSelf.mainContainerNameOverride)
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:

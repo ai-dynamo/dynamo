@@ -35,6 +35,9 @@ func ValidatePreparedGPUMemoryServicePodTemplate(ckpt *nvidiacomv1alpha1.DynamoC
 	podSpec := &ckpt.Spec.Job.PodTemplateSpec.Spec
 	targetContainerName := ckpt.Spec.Job.TargetContainerName
 	if targetContainerName == "" {
+		// Operator-created checkpoints always set Job.TargetContainerName to the
+		// component's resolved main-container name; this literal default only
+		// applies to hand-authored CRs.
 		targetContainerName = consts.MainContainerName
 	}
 	targetContainer := common.FindContainerByName(podSpec.Containers, targetContainerName)

@@ -12,6 +12,7 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -48,6 +49,24 @@ func GetPodTemplateLabels(component *v1beta1.DynamoComponentDeploymentSharedSpec
 	return component.PodTemplate.Labels
 }
 
+// stampMainContainerAnnotation records the component's effective main-container
+// name into the given pod annotations so discovery watchers can resolve the
+// remote pod's main container from the pod itself. Default-named components
+// are left unstamped to keep their rendered pods byte-identical — and any
+// user-supplied or stale value of the operator-owned annotation is removed so
+// a rename back to the default cannot leave the wrong container advertised as
+// main.
+func stampMainContainerAnnotation(annotations map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
+	if annotations == nil || component == nil {
+		return
+	}
+	if name := component.GetMainContainerName(); name != commonconsts.MainContainerName {
+		annotations[commonconsts.KubeAnnotationDynamoMainContainerName] = name
+	} else {
+		delete(annotations, commonconsts.KubeAnnotationDynamoMainContainerName)
+	}
+}
+
 func ensurePodTemplate(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.PodTemplateSpec {
 	if component.PodTemplate == nil {
 		component.PodTemplate = &corev1.PodTemplateSpec{}
@@ -61,24 +80,27 @@ func ensurePodTemplate(component *v1beta1.DynamoComponentDeploymentSharedSpec) *
 	return component.PodTemplate
 }
 
-func ensureMainContainer(podTemplate *corev1.PodTemplateSpec) *corev1.Container {
+func ensureMainContainer(podTemplate *corev1.PodTemplateSpec, mainContainerName string) *corev1.Container {
 	for i := range podTemplate.Spec.Containers {
-		if podTemplate.Spec.Containers[i].Name == commonconsts.MainContainerName {
+		if podTemplate.Spec.Containers[i].Name == mainContainerName {
 			return &podTemplate.Spec.Containers[i]
 		}
 	}
-	podTemplate.Spec.Containers = append([]corev1.Container{{Name: commonconsts.MainContainerName}}, podTemplate.Spec.Containers...)
+	podTemplate.Spec.Containers = append([]corev1.Container{{Name: mainContainerName}}, podTemplate.Spec.Containers...)
 	return &podTemplate.Spec.Containers[0]
 }
 
-// GetMainContainer returns the well-known main container from the component pod
-// template, if one exists.
+// GetMainContainer returns the component's main container from the component
+// pod template, if one exists. The main container is identified by the
+// component's effective main-container name (`mainContainerName`, defaulting
+// to "main").
 func GetMainContainer(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
 	if component == nil || component.PodTemplate == nil {
 		return nil
 	}
+	mainContainerName := component.GetMainContainerName()
 	for i := range component.PodTemplate.Spec.Containers {
-		if component.PodTemplate.Spec.Containers[i].Name == commonconsts.MainContainerName {
+		if component.PodTemplate.Spec.Containers[i].Name == mainContainerName {
 			return &component.PodTemplate.Spec.Containers[i]
 		}
 	}
@@ -140,6 +162,7 @@ func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]st
 
 	maps.Copy(annotations, GetDCDPreservedAlphaAnnotations(dcd))
 	maps.Copy(annotations, GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
+	stampMainContainerAnnotation(annotations, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	AddBaseModelAnnotation(annotations, dcd.Spec.ModelRef)
 	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
 	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
@@ -167,6 +190,19 @@ func GetGPUMemoryService(component *v1beta1.DynamoComponentDeploymentSharedSpec)
 		return nil
 	}
 	return component.Experimental.GPUMemoryService
+}
+
+// IsIntraPodGMSEnabled reports whether the component uses intra-pod GPU Memory
+// Service -- the layout that injects the gms-server sidecar into this pod (as
+// opposed to inter-pod GMS, which runs the server on a dedicated pod).
+func IsIntraPodGMSEnabled(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	return GetGPUMemoryService(component) != nil && !component.IsInterPodGMSEnabled()
+}
+
+// IntraPodGMSServerContainerName returns the reserved container name the
+// operator injects for intra-pod GMS.
+func IntraPodGMSServerContainerName() string {
+	return gms.ServerContainerName
 }
 
 // GetCheckpoint returns the component checkpoint config from the v1beta1

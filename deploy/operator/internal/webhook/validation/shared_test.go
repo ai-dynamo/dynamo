@@ -146,7 +146,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
 			},
 			Spec: corev1.PodSpec{
-				Containers:     []corev1.Container{{Name: consts.MainContainerName}, {Name: "sidecar"}},
+				Containers:     []corev1.Container{{Name: consts.MainContainerName}, {Name: "sidecar", Image: "sidecar:latest"}},
 				InitContainers: []corev1.Container{{Name: "init"}},
 			},
 		},

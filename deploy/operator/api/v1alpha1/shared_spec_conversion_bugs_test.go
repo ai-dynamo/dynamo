@@ -595,6 +595,40 @@ func TestBugDCD_HubPodTemplateContainerOrderRoundTrips(t *testing.T) {
 	}
 }
 
+func TestBugDCD_HubMainContainerVolumeMountOrderRoundTrips(t *testing.T) {
+	// The v1alpha1 recomposition puts the compilationCache mount first, so a
+	// hub main container that orders it after another mount is only restorable
+	// through the preserved hub payload's volume-mount order.
+	in := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "mount-order", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "mount-order",
+				CompilationCache: &v1beta1.CompilationCacheConfig{
+					PVCName:   "cache-pvc",
+					MountPath: "/opt/cache",
+				},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name: "main",
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "models", MountPath: "/models", SubPathExpr: "$(POD_NAME)"},
+								{Name: "cache-pvc", MountPath: "/opt/cache"},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	out := dcdRoundTripFromV1beta1(t, in)
+	if diff := cmp.Diff(in.Spec.PodTemplate, out.Spec.PodTemplate); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestBugDCD_MetadataOnlyPodTemplateSaveDoesNotFreezeContainerOrder(t *testing.T) {
 	hub := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "metadata-only-container-order", Namespace: "ns"},

@@ -2025,6 +2025,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		if len(info.RestoreTargetContainers) == 0 && alphaCheckpointConfig.TargetContainerName != "" {
 			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
 		}
+		if len(info.RestoreTargetContainers) == 0 {
+			// Default the restore target to the component's resolved main
+			// container so custom mainContainerName specs are honored.
+			info.RestoreTargetContainers = []string{component.GetMainContainerName()}
+		}
 		if dynamo.IsIntraPodFailoverEnabled(component) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
@@ -2134,7 +2139,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		podTemplate.Labels[consts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 
-	targetContainerName := consts.MainContainerName
+	targetContainerName := component.GetMainContainerName()
 	if checkpointConfig.TargetContainerName != "" {
 		targetContainerName = checkpointConfig.TargetContainerName
 	}
@@ -2405,7 +2410,7 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	componentName string,
 	backendFramework dynamo.BackendFramework,
 ) (corev1.PodTemplateSpec, error) {
-	targetContainerName := consts.MainContainerName
+	targetContainerName := component.GetMainContainerName()
 	if checkpointConfig := dynamo.GetCheckpoint(component); checkpointConfig != nil && checkpointConfig.TargetContainerName != "" {
 		targetContainerName = checkpointConfig.TargetContainerName
 	}

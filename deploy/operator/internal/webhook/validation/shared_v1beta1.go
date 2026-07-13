@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
@@ -47,6 +48,37 @@ func (v *sharedValidation) warn(message string) {
 
 func (v *sharedValidation) warnf(format string, args ...any) {
 	v.warn(fmt.Sprintf(format, args...))
+}
+
+// validateSidecarImages requires an image on every podTemplate container other
+// than the main container. The operator injects its default image only into the
+// main container; every other container -- including the frontend sidecar,
+// whose image comes from the user's podTemplate container (the operator merges
+// only command/args/env, not an image) -- must specify its own image. A CRD CEL
+// rule cannot express this because the main container is named by
+// mainContainerNameOverride, a sibling field an item-scoped rule cannot see.
+func validateSidecarImages(
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	mainContainerName string,
+	fldPath *field.Path,
+) field.ErrorList {
+	if spec.PodTemplate == nil {
+		return nil
+	}
+	containersPath := fldPath.Child("podTemplate", "spec", "containers")
+	var allErrs field.ErrorList
+	for i, container := range spec.PodTemplate.Spec.Containers {
+		if container.Name == mainContainerName {
+			continue
+		}
+		if container.Image == "" {
+			allErrs = append(allErrs, field.Required(
+				containersPath.Index(i).Child("image"),
+				fmt.Sprintf("is required for sidecar container %q", container.Name),
+			))
+		}
+	}
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
@@ -97,6 +129,41 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 		allErrs = append(allErrs, v.validateEPPConfig(spec.EPPConfig, fldPath.Child("eppConfig"))...)
 	}
 
+	mainContainerName := spec.GetMainContainerName()
+	if mainContainerName != nvidiacomv1beta1.MainContainerName &&
+		spec.PodTemplate != nil && hasContainerNamed(spec.PodTemplate.Spec.Containers, nvidiacomv1beta1.MainContainerName) {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("mainContainerNameOverride"),
+			spec.MainContainerNameOverride,
+			fmt.Sprintf(
+				"is ambiguous: podTemplate.spec.containers also declares a container named %q, which would be treated as a sidecar; rename that container or drop mainContainerNameOverride",
+				nvidiacomv1beta1.MainContainerName,
+			),
+		))
+	}
+	// Intra-pod failover clones the main container into generated engine
+	// containers; a main-container name equal to a generated name would make
+	// local (per-container) and remote (annotation-driven pod-level)
+	// identities disagree.
+	if spec.MainContainerNameOverride != "" && dynamo.IsIntraPodFailoverEnabled(spec) &&
+		slices.Contains(dynamo.IntraPodFailoverEngineContainerNames(), spec.MainContainerNameOverride) {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("mainContainerNameOverride"),
+			spec.MainContainerNameOverride,
+			"must not collide with a reserved intra-pod failover engine container name",
+		))
+	}
+	// Intra-pod GMS injects a gms-server sidecar into this pod; a main-container
+	// name equal to it would collide with the operator-generated container.
+	if spec.MainContainerNameOverride != "" && dynamo.IsIntraPodGMSEnabled(spec) &&
+		spec.MainContainerNameOverride == dynamo.IntraPodGMSServerContainerName() {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("mainContainerNameOverride"),
+			spec.MainContainerNameOverride,
+			"must not collide with the reserved GMS server container name",
+		))
+	}
+
 	if spec.FrontendSidecar != nil {
 		frontendSidecarPath := fldPath.Child("frontendSidecar")
 		if spec.PodTemplate == nil {
@@ -106,6 +173,15 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			))
 		} else if *spec.FrontendSidecar == "" {
 			allErrs = append(allErrs, field.Invalid(frontendSidecarPath, *spec.FrontendSidecar, "must not be empty"))
+		} else if spec.MainContainerNameOverride != "" && *spec.FrontendSidecar == mainContainerName {
+			// Scoped to explicit mainContainerNameOverride so pre-existing specs
+			// with `frontendSidecar: main` keep admitting unchanged; that (broken
+			// at render time) configuration is tracked as a separate fix.
+			allErrs = append(allErrs, field.Invalid(
+				frontendSidecarPath,
+				*spec.FrontendSidecar,
+				fmt.Sprintf("must designate a container other than the main container %q", mainContainerName),
+			))
 		} else if !hasContainerNamed(spec.PodTemplate.Spec.Containers, *spec.FrontendSidecar) {
 			allErrs = append(allErrs, field.Invalid(
 				frontendSidecarPath,
@@ -114,6 +190,8 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			))
 		}
 	}
+
+	allErrs = append(allErrs, validateSidecarImages(spec, mainContainerName, fldPath)...)
 
 	if spec.Experimental != nil {
 		allErrs = append(allErrs, v.validateExperimentalSpec(
@@ -357,6 +435,22 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 			topologyPath,
 			newComponent.TopologyConstraint,
 			fmt.Sprintf("is immutable and cannot be added, removed, or changed after creation; delete and recreate the %s to change topology constraints", ownerKind.Kind),
+		))
+	}
+
+	// mainContainerNameOverride is immutable. The v1beta1 CEL transition rule
+	// enforces this for v1beta1 requests, but a served v1alpha1 full
+	// replacement that drops the sparse hub-preservation annotation would
+	// otherwise convert to an empty override and silently rename the main
+	// container. Re-check here on the version-agnostic hub so the alpha path is
+	// covered too. Comparison is presence-sensitive (raw value, not the
+	// resolved effective name), matching the CEL rule: MinLength=1 makes a
+	// present-but-empty value impossible, so "" means the field is unset.
+	if oldComponent.MainContainerNameOverride != newComponent.MainContainerNameOverride {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("mainContainerNameOverride"),
+			newComponent.MainContainerNameOverride,
+			"is immutable after creation",
 		))
 	}
 

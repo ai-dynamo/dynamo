@@ -69,6 +69,39 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert "UNSUPPORTED_ENV" not in os.environ
 
 
+def test_apply_snapshot_restore_env_replaces_main_container_name(monkeypatch, tmp_path):
+    # Rename between checkpoint and restore: the restore context value wins.
+    monkeypatch.setenv("DYN_MAIN_CONTAINER_NAME", "engine-old")
+    write_restore_context(
+        monkeypatch,
+        tmp_path,
+        {"DYN_MAIN_CONTAINER_NAME": "engine-new"},
+    )
+
+    restored = apply_snapshot_restore_env()
+
+    assert restored == {"DYN_MAIN_CONTAINER_NAME": "engine-new"}
+    assert os.environ["DYN_MAIN_CONTAINER_NAME"] == "engine-new"
+
+
+def test_apply_snapshot_restore_env_clears_stale_main_container_name(
+    monkeypatch, tmp_path
+):
+    # Restored into a default-named pod: the stale snapshot-time value must be
+    # cleared so the runtime falls back to "main".
+    monkeypatch.setenv("DYN_MAIN_CONTAINER_NAME", "engine-old")
+    write_restore_context(
+        monkeypatch,
+        tmp_path,
+        {"DYN_MAIN_CONTAINER_NAME": None},
+    )
+
+    restored = apply_snapshot_restore_env()
+
+    assert restored == {"DYN_MAIN_CONTAINER_NAME": None}
+    assert "DYN_MAIN_CONTAINER_NAME" not in os.environ
+
+
 async def test_refresh_snapshot_restore_config_reparses_runtime_fields(
     monkeypatch, tmp_path
 ):

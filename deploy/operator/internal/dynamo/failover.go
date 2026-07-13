@@ -476,12 +476,17 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 	// DYN_FORWARDPASS_METRIC_PORT is removed here so we can override it per engine
 	// below — both engines share the pod network namespace, so the base value
 	// stamped by component_worker.go collides on bind.
+	// DYN_MAIN_CONTAINER_NAME is removed so a custom main-container name that
+	// happens to equal a generated engine name (e.g. "engine-0") cannot grant
+	// that engine pod-level identity; failover engines must always register
+	// with independent per-container identities.
 	removeSet := map[string]bool{
 		"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": true,
 		"DYN_SYSTEM_PORT":                       true,
 		"DYN_SYSTEM_ENABLED":                    true,
 		"DYN_HEALTH_CHECK_ENABLED":              true,
 		"CONTAINER_NAME":                        true,
+		commonconsts.DynamoMainContainerEnvVar:  true,
 		"DYN_FORWARDPASS_METRIC_PORT":           true,
 	}
 

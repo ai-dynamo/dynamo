@@ -3478,3 +3478,26 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 	require.Equal(t, "worker", got.Labels["role"])
 	require.Equal(t, commonconsts.MainContainerName, got.Spec.Containers[0].Name)
 }
+
+func TestCheckMainContainer(t *testing.T) {
+	spec := &corev1.PodSpec{
+		Containers: []corev1.Container{
+			{
+				Name:    "engine",
+				Command: []string{"sh"},
+				Args:    []string{"-c", "run"},
+			},
+		},
+	}
+
+	// The custom main-container name is found.
+	require.NoError(t, checkMainContainer(spec, "engine"))
+
+	// The default name is not present; the error names the expected container.
+	err := checkMainContainer(spec, commonconsts.MainContainerName)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `main container "main" not found`)
+
+	// Empty pod specs are rejected.
+	require.Error(t, checkMainContainer(&corev1.PodSpec{}, "engine"))
+}

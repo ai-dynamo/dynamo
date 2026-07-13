@@ -67,6 +67,34 @@ type ComponentContext struct {
 	Discovery                      DiscoveryContext
 	EPPConfig                      *v1beta1.EPPConfig
 	WorkerHashSuffix               string
+	// MainContainerName is the component's effective main-container name
+	// (spec.mainContainerName, defaulting to "main").
+	MainContainerName string
+	// ContainerName is the name of the container being generated from this
+	// context. Empty means the component's main container; the frontend
+	// sidecar merge sets it to the sidecar's name so identity env vars
+	// reflect the container they are injected into.
+	ContainerName string
+}
+
+// mainContainerName returns the context's main-container name, defaulting to
+// the well-known "main" when the context was built without one (tests,
+// legacy call sites).
+func (c ComponentContext) mainContainerName() string {
+	if c.MainContainerName == "" {
+		return commonconsts.MainContainerName
+	}
+	return c.MainContainerName
+}
+
+// containerName returns the name of the container being generated: the
+// explicit ContainerName when set (e.g. a frontend sidecar), otherwise the
+// component's main container.
+func (c ComponentContext) containerName() string {
+	if c.ContainerName == "" {
+		return c.mainContainerName()
+	}
+	return c.ContainerName
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
@@ -86,7 +114,7 @@ func (b *BaseComponentDefaults) getCommonPodSpec() corev1.PodSpec {
 
 func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) corev1.Container {
 	container := corev1.Container{
-		Name: commonconsts.MainContainerName,
+		Name: context.containerName(),
 		Command: []string{
 			"/bin/sh",
 			"-c",
@@ -146,8 +174,21 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 	if context.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "CONTAINER_NAME",
-			Value: commonconsts.MainContainerName,
+			Value: context.containerName(),
 		})
+		// Tell the runtime which container name carries main-container
+		// (pod-level) identity, so a renamed main container keeps the same
+		// discovery identity as the default "main". Only injected for
+		// non-default names: the runtime falls back to "main" when the env
+		// var is unset, and skipping it keeps pod specs of existing
+		// default-named deployments byte-identical across operator upgrades
+		// (no restart churn).
+		if mainContainerName := context.mainContainerName(); mainContainerName != commonconsts.MainContainerName {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  commonconsts.DynamoMainContainerEnvVar,
+				Value: mainContainerName,
+			})
+		}
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "DYN_KUBE_DISCOVERY_MODE",
 			Value: string(configv1alpha1.KubeDiscoveryModeContainer),

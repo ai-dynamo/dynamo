@@ -360,6 +360,74 @@ func TestDCD_RoundTrip_PodTemplate(t *testing.T) {
 	}
 }
 
+func TestDCD_RoundTrip_CustomMainContainerName(t *testing.T) {
+	src := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "custom-main", Namespace: "ns"},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName:             "custom-main",
+				MainContainerNameOverride: "engine",
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "engine",
+								Image: "dynamo:latest",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("2"),
+										corev1.ResourceMemory: resource.MustParse("8Gi"),
+									},
+								},
+							},
+							{
+								Name:  "logger",
+								Image: "fluent/fluent-bit",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	spoke := &DynamoComponentDeployment{}
+	if err := spoke.ConvertFrom(src); err != nil {
+		t.Fatalf("ConvertFrom: %v", err)
+	}
+	// The custom-named container is the semantic main container: it
+	// decomposes into the dedicated flat fields plus extraPodSpec.mainContainer
+	// exactly like a default-named one. Only its name is unrepresentable on
+	// v1alpha1 and is preserved with mainContainerName in the sparse hub payload.
+	if spoke.Spec.Resources == nil || spoke.Spec.Resources.Requests == nil ||
+		spoke.Spec.Resources.Requests.CPU != "2" || spoke.Spec.Resources.Requests.Memory != "8Gi" {
+		t.Fatalf("expected engine resources in dedicated flat fields, got %#v", spoke.Spec.Resources)
+	}
+	if spoke.Spec.ExtraPodSpec == nil || spoke.Spec.ExtraPodSpec.MainContainer == nil ||
+		spoke.Spec.ExtraPodSpec.MainContainer.Image != "dynamo:latest" {
+		t.Fatalf("expected engine image on extraPodSpec.mainContainer, got %#v", spoke.Spec.ExtraPodSpec)
+	}
+	if spoke.Spec.ExtraPodSpec.PodSpec == nil ||
+		hasContainerNamed(spoke.Spec.ExtraPodSpec.PodSpec.Containers, "engine") ||
+		!hasContainerNamed(spoke.Spec.ExtraPodSpec.PodSpec.Containers, "logger") {
+		t.Fatalf("expected only the logger sidecar in extraPodSpec.podSpec, got %#v", spoke.Spec.ExtraPodSpec.PodSpec)
+	}
+
+	got := &v1beta1.DynamoComponentDeployment{}
+	if err := spoke.ConvertTo(got); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if got.Spec.MainContainerNameOverride != "engine" {
+		t.Fatalf("mainContainerName = %q, want %q", got.Spec.MainContainerNameOverride, "engine")
+	}
+	if diff := cmp.Diff(src.Spec.PodTemplate, got.Spec.PodTemplate); diff != "" {
+		t.Fatalf("podTemplate mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(src, got, cmpopts.EquateEmpty()); diff != "" {
+		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestDCD_RoundTrip_PodTemplateKeepsGeneratedMainMarker(t *testing.T) {
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "generated-main-marker", Namespace: "ns"},
