@@ -18,6 +18,7 @@
 
 import argparse
 import asyncio
+import importlib.metadata
 import logging
 import os
 import signal
@@ -32,6 +33,7 @@ from dynamo.llm import (
     AicPerfConfig,
     EngineType,
     EntrypointArgs,
+    FrontendRoute,
     KvRouterConfig,
     RouterConfig,
     RouterMode,
@@ -50,6 +52,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend_routes"
 
 
 def setup_engine_factory(
@@ -86,6 +89,67 @@ def setup_sglang_engine_factory(
         reasoning_parser_name=reasoning_parser,
         chat_template=chat_template,
     )
+
+
+def _frontend_route_extension_entry_points():
+    entry_points = importlib.metadata.entry_points()
+    if hasattr(entry_points, "select"):
+        return list(entry_points.select(group=FRONTEND_ROUTE_ENTRYPOINT_GROUP))
+    return list(entry_points.get(FRONTEND_ROUTE_ENTRYPOINT_GROUP, ()))
+
+
+def _normalize_frontend_routes(
+    extension_name: str, provided: Any
+) -> list[FrontendRoute]:
+    if provided is None:
+        return []
+    if isinstance(provided, FrontendRoute):
+        return [provided]
+    try:
+        routes = list(provided)
+    except TypeError as exc:
+        raise TypeError(
+            f"Frontend route extension '{extension_name}' must return a FrontendRoute "
+            "or an iterable of FrontendRoute objects"
+        ) from exc
+    for route in routes:
+        if not isinstance(route, FrontendRoute):
+            raise TypeError(
+                f"Frontend route extension '{extension_name}' returned unsupported route "
+                f"object {route!r}; expected dynamo.llm.FrontendRoute"
+            )
+    return routes
+
+
+def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendRoute]:
+    """Load trusted frontend route extensions by entry point name."""
+
+    if not extension_names:
+        return []
+
+    entry_points = _frontend_route_extension_entry_points()
+    routes: list[FrontendRoute] = []
+    for extension_name in extension_names:
+        matches = [ep for ep in entry_points if ep.name == extension_name]
+        if not matches:
+            available = ", ".join(sorted(ep.name for ep in entry_points)) or "<none>"
+            raise ValueError(
+                f"Unknown frontend route extension '{extension_name}' in entry point "
+                f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'. Available: {available}"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous frontend route extension '{extension_name}' in entry point "
+                f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'"
+            )
+        provider = matches[0].load()
+        if not callable(provider):
+            raise TypeError(
+                f"Frontend route extension '{extension_name}' entry point must load a callable"
+            )
+        routes.extend(_normalize_frontend_routes(extension_name, provider()))
+
+    return routes
 
 
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
@@ -295,6 +359,13 @@ async def async_main():
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
+    frontend_route_extensions = load_frontend_route_extensions(
+        config.frontend_route_extensions
+    )
+    if frontend_route_extensions and (config.interactive or config.kserve_grpc_server):
+        raise ValueError(
+            "frontend route extensions are only supported by HTTP frontend mode"
+        )
 
     try:
         if config.interactive:
@@ -302,7 +373,7 @@ async def async_main():
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
-            await run_input(runtime, "http", engine)
+            await run_input(runtime, "http", engine, frontend_route_extensions)
     except asyncio.exceptions.CancelledError:
         pass
 
