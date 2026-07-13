@@ -183,6 +183,12 @@ class SkippedBenchmarkPoint:
     reason: str
 
 
+@dataclass
+class _BenchmarkGroupResult:
+    rank_results: list[dict]
+    stop_requested: bool
+
+
 def _benchmark_point_digest(point: BenchmarkPoint) -> str:
     payload = json.dumps(
         asdict(point),
@@ -383,14 +389,21 @@ class _BenchmarkSynchronizer:
         self._run_id = run_id
         return run_id
 
-    def collect_result(self, point: BenchmarkPoint, fpms: list[dict]) -> list[dict]:
-        """Gather one completed iteration and return every rank's FPMs."""
+    def collect_result(
+        self,
+        point: BenchmarkPoint,
+        fpms: list[dict],
+        *,
+        stop_requested: bool = False,
+    ) -> _BenchmarkGroupResult:
+        """Gather one completed iteration and agree whether to stop the sweep."""
         result = {
             "type": "result",
             "dp_rank": self.dp_rank,
             "benchmark_id": point.benchmark_id,
             "point_digest": _benchmark_point_digest(point),
             "fpms": fpms,
+            "stop_requested": stop_requested,
         }
         if self.dp_rank == 0:
             return self._coordinate_results(result)
@@ -401,7 +414,10 @@ class _BenchmarkSynchronizer:
         rank_results = reply.get("rank_results")
         if not isinstance(rank_results, list):
             raise RuntimeError("attention-DP benchmark group has no rank results")
-        return rank_results
+        group_stop_requested = reply.get("stop_requested")
+        if not isinstance(group_stop_requested, bool):
+            raise RuntimeError("attention-DP benchmark group has invalid stop decision")
+        return _BenchmarkGroupResult(rank_results, group_stop_requested)
 
     def _follower_phase(
         self,
@@ -592,11 +608,12 @@ class _BenchmarkSynchronizer:
                 )
             pending.remove(rank)
 
-    def _coordinate_results(self, local_result: dict) -> list[dict]:
+    def _coordinate_results(self, local_result: dict) -> _BenchmarkGroupResult:
         benchmark_id = local_result["benchmark_id"]
         point_digest = local_result["point_digest"]
         deadline = time.monotonic() + self.timeout_seconds
         identities: dict[int, bytes] = {}
+        stop_requested = local_result["stop_requested"]
         rank_results = [
             {"dp_rank": 0, "fpms": local_result["fpms"]},
         ]
@@ -626,6 +643,13 @@ class _BenchmarkSynchronizer:
                     raise RuntimeError(
                         f"attention-DP benchmark rank {rank} sent invalid FPMs"
                     )
+                rank_stop_requested = message.get("stop_requested")
+                if not isinstance(rank_stop_requested, bool):
+                    raise RuntimeError(
+                        f"attention-DP benchmark rank {rank} sent invalid "
+                        "stop decision"
+                    )
+                stop_requested = stop_requested or rank_stop_requested
                 identities[rank] = identity
                 rank_results.append({"dp_rank": rank, "fpms": fpms})
 
@@ -636,9 +660,10 @@ class _BenchmarkSynchronizer:
                     "type": "group",
                     "benchmark_id": benchmark_id,
                     "rank_results": rank_results,
+                    "stop_requested": stop_requested,
                 },
             )
-            return rank_results
+            return _BenchmarkGroupResult(rank_results, stop_requested)
         except Exception as error:
             self._notify_error(identities.values(), str(error))
             raise
@@ -1324,16 +1349,15 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_started_at: str | None = None
         self._bench_completed_at: str | None = None
         self._bench_start_monotonic: float | None = None
+        self._bench_deadline_monotonic: float | None = None
         self._bench_elapsed_seconds: float | None = None
         self._bench_feasible_max_decode_batch_size = 0
         self._bench_sync_pending = False
+        self._bench_stop_requested = False
+        self._bench_stop_reason: str | None = None
         self._bench_point_deadline = 0.0
         self._bench_point_result_timeout_seconds = (
-            min(
-                float(self._bench_config.timeout),
-                float(_BenchmarkSynchronizer.MAX_SYNC_TIMEOUT_SECONDS),
-            )
-            * 0.8
+            float(_BenchmarkSynchronizer.MAX_SYNC_TIMEOUT_SECONDS) * 0.8
         )
 
         parallel_config = vllm_config.parallel_config
@@ -1349,7 +1373,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 dp_size=self._bench_dp_size,
                 master_ip=parallel_config.data_parallel_master_ip,
                 port=sync_port,
-                timeout=self._bench_config.timeout,
+                timeout=_BenchmarkSynchronizer.MAX_SYNC_TIMEOUT_SECONDS,
             )
             if self._bench_synchronizer.run_id is not None:
                 self._bench_run_id = self._bench_synchronizer.run_id
@@ -2297,6 +2321,38 @@ class InstrumentedScheduler(AsyncScheduler):
             return
         self._bench_started_at = _utc_now_rfc3339()
         self._bench_start_monotonic = time.monotonic()
+        self._bench_deadline_monotonic = (
+            self._bench_start_monotonic + self._bench_config.timeout
+        )
+
+    def _bench_soft_timeout_elapsed(self) -> bool:
+        deadline = getattr(self, "_bench_deadline_monotonic", None)
+        return deadline is not None and time.monotonic() >= deadline
+
+    def _bench_request_timeout_stop(self, point: BenchmarkPoint) -> None:
+        if getattr(self, "_bench_stop_requested", False):
+            return
+        self._bench_stop_requested = True
+        self._bench_stop_reason = "timeout"
+        start = getattr(self, "_bench_start_monotonic", None)
+        elapsed = 0.0 if start is None else max(0.0, time.monotonic() - start)
+        logger.warning(
+            "Self-benchmark reached the %ds soft timeout after %.2fs; "
+            "benchmark_id=%d is complete, stopping with %d/%d measured points "
+            "and continuing engine startup",
+            self._bench_config.timeout,
+            elapsed,
+            point.benchmark_id,
+            len(self._bench_results),
+            self._bench_expected_points,
+        )
+
+    def _bench_transition_to_timeout_done(self) -> bool:
+        if not getattr(self, "_bench_stop_requested", False):
+            return False
+        self._bench_drain_pending = False
+        self._bench_phase = _BenchPhase.DONE
+        return True
 
     def _bench_finish_timing(self) -> None:
         if getattr(self, "_bench_elapsed_seconds", None) is not None:
@@ -2384,6 +2440,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 return None
             self._bench_save_current_point()
             self._bench_cleanup_requests()
+            if self._bench_transition_to_timeout_done():
+                return None
             self._bench_drain_pending = True
             return None
 
@@ -2486,6 +2544,8 @@ class InstrumentedScheduler(AsyncScheduler):
                     return None
             self._bench_save_current_point()
             self._bench_cleanup_requests()
+            if self._bench_transition_to_timeout_done():
+                return None
             self._bench_drain_pending = True
             return None
 
@@ -2538,12 +2598,19 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._bench_current_point is not None:
             point = self._bench_current_point
             local_fpms = list(self._bench_current_fpms)
+            local_stop_requested = self._bench_soft_timeout_elapsed()
             if self._bench_synchronizer is not None:
-                rank_results = self._bench_synchronizer.collect_result(
-                    point, local_fpms
+                group_result = self._bench_synchronizer.collect_result(
+                    point,
+                    local_fpms,
+                    stop_requested=local_stop_requested,
                 )
             else:
-                rank_results = [{"dp_rank": self._fpm_dp_rank, "fpms": local_fpms}]
+                group_result = _BenchmarkGroupResult(
+                    rank_results=[{"dp_rank": self._fpm_dp_rank, "fpms": local_fpms}],
+                    stop_requested=local_stop_requested,
+                )
+            rank_results = group_result.rank_results
 
             expected_ranks = list(range(self._bench_dp_size))
             actual_ranks = [result.get("dp_rank") for result in rank_results]
@@ -2594,6 +2661,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_current_point = None
                 self._bench_current_fpms = []
                 self._bench_point_deadline = 0.0
+                if group_result.stop_requested:
+                    self._bench_request_timeout_stop(point)
                 return
 
             self._bench_results.append(
@@ -2612,6 +2681,11 @@ class InstrumentedScheduler(AsyncScheduler):
                     "rank_results": rank_results,
                 }
             )
+            if (
+                group_result.stop_requested
+                and len(self._bench_results) < self._bench_expected_points
+            ):
+                self._bench_request_timeout_stop(point)
         self._bench_current_point = None
         self._bench_current_fpms = []
         self._bench_point_deadline = 0.0
@@ -2659,17 +2733,35 @@ class InstrumentedScheduler(AsyncScheduler):
             and bool(self._bench_completed_at)
             and measured_iteration_seconds <= elapsed_seconds + 1e-12
         )
+        coverage_complete = completed_points == self._bench_expected_points
+        stop_reason = getattr(self, "_bench_stop_reason", None)
+        status = (
+            "failed"
+            if error is not None
+            else "partial"
+            if stop_reason is not None and not coverage_complete
+            else "complete"
+        )
+        usable = (
+            error is None
+            and completed_points > 0
+            and len(iteration_groups) == completed_points
+            and all(group.get("complete") for group in iteration_groups)
+            and timing_valid
+        )
         output = {
             "schema_version": 2,
             "artifact_type": "rank",
-            "status": "failed" if error is not None else "complete",
-            "valid": completed_points == self._bench_expected_points
+            "status": status,
+            "valid": coverage_complete
             and len(iteration_groups) == completed_points
             and all(group.get("complete") for group in iteration_groups)
             and skipped_points == 0
             and not missing_phases
             and error is None
             and timing_valid,
+            "usable": usable,
+            "stop_reason": stop_reason if status == "partial" else None,
             "timing_valid": timing_valid,
             "run_id": getattr(self, "_bench_run_id", None),
             "grid_digest": getattr(self, "_bench_grid_digest", None),

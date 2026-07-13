@@ -401,8 +401,9 @@ class DynamoVllmArgGroup(ArgGroup):
             default=900,
             arg_type=int,
             help=(
-                "Maximum seconds to wait for benchmark to complete "
-                "(default: 900). Worker startup fails if exceeded."
+                "Soft limit in seconds for self-benchmarking (default: 900). "
+                "After the limit, the current measured iteration finishes, "
+                "partial results are returned, and engine startup continues."
             ),
         )
 

@@ -497,13 +497,13 @@ def test_benchmark_synchronizer_aligns_point_and_shares_run_id():
 
     def synchronize_follower():
         follower_result["run_id"] = rank1.synchronize(point)
-        follower_result["rank_results"] = rank1.collect_result(point, rank1_fpms)
+        follower_result["group"] = rank1.collect_result(point, rank1_fpms)
 
     follower = threading.Thread(target=synchronize_follower)
     follower.start()
     try:
         coordinator_run_id = rank0.synchronize(point)
-        coordinator_rank_results = rank0.collect_result(point, rank0_fpms)
+        coordinator_group = rank0.collect_result(point, rank0_fpms)
         follower.join(timeout=2)
         assert not follower.is_alive()
         assert follower_result["run_id"] == coordinator_run_id
@@ -512,8 +512,56 @@ def test_benchmark_synchronizer_aligns_point_and_shares_run_id():
             {"dp_rank": 0, "fpms": rank0_fpms},
             {"dp_rank": 1, "fpms": rank1_fpms},
         ]
-        assert coordinator_rank_results == expected_rank_results
-        assert follower_result["rank_results"] == expected_rank_results
+        assert coordinator_group.rank_results == expected_rank_results
+        assert follower_result["group"].rank_results == expected_rank_results
+        assert coordinator_group.stop_requested is False
+        assert follower_result["group"].stop_requested is False
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_shares_timeout_stop_decision():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    point = BenchmarkPoint(point_type="decode", benchmark_id=1)
+    follower_result = {}
+
+    def run_follower():
+        rank1.synchronize(point)
+        follower_result["group"] = rank1.collect_result(
+            point,
+            [{"counter_id": 1, "dp_rank": 1}],
+            stop_requested=True,
+        )
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        rank0.synchronize(point)
+        coordinator_group = rank0.collect_result(
+            point,
+            [{"counter_id": 1, "dp_rank": 0}],
+        )
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert coordinator_group.stop_requested is True
+        assert follower_result["group"].stop_requested is True
     finally:
         rank1.close()
         rank0.close()
@@ -2093,6 +2141,89 @@ def test_benchmark_timing_excludes_engine_startup_and_sums_measured_groups(
         "completed_at": "2026-07-10T12:00:09Z",
         "benchmark_elapsed_seconds": 9.0,
         "measured_iteration_seconds": 3.75,
+    }
+
+
+def test_benchmark_soft_timeout_stops_after_saving_current_point(monkeypatch):
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=1,
+        total_kv_read_tokens=48,
+        batch_size=3,
+    )
+    fpms = [
+        {
+            "scheduled_requests": {
+                "num_decode_requests": 3,
+                "sum_decode_kv_tokens": 48,
+            }
+        }
+    ]
+    stub = _benchmark_save_stub(point, fpms)
+    stub._bench_config = BenchmarkConfig(timeout=1)
+    stub._bench_start_monotonic = 0.0
+    stub._bench_deadline_monotonic = 1.0
+    stub._bench_expected_points = 2
+    stub._bench_stop_requested = False
+    stub._bench_stop_reason = None
+    stub._bench_drain_pending = True
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", lambda: 2.0)
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert len(stub._bench_results) == 1
+    assert stub._bench_stop_requested is True
+    assert stub._bench_stop_reason == "timeout"
+    assert InstrumentedScheduler._bench_transition_to_timeout_done(stub) is True
+    assert stub._bench_phase == _BenchPhase.DONE
+    assert stub._bench_drain_pending is False
+
+
+def test_benchmark_output_marks_timeout_result_partial_and_usable(tmp_path):
+    point = BenchmarkPoint(point_type="decode", benchmark_id=1, batch_size=1)
+    fpm = {"counter_id": 1, "dp_rank": 0, "wall_time": 0.25}
+    output_path = tmp_path / "benchmark.json"
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(output_path=str(output_path), timeout=1)
+    stub._bench_expected_points = 2
+    stub._bench_results = [
+        instrumented_scheduler_module.BenchmarkPointResult(point=point, fpms=[fpm])
+    ]
+    stub._bench_iteration_groups = [
+        {
+            "benchmark_id": 1,
+            "point": point.__dict__,
+            "expected_dp_ranks": [0],
+            "complete": True,
+            "wall_time": 0.25,
+            "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
+        }
+    ]
+    stub._bench_skipped_points = []
+    stub._bench_missing_phases = []
+    stub._bench_stop_reason = "timeout"
+    stub._bench_started_at = "2026-07-13T12:00:00Z"
+    stub._bench_completed_at = "2026-07-13T12:00:01Z"
+    stub._bench_start_monotonic = 0.0
+    stub._bench_elapsed_seconds = 1.0
+    stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.max_model_len = 128
+    stub.block_size = 8
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    output = json.loads(output_path.read_text())
+    assert output["status"] == "partial"
+    assert output["valid"] is False
+    assert output["usable"] is True
+    assert output["stop_reason"] == "timeout"
+    assert output["coverage"] == {
+        "expected_points": 2,
+        "completed_points": 1,
+        "skipped_points": 0,
     }
 
 
