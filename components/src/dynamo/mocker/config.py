@@ -87,6 +87,7 @@ def _estimate_aic_num_gpu_blocks(
     max_num_batched_tokens: int | None,
     aic_backend: str,
     aic_system: str | None,
+    aic_systems_path: str | None,
     aic_backend_version: str | None,
     aic_tp_size: int | None,
     aic_model_path: str | None,
@@ -109,6 +110,7 @@ def _estimate_aic_num_gpu_blocks(
     return estimate_num_gpu_blocks(
         backend_name=aic_backend,
         system=aic_system or _DEFAULT_AIC_SYSTEM,
+        systems_path=aic_systems_path,
         model_path=aic_model_path,
         tp_size=aic_tp_size if aic_tp_size is not None else 1,
         block_size=resolved_block_size,
@@ -144,6 +146,7 @@ def _resolve_num_gpu_blocks(
     max_num_batched_tokens: int | None,
     aic_backend: str | None,
     aic_system: str | None,
+    aic_systems_path: str | None,
     aic_backend_version: str | None,
     aic_tp_size: int | None,
     aic_model_path: str | None,
@@ -165,6 +168,7 @@ def _resolve_num_gpu_blocks(
         max_num_batched_tokens=max_num_batched_tokens,
         aic_backend=aic_backend,
         aic_system=aic_system,
+        aic_systems_path=aic_systems_path,
         aic_backend_version=aic_backend_version,
         aic_tp_size=aic_tp_size,
         aic_model_path=aic_model_path,
@@ -199,6 +203,7 @@ def _resolve_raw_engine_args(
         max_num_batched_tokens=raw.get("max_num_batched_tokens"),
         aic_backend=aic_backend,
         aic_system=raw.get("aic_system"),
+        aic_systems_path=raw.get("aic_systems_path"),
         aic_backend_version=raw.get("aic_backend_version"),
         aic_tp_size=raw.get("aic_tp_size"),
         aic_model_path=raw.get("aic_model_path") or fallback_model_path,
@@ -223,6 +228,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
     )
     aic_backend = None
     aic_system = None
+    aic_systems_path = None
     aic_backend_version = None
     aic_tp_size = None
     aic_model_path = None
@@ -236,6 +242,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
             or "vllm"
         )
         aic_system = getattr(args, "aic_system", None)
+        aic_systems_path = getattr(args, "aic_systems_path", None)
         aic_backend_version = getattr(args, "aic_backend_version", None)
         aic_tp_size = getattr(args, "aic_tp_size", None)
         aic_model_path = getattr(args, "model_path", None)
@@ -253,6 +260,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         ),
         aic_backend=aic_backend,
         aic_system=aic_system,
+        aic_systems_path=aic_systems_path,
         aic_backend_version=aic_backend_version,
         aic_tp_size=aic_tp_size,
         aic_model_path=aic_model_path,
@@ -284,6 +292,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         planner_profile_data=getattr(args, "planner_profile_data", None),
         aic_backend=aic_backend,
         aic_system=aic_system,
+        aic_systems_path=aic_systems_path,
         aic_backend_version=aic_backend_version,
         aic_tp_size=aic_tp_size,
         aic_model_path=aic_model_path,
@@ -323,6 +332,8 @@ def load_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         raw = json.loads(args.extra_engine_args.read_text())
         if not isinstance(raw, dict):
             raise ValueError("extra engine args must be a JSON object")
+        if args.aic_systems_path is not None:
+            raw["aic_systems_path"] = args.aic_systems_path
         raw = _resolve_raw_engine_args(
             raw, fallback_model_path=getattr(args, "model_path", None)
         )
