@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::scheduling::{RequestOutcome, RequestProgressUpdater};
+use dynamo_kv_router::scheduling::{AdmissionLease, RequestOutcome, RequestProgressUpdater};
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
@@ -21,13 +21,14 @@ use crate::{
 /// Post-selection owner of scheduler bookkeeping.
 ///
 /// `KvPushRouter` installs this through [`RequestGuard`] before its next
-/// fallible await. At that point the scheduling response channel has completed
-/// its admission handoff and no longer represents request lifetime.
+/// fallible await. The admission lease moves directly from the scheduling
+/// response into this guard and remains the request-lifetime authority.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
     request_progress: Option<RequestProgressUpdater>,
+    admission_lease: Option<AdmissionLease>,
     freed: bool,
 }
 
@@ -37,22 +38,31 @@ impl RequestCleanup {
         context_id: String,
         scheduler_tracked: bool,
         request_progress: Option<RequestProgressUpdater>,
+        admission_lease: Option<AdmissionLease>,
     ) -> Self {
         debug_assert!(request_progress.is_none() || scheduler_tracked);
+        debug_assert_eq!(request_progress.is_some(), admission_lease.is_some());
         Self {
             chooser,
             context_id,
             scheduler_tracked,
             request_progress,
+            admission_lease,
             freed: false,
         }
     }
 
     async fn finish(&mut self, outcome: RequestOutcome) {
-        let result = if !self.scheduler_tracked {
+        let result = if let Some(mut lease) = self.admission_lease.take() {
+            if let RequestOutcome::Completed { context_tokens } = outcome {
+                lease.mark_completed(context_tokens);
+            }
+            // AdmissionLease reports the terminal outcome through the shared dirty set.
+            // The scheduler actor remains the sole owner of booking and queue cleanup.
+            drop(lease);
             Ok(())
-        } else if self.request_progress.is_some() {
-            self.chooser.finish(&self.context_id, outcome).await
+        } else if !self.scheduler_tracked {
+            Ok(())
         } else {
             self.chooser.free(&self.context_id).await
         };
@@ -65,12 +75,26 @@ impl RequestCleanup {
         }
         self.freed = true;
     }
+
+    fn mark_completed(&mut self, context_tokens: usize) {
+        if let Some(progress) = &self.request_progress {
+            progress.update_context_tokens(context_tokens);
+        }
+        if let Some(lease) = self.admission_lease.as_mut() {
+            lease.mark_completed(context_tokens);
+        }
+    }
 }
 
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
         let needs_free = !self.freed && self.scheduler_tracked;
         if !needs_free {
+            return;
+        }
+
+        // AdmissionLease drops after this method and performs coalesced actor-owned cleanup.
+        if self.admission_lease.is_some() {
             return;
         }
 
@@ -84,13 +108,8 @@ impl Drop for RequestCleanup {
 
         let chooser = self.chooser.clone();
         let context_id = self.context_id.clone();
-        let has_admission_lifecycle = self.request_progress.is_some();
         handle.spawn(async move {
-            let result = if has_admission_lifecycle {
-                chooser.finish(&context_id, RequestOutcome::Aborted).await
-            } else {
-                chooser.free(&context_id).await
-            };
+            let result = chooser.free(&context_id).await;
             if let Err(error) = result {
                 tracing::warn!(
                     request_id = %context_id,
@@ -303,6 +322,7 @@ impl RequestGuard {
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
         request_progress: Option<RequestProgressUpdater>,
+        admission_lease: Option<AdmissionLease>,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -319,7 +339,13 @@ impl RequestGuard {
             RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
         Self {
-            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked, request_progress),
+            cleanup: RequestCleanup::new(
+                chooser,
+                context_id,
+                scheduler_tracked,
+                request_progress,
+                admission_lease,
+            ),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
@@ -423,15 +449,20 @@ impl RequestGuard {
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
+        self.mark_completed_terminal();
         let context_tokens = self
             .observability
             .context_tokens(self.initial_context_tokens);
-        if let Some(progress) = &self.cleanup.request_progress {
-            progress.update_context_tokens(context_tokens);
-        }
         self.cleanup
             .finish(RequestOutcome::Completed { context_tokens })
             .await;
+    }
+
+    pub(super) fn mark_completed_terminal(&mut self) {
+        let context_tokens = self
+            .observability
+            .context_tokens(self.initial_context_tokens);
+        self.cleanup.mark_completed(context_tokens);
     }
 
     pub(super) async fn abort(&mut self) {

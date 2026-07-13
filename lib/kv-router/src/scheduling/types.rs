@@ -77,6 +77,7 @@ pub struct SchedulingResponse {
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub request_progress: Option<RequestProgressUpdater>,
+    pub admission_lease: Option<super::queue::AdmissionLease>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

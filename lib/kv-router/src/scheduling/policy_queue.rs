@@ -593,13 +593,23 @@ impl<T> PolicyQueue<T> {
         class_index: usize,
         admission_id: AdmissionId,
         placement: WorkerPlacement,
-    ) -> bool {
+        replacement_snapshot: Option<(QueueSnapshot, f64)>,
+    ) -> Option<QueueSnapshot> {
         let class = &mut self.classes[class_index];
-        let Some(entry) = class.deferred.remove(&admission_id) else {
-            return false;
+        let mut entry = class.deferred.remove(&admission_id)?;
+        let old_snapshot = entry.snapshot;
+        if let Some((snapshot, priority_jump)) = replacement_snapshot {
+            subtract_stats(&mut class.stats, old_snapshot);
+            add_stats(&mut class.stats, snapshot);
+            if class.config.queue_policy == RouterQueuePolicy::Wspt {
+                entry.priority.policy_score = OrderedFloat(
+                    (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64,
+                );
+            }
+            entry.snapshot = snapshot;
         };
         class.push_ready(placement, entry);
-        true
+        Some(old_snapshot)
     }
 
     pub(crate) fn deferred_payload_mut(
@@ -973,13 +983,76 @@ policy_classes:
         );
         assert!(queue.pop_next(|_, _, _| true).is_none());
 
-        assert!(queue.make_ready(0, deferred_id, WorkerPlacement::Any));
+        assert!(
+            queue
+                .make_ready(0, deferred_id, WorkerPlacement::Any, None)
+                .is_some()
+        );
         assert_eq!(
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "deferred"
         );
         assert_eq!(queue.pending_count(), 0);
         assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
+    }
+
+    #[test]
+    fn exact_make_ready_rekeys_wspt_priority() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: agents
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agents
+    policy_family: agents
+    cache_bucket: all
+    queue_policy: wspt
+    queue_admission:
+      type: test
+    quantum: 1000
+"#,
+        ));
+        let deferred_id = AdmissionId::new(1);
+        queue
+            .enqueue_deferred(
+                0,
+                1,
+                QueueSnapshot::new(100, 99),
+                0.0,
+                0.0,
+                0,
+                deferred_id,
+                "rekeyed",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(10, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "ready",
+            )
+            .unwrap();
+
+        queue
+            .make_ready(
+                0,
+                deferred_id,
+                WorkerPlacement::Any,
+                Some((QueueSnapshot::new(100, 0), 0.0)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "ready"
+        );
     }
 
     #[test]

@@ -166,6 +166,10 @@ where
         monitor_worker_configs: bool,
         admission_strategies: PolicyClassAdmissionStrategies,
     ) -> Result<Self, KvSchedulerError> {
+        let periodic_recheck_interval = admission_strategies
+            .values()
+            .filter_map(|strategy| strategy.reconcile_interval())
+            .fold(recheck_interval, Duration::min);
         let queue = Arc::new(
             SchedulerQueue::new_with_policy_profile_and_admission_strategies(
                 Arc::clone(&slots),
@@ -176,6 +180,7 @@ where
                 prefill_load_estimator,
                 overlap_scores_refresh,
                 overloaded_worker_provider,
+                recheck_interval,
                 admission_strategies,
             )?,
         );
@@ -246,7 +251,7 @@ where
         });
 
         tokio::spawn(async move {
-            let mut recheck_interval = tokio::time::interval(recheck_interval);
+            let mut recheck_interval = tokio::time::interval(periodic_recheck_interval);
             tracing::trace!("LocalScheduler periodic queue update task started");
 
             loop {
@@ -256,7 +261,7 @@ where
                         break;
                     }
                     _ = recheck_interval.tick() => {
-                        queue_periodic_updates.reconcile().await;
+                        queue_periodic_updates.periodic_reconcile().await;
                     }
                 }
             }
@@ -327,11 +332,18 @@ where
             .enqueue_with_block_hashes(request, block_hashes)
             .await;
 
-        let response = resp_rx
+        let mut response = resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-        if let Some(guard) = cancellation_guard.as_mut() {
-            guard.disarm();
+        match &mut response {
+            Ok(response) if response.request_progress.is_some() => {
+                response.admission_lease = cancellation_guard.take();
+            }
+            Ok(_) | Err(_) => {
+                if let Some(guard) = cancellation_guard.as_mut() {
+                    guard.disarm();
+                }
+            }
         }
         response
     }
@@ -1493,12 +1505,14 @@ mod tests {
             strategies,
         )
         .unwrap();
-        scheduler
+        let mut response = scheduler
             .schedule_request(request(ScheduleMode::TrackedWithAdmission {
                 request_id: "req-1".to_owned(),
             }))
             .await
             .unwrap();
+        assert!(response.admission_lease.is_some());
+        response.admission_lease.as_mut().unwrap().disarm();
 
         scheduler
             .finish("req-1", RequestOutcome::Aborted)

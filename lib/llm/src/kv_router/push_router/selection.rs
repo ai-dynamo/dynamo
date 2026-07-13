@@ -7,7 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::{RequestProgressUpdater, RoutingEligibility},
+    scheduling::{AdmissionLease, RequestProgressUpdater, RoutingEligibility},
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -29,6 +29,7 @@ pub(super) struct WorkerSelection {
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) scheduler_tracked: bool,
     pub(super) request_progress: Option<RequestProgressUpdater>,
+    pub(super) admission_lease: Option<AdmissionLease>,
 }
 
 #[derive(Clone, Copy)]
@@ -104,6 +105,7 @@ impl KvPushRouter {
                 cached_tokens,
                 routing_hashes,
                 request_progress,
+                admission_lease,
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -113,6 +115,7 @@ impl KvPushRouter {
                 routing_hashes,
                 scheduler_tracked: args.scheduler_tracked,
                 request_progress,
+                admission_lease,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

@@ -4,7 +4,6 @@
 use std::{sync::Arc, time::Duration};
 
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
-use dynamo_kv_router::scheduling::RequestOutcome;
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -123,21 +122,9 @@ impl KvPushRouter {
 
         match selection_result {
             Some(result) => result,
-            None => {
-                if !is_query_only
-                    && let Err(error) = self
-                        .chooser
-                        .finish(&context_id, RequestOutcome::Aborted)
-                        .await
-                {
-                    tracing::warn!(
-                        request_id = %context_id,
-                        %error,
-                        "Failed to finish scheduler state after cancellation during worker selection"
-                    );
-                }
-                Err(cancelled_error(&context_id))
-            }
+            // Dropping selection_future drops its AdmissionLease. The scheduler actor owns
+            // rollback if selection reached queueing or booking; otherwise there is no state.
+            None => Err(cancelled_error(&context_id)),
         }
     }
 
@@ -219,6 +206,7 @@ impl KvPushRouter {
             request,
             selection.scheduler_tracked,
             selection.request_progress.take(),
+            selection.admission_lease.take(),
         );
 
         let record_result: Result<(), Error> = async {
@@ -374,6 +362,9 @@ impl KvPushRouter {
                         };
                         failed |= response_item_failed(&item);
                         guard.on_item(&item).await;
+                        if !failed && response_item_completed(&item) {
+                            guard.mark_completed_terminal();
+                        }
                         yield item;
                     }
                 }
@@ -634,6 +625,14 @@ fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
             })
 }
 
+fn response_item_completed(item: &Annotated<LLMEngineOutput>) -> bool {
+    !response_item_failed(item)
+        && item
+            .data
+            .as_ref()
+            .is_some_and(|data| data.finish_reason.is_some())
+}
+
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for DirectRoutingRouter
@@ -693,6 +692,23 @@ mod tests {
 
         output.finish_reason = Some(FinishReason::Length);
         assert!(!response_item_failed(&Annotated::from_data(output)));
+    }
+
+    #[test]
+    fn response_item_completed_requires_successful_terminal_reason() {
+        for reason in [FinishReason::Stop, FinishReason::EoS, FinishReason::Length] {
+            let output = LLMEngineOutput {
+                finish_reason: Some(reason),
+                ..Default::default()
+            };
+            assert!(response_item_completed(&Annotated::from_data(output)));
+        }
+
+        let output = LLMEngineOutput {
+            finish_reason: Some(FinishReason::Error("decode failed".to_string())),
+            ..Default::default()
+        };
+        assert!(!response_item_completed(&Annotated::from_data(output)));
     }
 
     async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {

@@ -6,9 +6,9 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PolicyClassAdmissionStrategies,
-    PotentialLoad, RequestOutcome, ScheduleRequest, SchedulingRequest, SchedulingResponse,
-    TierOverlapBlocks,
+    AdmissionLease, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
+    PolicyClassAdmissionStrategies, PotentialLoad, RequestOutcome, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -119,16 +119,7 @@ where
         let profile = kv_router_config
             .policy_profile(model_name)
             .map_err(|error| KvSchedulerError::InitFailed(error.to_string()))?;
-        let strategy_recheck_interval = admission_strategies
-            .values()
-            .filter_map(|strategy| strategy.reconcile_interval())
-            .min();
-        let queue_recheck_interval = strategy_recheck_interval.map_or_else(
-            || kv_router_config.router_queue_recheck_interval(),
-            |strategy_interval| {
-                strategy_interval.min(kv_router_config.router_queue_recheck_interval())
-            },
-        );
+        let queue_recheck_interval = kv_router_config.router_queue_recheck_interval();
         let metric_model = model_name.unwrap_or("unknown");
         let queue_metrics = profile
             .classes()

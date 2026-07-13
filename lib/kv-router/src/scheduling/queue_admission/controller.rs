@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::time::Duration;
+
+use tokio::time::Instant;
 
 use super::{
     AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
@@ -25,13 +28,20 @@ pub(crate) struct ClassAdmissionAction {
 }
 
 pub(crate) struct PolicyClassAdmissionController {
-    strategies: Vec<Option<Box<dyn PolicyClassAdmissionStrategy>>>,
+    strategies: Vec<Option<ScheduledStrategy>>,
     next_id: u64,
+}
+
+struct ScheduledStrategy {
+    strategy: Box<dyn PolicyClassAdmissionStrategy>,
+    reconcile_interval: Duration,
+    next_reconcile: Instant,
 }
 
 impl PolicyClassAdmissionController {
     pub fn new(
         profile: &PolicyProfile,
+        queue_recheck_interval: Duration,
         mut strategies: PolicyClassAdmissionStrategies,
     ) -> Result<Self, KvSchedulerError> {
         if let Some(class_name) = strategies.iter().find_map(|(class_name, strategy)| {
@@ -45,6 +55,7 @@ impl PolicyClassAdmissionController {
             )));
         }
 
+        let now = Instant::now();
         let resolved = profile
             .classes()
             .iter()
@@ -58,7 +69,18 @@ impl PolicyClassAdmissionController {
                         class.name, config.strategy
                     )));
                 }
-                Ok(strategy)
+                Ok(strategy.map(|strategy| {
+                    let reconcile_interval = strategy
+                        .reconcile_interval()
+                        .map_or(queue_recheck_interval, |requested| {
+                            requested.min(queue_recheck_interval)
+                        });
+                    ScheduledStrategy {
+                        strategy,
+                        reconcile_interval,
+                        next_reconcile: now + reconcile_interval,
+                    }
+                }))
             })
             .collect::<Result<Vec<_>, _>>()?;
         for class_name in strategies.keys() {
@@ -81,7 +103,7 @@ impl PolicyClassAdmissionController {
         context_tokens: usize,
         worker_eligibility: WorkerEligibility,
     ) -> Option<(AdmissionTicket, RequestProgressUpdater, AdmissionDecision)> {
-        let strategy = self.strategies[class_index].as_mut()?;
+        let strategy = &mut self.strategies[class_index].as_mut()?.strategy;
         let id = AdmissionId::new(self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         let ticket = AdmissionTicket { class_index, id };
@@ -128,14 +150,21 @@ impl PolicyClassAdmissionController {
         self.event(ticket, AdmissionEvent::Aborted { id: ticket.id })
     }
 
-    pub fn reconcile(&mut self) -> Vec<ClassAdmissionAction> {
+    pub fn reconcile(&mut self, now: Instant, force: bool) -> Vec<ClassAdmissionAction> {
         let mut actions = Vec::new();
-        for (class_index, strategy) in self.strategies.iter_mut().enumerate() {
-            let Some(strategy) = strategy else {
+        for (class_index, scheduled) in self.strategies.iter_mut().enumerate() {
+            let Some(scheduled) = scheduled else {
                 continue;
             };
+            if !force && now < scheduled.next_reconcile {
+                continue;
+            }
+            if now >= scheduled.next_reconcile {
+                scheduled.next_reconcile = now + scheduled.reconcile_interval;
+            }
             actions.extend(
-                strategy
+                scheduled
+                    .strategy
                     .on_event(AdmissionEvent::Reconcile)
                     .into_iter()
                     .map(|action| ClassAdmissionAction {
@@ -156,6 +185,7 @@ impl PolicyClassAdmissionController {
             return Vec::new();
         };
         strategy
+            .strategy
             .on_event(event)
             .into_iter()
             .map(|action| ClassAdmissionAction {
@@ -168,6 +198,8 @@ impl PolicyClassAdmissionController {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -191,6 +223,28 @@ mod tests {
 
         fn reconcile_interval(&self) -> Option<Duration> {
             Some(Duration::ZERO)
+        }
+    }
+
+    struct CountingStrategy {
+        reconciles: Arc<AtomicUsize>,
+        interval: Duration,
+    }
+
+    impl PolicyClassAdmissionStrategy for CountingStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Bypass
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            if event == AdmissionEvent::Reconcile {
+                self.reconciles.fetch_add(1, Ordering::Relaxed);
+            }
+            Vec::new()
+        }
+
+        fn reconcile_interval(&self) -> Option<Duration> {
+            Some(self.interval)
         }
     }
 
@@ -220,6 +274,7 @@ policy_classes:
     fn rejects_configured_class_without_strategy() {
         let error = PolicyClassAdmissionController::new(
             &configured_profile(),
+            Duration::from_secs(60),
             PolicyClassAdmissionStrategies::new(),
         )
         .err()
@@ -238,9 +293,10 @@ policy_classes:
             Box::new(ZeroIntervalStrategy),
         );
 
-        let error = PolicyClassAdmissionController::new(&profile, strategies)
-            .err()
-            .unwrap();
+        let error =
+            PolicyClassAdmissionController::new(&profile, Duration::from_secs(60), strategies)
+                .err()
+                .unwrap();
 
         assert!(matches!(error, KvSchedulerError::InitFailed(message) if
             message.contains("zero reconcile interval")));
@@ -255,8 +311,47 @@ policy_classes:
             Box::new(ReadyStrategy),
         );
 
-        let controller = PolicyClassAdmissionController::new(&profile, strategies).unwrap();
+        let controller =
+            PolicyClassAdmissionController::new(&profile, Duration::from_secs(60), strategies)
+                .unwrap();
 
         assert!(controller.has_strategy(0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconciles_only_strategies_whose_deadlines_are_due() {
+        let fast = Arc::new(AtomicUsize::new(0));
+        let slow = Arc::new(AtomicUsize::new(0));
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert(
+            "standard".to_owned(),
+            Box::new(CountingStrategy {
+                reconciles: Arc::clone(&fast),
+                interval: Duration::from_millis(10),
+            }),
+        );
+        strategies.insert(
+            "agents".to_owned(),
+            Box::new(CountingStrategy {
+                reconciles: Arc::clone(&slow),
+                interval: Duration::from_secs(60),
+            }),
+        );
+        let mut controller = PolicyClassAdmissionController::new(
+            &configured_profile(),
+            Duration::from_secs(60),
+            strategies,
+        )
+        .unwrap();
+
+        tokio::time::advance(Duration::from_millis(10)).await;
+        controller.reconcile(Instant::now(), false);
+        assert_eq!(fast.load(Ordering::Relaxed), 1);
+        assert_eq!(slow.load(Ordering::Relaxed), 0);
+
+        tokio::time::advance(Duration::from_millis(59_990)).await;
+        controller.reconcile(Instant::now(), false);
+        assert_eq!(fast.load(Ordering::Relaxed), 2);
+        assert_eq!(slow.load(Ordering::Relaxed), 1);
     }
 }

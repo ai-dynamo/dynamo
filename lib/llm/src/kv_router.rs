@@ -80,6 +80,7 @@ pub enum FindBestMatchOutcome {
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
         request_progress: Option<RequestProgressUpdater>,
+        admission_lease: Option<scheduler::AdmissionLease>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -789,6 +790,7 @@ where
             cached_tokens: response.cached_tokens,
             routing_hashes,
             request_progress: response.request_progress,
+            admission_lease: response.admission_lease,
         })
     }
 

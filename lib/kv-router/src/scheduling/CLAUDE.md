@@ -69,6 +69,7 @@ PolicyClassQueue("agents")
 
 ## Guardrails
 
+- A request ID identifies at most one active scheduler request. Do not reuse it until the prior request reaches terminal cleanup; cancellation and admission lifecycle state intentionally key by request ID.
 - `SchedulerQueueActor::admit_one` is the canonical admission path: compute projected
   load, select worker, skip booking if the response receiver is closed, then
   book state before responding. Failed response delivery must roll back the
