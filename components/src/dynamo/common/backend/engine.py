@@ -7,17 +7,22 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypedDict
 
 from typing_extensions import Required
 
 from dynamo._core import Context
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.snapshot.restore_context import RestoredRuntimeConfig
 
 from .publisher import KvEventSource
 
 if TYPE_CHECKING:
-    from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
+    from dynamo._core.backend import (  # type: ignore[import-not-found]
+        EngineMetrics,
+        PreRuntimeContext,
+    )
     from dynamo.logits_processing import BaseLogitsProcessor
 
     from .worker import WorkerConfig
@@ -150,6 +155,32 @@ class EngineConfig:
     llm: Optional[LlmRegistration] = None
 
 
+class PreRuntimeAction(str, Enum):
+    CONTINUE = "continue"
+    PREPARED = "prepared"
+    EXIT_SUCCESS = "exit_success"
+
+
+@dataclass(frozen=True)
+class PreRuntimeOutcome:
+    """Result returned by :meth:`BaseEngine.prepare_for_runtime`."""
+
+    action: PreRuntimeAction
+    restored_runtime: Optional[RestoredRuntimeConfig] = None
+
+    @classmethod
+    def continue_startup(cls) -> "PreRuntimeOutcome":
+        return cls(PreRuntimeAction.CONTINUE)
+
+    @classmethod
+    def prepared(cls, restored_runtime: RestoredRuntimeConfig) -> "PreRuntimeOutcome":
+        return cls(PreRuntimeAction.PREPARED, restored_runtime)
+
+    @classmethod
+    def exit_success(cls) -> "PreRuntimeOutcome":
+        return cls(PreRuntimeAction.EXIT_SUCCESS)
+
+
 class BaseEngine(ABC):
     """Abstract base for all engines — the modality-agnostic lifecycle.
 
@@ -161,13 +192,15 @@ class BaseEngine(ABC):
 
     Lifecycle:
         1. from_args(argv) -- parse CLI args, return (engine, WorkerConfig)
-        2. start()         -- start the engine, return EngineConfig metadata.
+        2. prepare_for_runtime() -- optional snapshot/restore preparation before
+                                   Dynamo opens distributed-runtime connections.
+        3. start()         -- start/activate the engine, return EngineConfig metadata.
                               After start() returns, generate() MUST be ready
                               to accept calls. Worker begins serving
                               immediately after start().
-        3. generate()      -- called for each request (concurrent calls expected)
-        4. abort()         -- called when a request is cancelled (optional, default no-op)
-        5. cleanup()       -- called once on shutdown, release all resources
+        4. generate()      -- called for each request (concurrent calls expected)
+        5. abort()         -- called when a request is cancelled (optional, default no-op)
+        6. cleanup()       -- called once on shutdown, release all resources
     """
 
     @classmethod
@@ -184,6 +217,20 @@ class BaseEngine(ABC):
             A ``(engine, worker_config)`` pair.
         """
         ...
+
+    async def prepare_for_runtime(
+        self, context: "PreRuntimeContext"
+    ) -> PreRuntimeOutcome:
+        """Optionally initialize snapshot state before DistributedRuntime.
+
+        The default keeps cold startup unchanged. Snapshot-aware engines return
+        ``prepared`` after restore or ``exit_success`` after the producer has
+        been captured. ``context`` exposes ``is_cancelled()`` and an awaitable
+        ``cancelled()`` for shutdown-aware sentinel waits.
+        """
+
+        del context
+        return PreRuntimeOutcome.continue_startup()
 
     @abstractmethod
     async def start(self, worker_id: int) -> EngineConfig:
@@ -245,8 +292,12 @@ class BaseEngine(ABC):
           be null-safe: guard each resource with an ``is None`` check
           so a partially constructed engine can be released without
           raising.
-        * ``cleanup()`` is **not** called when ``start()`` was never
-          invoked (e.g. pre-start shutdown). Engines whose constructors
+        * ``cleanup()`` runs when ``prepare_for_runtime()`` returned
+          ``prepared`` or raised after partial initialization, even if
+          ``start()`` was never invoked.
+        * ``cleanup()`` is **not** called when preparation returned
+          ``continue`` and ``start()`` was never invoked, or when snapshot
+          capture returned ``exit_success``. Engines whose constructors
           allocate resources should release them via ``__del__`` /
           context-manager semantics rather than rely on ``cleanup()``.
 

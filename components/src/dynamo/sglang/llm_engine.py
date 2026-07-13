@@ -45,6 +45,7 @@ from dynamo.common.backend.engine import (
     LLMEngine,
     LlmRegistration,
     LogitsProcessorSpec,
+    PreRuntimeOutcome,
     is_generation_stage,
     logits_processors_for_request,
     resolve_test_logits_processor_spec,
@@ -156,6 +157,9 @@ class SglangLLMEngine(LLMEngine):
         self._logits_processor_spec: LogitsProcessorSpec | None = None
         self._pause_controller: SGLangEnginePauseController | None = None
         self._pause_lock = asyncio.Lock()
+        self._engine_config: EngineConfig | None = None
+        self._runtime_activated = False
+        self._snapshot_argv: list[str] | None = None
 
     @classmethod
     async def from_args(
@@ -182,6 +186,7 @@ class SglangLLMEngine(LLMEngine):
         )
 
         engine = cls(server_args, dynamo_args, config.serving_mode)
+        engine._snapshot_argv = list(argv) if argv is not None else list(sys.argv[1:])
         worker_config = WorkerConfig.from_runtime_config(
             dynamo_args,
             model_name=server_args.model_path,
@@ -191,8 +196,26 @@ class SglangLLMEngine(LLMEngine):
         )
         return engine, worker_config
 
+    async def prepare_for_runtime(self, context) -> PreRuntimeOutcome:
+        from dynamo.sglang.snapshot import prepare_unified_snapshot
+
+        return await prepare_unified_snapshot(
+            self,
+            argv=self._snapshot_argv,
+            context=context,
+        )
+
     async def start(self, worker_id: int) -> EngineConfig:
         del worker_id  # SGLang bootstrap uses host/port/room triples
+        config = await self._initialize_engine()
+        if not self._runtime_activated:
+            self._start_metrics_task()
+            self._runtime_activated = True
+        return config
+
+    async def _initialize_engine(self) -> EngineConfig:
+        if self._engine_config is not None:
+            return self._engine_config
 
         # SGLang's tokenizer_manager registers its own SIGTERM/SIGINT handlers
         # via loop.add_signal_handler() (lazily, on warmup). The unified Worker
@@ -237,11 +260,9 @@ class SglangLLMEngine(LLMEngine):
         capacity = runtime_capacity(self.server_args, scheduler_info)
         page_size = self.server_args.page_size
 
-        self._start_metrics_task()
-
         self._dp_start = capacity.data_parallel_start_rank
         self._dp_size = capacity.data_parallel_size
-        return EngineConfig(
+        self._engine_config = EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
             runtime_data=_get_runtime_data(self.server_args, scheduler_info),
@@ -259,6 +280,7 @@ class SglangLLMEngine(LLMEngine):
                 bootstrap_port=self._bootstrap_port,
             ),
         )
+        return self._engine_config
 
     def _logits_tokenizer(self) -> Any:
         """Tokenizer the smoke hook tokenizes ``"Hello world!"`` with.
@@ -776,9 +798,9 @@ class SglangLLMEngine(LLMEngine):
         Partial ``bootstrap_info`` is a router contract violation; we
         warn and fill the gaps so the request doesn't fail outright.
         """
-        assert (
-            self._bootstrap_host is not None and self._bootstrap_port is not None
-        ), "prefill workers must resolve bootstrap host/port in start()"
+        assert self._bootstrap_host is not None and self._bootstrap_port is not None, (
+            "prefill workers must resolve bootstrap host/port in start()"
+        )
 
         bootstrap_info_from_req = request.get("bootstrap_info") or {}
         if isinstance(bootstrap_info_from_req, dict) and bootstrap_info_from_req:

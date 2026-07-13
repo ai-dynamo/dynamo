@@ -137,7 +137,8 @@ async def _check_start_populates_registration_metadata(started_engine):
     """``start`` must surface non-None values for the fields the Rust
     registration path reads — if any of them come back None, the model
     appears in /v1/models but fails to actually serve."""
-    _engine, cfg = started_engine
+    engine, cfg = started_engine
+    assert await engine.start(0) is cfg, "start must reuse the prepared vLLM engine"
     assert cfg.llm is not None
     assert cfg.llm.context_length and cfg.llm.context_length > 0
     assert cfg.llm.kv_cache_block_size and cfg.llm.kv_cache_block_size > 0

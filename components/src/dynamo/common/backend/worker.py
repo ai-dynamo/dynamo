@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import warnings
 from dataclasses import dataclass, field
@@ -288,4 +289,8 @@ class Worker:
         # LLMEngine. The Rust Worker validates model_input against the kind.
         is_raw = isinstance(self.engine, RawEngine)
         worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
-        await worker.run()
+        snapshot_complete = await worker.run()
+        if snapshot_complete:
+            # The snapshot producer must not run Python/vendor destructors over
+            # the captured engine image. This mirrors the legacy TRT-LLM path.
+            os._exit(0)

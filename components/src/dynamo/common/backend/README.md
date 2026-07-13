@@ -4,7 +4,9 @@
 inference, the shared multimodal request and encoder-handoff contract,
 metrics + Prometheus bridging, KV event publishing, KV-aware (DP-rank)
 routing, health-check canaries, OpenTelemetry tracing, and request-side
-guided decoding / structural tag.
+guided decoding / structural tag. The unified vLLM, SGLang, and TRT-LLM
+workers also support the watcher-driven snapshot/restore lifecycle described
+below, subject to each backend's existing snapshot constraints.
 
 > **Work in progress.** Multimodal support is backend-specific: vLLM supports
 > aggregated and prefill/decode image and video inference, while separate
@@ -12,8 +14,8 @@ guided decoding / structural tag.
 > non-unified paths. Diffusion (image/video/DLLM),
 > LoRA (SGLang / TRT-LLM — vLLM is supported),
 > engine routes (pause/resume, profiling, weight updates),
-> text-in-text-out, and snapshot/CRIU are still on the non-unified
-> path. See [Feature Gaps](#feature-gaps) for the per-engine matrix.
+> and text-in-text-out are still on the non-unified path. See
+> [Feature Gaps](#feature-gaps) for the per-engine matrix.
 
 > **Looking for a walkthrough?** Start with the
 > [Writing Unified Backends](../../../../../docs/development/unified-backends.md)
@@ -29,7 +31,8 @@ all backends) from **engine logic** (vLLM, SGLang, TensorRT-LLM, etc.).
 ```text
 LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - from_args(argv) -> (LLMEngine, WorkerConfig)  (factory)
-    |   - start(worker_id) -> EngineConfig    (start engine, return metadata)
+    |   - prepare_for_runtime(context) -> PreRuntimeOutcome (optional)
+    |   - start(worker_id) -> EngineConfig    (activate engine, return metadata)
     |   - generate(request, context)         (streaming inference)
     |   - abort(context)                     (cancel request, optional)
     |   - is_quiescent() -> Optional[bool]   (prefill drain early-exit, optional)
@@ -42,12 +45,58 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
 
 Worker                  <-- runtime integration (worker.py)
     - receives WorkerConfig from from_args()
-    - creates DistributedRuntime
     - sets up endpoints, signal handlers
+    - calls engine.prepare_for_runtime() before creating DistributedRuntime
+    - replaces identity/transport config after a restore, then connects
     - calls engine.start(worker_id), registers model
     - serves generate endpoint with cancellation monitoring
     - drains prefill workers (polls engine.is_quiescent()) then calls engine.cleanup() on shutdown
 ```
+
+### Snapshot and restore lifecycle
+
+Snapshot-aware unified workers use this ordering:
+
+```text
+from_args
+  -> install shutdown handling
+  -> prepare_for_runtime
+       -> load + warm up + pause vendor engine
+       -> wait for snapshot-complete or restore-complete
+  -> create DistributedRuntime
+  -> start(worker_id)
+       -> post-runtime activation and identity-dependent setup
+  -> register model and become ready
+```
+
+No etcd, NATS, request-plane, or event-plane connection is created before the
+snapshot capture or restore finishes. A capture process exits successfully
+after `snapshot-complete`; it does not create the distributed runtime or run
+destructive engine cleanup. After `restore-complete`, the already-loaded engine
+is resumed and reused, and `start(worker_id)` performs only activation work.
+The worker is not discoverable until that activation and model registration
+succeed. With `DYN_SNAPSHOT_CONTROL_DIR` unset, `prepare_for_runtime` is a
+no-op and startup follows the existing cold-load path.
+
+The restore standby captures the new container's runtime environment before
+importing vLLM, SGLang, or TRT-LLM. On restore, Dynamo applies that context and
+reparses the normal runtime arguments: explicit CLI values retain their normal
+precedence over restored environment values. The resulting namespace,
+discovery backend, request plane, and event plane replace the snapshot-time
+worker settings as a unit before `DistributedRuntime` is created.
+
+The protocol continues to use `DYN_SNAPSHOT_CONTROL_DIR`, the existing
+sentinel files, and `restore-context.json`; it adds no management endpoint or
+CLI flag. Invalid snapshot combinations are reported as `InvalidArgument`,
+cancellation as `Cancelled`, and preparation/restore incompatibilities as
+`EngineShutdown` with the backend and lifecycle phase included. Preparation
+and activation failures run engine cleanup exactly once. TRT-LLM retains its
+existing restriction to single-GPU, aggregated, text-only snapshot workers;
+vLLM and SGLang retain their existing pause-controller and warmup behavior.
+
+This lifecycle is for watcher-driven capture before distributed-runtime
+startup and a later restore. It does not provide live checkpointing of an
+already-serving worker.
 
 ## Quick Start
 
@@ -629,7 +678,6 @@ Request handling:
 | Multimodal parity | The shared request and encoder-handoff contract are available. vLLM supports aggregated and prefill/decode image and video inference; SGLang / TRT-LLM execution and separate encode workers remain separate work. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
-| Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |
 
 ### vLLM-specific gaps
 
@@ -655,7 +703,6 @@ Request handling:
 | Multimodal encode worker | Front-facing `MMEncoder`, embedding LRU cache, NIXL transfer (`MultimodalEncodeWorkerHandler`) |
 | Multimodal worker | Aggregated and disaggregated-prefill multimodal inference with `EmbeddingsProcessor` |
 | Deferred signal handling | `install_graceful_shutdown` captures SGLang's internal `loop.add_signal_handler` registrations for coordinated teardown |
-| Snapshot pause | Legacy `prepare_snapshot_engine` wires `SGLangEnginePauseController` to the shared `EngineSnapshotController` (CRIU + identity reload); unified path doesn't invoke it |
 | Image/video health-check payloads | `ImageDiffusionHealthCheckPayload`, `VideoGenerationHealthCheckPayload` |
 | `register_model_with_readiness_gate` + image/video fast paths | `register.py` skips HF `config.json` download for `ModelType.Images` / `ModelType.Videos` |
 | Output modalities override | Required for diffusion workers (default `["text"]` -> `["image"]` / `["video"]`) |
@@ -694,6 +741,5 @@ For users picking what to land next on the unified path:
 3. **Engine routes / lifecycle endpoints** — weight updates. (Profiling,
    sleep/wake, KV block clearing, elastic-EP scaling, and headless
    multi-node already landed.) Visible in operator workflows.
-4. **Snapshot / CRIU** — production checkpoint support.
-5. **Multimodal / diffusion / video / DLLM** — biggest functional
+4. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.

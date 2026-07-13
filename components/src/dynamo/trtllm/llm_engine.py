@@ -45,6 +45,7 @@ from dynamo.common.backend.engine import (
     LLMEngine,
     LlmRegistration,
     LogitsProcessorSpec,
+    PreRuntimeOutcome,
     is_generation_stage,
     logits_processors_for_request,
     resolve_test_logits_processor_spec,
@@ -210,6 +211,9 @@ class TrtllmLLMEngine(LLMEngine):
         self._no_inflight_requests.set()
         self._reject_new_requests = False
         self._resume_recovery_required = False
+        self._engine_config: EngineConfig | None = None
+        self._snapshot_config: Any = None
+        self._snapshot_argv: list[str] | None = None
 
     @classmethod
     async def from_args(
@@ -320,6 +324,8 @@ class TrtllmLLMEngine(LLMEngine):
             component=config.component,
             publish_events_and_metrics=config.publish_events_and_metrics,
         )
+        engine._snapshot_config = config
+        engine._snapshot_argv = list(argv) if argv is not None else list(sys.argv[1:])
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
@@ -328,6 +334,24 @@ class TrtllmLLMEngine(LLMEngine):
             disaggregation_mode=_TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode],
         )
         return engine, worker_config
+
+    async def prepare_for_runtime(self, context) -> PreRuntimeOutcome:
+        from dynamo.trtllm.snapshot import prepare_unified_snapshot
+
+        return await prepare_unified_snapshot(
+            self,
+            config=self._snapshot_config,
+            argv=self._snapshot_argv,
+            context=context,
+        )
+
+    async def _initialize_engine(self) -> None:
+        if self._engine is not None:
+            return
+        self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
+        await self._engine.initialize()
+        self._pause_controller = TRTLLMEnginePauseController(self._engine)
+        self._logits_processor_spec = await self.logits_processor_spec()
 
     async def start(self, worker_id: int) -> EngineConfig:
         # disagg_request_id is the cluster-wide prefill→decode match
@@ -340,13 +364,11 @@ class TrtllmLLMEngine(LLMEngine):
             worker_id,
         )
 
-        self._engine = TensorRTLLMEngine(self.engine_args, self.disaggregation_mode)
-        await self._engine.initialize()
-        self._pause_controller = TRTLLMEnginePauseController(self._engine)
+        await self._initialize_engine()
+        if self._engine_config is not None:
+            return self._engine_config
 
-        # Resolve the engine-declared spec now the engine (and its tokenizer)
-        # is initialized; see `logits_processor_spec()`.
-        self._logits_processor_spec = await self.logits_processor_spec()
+        assert self._engine is not None
         # TODO: Thread runtime and shutdown_event through unified LLMEngine
         # startup so the TRT-LLM monitor can match the legacy shutdown path.
         self._engine.start_health_monitor()
@@ -389,7 +411,7 @@ class TrtllmLLMEngine(LLMEngine):
         )
         self._metrics_thread.start()
 
-        return EngineConfig(
+        self._engine_config = EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
             llm=LlmRegistration(
@@ -400,6 +422,7 @@ class TrtllmLLMEngine(LLMEngine):
                 data_parallel_size=self._attention_dp_size,
             ),
         )
+        return self._engine_config
 
     # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
     # thread, so we drive them from dedicated worker threads rather than
@@ -679,9 +702,8 @@ class TrtllmLLMEngine(LLMEngine):
         async with self._pause_lock:
             if controller.is_paused:
                 return {"status": "ok", "message": "Memory already released"}
-            if (
-                self._resume_recovery_required
-                or self._controller_needs_resume_recovery(controller)
+            if self._resume_recovery_required or self._controller_needs_resume_recovery(
+                controller
             ):
                 return {
                     "status": "error",

@@ -10,14 +10,20 @@ See dynamo/common/backend/README.md for architecture, response contract,
 and feature gap details.
 """
 
-from dynamo.common.backend.run import run
-from dynamo.common.backend.worker import WorkerConfig
-from dynamo.vllm.args import parse_args
-from dynamo.vllm.headless import run_dynamo_headless
-from dynamo.vllm.llm_engine import VllmLLMEngine
-
 
 def main():
+    from dynamo.common.snapshot.restore_context import maybe_run_restore_standby_mode
+
+    maybe_run_restore_standby_mode()
+
+    # Import vLLM only after the restore standby has captured the target pod's
+    # environment and replaced itself with an inert process.
+    from dynamo.common.backend.run import run
+    from dynamo.common.backend.worker import WorkerConfig
+    from dynamo.vllm.args import parse_args
+    from dynamo.vllm.headless import run_dynamo_headless
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+
     # Headless secondary nodes (multi-node TP/PP with --data-parallel-backend
     # mp) run vLLM workers only and never touch the DistributedRuntime, so they
     # bypass the Worker/engine lifecycle entirely. Intercept before run() —

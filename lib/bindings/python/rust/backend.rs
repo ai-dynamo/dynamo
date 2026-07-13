@@ -11,7 +11,7 @@
 //! only owns engine semantics.
 //!
 //! Exposed under `dynamo._core.backend` as `Worker`, `WorkerConfig`,
-//! `EngineConfig`, and `RuntimeConfig`.
+//! `EngineConfig`, `RuntimeConfig`, and `PreRuntimeContext`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -24,8 +24,11 @@ use dynamo_backend_common::{
     DisaggregationMode as RsDisaggregationMode, DynamoError, EngineConfig as RsEngineConfig,
     ErrorType, KvEventSource as RsKvEventSource, LLMEngine, LLMEngineOutput,
     LlmRegistration as RsLlmRegistration, MetricsBindings, MetricsCtx, OnPublisherReady,
-    PreprocessedRequest, RawEngine, RuntimeConfig as RsRuntimeConfig,
+    PreRuntimeContext as RsPreRuntimeContext, PreRuntimeOutcome as RsPreRuntimeOutcome,
+    PreprocessedRequest, RawEngine, RestoredRuntimeConfig as RsRestoredRuntimeConfig,
+    RuntimeConfig as RsRuntimeConfig,
     SnapshotPublisher as RsSnapshotPublisher, Worker as RsWorker, WorkerConfig as RsWorkerConfig,
+    WorkerExit as RsWorkerExit,
 };
 use dynamo_llm::local_model::runtime_config::{
     StructuralTagMode as RsStructuralTagMode, StructuralTagSchemaMode as RsStructuralTagSchemaMode,
@@ -55,6 +58,7 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
     m.add_class::<RuntimeConfig>()?;
+    m.add_class::<PreRuntimeContext>()?;
     m.add_class::<WorkerConfig>()?;
     m.add_class::<Worker>()?;
     m.add_class::<PySnapshotPublisher>()?;
@@ -65,6 +69,31 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("dynamo._core.backend", &m)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PreRuntimeContext — cancellation view handed to Python BaseEngine.
+// ---------------------------------------------------------------------------
+
+#[pyclass(module = "dynamo._core.backend", name = "PreRuntimeContext", frozen)]
+#[derive(Clone)]
+pub struct PreRuntimeContext {
+    inner: RsPreRuntimeContext,
+}
+
+#[pymethods]
+impl PreRuntimeContext {
+    fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
+
+    fn cancelled<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let context = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            context.cancelled().await;
+            Ok(())
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -580,22 +609,26 @@ impl Worker {
                 RsWorker::new(Arc::new(py_engine), config)
             };
 
-            let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
+            let result = worker
+                .run_with_outcome(runtime.clone())
+                .await
+                .map_err(to_pyerr);
+            let snapshot_complete = matches!(result, Ok(RsWorkerExit::ExitSuccess));
 
             // Only tear the runtime down if we constructed it. When a
             // `DistributedRuntime` was already in scope (HTTP frontend,
             // tests, etc.) it owns the shutdown lifecycle and we'd be
             // pulling the rug out from other tasks if we called shutdown.
-            if owns_runtime {
+            if owns_runtime && !snapshot_complete {
                 runtime.shutdown();
-            } else {
+            } else if !snapshot_complete {
                 tracing::debug!(
                     "Worker.run skipping runtime.shutdown(); runtime is \
                      shared with another caller"
                 );
             }
 
-            result
+            result.map(|outcome| matches!(outcome, RsWorkerExit::ExitSuccess))
         })
     }
 }
@@ -769,6 +802,36 @@ impl Drop for RequestStateGuard {
 }
 
 impl PyEngineCore {
+    async fn prepare_for_runtime(
+        &self,
+        context: RsPreRuntimeContext,
+    ) -> Result<RsPreRuntimeOutcome, DynamoError> {
+        let engine = self.engine.clone();
+        let event_loop = self.event_loop.clone();
+
+        let py_future = tokio::task::spawn_blocking(move || {
+            Python::with_gil(|py| -> PyResult<_> {
+                let py_context = Py::new(py, PreRuntimeContext { inner: context })?;
+                let bound = engine.bind(py);
+                let coroutine = bound.call_method1("prepare_for_runtime", (py_context,))?;
+                let locals = TaskLocals::new(event_loop.bind(py).clone());
+                pyo3_async_runtimes::into_future_with_locals(&locals, coroutine)
+            })
+        })
+        .await
+        .map_err(|e| {
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::Unknown))
+                .message(format!("prepare_for_runtime offload error: {e}"))
+                .build()
+        })?
+        .map_err(py_err_to_dynamo)?;
+
+        let result = py_future.await.map_err(py_err_to_dynamo)?;
+        Python::with_gil(|py| depythonize_pre_runtime_outcome(result.bind(py)))
+            .map_err(py_err_to_dynamo)
+    }
+
     async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
@@ -1235,6 +1298,13 @@ impl PyLLMEngine {
 
 #[async_trait]
 impl LLMEngine for PyLLMEngine {
+    async fn prepare_for_runtime(
+        &self,
+        context: RsPreRuntimeContext,
+    ) -> Result<RsPreRuntimeOutcome, DynamoError> {
+        self.core.prepare_for_runtime(context).await
+    }
+
     async fn start(&self, worker_id: u64) -> Result<RsEngineConfig, DynamoError> {
         self.core.start(worker_id).await
     }
@@ -1523,6 +1593,42 @@ fn class_name(item: &Bound<'_, PyAny>) -> PyResult<String> {
     item.get_type().getattr("__name__")?.extract::<String>()
 }
 
+fn depythonize_pre_runtime_outcome(
+    bound: &Bound<'_, PyAny>,
+) -> PyResult<RsPreRuntimeOutcome> {
+    let action_obj = bound.getattr("action")?;
+    let action: String = match action_obj.getattr("value") {
+        Ok(value) => value.extract()?,
+        Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(bound.py()) => {
+            action_obj.extract()?
+        }
+        Err(e) => return Err(e),
+    };
+
+    match action.as_str() {
+        "continue" => Ok(RsPreRuntimeOutcome::Continue),
+        "prepared" => {
+            let restored_obj = bound.getattr("restored_runtime")?;
+            if restored_obj.is_none() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "prepared pre-runtime outcome requires restored_runtime",
+                ));
+            }
+            let restored_runtime = RsRestoredRuntimeConfig {
+                namespace: restored_obj.getattr("namespace")?.extract()?,
+                discovery_backend: restored_obj.getattr("discovery_backend")?.extract()?,
+                request_plane: restored_obj.getattr("request_plane")?.extract()?,
+                event_plane: opt_attr::<String>(&restored_obj, "event_plane")?,
+            };
+            Ok(RsPreRuntimeOutcome::Prepared { restored_runtime })
+        }
+        "exit_success" => Ok(RsPreRuntimeOutcome::ExitSuccess),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid pre-runtime outcome action {other:?}"
+        ))),
+    }
+}
+
 fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
     let cls = class_name(item)?;
     let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
@@ -1633,4 +1739,66 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
         .error_type(ErrorType::Backend(backend))
         .message(message)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_runtime_outcomes_are_forwarded_from_python() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let namespace = PyModule::import(py, "types")
+                .unwrap()
+                .getattr("SimpleNamespace")
+                .unwrap();
+
+            let continue_args = PyDict::new(py);
+            continue_args.set_item("action", "continue").unwrap();
+            let continue_outcome = namespace.call((), Some(&continue_args)).unwrap();
+            assert_eq!(
+                depythonize_pre_runtime_outcome(&continue_outcome).unwrap(),
+                RsPreRuntimeOutcome::Continue
+            );
+
+            let restored_args = PyDict::new(py);
+            restored_args.set_item("namespace", "restored-ns").unwrap();
+            restored_args
+                .set_item("discovery_backend", "kubernetes")
+                .unwrap();
+            restored_args.set_item("request_plane", "tcp").unwrap();
+            restored_args.set_item("event_plane", py.None()).unwrap();
+            let restored = namespace.call((), Some(&restored_args)).unwrap();
+
+            let prepared_args = PyDict::new(py);
+            prepared_args.set_item("action", "prepared").unwrap();
+            prepared_args
+                .set_item("restored_runtime", restored)
+                .unwrap();
+            let prepared_outcome = namespace.call((), Some(&prepared_args)).unwrap();
+            assert_eq!(
+                depythonize_pre_runtime_outcome(&prepared_outcome).unwrap(),
+                RsPreRuntimeOutcome::Prepared {
+                    restored_runtime: RsRestoredRuntimeConfig {
+                        namespace: "restored-ns".to_string(),
+                        discovery_backend: "kubernetes".to_string(),
+                        request_plane: "tcp".to_string(),
+                        event_plane: None,
+                    },
+                }
+            );
+
+            let action_args = PyDict::new(py);
+            action_args.set_item("value", "exit_success").unwrap();
+            let action = namespace.call((), Some(&action_args)).unwrap();
+            let exit_args = PyDict::new(py);
+            exit_args.set_item("action", action).unwrap();
+            let exit_outcome = namespace.call((), Some(&exit_args)).unwrap();
+            assert_eq!(
+                depythonize_pre_runtime_outcome(&exit_outcome).unwrap(),
+                RsPreRuntimeOutcome::ExitSuccess
+            );
+        });
+    }
 }

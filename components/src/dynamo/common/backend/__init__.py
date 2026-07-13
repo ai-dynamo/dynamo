@@ -10,9 +10,12 @@ from .engine import (
     GenerateRequest,
     LLMEngine,
     LlmRegistration,
+    PreRuntimeAction,
+    PreRuntimeOutcome,
     RawEngine,
     RawRequest,
     RawResponseChunk,
+    RestoredRuntimeConfig,
 )
 from .worker import Worker, WorkerConfig
 
@@ -24,9 +27,12 @@ __all__ = [
     "GenerateRequest",
     "LLMEngine",
     "LlmRegistration",
+    "PreRuntimeAction",
+    "PreRuntimeOutcome",
     "RawEngine",
     "RawRequest",
     "RawResponseChunk",
+    "RestoredRuntimeConfig",
     "Worker",
     "WorkerConfig",
     "telemetry",

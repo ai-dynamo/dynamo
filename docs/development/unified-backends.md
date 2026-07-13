@@ -24,7 +24,8 @@ is still outside the unified contract.
 Both unified implementations follow the same shape:
 
 ```text
-parse config -> start engine -> stream generated chunks -> abort/drain -> cleanup
+parse config -> prepare before runtime -> connect runtime -> start engine
+             -> stream generated chunks -> abort/drain -> cleanup
 ```
 
 The framework handles model registration, endpoint serving, cancellation
@@ -40,6 +41,7 @@ Supported today:
 - request cancellation
 - structured backend errors
 - graceful shutdown and drain hooks
+- pre-runtime snapshot/restore preparation with delayed discovery and transport connections
 
 Still use the lower-level Python worker path when you need a backend-specific
 feature that has not reached its unified engine, a separate multimodal encode
@@ -121,6 +123,8 @@ Lifecycle and runtime:
 - Model registration with discovery and endpoint types
 - Request cancellation via `abort()` + `context.is_stopped()`
 - Graceful shutdown with signal handling
+- `prepare_for_runtime()` hook for snapshot/restore work before Dynamo opens
+  discovery or transport connections
 - `drain()` hook for pre-cleanup work (e.g. in-flight NIXL transfers)
 - `DynamoException` error chain wrapping
 - Finish reason normalization (handled by the Rust layer)
@@ -186,7 +190,6 @@ Request handling:
 | Multimodal parity | vLLM supports aggregated and prefill/decode image and video inference. SGLang and TRT-LLM multimodal execution, separate encode workers, and the `ENCODE` role are not yet available through their unified engines. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading on prefill |
-| Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
 
 If you need one of these features today, keep that workload on the
 existing per-engine entry point (`dynamo.<backend>.main`) until the
@@ -210,11 +213,11 @@ actually lives in Rust; `dynamo.common.backend.Worker` is a thin
 Python shim over it.)
 
 ```text
-from_args  →  start()  →  generate() / abort()  →  drain()  →  cleanup()
-   |            |               |                     |           |
-parse argv,  start engine,  serve requests       pre-cleanup    release
-return       return            (concurrent)       drain          resources
-engine       metadata
+from_args → prepare_for_runtime() → connect runtime → start()
+          → generate() / abort() → drain() → cleanup()
+   |                 |                    |           |          |
+parse argv,      optional load,       serve       pre-cleanup  release
+return engine   snapshot, restore   requests        drain      resources
 ```
 
 ### Python prerequisites
@@ -284,7 +287,9 @@ Building the wheel needs a Rust toolchain plus `clang`, `cmake`,
 
 In `src/my_backend/engine.py`, declare a class that subclasses
 `LLMEngine` and owns whatever state your engine needs. Construction
-must be cheap and side-effect-free — heavy work goes in `start()`.
+must be cheap and side-effect-free. Heavy work goes in `start()` for
+normal cold starts, or in `prepare_for_runtime()` when the engine must be
+loaded before a snapshot is captured.
 
 ```python
 # src/my_backend/engine.py
@@ -369,7 +374,38 @@ fields off the config in one line.
 ### Python Step 4: Implement `LLMEngine` methods
 
 The ABC has three required methods (`start`, `generate`, `cleanup`)
-plus two with default no-op implementations (`abort`, `drain`).
+plus three with default no-op implementations (`prepare_for_runtime`,
+`abort`, `drain`).
+
+#### Python: `prepare_for_runtime()`
+
+**Experimental.** Override `prepare_for_runtime()` only when the engine must initialize before
+Dynamo creates `DistributedRuntime`. The default returns
+`PreRuntimeOutcome.continue_startup()`, which preserves the cold-start path.
+
+The hook receives a `PreRuntimeContext`. Use `context.is_cancelled()` between
+initialization steps and await `context.cancelled()` while waiting for an
+external snapshot controller. Return one of these outcomes:
+
+- `PreRuntimeOutcome.continue_startup()` when the hook did not initialize the engine.
+- `PreRuntimeOutcome.prepared(restored_runtime)` after restore. Pass a
+  `RestoredRuntimeConfig` to replace the namespace, discovery backend, request
+  plane, and event plane before runtime creation.
+- `PreRuntimeOutcome.exit_success()` after snapshot capture. The worker exits
+  successfully without creating the distributed runtime or running engine teardown.
+
+After `prepared`, `start(worker_id)` must reuse the initialized engine and perform
+only post-runtime activation, identity-dependent setup, and metadata creation. The
+worker registers the model and becomes discoverable only after `start()` succeeds.
+If preparation or activation fails, the worker calls `cleanup()` once. Snapshot
+producer success is the exception because teardown would modify the captured image.
+
+The built-in vLLM, SGLang, and TRT-LLM engines use the existing
+`DYN_SNAPSHOT_CONTROL_DIR` sentinel protocol. The restore standby captures the
+new container environment before importing the vendor backend. Restored runtime
+settings use the normal CLI-over-environment precedence and replace the old
+settings before Dynamo connects. TRT-LLM snapshot support remains limited to its
+single-GPU, aggregated, text-only configuration.
 
 #### Python: `start()`
 
@@ -922,6 +958,8 @@ Lifecycle and runtime:
 - Typed `DynamoError` with `ErrorType::Backend(BackendError::X)`
 - Graceful shutdown with signal handling and 3-phase
   distributed-runtime teardown
+- `LLMEngine::prepare_for_runtime()` for snapshot/restore work before
+  discovery or transport connections are created
 - Debug-build stream validator and the `testing::run_conformance` kit
 - Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
 
@@ -977,7 +1015,6 @@ Request handling:
 | Native Rust multimodal engines | The shared request fields are available, but native Rust engines do not yet implement image, video, embedding transfer, or the `ENCODE` role. The Python unified vLLM engine supports aggregated and prefill/decode image and video inference. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path |
 | LoRA adapters | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization |
-| Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload |
 
 If you need one of these features today, keep that workload on the
 existing per-engine entry point until the unified path catches up.
@@ -1001,11 +1038,11 @@ Engines work directly with `PreprocessedRequest` and `LLMEngineOutput`
 No Python-shaped translation layer.
 
 ```text
-construct  →  start()  →  generate() / abort()  →  drain() →  cleanup()
-   |            |               |                      |          |
-parse args   start engine,  serve requests       pre-cleanup   release
-return       return            (concurrent)       drain        resources
-engine       metadata
+construct → prepare_for_runtime() → connect runtime → start()
+          → generate() / abort() → drain() → cleanup()
+   |                 |                    |           |          |
+parse args       optional load,       serve       pre-cleanup  release
+return engine   snapshot, restore   requests        drain      resources
 ```
 
 ### Rust prerequisites
@@ -1243,7 +1280,26 @@ dispatch stay in lockstep.
 ### Rust Step 4: Implement the `LLMEngine` trait
 
 The trait has three required methods (`start`, `generate`, `cleanup`)
-plus two with default implementations you can override (`abort`, `drain`).
+plus three with default implementations you can override
+(`prepare_for_runtime`, `abort`, `drain`).
+
+#### Rust: `prepare_for_runtime()`
+
+**Experimental.** Override `prepare_for_runtime()` only when the engine must initialize before
+`DistributedRuntime` connects. The default returns `PreRuntimeOutcome::Continue`.
+The `PreRuntimeContext` exposes shutdown cancellation for long initialization or
+sentinel waits.
+
+Return `PreRuntimeOutcome::Prepared` after restore. Its
+`RestoredRuntimeConfig` replaces the namespace, discovery backend, request plane,
+and event plane before runtime creation. Return `PreRuntimeOutcome::ExitSuccess`
+after successful capture; the launcher exits without connecting the runtime or
+running destructive engine cleanup. After `Prepared`, `start(worker_id)` must
+reuse the prepared engine and perform only activation and identity-dependent work.
+
+The worker does not register the model or become ready before `start()` succeeds.
+Preparation errors, activation errors, and cancellation run `cleanup()` exactly
+once. The capture-success path skips cleanup to preserve the captured engine image.
 
 #### Rust: `start()`
 
@@ -1487,8 +1543,10 @@ scheduler to stop computing for this request).
   transport layer goes away (e.g. in-flight NIXL KV transfers on
   prefill workers). Default is no-op.
 - `cleanup()` is called once on shutdown. Release all engine
-  resources. The framework guarantees `cleanup()` runs exactly once if
-  `start()` succeeded — even if registration or serve fails afterward.
+  resources. The framework guarantees `cleanup()` runs exactly once after
+  preparation returns `Prepared` or fails, or after `start()` begins. This covers
+  preparation, activation, registration, and serving failures. Successful snapshot
+  capture skips cleanup.
 
 Make `cleanup()` idempotent and tolerant of being called from a
 half-initialized state. Engines like vLLM/TRT-LLM tear down NCCL groups
@@ -1509,8 +1567,8 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-`run` installs signal handlers, builds the distributed runtime, calls
-`engine.start()`, registers the model with discovery, serves the
+`run` installs signal handlers, calls `engine.prepare_for_runtime()`, builds the
+distributed runtime, calls `engine.start()`, registers the model with discovery, serves the
 endpoint, and runs the full graceful-shutdown orchestrator on
 SIGTERM/SIGINT.
 

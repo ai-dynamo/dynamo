@@ -17,6 +17,7 @@ from dynamo.common.snapshot.constants import (
 )
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
+    load_restored_runtime_config,
     refresh_snapshot_restore_config,
 )
 
@@ -67,6 +68,37 @@ def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_p
     assert os.environ["DYN_DISCOVERY_BACKEND"] == "etcd"
     assert "DYN_REQUEST_PLANE" not in os.environ
     assert "UNSUPPORTED_ENV" not in os.environ
+
+
+def test_load_restored_runtime_config_returns_unified_replacement(
+    monkeypatch, tmp_path
+):
+    write_restore_context(
+        monkeypatch,
+        tmp_path,
+        {
+            "DYN_NAMESPACE": "restore-ns",
+            "DYN_DISCOVERY_BACKEND": "mem",
+            "DYN_REQUEST_PLANE": "tcp",
+            "DYN_EVENT_PLANE": None,
+        },
+    )
+    monkeypatch.setattr(
+        "dynamo.common.snapshot.restore_context.parse_snapshot_restore_runtime_config",
+        lambda _argv: SimpleNamespace(
+            namespace=os.environ["DYN_NAMESPACE"],
+            discovery_backend=os.environ["DYN_DISCOVERY_BACKEND"],
+            request_plane=os.environ["DYN_REQUEST_PLANE"],
+            event_plane=os.environ.get("DYN_EVENT_PLANE"),
+        ),
+    )
+
+    restored = load_restored_runtime_config([])
+
+    assert restored.namespace == "restore-ns"
+    assert restored.discovery_backend == "mem"
+    assert restored.request_plane == "tcp"
+    assert restored.event_plane is None
 
 
 async def test_refresh_snapshot_restore_config_reparses_runtime_fields(

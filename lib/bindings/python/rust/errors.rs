@@ -134,6 +134,39 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
 );
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_python_backend_errors_preserve_category_and_diagnostic() {
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let cases = [
+                (
+                    PyErr::new::<InvalidArgument, _>("invalid snapshot flags"),
+                    BackendError::InvalidArgument,
+                ),
+                (
+                    PyErr::new::<Cancelled, _>("snapshot cancelled"),
+                    BackendError::Cancelled,
+                ),
+                (
+                    PyErr::new::<EngineShutdown, _>("restore version mismatch"),
+                    BackendError::EngineShutdown,
+                ),
+            ];
+
+            for (error, expected) in cases {
+                let (actual, message) =
+                    py_exception_to_backend_error(py, &error).expect("typed error must map");
+                assert_eq!(actual, expected);
+                assert_eq!(message, error.to_string());
+            }
+        });
+    }
+}
+
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
 /// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
