@@ -39,14 +39,6 @@ def _resolve_qwen3_tool_parser_class():
         return Qwen3CoderToolParser
 
 
-if HAS_QWEN3_TOOL_PARSER:
-    Qwen3CoderToolParser = _resolve_qwen3_tool_parser_class()
-else:
-
-    class Qwen3CoderToolParser:  # pragma: no cover - only used when vllm parsers are missing
-        pass
-
-
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
@@ -443,7 +435,7 @@ class TestSchemaAwareToolParser:
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=Qwen3CoderToolParser,
+            tool_parser_class=_resolve_qwen3_tool_parser_class(),
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 
