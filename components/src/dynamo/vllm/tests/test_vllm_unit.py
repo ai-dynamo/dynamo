@@ -1137,7 +1137,7 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
-def test_build_sampling_params_adapts_router_hint_to_remote_g2_plan():
+def test_build_sampling_params_passes_kv_transfer_params_extra_args():
     from dynamo.vllm.handlers import build_sampling_params
 
     router_hint = {
@@ -1149,14 +1149,14 @@ def test_build_sampling_params_adapts_router_hint_to_remote_g2_plan():
         "sampling_options": {},
         "stop_conditions": {},
         "output_options": {},
-        "extra_args": {"router_hint": router_hint},
+        "extra_args": {"kv_transfer_params": {"router_hint": router_hint}},
     }
 
     sp = build_sampling_params(request, default_sampling_params={})
 
     assert sp.extra_args == {
         "kv_transfer_params": {
-            "remote_g2_plan": router_hint,
+            "router_hint": router_hint,
         }
     }
 
