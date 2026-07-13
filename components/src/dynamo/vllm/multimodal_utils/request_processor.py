@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -173,7 +174,9 @@ def compute_mm_uuids(
     return {modality: compute_mm_uuids_from_images(images)}
 
 
-def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
+def get_mm_processor_kwargs(
+    request: Mapping[str, Any],
+) -> Optional[dict[str, Any]]:
     """Read processor kwargs from the canonical or router-compatible location."""
     value = request.get("mm_processor_kwargs")
     if value is None:
