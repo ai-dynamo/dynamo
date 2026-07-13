@@ -946,9 +946,9 @@ class TestBenchmarkConfig:
 
         assert config._benchmark_additional_config == {
             "mode": "prefill",
-            "warmup_iterations": "2",
+            "warmup_iterations": 2,
             "output_path": str(output),
-            "timeout": 300,
+            "timeout": 900,
             "prefill_max_new_token_samples": 64,
             "prefill_max_kv_read_token_samples": 16,
             "decode_max_kv_read_token_samples": 128,
@@ -977,22 +977,170 @@ class TestBenchmarkConfig:
         config = parse_args()
 
         assert (
-            config._benchmark_additional_config["prefill_max_new_token_samples"] == "12"
+            config._benchmark_additional_config["prefill_max_new_token_samples"] == 12
         )
         assert (
             config._benchmark_additional_config["prefill_max_kv_read_token_samples"]
-            == "6"
+            == 6
         )
         assert (
             config._benchmark_additional_config["decode_max_kv_read_token_samples"]
-            == "24"
+            == 24
         )
         assert (
-            config._benchmark_additional_config["decode_max_batch_size_samples"] == "20"
+            config._benchmark_additional_config["decode_max_batch_size_samples"] == 20
         )
-        assert (
-            config._benchmark_additional_config["prefix_max_batch_size_samples"] == "2"
+        assert config._benchmark_additional_config["prefix_max_batch_size_samples"] == 2
+
+    @pytest.mark.parametrize(
+        ("legacy_flag", "replacement_name", "legacy_value", "expected"),
+        [
+            ("--benchmark-prefill-granularity", "prefill_max_new_token_samples", 1, 2),
+            (
+                "--benchmark-prefill-kv-read-granularity",
+                "prefill_max_kv_read_token_samples",
+                6,
+                6,
+            ),
+            (
+                "--benchmark-prefill-batch-granularity",
+                "prefix_max_batch_size_samples",
+                1,
+                1,
+            ),
+            (
+                "--benchmark-decode-length-granularity",
+                "decode_max_kv_read_token_samples",
+                1,
+                2,
+            ),
+            (
+                "--benchmark-decode-batch-granularity",
+                "decode_max_batch_size_samples",
+                7,
+                7,
+            ),
+        ],
+    )
+    def test_legacy_benchmark_sampling_flags_are_mapped(
+        self,
+        mock_vllm_cli,
+        legacy_flag,
+        replacement_name,
+        legacy_value,
+        expected,
+    ):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            legacy_flag,
+            str(legacy_value),
         )
+
+        with pytest.warns(DeprecationWarning):
+            config = parse_args()
+
+        assert getattr(config, replacement_name) == expected
+        assert config._benchmark_additional_config[replacement_name] == expected
+
+    @pytest.mark.parametrize(
+        ("legacy_env", "replacement_name", "expected"),
+        [
+            ("DYN_BENCHMARK_PREFILL_GRANULARITY", "prefill_max_new_token_samples", 2),
+            (
+                "DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY",
+                "prefill_max_kv_read_token_samples",
+                5,
+            ),
+            (
+                "DYN_BENCHMARK_PREFILL_BATCH_GRANULARITY",
+                "prefix_max_batch_size_samples",
+                1,
+            ),
+            (
+                "DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
+                "decode_max_kv_read_token_samples",
+                2,
+            ),
+            (
+                "DYN_BENCHMARK_DECODE_BATCH_GRANULARITY",
+                "decode_max_batch_size_samples",
+                9,
+            ),
+        ],
+    )
+    def test_legacy_benchmark_sampling_env_vars_are_mapped(
+        self,
+        mock_vllm_cli,
+        monkeypatch,
+        legacy_env,
+        replacement_name,
+        expected,
+    ):
+        monkeypatch.setenv(legacy_env, str(expected))
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--benchmark-mode", "agg")
+
+        with pytest.warns(DeprecationWarning):
+            config = parse_args()
+
+        assert getattr(config, replacement_name) == expected
+        assert isinstance(getattr(config, replacement_name), int)
+
+    def test_legacy_and_new_benchmark_sampling_conflict(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--benchmark-prefill-granularity",
+            "12",
+            "--prefill-max-new-token-samples",
+            "20",
+        )
+
+        with pytest.raises(ValueError, match="cannot combine"):
+            parse_args()
+
+    def test_legacy_conflicts_with_explicit_new_default(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--benchmark-prefill-granularity",
+            "12",
+            "--prefill-max-new-token-samples",
+            "64",
+        )
+
+        with pytest.raises(ValueError, match="cannot combine"):
+            parse_args()
+
+    def test_legacy_env_conflicts_with_explicit_new_default_env(
+        self, mock_vllm_cli, monkeypatch
+    ):
+        monkeypatch.setenv("DYN_BENCHMARK_PREFILL_GRANULARITY", "12")
+        monkeypatch.setenv("DYN_PREFILL_MAX_NEW_TOKEN_SAMPLES", "64")
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--benchmark-mode", "prefill")
+
+        with pytest.raises(ValueError, match="cannot combine"):
+            parse_args()
+
+    @pytest.mark.parametrize("value", [0, 1025])
+    def test_legacy_benchmark_sampling_range_is_validated(self, mock_vllm_cli, value):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--benchmark-prefill-granularity",
+            str(value),
+        )
+
+        with pytest.raises(ValueError, match="must be between 1 and 1024"):
+            parse_args()
 
     def test_prefill_without_prefix_caching_is_allowed(self, mock_vllm_cli):
         mock_vllm_cli(
@@ -1243,7 +1391,7 @@ def _make_dynamo_config(**overrides):
         "benchmark_mode": None,
         "benchmark_warmup_iterations": 5,
         "benchmark_output_path": "/tmp/benchmark_results.json",
-        "benchmark_timeout": 300,
+        "benchmark_timeout": 900,
         "prefill_max_new_token_samples": 64,
         "prefill_max_kv_read_token_samples": 16,
         "decode_max_kv_read_token_samples": 128,

@@ -142,7 +142,7 @@ class BenchmarkConfig:
     mode: Literal["prefill", "decode", "agg"] = "agg"
     warmup_iterations: int = 5
     output_path: str = "/tmp/benchmark_results.json"
-    timeout: int = 300
+    timeout: int = 900
     prefill_max_new_token_samples: int = 64
     prefill_max_kv_read_token_samples: int = 16
     decode_max_kv_read_token_samples: int = 128
@@ -1619,7 +1619,11 @@ class InstrumentedScheduler(AsyncScheduler):
             ):
                 return False
             seed_required_blocks = sum(
-                self._bench_prefill_blocks_per_req(prompt_len, 0)
+                self._bench_blocks_per_req(
+                    prompt_len,
+                    has_cache_hit=False,
+                    apply_admission_cap=False,
+                )
                 for prompt_len in seed_prompt_lengths
             )
             required_blocks = max(required_blocks, seed_required_blocks)
@@ -1940,37 +1944,64 @@ class InstrumentedScheduler(AsyncScheduler):
             raise ValueError("cache_salts must match prefix_lengths")
 
         seed_requests: list[Request] = []
-        for index, (prefix_tokens, cache_salt) in enumerate(
-            zip(prefix_lengths, cache_salts)
-        ):
-            req = Request(
-                request_id=f"__bench_fake_prefix_{self._bench_seq + index}",
-                prompt_token_ids=[0] * prefix_tokens,
-                sampling_params=SamplingParams(max_tokens=1),
-                pooling_params=None,
-                block_hasher=self._bench_block_hasher,
-                cache_salt=cache_salt,
-            )
-            new_blocks = self.kv_cache_manager.allocate_slots(
-                req,
-                prefix_tokens,
-                full_sequence_must_fit=True,
-            )
-            if new_blocks is None:
-                for allocated_req in seed_requests:
-                    self.kv_cache_manager.free(allocated_req)
-                if not self.kv_cache_manager.reset_prefix_cache():
-                    raise RuntimeError(
-                        "failed to roll back partial fake prefix-cache allocation"
-                    )
-                return False
-            seed_requests.append(req)
 
+        def rollback() -> None:
+            free_error: Exception | None = None
+            for allocated_req in reversed(seed_requests):
+                try:
+                    self.kv_cache_manager.free(allocated_req)
+                except Exception as error:
+                    if free_error is None:
+                        free_error = error
+            cache_reset = self.kv_cache_manager.reset_prefix_cache()
+            if free_error is not None:
+                raise RuntimeError(
+                    "failed to free partial fake prefix-cache allocation"
+                ) from free_error
+            if not cache_reset:
+                raise RuntimeError(
+                    "failed to roll back partial fake prefix-cache allocation"
+                )
+
+        allocation_failed = False
+        try:
+            for index, (prefix_tokens, cache_salt) in enumerate(
+                zip(prefix_lengths, cache_salts)
+            ):
+                req = Request(
+                    request_id=f"__bench_fake_prefix_{self._bench_seq + index}",
+                    prompt_token_ids=[0] * prefix_tokens,
+                    sampling_params=SamplingParams(max_tokens=1),
+                    pooling_params=None,
+                    block_hasher=self._bench_block_hasher,
+                    cache_salt=cache_salt,
+                )
+                seed_requests.append(req)
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    req,
+                    prefix_tokens,
+                    full_sequence_must_fit=True,
+                    has_scheduled_reqs=len(seed_requests) > 1,
+                )
+                if new_blocks is None:
+                    allocation_failed = True
+                    break
+        except Exception:
+            rollback()
+            raise
+        if allocation_failed:
+            rollback()
+            return False
+
+        try:
+            for req in seed_requests:
+                # Blocks remain hash-cached with refcount zero. The measured request
+                # immediately reacquires them before allocating its new-token slots.
+                self.kv_cache_manager.free(req)
+        except Exception:
+            rollback()
+            raise
         self._bench_seq += len(seed_requests)
-        for req in seed_requests:
-            # Blocks remain hash-cached with refcount zero. The measured request
-            # immediately reacquires them before allocating its new-token slots.
-            self.kv_cache_manager.free(req)
         return True
 
     def _bench_inject_prefill(
@@ -2225,7 +2256,7 @@ class InstrumentedScheduler(AsyncScheduler):
             f"the point: expected={expected} actual={summary}"
         )
 
-    def _bench_deactivate(self) -> None:
+    def _bench_deactivate(self, *, resume_publisher: bool = True) -> None:
         if self._bench_synchronizer is not None:
             self._bench_synchronizer.close()
             self._bench_synchronizer = None
@@ -2234,16 +2265,30 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_sync_pending = False
         self._schedule_times.clear()
         self._last_update_time = 0.0
-        self._publisher.resume()
+        if resume_publisher:
+            self._publisher.resume()
 
     def _bench_abort(self, error: Exception) -> None:
         self._bench_cleanup_requests()
         self._bench_grid_error = str(error)
+        cleanup_error: Exception | None = None
+        try:
+            self._bench_clear_prefix_cache()
+        except Exception as prefix_error:
+            cleanup_error = prefix_error
+            self._bench_grid_error = (
+                f"{self._bench_grid_error}; prefix-cache cleanup failed: "
+                f"{prefix_error}"
+            )
         try:
             self._bench_write_results()
         except Exception:
             logger.exception("Failed to write benchmark failure results")
-        self._bench_deactivate()
+        self._bench_deactivate(resume_publisher=cleanup_error is None)
+        if cleanup_error is not None:
+            raise RuntimeError(
+                "self-benchmark aborted and synthetic prefix-cache cleanup failed"
+            ) from cleanup_error
 
     # -- State machine --------------------------------------------------
 

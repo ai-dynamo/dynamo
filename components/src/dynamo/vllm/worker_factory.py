@@ -351,7 +351,7 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     base_path = Path(
         os.environ.get(ENV_FPM_BENCHMARK_OUTPUT_PATH, bench_cfg["output_path"])
     )
-    timeout = int(bench_cfg.get("timeout", 300))
+    timeout = int(bench_cfg.get("timeout", 900))
 
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
 

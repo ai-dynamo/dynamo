@@ -1654,6 +1654,21 @@ def test_prefill_kv_read_grid_accounts_for_eagle_cache_block_drop():
     assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 1, 1)[-1] == 112
 
 
+def test_prefill_fake_seed_feasibility_uses_uncapped_allocation():
+    stub = _prefill_grid_stub(block_size=8)
+    stub._bench_prefill_blocks_per_req = MagicMock(return_value=1)
+    stub._bench_blocks_per_req = MagicMock(return_value=1)
+    stub._bench_usable_blocks = MagicMock(return_value=8)
+
+    assert InstrumentedScheduler._bench_prefill_point_feasible(stub, 8, 1, 8)
+
+    stub._bench_blocks_per_req.assert_called_once_with(
+        8,
+        has_cache_hit=False,
+        apply_admission_cap=False,
+    )
+
+
 def test_mamba_connector_uses_scheduler_per_group_cache_lookup():
     stub = _prefill_grid_stub(block_size=8)
     coordinator = SimpleNamespace(
@@ -1823,9 +1838,24 @@ def test_fake_prefix_cache_allocates_caches_and_releases_blocks(monkeypatch):
     ]
     assert [len(req.prompt_token_ids) for req in created_requests] == [16, 16, 8]
     assert stub.kv_cache_manager.allocate_slots.call_args_list == [
-        call(created_requests[0], 16, full_sequence_must_fit=True),
-        call(created_requests[1], 16, full_sequence_must_fit=True),
-        call(created_requests[2], 8, full_sequence_must_fit=True),
+        call(
+            created_requests[0],
+            16,
+            full_sequence_must_fit=True,
+            has_scheduled_reqs=False,
+        ),
+        call(
+            created_requests[1],
+            16,
+            full_sequence_must_fit=True,
+            has_scheduled_reqs=True,
+        ),
+        call(
+            created_requests[2],
+            8,
+            full_sequence_must_fit=True,
+            has_scheduled_reqs=True,
+        ),
     ]
     assert stub.kv_cache_manager.free.call_args_list == [
         call(created_requests[0]),
@@ -1860,7 +1890,37 @@ def test_fake_prefix_cache_rolls_back_partial_allocation(monkeypatch):
         cache_salts=["salt-0", "salt-1"],
     )
 
-    stub.kv_cache_manager.free.assert_called_once()
+    assert stub.kv_cache_manager.free.call_count == 2
+    stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
+    assert stub._bench_seq == 0
+
+
+def test_fake_prefix_cache_rolls_back_after_allocation_exception(monkeypatch):
+    class FakeRequest:
+        def __init__(self, request_id, **kwargs):
+            self.request_id = request_id
+
+    monkeypatch.setattr(instrumented_scheduler_module, "Request", FakeRequest)
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "SamplingParams", lambda **kwargs: object()
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 0
+    stub._bench_block_hasher = None
+    stub.kv_cache_manager = SimpleNamespace(
+        allocate_slots=MagicMock(side_effect=[object(), RuntimeError("allocate")]),
+        free=MagicMock(),
+        reset_prefix_cache=MagicMock(return_value=True),
+    )
+
+    with pytest.raises(RuntimeError, match="allocate"):
+        InstrumentedScheduler._bench_cache_fake_prefixes(
+            stub,
+            prefix_lengths=[8, 8],
+            cache_salts=["salt-0", "salt-1"],
+        )
+
+    assert stub.kv_cache_manager.free.call_count == 2
     stub.kv_cache_manager.reset_prefix_cache.assert_called_once_with()
     assert stub._bench_seq == 0
 
@@ -1885,6 +1945,39 @@ def test_benchmark_clear_prefix_cache_is_required_and_idempotent():
     )
     with pytest.raises(RuntimeError, match="failed to clear synthetic prefix cache"):
         InstrumentedScheduler._bench_clear_prefix_cache(failed)
+
+
+def test_benchmark_abort_clears_synthetic_prefix_cache_before_deactivation():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_cleanup_requests = MagicMock()
+    stub._bench_clear_prefix_cache = MagicMock()
+    stub._bench_write_results = MagicMock()
+    stub._bench_deactivate = MagicMock()
+
+    InstrumentedScheduler._bench_abort(stub, RuntimeError("benchmark failed"))
+
+    stub._bench_cleanup_requests.assert_called_once_with()
+    stub._bench_clear_prefix_cache.assert_called_once_with()
+    stub._bench_write_results.assert_called_once_with()
+    stub._bench_deactivate.assert_called_once_with(resume_publisher=True)
+    assert stub._bench_grid_error == "benchmark failed"
+
+
+def test_benchmark_abort_is_fail_closed_when_prefix_cleanup_fails():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_cleanup_requests = MagicMock()
+    stub._bench_clear_prefix_cache = MagicMock(
+        side_effect=RuntimeError("cache still referenced")
+    )
+    stub._bench_write_results = MagicMock()
+    stub._bench_deactivate = MagicMock()
+
+    with pytest.raises(RuntimeError, match="synthetic prefix-cache cleanup failed"):
+        InstrumentedScheduler._bench_abort(stub, RuntimeError("benchmark failed"))
+
+    stub._bench_write_results.assert_called_once_with()
+    stub._bench_deactivate.assert_called_once_with(resume_publisher=False)
+    assert "cache still referenced" in stub._bench_grid_error
 
 
 def test_prefill_batch_validation_is_atomic(monkeypatch):
