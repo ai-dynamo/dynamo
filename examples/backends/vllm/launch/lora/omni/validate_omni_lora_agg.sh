@@ -130,7 +130,7 @@ echo "Prompt:     $PROMPT"
 echo "=================================================="
 
 echo ""
-echo "[1/9] Checking frontend health..."
+echo "[1/7] Checking frontend health..."
 if api "$FRONTEND/v1/models" > /dev/null; then
     pass "Frontend is reachable"
 else
@@ -161,7 +161,7 @@ else
 fi
 
 echo ""
-echo "[2/9] Testing list_loras (GET)..."
+echo "[2/7] Testing list_loras (GET)..."
 RESP=$(api "$SYSTEM/v1/loras" || echo '{"status":"error"}')
 check_json_field "$RESP" "status" "success" "list_loras returns success"
 
@@ -225,11 +225,11 @@ if [[ -n "$LORA_PATH" && -d "$LORA_PATH" ]]; then
     RESP=$(api -X DELETE "$SYSTEM/v1/loras/$LORA_NAME" || echo '{"status":"error"}')
     check_json_field "$RESP" "status" "success" "unload_lora succeeds"
 
-    MODELS=$(api "$FRONTEND/v1/models" || echo '{}')
+    MODELS=$(api "$SYSTEM/v1/loras" || echo '{}')
     if echo "$MODELS" | python3 -c "import sys,json; ids=[m['id'] for m in json.load(sys.stdin).get('data',[])]; assert '$LORA_NAME' not in ids" 2>/dev/null; then
-        pass "LoRA removed from /v1/models"
+        pass "LoRA removed from backend /v1/loras"
     else
-        fail "LoRA still present in /v1/models after unload"
+        fail "LoRA still present in backend /v1/loras after unload"
     fi
 
     if [[ -f "${TMP_LORA_IMG:-}" && -f "$TMP_BASE_IMG" ]]; then

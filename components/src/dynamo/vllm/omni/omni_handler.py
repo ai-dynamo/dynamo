@@ -349,9 +349,61 @@ class OmniHandler(BaseOmniHandler):
 
             try:
                 lora_id = lora.id
+
+                if self.generate_endpoint is not None:
+                    try:
+                        await unregister_model(
+                            endpoint=self.generate_endpoint,
+                            lora_name=lora_name,
+                        )
+                    except Exception as unreg_err:
+                        logger.exception(
+                            "Failed to unregister LoRA '%s' from discovery",
+                            lora_name,
+                        )
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {unreg_err!s}",
+                            "lora_name": lora_name,
+                        }
+                        return
+
                 try:
                     await self.engine_client.remove_lora(lora_id)
                 except Exception as remove_err:
+                    if self.generate_endpoint is not None:
+                        try:
+                            runtime_config = ModelRuntimeConfig()
+                            model_type = get_output_modalities(
+                                self.config.output_modalities,
+                                self.config.model,
+                            )
+                            if model_type is None:
+                                model_type = ModelType.Images
+
+                            await register_model(
+                                model_input=ModelInput.Text,
+                                model_type=model_type,
+                                endpoint=self.generate_endpoint,
+                                model_path=self.config.model,
+                                kv_cache_block_size=self.config.engine_args.block_size,
+                                runtime_config=runtime_config,
+                                user_data={"lora_adapter": True, "lora_id": lora_id},
+                                lora_name=lora_name,
+                                base_model_path=self.config.model,
+                                worker_type=WorkerType.Aggregated,
+                                needs=[],
+                            )
+                            logger.info(
+                                "Re-registered LoRA '%s' in discovery after remove_lora failure",
+                                lora_name,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to rollback discovery entry for LoRA '%s' after remove_lora failure",
+                                lora_name,
+                            )
+
                     logger.exception(
                         "Failed to remove LoRA '%s' from engine",
                         lora_name,
@@ -364,48 +416,6 @@ class OmniHandler(BaseOmniHandler):
                     return
 
                 self.loaded_loras.pop(lora_name, None)
-
-                if self.generate_endpoint is not None:
-                    try:
-                        await unregister_model(
-                            endpoint=self.generate_endpoint,
-                            lora_name=lora_name,
-                        )
-                    except Exception as unreg_err:
-                        logger.exception(
-                            "Failed to unregister LoRA '%s' from discovery after engine removal; rolling back",
-                            lora_name,
-                        )
-                        try:
-                            await self.engine_client.add_lora(
-                                LoRARequest(
-                                    lora_name=lora_name,
-                                    lora_int_id=lora_id,
-                                    lora_path=lora.path,
-                                )
-                            )
-                            self.loaded_loras[lora_name] = lora
-                        except Exception as rollback_err:
-                            logger.exception(
-                                "Failed to rollback LoRA '%s' in engine after discovery unregistration failure",
-                                lora_name,
-                            )
-                            yield {
-                                "status": "error",
-                                "message": (
-                                    f"Failed to unregister LoRA '{lora_name}' from discovery registry: {unreg_err!s}. "
-                                    f"Rollback also failed: {rollback_err!s}"
-                                ),
-                                "lora_name": lora_name,
-                            }
-                            return
-
-                        yield {
-                            "status": "error",
-                            "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {unreg_err!s}",
-                            "lora_name": lora_name,
-                        }
-                        return
 
                 logger.info("LoRA '%s' unloaded", lora_name)
 
