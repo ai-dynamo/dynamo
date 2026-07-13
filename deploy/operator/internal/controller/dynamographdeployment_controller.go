@@ -239,7 +239,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				message = Message(err.Error())
 				return ctrl.Result{}, err
 			}
-			r.setCurrentWorkerHashes(dynamoDeployment, hashes)
+			r.setCurrentWorkerHashes(dynamoDeployment, workerHashesForCompletedGeneration(hashes.v2, hashes))
 			if updateErr := r.Update(ctx, dynamoDeployment); updateErr != nil {
 				logger.Error(updateErr, "Failed to initialize worker hash for unsupported pathway")
 				reason = reasonFailedToInitializeWorkerHash
