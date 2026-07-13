@@ -24,7 +24,8 @@ user-facing security boundary.
 | Client to inference API | OpenAI-compatible HTTP APIs and optional [server-side TLS](../components/frontend/configuration.md#tls-and-client-authentication) | Authenticate and authorize clients, terminate TLS or mutual TLS, filter requests, and enforce quotas at a gateway. See the [Gateway API integration](gateway-api/README.mdx). |
 | Component to component | [Request-plane](../design-docs/request-plane.md#transport-security) and [event-plane](../design-docs/event-plane.md#transport-security) transports for trusted networks | Keep internal ports private, apply NetworkPolicies, and configure transport authentication and encryption where supported. |
 | Pod to Kubernetes API | Kubernetes API access over TLS with ServiceAccounts and role-based access control (RBAC) | Use least-privilege identities and restrict ServiceAccount token access. See [Service Discovery](service-discovery.md#rbac). |
-| Workload and data | Execution of selected images, models, backends, and plugins; operational metrics and routing metadata | Approve artifacts, constrain pods, isolate tenants, and control access to telemetry and state. |
+| Workload trust | Execution of selected container images, model code, backends, and plugins | Approve and pin artifacts, constrain pods, and isolate mutually untrusted workloads. |
+| Operational data | Metrics, routing metadata, request traces, and KV event content | Isolate tenants and control access to telemetry, diagnostic data, and runtime state. |
 
 > [!NOTE]
 > etcd discovery is deprecated for Kubernetes deployments. The Dynamo operator uses Kubernetes-native discovery by

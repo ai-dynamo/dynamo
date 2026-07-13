@@ -266,8 +266,14 @@ supported [Dynamo release artifacts](../reference/release-artifacts.md), pin pro
 remote models to an immutable commit or revision. Control who can replace artifacts in registries, object storage,
 and persistent volumes.
 
-Remote model code behavior is backend-specific. Enable a backend's remote-code option only for reviewed models,
-and follow that backend's security and isolation guidance.
+Some Hugging Face models reference custom Python through the `auto_map` field in `config.json`. Loading those models
+with vLLM or SGLang can require `--trust-remote-code`; enabling it permits model-supplied code to execute in the
+serving process.
+
+Dynamo does not infer trust from a model's location or automatically add a backend's remote-code option when the
+profiler resolves a model cache to a local directory. Review and pin the exact model revision, then add the
+backend-specific option explicitly to the worker arguments. For a DGDR-generated deployment, use
+[generated DGD overrides](dgdr.md#generated-dgd-overrides).
 
 ## Production Detail: Model Caching
 
