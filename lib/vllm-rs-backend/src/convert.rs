@@ -89,7 +89,7 @@ pub(crate) fn lower_request(
         structured_outputs: sampling
             .guided_decoding
             .as_ref()
-            .map(structured_outputs_from_guided_decoding),
+            .and_then(structured_outputs_from_guided_decoding),
         logprob_token_ids: None,
         skip_reading_prefix_cache: None,
         thinking_token_budget: request.stop_conditions.max_thinking_tokens.map(u64::from),
@@ -247,7 +247,7 @@ fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
 
 fn structured_outputs_from_guided_decoding(
     guided: &GuidedDecodingOptions,
-) -> StructuredOutputsParams {
+) -> Option<StructuredOutputsParams> {
     let constraint = if let Some(json) = guided.json.clone() {
         StructuredOutputConstraint::Json(json)
     } else if let Some(regex) = guided.regex.clone() {
@@ -261,16 +261,17 @@ fn structured_outputs_from_guided_decoding(
     {
         StructuredOutputConstraint::StructuralTag(structural_tag)
     } else {
-        StructuredOutputConstraint::JsonObject
+        // whitespace_pattern alone is not a constraint; skip structured outputs.
+        return None;
     };
-    StructuredOutputsParams {
+    Some(StructuredOutputsParams {
         constraint,
         options: StructuredOutputOptions {
             whitespace_pattern: guided.whitespace_pattern.clone(),
             ..Default::default()
         },
         backend: Default::default(),
-    }
+    })
 }
 
 fn structural_tag_to_string(tag: &serde_json::Value) -> String {
