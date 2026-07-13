@@ -13,6 +13,7 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 use std::collections::HashMap;
+use std::env;
 use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
@@ -39,6 +40,44 @@ use crate::protocols::{
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
 // more details.
 const FORCE_EXPIRE_REQUESTS_ACROSS_ALL_WORKERS_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Environment override for the stale active-request cleanup guard.
+const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
+
+/// Returns the configured stale active-request cleanup guard.
+fn active_request_expiry_duration() -> Duration {
+    active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
+}
+
+/// Parses the cleanup guard from an environment lookup, falling back on invalid input.
+fn active_request_expiry_duration_from_lookup(
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Duration {
+    let Some(raw) = get_env(DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS) else {
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    let Ok(seconds) = raw.parse::<u64>() else {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            value = %raw,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "invalid active request expiry override, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    };
+
+    if seconds == 0 {
+        tracing::warn!(
+            env = DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            default_secs = DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.as_secs(),
+            "active request expiry override must be greater than zero, falling back to default"
+        );
+        return DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION;
+    }
+
+    Duration::from_secs(seconds)
+}
 
 // ---------------------------------------------------------------------------
 // Traits
@@ -218,6 +257,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Create a tracker with an explicit stale active-request cleanup guard.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `expiry_duration` is zero.
     pub fn new_with_expiry_duration(
         publisher: P,
         block_size: usize,
@@ -227,6 +270,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker_type: &'static str,
         expiry_duration: Duration,
     ) -> Self {
+        assert!(
+            !expiry_duration.is_zero(),
+            "expiry_duration must be greater than zero"
+        );
         Self::new_with_options(
             publisher,
             block_size,
@@ -260,7 +307,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy,
-                expiry_duration: Some(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION),
+                expiry_duration: Some(active_request_expiry_duration()),
             },
         )
     }
@@ -1111,6 +1158,51 @@ mod tests {
     };
     use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
+
+    /// Verifies that a positive expiry override is accepted.
+    #[test]
+    fn active_request_expiry_duration_override_uses_positive_seconds() {
+        let lookup =
+            |key: &str| (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| "3600".to_string());
+
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(lookup),
+            Duration::from_secs(3600)
+        );
+    }
+
+    /// Verifies that absent and invalid expiry overrides use the default.
+    #[test]
+    fn active_request_expiry_duration_override_falls_back_to_default() {
+        assert_eq!(
+            active_request_expiry_duration_from_lookup(|_| None),
+            DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+        );
+        for value in ["", "abc", "0"] {
+            let lookup = |key: &str| {
+                (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| value.to_string())
+            };
+            assert_eq!(
+                active_request_expiry_duration_from_lookup(lookup),
+                DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
+            );
+        }
+    }
+
+    /// Verifies that zero duration is rejected before worker-table construction.
+    #[test]
+    #[should_panic(expected = "expiry_duration must be greater than zero")]
+    fn custom_expiry_rejects_zero_duration_at_multi_worker_boundary() {
+        let _ = ActiveSequencesMultiWorker::new_with_expiry_duration(
+            NoopSequencePublisher,
+            4,
+            HashMap::new(),
+            false,
+            0,
+            "test",
+            Duration::ZERO,
+        );
+    }
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
         ActiveSequencesMultiWorker::new(

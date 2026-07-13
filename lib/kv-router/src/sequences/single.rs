@@ -121,6 +121,11 @@ impl ActiveSequences {
         Self::new_with_expiry(block_size, Some(DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION))
     }
 
+    /// Creates a tracker with an explicit stale-request expiry duration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `expiry_duration` is zero or `block_size` is zero.
     pub(super) fn new_with_expiry_duration(block_size: usize, expiry_duration: Duration) -> Self {
         assert!(
             !expiry_duration.is_zero(),
@@ -129,6 +134,7 @@ impl ActiveSequences {
         Self::new_with_expiry(block_size, Some(expiry_duration))
     }
 
+    /// Creates a tracker that relies only on explicit request lifecycle events.
     pub(super) fn new_without_expiry(block_size: usize) -> Self {
         Self::new_with_expiry(block_size, None)
     }
@@ -708,6 +714,7 @@ mod tests {
         assert!(seq_manager.requests.is_empty());
     }
 
+    /// Verifies that force-expiry honors a custom cleanup duration.
     #[tokio::test(start_paused = true)]
     async fn test_force_expiry() {
         let block_size = 4;
@@ -799,6 +806,7 @@ mod tests {
         seq_manager.assert_consistent();
     }
 
+    /// Verifies that a zero cleanup duration is rejected.
     #[test]
     #[should_panic(expected = "expiry_duration must be greater than zero")]
     fn test_custom_expiry_rejects_zero_duration() {
