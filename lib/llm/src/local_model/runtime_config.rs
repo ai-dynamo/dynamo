@@ -96,6 +96,13 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 /// to the other engine.
 pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
+/// Worker capability for exact multimodal KV routing on vLLM's Generate API.
+///
+/// Workers must advertise this only when their KV-event normalizer has a
+/// resolved image-token ID and applies the same multimodal identifier mapping
+/// as the frontend.
+pub const VLLM_EXACT_MM_ROUTING_CAPABILITY: &str = "vllm_exact_mm_routing";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

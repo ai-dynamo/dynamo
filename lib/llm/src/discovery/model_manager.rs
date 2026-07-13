@@ -1342,6 +1342,16 @@ impl ModelManager {
             .get_generate_engine_for_capability(capability)
     }
 
+    pub fn get_generate_engine_with_routing_metadata(
+        &self,
+        model: &str,
+    ) -> Result<(GenerateStreamingEngine, u32, Option<String>, bool), ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_with_routing_metadata()
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
