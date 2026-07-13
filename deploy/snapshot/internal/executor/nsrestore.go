@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"os"
 	"syscall"
 	"time"
 
@@ -44,6 +45,7 @@ type NSRestoreSetupTimings struct {
 	RootfsDiffCgroupAfter         snapshotruntime.CgroupResourceSnapshot `json:"rootfsDiffCgroupAfter"`
 	RootfsDiffCgroupDelta         snapshotruntime.CgroupResourceDelta    `json:"rootfsDiffCgroupDelta"`
 	RootfsDiffCgroupReadErrors    []string                               `json:"rootfsDiffCgroupReadErrors,omitempty"`
+	RootfsReadyMarkerDuration     time.Duration                          `json:"rootfsReadyMarkerDuration"`
 	DeletedFilesReadDuration      time.Duration                          `json:"deletedFilesReadDuration"`
 	DeletedFilesParseDuration     time.Duration                          `json:"deletedFilesParseDuration"`
 	DeletedFilesRemoveDuration    time.Duration                          `json:"deletedFilesRemoveDuration"`
@@ -65,6 +67,7 @@ func (t *NSRestoreSetupTimings) finalize(total time.Duration) {
 		t.BuildRestoreOptsDuration +
 		t.RootfsDiffStatDuration +
 		t.RootfsDiffExtractDuration +
+		t.RootfsReadyMarkerDuration +
 		t.DeletedFilesReadDuration +
 		t.DeletedFilesParseDuration +
 		t.DeletedFilesRemoveDuration +
@@ -149,6 +152,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 			"rootfs_diff_cgroup_after":       setupTimings.RootfsDiffCgroupAfter,
 			"rootfs_diff_cgroup_delta":       setupTimings.RootfsDiffCgroupDelta,
 			"rootfs_diff_cgroup_read_errors": setupTimings.RootfsDiffCgroupReadErrors,
+			"rootfs_ready_marker_duration":   setupTimings.RootfsReadyMarkerDuration.String(),
 			"deleted_files_read_duration":    setupTimings.DeletedFilesReadDuration.String(),
 			"deleted_files_parse_duration":   setupTimings.DeletedFilesParseDuration.String(),
 			"deleted_files_remove_duration":  setupTimings.DeletedFilesRemoveDuration.String(),
@@ -196,6 +200,17 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	timings.nsrestoreSetupTimings.RootfsDiffCgroupReadErrors = rootfsStats.CgroupReadErrors
 	if err != nil {
 		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
+	}
+	if markerPath := os.Getenv("DYN_SNAPSHOT_EXPERIMENT_ROOTFS_READY_FILE"); markerPath != "" {
+		markerStart := time.Now()
+		if err := os.WriteFile(markerPath, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0644); err != nil {
+			return nil, 0, fmt.Errorf("failed to write experimental rootfs ready marker %s: %w", markerPath, err)
+		}
+		timings.nsrestoreSetupTimings.RootfsReadyMarkerDuration = time.Since(markerStart)
+		log.Info("Wrote experimental rootfs ready marker",
+			"path", markerPath,
+			"duration", timings.nsrestoreSetupTimings.RootfsReadyMarkerDuration,
+		)
 	}
 
 	deletedStats, err := snapshotruntime.ApplyDeletedFilesWithStats(opts.CheckpointPath, "/", log)

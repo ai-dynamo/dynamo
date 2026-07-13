@@ -12,17 +12,18 @@ func TestNSRestoreSetupTimingsFinalize(t *testing.T) {
 		BuildRestoreOptsDuration:   3 * time.Millisecond,
 		RootfsDiffStatDuration:     4 * time.Millisecond,
 		RootfsDiffExtractDuration:  5 * time.Millisecond,
+		RootfsReadyMarkerDuration:  11 * time.Millisecond,
 		DeletedFilesReadDuration:   6 * time.Millisecond,
 		DeletedFilesParseDuration:  7 * time.Millisecond,
 		DeletedFilesRemoveDuration: 8 * time.Millisecond,
 		DevShmUnmountDuration:      9 * time.Millisecond,
 		ProcSysRemountReadWrite:    10 * time.Millisecond,
 	}
-	const total = 60 * time.Millisecond
+	const total = 71 * time.Millisecond
 
 	timings.finalize(total)
 
-	const wantSum = 55 * time.Millisecond
+	const wantSum = 66 * time.Millisecond
 	if timings.SetupSubphasesDuration != wantSum {
 		t.Errorf("SetupSubphasesDuration = %s, want %s", timings.SetupSubphasesDuration, wantSum)
 	}
