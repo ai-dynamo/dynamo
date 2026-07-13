@@ -586,3 +586,71 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
         # No tool calls, plain content preserved, no crash.
         tc = (choice or {}).get("delta", {}).get("tool_calls", [])
         assert tc == []
+
+
+# ---------------------------------------------------------------------------
+# EOS token text must not leak into content
+# ---------------------------------------------------------------------------
+
+
+class TestEosTokenTextNotLeaked:
+    """With a tool parser active, special tokens are preserved for the
+    parser's delimiters (``skip_special_tokens=False``), so the engine's
+    terminating EOS id would otherwise detokenize into user-visible text at
+    the tail of ``content`` whenever the model answers in plain text instead
+    of calling a tool. The post-processor must drop EOS ids before decoding.
+    """
+
+    ANSWER = "The capital of France is Paris."
+
+    def _collect_content(self, results):
+        return "".join((r.get("delta", {}) or {}).get("content") or "" for r in results)
+
+    def _drive(self, tokenizer, batches):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=FunctionCallParser(tools=TOOLS, tool_call_parser="hermes"),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+        )
+        results = []
+        for i, batch in enumerate(batches):
+            choice = post.process_output(
+                {
+                    "token_ids": batch,
+                    "finish_reason": "stop" if i == len(batches) - 1 else None,
+                }
+            )
+            if choice:
+                results.append(choice)
+        return results
+
+    def test_plain_answer_with_trailing_eos(self, tokenizer):
+        """EOS arriving in the same chunk as the final text tokens."""
+        ids = tokenizer.encode(self.ANSWER) + [tokenizer.eos_token_id]
+        content = self._collect_content(self._drive(tokenizer, [ids]))
+        assert tokenizer.eos_token not in content
+        assert "Paris" in content
+
+    def test_eos_alone_in_final_chunk(self, tokenizer):
+        """Streaming shape: EOS id arrives by itself with the finish flag."""
+        ids = tokenizer.encode(self.ANSWER)
+        content = self._collect_content(
+            self._drive(tokenizer, [ids[:3], ids[3:], [tokenizer.eos_token_id]])
+        )
+        assert tokenizer.eos_token not in content
+        assert "Paris" in content
+
+    def test_tool_call_parsing_unaffected(self, tokenizer):
+        """Dropping EOS ids must not disturb tool-call markup parsing."""
+        text = (
+            '<tool_call>\n{"name": "get_weather", '
+            '"arguments": {"city": "Paris"}}\n</tool_call>'
+        )
+        ids = tokenizer.encode(text) + [tokenizer.eos_token_id]
+        results = self._drive(tokenizer, [ids])
+        tc = _extract_tool_calls(results)
+        assert len(tc) == 1
+        assert tc[0]["function"]["name"] == "get_weather"
+        assert json.loads(tc[0]["function"]["arguments"]) == {"city": "Paris"}
+        assert tokenizer.eos_token not in self._collect_content(results)

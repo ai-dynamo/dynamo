@@ -953,6 +953,21 @@ class SglangStreamingPostProcessor:
         # Preserve special tokens when a tool call parser is active so
         # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
         self._skip_special_tokens = tool_call_parser is None
+        # EOS ids to filter from the decode stream when special tokens are
+        # preserved. With ``skip_special_tokens=False`` the engine's
+        # terminating EOS would otherwise detokenize into user-visible text
+        # at the tail of ``content`` (e.g. a trailing "<|im_end|>") whenever
+        # the model answers in plain text while a tool parser is active.
+        # Neither the reasoning nor the tool parser consumes the EOS, so it
+        # is dropped at the id level before decoding — streaming-chunk safe,
+        # and cannot strip legitimate text that merely resembles the EOS
+        # string.
+        _eos = getattr(tokenizer, "eos_token_id", None)
+        if _eos is None:
+            _eos = []
+        elif isinstance(_eos, int):
+            _eos = [_eos]
+        self._eos_token_ids = frozenset(_eos)
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
@@ -1091,6 +1106,9 @@ class SglangStreamingPostProcessor:
         """
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
+        # Drop EOS ids before incremental decode — see __init__.
+        if not self._skip_special_tokens and self._eos_token_ids:
+            token_ids = [t for t in token_ids if t not in self._eos_token_ids]
         finish_reason = engine_response.get("finish_reason")
         if finish_reason:
             token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
