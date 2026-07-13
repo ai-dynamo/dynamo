@@ -167,6 +167,11 @@ pub fn lower_tier_query_order() -> [StorageTier; 3] {
     ]
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LowerTierQueryOptions {
+    pub retain_router_hint_chain: bool,
+}
+
 /// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
 /// per-tier match map seeded from `device_matches`. Per-worker continuations
 /// flow forward: a worker that matched N device blocks starts the host walk
@@ -175,6 +180,20 @@ pub fn query_lower_tiers(
     indexers: &LowerTierIndexers,
     sequence: &[LocalBlockHash],
     device_matches: &MatchDetails,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    query_lower_tiers_with_options(
+        indexers,
+        sequence,
+        device_matches,
+        LowerTierQueryOptions::default(),
+    )
+}
+
+pub fn query_lower_tiers_with_options(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
     // No lower-tier indexers are allocated, so there is no continuation
     // work to perform. Return before validating device score/hash lockstep;
@@ -216,9 +235,14 @@ pub fn query_lower_tiers(
             }
         }
 
-        let tier_matches = indexer
+        let router_hint_root_candidates = (options.retain_router_hint_chain
+            && storage_tier == StorageTier::HostPinned)
+            .then(|| indexer.backend().root_chain_candidates(sequence))
+            .flatten();
+        let mut tier_matches = indexer
             .backend()
             .query_match_details(sequence, &continuations);
+        tier_matches.router_hint_root_candidates = router_hint_root_candidates;
         let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
         tracing::debug!(
             ?storage_tier,
@@ -236,7 +260,39 @@ pub fn query_lower_tiers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::{LocalBlockHash, OverlapScores, WorkerWithDpRank};
+    use crate::indexer::KvIndexerInterface;
+    use crate::protocols::{
+        ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
+        OverlapScores, WorkerWithDpRank,
+    };
+    use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
+
+    fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
+        values.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn store_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        parent_hash: Option<u64>,
+        local_values: &[u64],
+        external_hashes: &[u64],
+    ) -> crate::protocols::RouterEvent {
+        router_event(
+            worker_id,
+            event_id,
+            dp_rank,
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                start_position: None,
+                blocks: stored_blocks_with_sequence_hashes(
+                    &local_hashes(local_values),
+                    external_hashes,
+                ),
+            }),
+        )
+    }
 
     #[test]
     fn query_lower_tiers_returns_empty_when_no_tiers_allocated() {
@@ -257,5 +313,41 @@ mod tests {
         let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
         let result = query_lower_tiers(&indexers, &sequence, &device_matches);
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_retains_router_hint_chain_when_enabled() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &MatchDetails::default(),
+            LowerTierQueryOptions {
+                retain_router_hint_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.kv_block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102)
+            ]
+        );
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![(WorkerWithDpRank::new(7, 0), 2)]
+        );
     }
 }
