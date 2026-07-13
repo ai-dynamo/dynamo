@@ -216,6 +216,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	// Apply rootfs diff inside the namespace (target root is /)
 	nsrestoreSetupStart := time.Now()
 	var beforeRootfsExtract func() error
+	var afterRootfsExtract func() error
 	if gateEnabled && opts.RootfsGMSReleaseMode == "control" {
 		beforeRootfsExtract = func() error {
 			markerStart := time.Now()
@@ -230,7 +231,27 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 			return nil
 		}
 	}
-	rootfsStats, err := snapshotruntime.ApplyRootfsDiffWithStatsBeforeExtract(opts.CheckpointPath, "/", log, beforeRootfsExtract)
+	if gateEnabled && opts.RootfsGMSReleaseMode == "treatment" {
+		afterRootfsExtract = func() error {
+			markerStart := time.Now()
+			if err := writeMarkerAtomically(opts.RootfsGMSReleaseFile); err != nil {
+				return fmt.Errorf("write treatment GMS release marker: %w", err)
+			}
+			timings.nsrestoreSetupTimings.RootfsReleaseMarkerDuration = time.Since(markerStart)
+			log.Info("Treatment GMS release marker created immediately after rootfs tar",
+				"path", opts.RootfsGMSReleaseFile,
+				"duration", timings.nsrestoreSetupTimings.RootfsReleaseMarkerDuration,
+			)
+			return nil
+		}
+	}
+	rootfsStats, err := snapshotruntime.ApplyRootfsDiffWithStatsHooks(
+		opts.CheckpointPath,
+		"/",
+		log,
+		beforeRootfsExtract,
+		afterRootfsExtract,
+	)
 	timings.nsrestoreSetupTimings.RootfsDiffStatDuration = rootfsStats.StatDuration
 	timings.nsrestoreSetupTimings.RootfsDiffSizeBytes = rootfsStats.SizeBytes
 	timings.nsrestoreSetupTimings.RootfsDiffExtractDuration = rootfsStats.ExtractDuration
@@ -241,17 +262,6 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	timings.nsrestoreSetupTimings.RootfsDiffCgroupReadErrors = rootfsStats.CgroupReadErrors
 	if err != nil {
 		return nil, 0, fmt.Errorf("rootfs diff failed: %w", err)
-	}
-	if gateEnabled && opts.RootfsGMSReleaseMode == "treatment" {
-		markerStart := time.Now()
-		if err := writeMarkerAtomically(opts.RootfsGMSReleaseFile); err != nil {
-			return nil, 0, fmt.Errorf("write treatment GMS release marker: %w", err)
-		}
-		timings.nsrestoreSetupTimings.RootfsReleaseMarkerDuration = time.Since(markerStart)
-		log.Info("Treatment GMS release marker created immediately after rootfs",
-			"path", opts.RootfsGMSReleaseFile,
-			"duration", timings.nsrestoreSetupTimings.RootfsReleaseMarkerDuration,
-		)
 	}
 
 	deletedStats, err := snapshotruntime.ApplyDeletedFilesWithStats(opts.CheckpointPath, "/", log)

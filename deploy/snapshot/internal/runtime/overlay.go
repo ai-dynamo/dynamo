@@ -183,16 +183,16 @@ func ApplyRootfsDiff(checkpointPath, targetRoot string, log logr.Logger) error {
 
 // ApplyRootfsDiffWithStats extracts rootfs-diff.tar and reports restore measurements.
 func ApplyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger) (RootfsDiffApplyStats, error) {
-	return applyRootfsDiffWithStats(checkpointPath, targetRoot, log, nil)
+	return applyRootfsDiffWithStats(checkpointPath, targetRoot, log, nil, nil)
 }
 
-// ApplyRootfsDiffWithStatsBeforeExtract runs beforeExtract immediately before
-// starting the measured tar child.
-func ApplyRootfsDiffWithStatsBeforeExtract(checkpointPath, targetRoot string, log logr.Logger, beforeExtract func() error) (RootfsDiffApplyStats, error) {
-	return applyRootfsDiffWithStats(checkpointPath, targetRoot, log, beforeExtract)
+// ApplyRootfsDiffWithStatsHooks runs hooks directly before and after the
+// measured tar child without including hook time in ExtractDuration.
+func ApplyRootfsDiffWithStatsHooks(checkpointPath, targetRoot string, log logr.Logger, beforeExtract, afterExtract func() error) (RootfsDiffApplyStats, error) {
+	return applyRootfsDiffWithStats(checkpointPath, targetRoot, log, beforeExtract, afterExtract)
 }
 
-func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger, beforeExtract func() error) (RootfsDiffApplyStats, error) {
+func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger, beforeExtract, afterExtract func() error) (RootfsDiffApplyStats, error) {
 	var stats RootfsDiffApplyStats
 	rootfsDiffPath := filepath.Join(checkpointPath, rootfsDiffFilename)
 	statStart := time.Now()
@@ -227,6 +227,10 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 	extractStart := time.Now()
 	err = cmd.Run()
 	stats.ExtractDuration = time.Since(extractStart)
+	var afterExtractErr error
+	if afterExtract != nil {
+		afterExtractErr = afterExtract()
+	}
 	if cmd.ProcessState != nil {
 		if usage, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
 			stats.ChildRusage = childRusageStats(usage)
@@ -250,6 +254,9 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 	)
 	if err != nil {
 		return stats, fmt.Errorf("tar extract failed: %w", err)
+	}
+	if afterExtractErr != nil {
+		return stats, fmt.Errorf("after rootfs extract: %w", afterExtractErr)
 	}
 	return stats, nil
 }

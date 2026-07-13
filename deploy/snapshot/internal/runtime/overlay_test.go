@@ -78,7 +78,7 @@ func TestBuildExclusions(t *testing.T) {
 	}
 }
 
-func TestApplyRootfsDiffWithStatsRunsHookImmediatelyBeforeTar(t *testing.T) {
+func TestApplyRootfsDiffWithStatsRunsHooksOutsideMeasuredTar(t *testing.T) {
 	checkpointDir := t.TempDir()
 	targetRoot := t.TempDir()
 	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
@@ -92,14 +92,18 @@ func TestApplyRootfsDiffWithStatsRunsHookImmediatelyBeforeTar(t *testing.T) {
 	if err := archive.Close(); err != nil {
 		t.Fatalf("close archive: %v", err)
 	}
-	markerPath := filepath.Join(targetRoot, "before-extract")
+	beforeMarker := filepath.Join(targetRoot, "before-extract")
+	afterMarker := filepath.Join(targetRoot, "after-extract")
 
-	stats, err := ApplyRootfsDiffWithStatsBeforeExtract(
+	stats, err := ApplyRootfsDiffWithStatsHooks(
 		checkpointDir,
 		targetRoot,
 		testr.New(t),
 		func() error {
-			return os.WriteFile(markerPath, []byte("ready"), 0o644)
+			return os.WriteFile(beforeMarker, []byte("ready"), 0o644)
+		},
+		func() error {
+			return os.WriteFile(afterMarker, []byte("released"), 0o644)
 		},
 	)
 	if err != nil {
@@ -108,8 +112,11 @@ func TestApplyRootfsDiffWithStatsRunsHookImmediatelyBeforeTar(t *testing.T) {
 	if stats.ExtractDuration <= 0 {
 		t.Fatalf("expected measured tar duration, got %+v", stats)
 	}
-	if _, err := os.Stat(markerPath); err != nil {
+	if _, err := os.Stat(beforeMarker); err != nil {
 		t.Fatalf("before-extract hook did not run: %v", err)
+	}
+	if _, err := os.Stat(afterMarker); err != nil {
+		t.Fatalf("after-extract hook did not run: %v", err)
 	}
 }
 
