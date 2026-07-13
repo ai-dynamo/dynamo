@@ -44,6 +44,7 @@ tests:
     template: charts/dynamo-operator/templates/webhook-configuration.yaml
     set:
       dynamo-operator.namespaceRestriction.enabled: true
+      # Exercise a YAML boolean-like namespace to ensure the rendered selector stays a string.
       dynamo-operator.namespaceRestriction.targetNamespace: "true"
       dynamo-operator.upgradeCRD: false
     asserts:
