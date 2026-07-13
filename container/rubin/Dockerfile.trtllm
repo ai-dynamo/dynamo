@@ -42,8 +42,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 #     Manual build: stage an arch-matching wheel there first, e.g.
 #       mkdir -p container/rubin/.trtllm-wheel \
 #         && cp tensorrt_llm-*.whl container/rubin/.trtllm-wheel/
+# sentencepiece + tiktoken are the backends transformers uses to convert a slow
+# (SentencePiece/tiktoken) tokenizer to a fast one. The pytorch-rubin base ships
+# transformers without them, so tokenizer_factory() fails at model load with
+# "Couldn't instantiate the backend tokenizer ... need sentencepiece or tiktoken".
 RUN --mount=type=bind,source=container/rubin/.trtllm-wheel,target=/tmp/trtllm-wheel \
-    pip install --break-system-packages --no-cache-dir /tmp/trtllm-wheel/*.whl
+    pip install --break-system-packages --no-cache-dir /tmp/trtllm-wheel/*.whl \
+ && pip install --break-system-packages --no-cache-dir sentencepiece tiktoken
 
 # (2) nats + etcd. TARGETARCH is set automatically by buildkit from --platform
 #     (amd64|arm64) and matches the nats/etcd release asset suffixes directly.
@@ -75,6 +80,23 @@ RUN cd lib/bindings/python \
 RUN pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo_runtime*.whl \
  && pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo-*.whl \
  && pip install --break-system-packages --no-cache-dir msgspec uvloop imageio imageio-ffmpeg
+
+# Dynamo runtime dependency closure. The ai_dynamo wheels above are installed with
+# --no-deps, and the pytorch-rubin base is minimal (unlike the upstream
+# tensorrt-llm/release image the templated build layers on), so install the same
+# requirement sets container/templates/{dynamo_runtime,trtllm_runtime}.Dockerfile use:
+#   common   — fastapi/uvicorn/httpx/pydantic/opentelemetry/prometheus/transformers/...
+#   frontend — grpcio + tritonclient[grpc]
+#   planner  — kubernetes/aiconfigurator/scikit-learn/filterpy/pmdarima
+# requirements.trtllm.txt is intentionally NOT installed here: it pins nixl/nixl-cu13
+# from PyPI, but this image builds NIXL from source below.
+RUN --mount=type=bind,source=container/deps/requirements.common.txt,target=/tmp/req.common.txt \
+    --mount=type=bind,source=container/deps/requirements.frontend.txt,target=/tmp/req.frontend.txt \
+    --mount=type=bind,source=container/deps/requirements.planner.txt,target=/tmp/req.planner.txt \
+    pip install --break-system-packages --no-cache-dir \
+      -r /tmp/req.common.txt \
+      -r /tmp/req.frontend.txt \
+      -r /tmp/req.planner.txt
 
 # (5) UCX + NIXL, built from source exactly as container/templates/wheel_builder.Dockerfile
 #     does for CUDA — the Rubin framework bases ship no UCX/NIXL, so without this the
