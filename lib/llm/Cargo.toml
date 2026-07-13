@@ -28,6 +28,7 @@ block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicat
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
+media-preprocessing = ["media-ffmpeg"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
@@ -63,6 +64,7 @@ dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true }
 dynamo-rl = { workspace = true }
 dynamo-runtime = { workspace = true }
+dynamo-multimodal = { workspace = true }
 dynamo-tokenizers = { workspace = true }
 dynamo-renderer = { workspace = true }
 dynamo-tokens = { workspace = true }
@@ -91,6 +93,7 @@ oneshot = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
 serde = { workspace = true }
+serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 strum = { workspace = true }

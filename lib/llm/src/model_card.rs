@@ -890,6 +890,10 @@ pub struct ModelDeploymentCard {
     #[serde(default)]
     pub media_decoder: Option<MediaDecoder>,
 
+    /// Optional model-specific preprocessing applied after media decoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_preprocessor: Option<crate::preprocessor::media::MediaPreprocessor>,
+
     /// Media fetching configuration
     #[serde(default)]
     pub media_fetcher: Option<MediaFetcher>,
@@ -1631,6 +1635,7 @@ impl ModelDeploymentCard {
             runtime_config: ModelRuntimeConfig::default(),
             tensor_model_config: None,
             media_decoder: None,
+            media_preprocessor: None,
             media_fetcher: None,
             router_config: None,
             extra_files: Vec::new(),

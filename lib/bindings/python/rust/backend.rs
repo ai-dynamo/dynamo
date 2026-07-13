@@ -44,7 +44,7 @@ use crate::ModelInput;
 use crate::context::Context as PyContext;
 use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
-use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
+use crate::llm::preprocessor::{MediaDecoder, MediaFetcher, MediaPreprocessor};
 use crate::to_pyerr;
 
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
@@ -319,6 +319,7 @@ impl WorkerConfig {
         route_to_encoder = false,
         media_decoder = None,
         media_fetcher = None,
+        media_preprocessor = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -346,6 +347,7 @@ impl WorkerConfig {
         route_to_encoder: bool,
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
+        media_preprocessor: Option<MediaPreprocessor>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -424,6 +426,7 @@ impl WorkerConfig {
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
                 route_to_encoder,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
+                media_preprocessor: media_preprocessor.map(|preprocessor| preprocessor.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
         })

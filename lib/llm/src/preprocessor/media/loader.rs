@@ -15,8 +15,10 @@ use dynamo_memory::nixl::NixlAgent;
 use dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart;
 
 use super::common::EncodedMediaData;
-use super::decoders::{Decoder, MediaDecoder};
-use super::rdma::{DataType, RdmaMediaDataDescriptor, get_nixl_agent};
+use super::decoders::{Decoder, MediaDecoder, MediaPreprocessor};
+use super::rdma::{
+    DataType, ProcessedMediaDataDescriptor, RdmaMediaDataDescriptor, get_nixl_agent,
+};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::collections::hash_map::DefaultHasher;
@@ -25,6 +27,11 @@ use std::hash::{Hash, Hasher};
 const DEFAULT_HTTP_USER_AGENT: &str = "dynamo-ai/dynamo";
 const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
+
+pub enum MediaDataDescriptor {
+    Decoded(RdmaMediaDataDescriptor),
+    Preprocessed(ProcessedMediaDataDescriptor),
+}
 
 // IP ranges that must never be reachable from a user-controlled URL.
 // Source: RFC1918 (private), RFC6598 (CGNAT), RFC5735 (loopback, link-local,
@@ -350,6 +357,8 @@ impl LoaderCache {
 fn descriptor_bytes(d: &RdmaMediaDataDescriptor) -> u64 {
     let elem = match d.tensor_info.dtype {
         DataType::UINT8 => 1u64,
+        DataType::FLOAT32 => 4u64,
+        DataType::INT64 | DataType::FLOAT64 => 8u64,
     };
     d.tensor_info
         .shape
@@ -362,6 +371,8 @@ fn descriptor_bytes(d: &RdmaMediaDataDescriptor) -> u64 {
 pub struct MediaLoader {
     #[allow(dead_code)]
     media_decoder: MediaDecoder,
+    #[cfg(feature = "media-ffmpeg")]
+    video_processor: Option<Arc<dyn dynamo_multimodal::registry::VideoProcessor>>,
     #[allow(dead_code)]
     http_client: reqwest::Client,
     #[allow(dead_code)]
@@ -399,13 +410,26 @@ impl MediaLoader {
         h.finish()
     }
 
-    pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
+    pub fn new(
+        media_decoder: MediaDecoder,
+        media_preprocessor: Option<MediaPreprocessor>,
+        media_fetcher: Option<MediaFetcher>,
+    ) -> Result<Self> {
         // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
         // honored even when the caller doesn't pass an explicit fetcher.
         let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);
         let http_client = media_fetcher.build_http_client()?;
 
         let nixl_agent = get_nixl_agent()?;
+
+        #[cfg(feature = "media-ffmpeg")]
+        let video_processor = media_preprocessor
+            .and_then(|preprocessor| preprocessor.video)
+            .map(dynamo_multimodal::registry::VideoProcessorRegistry::build)
+            .transpose()?;
+
+        #[cfg(not(feature = "media-ffmpeg"))]
+        let _ = media_preprocessor;
 
         let cache = match Self::cache_budget_bytes_from_env() {
             0 => {
@@ -425,6 +449,8 @@ impl MediaLoader {
 
         Ok(Self {
             media_decoder,
+            #[cfg(feature = "media-ffmpeg")]
+            video_processor,
             http_client,
             media_fetcher,
             nixl_agent,
@@ -441,7 +467,7 @@ impl MediaLoader {
         media_fetcher: Option<MediaFetcher>,
         budget_bytes: u64,
     ) -> Result<Self> {
-        let mut loader = Self::new(media_decoder, media_fetcher)?;
+        let mut loader = Self::new(media_decoder, None, media_fetcher)?;
         loader.cache = if budget_bytes == 0 {
             None
         } else {
@@ -459,7 +485,7 @@ impl MediaLoader {
         &self,
         oai_content_part: &ChatCompletionRequestUserMessageContentPart,
         media_io_kwargs: Option<&MediaDecoder>,
-    ) -> Result<RdmaMediaDataDescriptor> {
+    ) -> Result<MediaDataDescriptor> {
         // Image-only fast path: cache lookup keyed by URL/datauri string.
         // Video/audio aren't cached yet (their lifetime/content semantics
         // are different — easy to add later if profiling justifies it).
@@ -476,7 +502,7 @@ impl MediaLoader {
                 let key = Self::cache_key(image_part.image_url.url.as_str());
                 if let Some(hit) = cache.lock().get(&key) {
                     tracing::debug!(url_hash = key, "[mm-cache] hit");
-                    return Ok(hit);
+                    return Ok(MediaDataDescriptor::Decoded(hit));
                 }
             }
         }
@@ -531,7 +557,33 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
-        let rdma_descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+        let is_video = matches!(
+            oai_content_part,
+            ChatCompletionRequestUserMessageContentPart::VideoUrl(_)
+        );
+        let descriptor = if is_video {
+            #[cfg(feature = "media-ffmpeg")]
+            {
+                if let Some(processor) = self.video_processor.as_ref().map(Arc::clone) {
+                    // Resize and patchification are CPU-heavy. Keep them off
+                    // the async runtime just as the decode step above does.
+                    let output =
+                        tokio_rayon::spawn(move || decoded.preprocess_video(processor.as_ref()))
+                            .await?;
+                    let descriptor =
+                        ProcessedMediaDataDescriptor::from_processed(output, &self.nixl_agent)?;
+                    MediaDataDescriptor::Preprocessed(descriptor)
+                } else {
+                    MediaDataDescriptor::Decoded(decoded.into_rdma_descriptor(&self.nixl_agent)?)
+                }
+            }
+            #[cfg(not(feature = "media-ffmpeg"))]
+            {
+                MediaDataDescriptor::Decoded(decoded.into_rdma_descriptor(&self.nixl_agent)?)
+            }
+        } else {
+            MediaDataDescriptor::Decoded(decoded.into_rdma_descriptor(&self.nixl_agent)?)
+        };
 
         // Insert into the cache on the way out. We only cache image inputs
         // (matched in the lookup above) and only when no per-request decoder
@@ -544,12 +596,14 @@ impl MediaLoader {
             && media_io_kwargs.is_none()
         {
             let key = Self::cache_key(image_part.image_url.url.as_str());
-            let bytes = descriptor_bytes(&rdma_descriptor);
-            cache.lock().put(key, rdma_descriptor.clone());
-            tracing::debug!(url_hash = key, bytes, "[mm-cache] insert");
+            if let MediaDataDescriptor::Decoded(rdma_descriptor) = &descriptor {
+                let bytes = descriptor_bytes(rdma_descriptor);
+                cache.lock().put(key, rdma_descriptor.clone());
+                tracing::debug!(url_hash = key, bytes, "[mm-cache] insert");
+            }
         }
 
-        Ok(rdma_descriptor)
+        Ok(descriptor)
     }
 }
 
@@ -587,7 +641,7 @@ mod tests {
             ..Default::default()
         };
 
-        let loader: MediaLoader = match MediaLoader::new(media_decoder, Some(fetcher)) {
+        let loader: MediaLoader = match MediaLoader::new(media_decoder, None, Some(fetcher)) {
             Ok(l) => l,
             Err(e) => {
                 println!(

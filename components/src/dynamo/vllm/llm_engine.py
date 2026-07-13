@@ -303,8 +303,10 @@ class VllmLLMEngine(LLMEngine):
             ),
             namespace=config.namespace,
         )
-        media_decoder, media_fetcher = create_frontend_media_config(
-            config.frontend_decoding
+        media_decoder, media_preprocessor, media_fetcher = create_frontend_media_config(
+            config.frontend_decoding,
+            video_preprocessing=config.frontend_video_preprocessing,
+            model=config.model,
         )
         worker_config = WorkerConfig.from_runtime_config(
             config,
@@ -312,6 +314,7 @@ class VllmLLMEngine(LLMEngine):
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
             media_decoder=media_decoder,
+            media_preprocessor=media_preprocessor,
             media_fetcher=media_fetcher,
         )
         return engine, worker_config

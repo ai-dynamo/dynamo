@@ -2198,6 +2198,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
+ "dynamo-multimodal",
  "dynamo-parsers",
  "dynamo-parsers-v2",
  "dynamo-protocols",
@@ -2242,6 +2243,7 @@ dependencies = [
  "rmp-serde",
  "rustls 0.23.40",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2",
  "strum",
@@ -2322,6 +2324,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-multimodal"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "fast_image_resize",
+ "image",
+ "ndarray 0.17.2",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dynamo-parsers"
 version = "4.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2391,6 +2407,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",
+ "dynamo-multimodal",
  "dynamo-parsers",
  "dynamo-runtime",
  "futures",

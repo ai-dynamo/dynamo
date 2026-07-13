@@ -147,6 +147,19 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_frontend_decoding_arg(g, env_prefix="VLLM")
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--frontend-video-preprocessing",
+            env_var="DYN_VLLM_FRONTEND_VIDEO_PREPROCESSING",
+            default=False,
+            help=(
+                "EXPERIMENTAL: decode and apply Hugging Face-compatible Qwen3-VL "
+                "video preprocessing in the Dynamo frontend, then transfer FP32 "
+                "pixel values to this aggregated vLLM worker. Requires "
+                "--frontend-decoding and --enable-multimodal."
+            ),
+        )
+
         add_argument(
             g,
             flag_name="--custom-encoder-class",
@@ -345,6 +358,7 @@ class DynamoVllmConfig(ConfigBase):
     enable_rl: bool = False
     mm_prompt_template: str
     frontend_decoding: bool
+    frontend_video_preprocessing: bool = False
     embedding_transfer_mode: Union[
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
@@ -382,6 +396,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
         self._validate_benchmark_config()
+        self._validate_frontend_video_preprocessing()
 
     def _validate_benchmark_config(self) -> None:
         if self.benchmark_mode is None:
@@ -428,6 +443,39 @@ class DynamoVllmConfig(ConfigBase):
                 f"--benchmark-mode {self.benchmark_mode} requests "
                 f"{requested_points} grid points; the maximum is "
                 f"{MAX_BENCHMARK_GRID_POINTS}."
+            )
+
+    def _validate_frontend_video_preprocessing(self) -> None:
+        if not self.frontend_video_preprocessing:
+            return
+        if not self.frontend_decoding:
+            raise ValueError(
+                "--frontend-video-preprocessing requires --frontend-decoding."
+            )
+        if not self.enable_multimodal:
+            raise ValueError(
+                "--frontend-video-preprocessing requires --enable-multimodal."
+            )
+        if self.use_vllm_tokenizer:
+            raise ValueError(
+                "--frontend-video-preprocessing is incompatible with "
+                "--use-vllm-tokenizer because the preprocessed-media protocol "
+                "uses Dynamo's token pipeline."
+            )
+        if self.custom_encoder_class:
+            raise ValueError(
+                "--frontend-video-preprocessing is incompatible with "
+                "--custom-encoder-class."
+            )
+        if self.route_to_encoder or self.multimodal_encode_worker:
+            raise ValueError(
+                "--frontend-video-preprocessing does not support a separate "
+                "multimodal encoder worker."
+            )
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError(
+                "--frontend-video-preprocessing is currently supported only "
+                "in aggregated mode (--disaggregation-mode=agg)."
             )
 
     def _resolve_embedding_transfer_mode(self) -> None:
