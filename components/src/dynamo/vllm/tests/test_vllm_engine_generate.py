@@ -118,7 +118,7 @@ def test_pd_prompt_logprobs_are_composed_from_prefill():
 def test_text_prompt_preserves_exact_tokens_and_cache_salt():
     prompt = _build_engine_generate_prompt(_request({}, cache_salt="checkpoint-7"))
     assert prompt["prompt_token_ids"] == [11, 22, 33]
-    assert prompt["cache_salt"] == "checkpoint-7"
+    assert prompt["cache_salt"] == "dynamo-cache-salt:checkpoint-7"
 
 
 def test_prompt_rejects_envelope_core_token_mismatch():
@@ -147,7 +147,11 @@ def test_multimodal_cache_hit_prompt_preserves_hashes_and_placeholders():
             "mm_hashes": {"image": ["hash-1"]},
             "mm_placeholders": {
                 "image": [
-                    {"offset": 1, "length": 1, "is_embed": [True]},
+                    {
+                        "offset": 0,
+                        "length": 3,
+                        "is_embed": [False, True, False],
+                    },
                 ]
             },
             "kwargs_data": None,
@@ -157,10 +161,11 @@ def test_multimodal_cache_hit_prompt_preserves_hashes_and_placeholders():
     assert prompt["type"] == "multimodal"
     assert prompt["prompt_token_ids"] == [11, 22, 33]
     assert prompt["mm_hashes"] == {"image": ["hash-1"]}
-    assert prompt["mm_placeholders"]["image"][0].offset == 1
-    assert prompt["mm_placeholders"]["image"][0].is_embed.tolist() == [True]
+    placeholder = prompt["mm_placeholders"]["image"][0]
+    assert (placeholder.offset, placeholder.length) == (0, 3)
+    assert placeholder.is_embed.tolist() == [False, True, False]
     assert prompt["mm_kwargs"]["image"] == [None]
-    assert prompt["cache_salt"] == "checkpoint-mm"
+    assert prompt["cache_salt"] == "dynamo-cache-salt:checkpoint-mm"
 
 
 def test_multimodal_prompt_rejects_invalid_sparse_placeholder_mask():

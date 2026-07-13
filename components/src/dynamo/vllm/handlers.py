@@ -85,7 +85,11 @@ from dynamo.vllm.kv_connector_protocols import (
 )
 
 from .args import Config
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import (
+    DYNAMO_CACHE_SALT_PREFIX,
+    DisaggregationMode,
+    EmbeddingTransferMode,
+)
 from .engine_generate import build_prompt as _build_engine_generate_prompt
 from .engine_generate import (
     build_sampling_params as _build_engine_generate_sampling_params,
@@ -509,10 +513,6 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
-# Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
-_DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
-
-
 def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
     """Pass an internally tagged cache salt to vLLM.
 
@@ -527,7 +527,7 @@ def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
     for source in _iter_nvext_sources(request):
         cache_salt = source.get("cache_salt")
         if cache_salt:
-            prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
+            prompt["cache_salt"] = f"{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
             return
 
 
@@ -3020,89 +3020,93 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         mode = cast(DisaggregationMode, self.config.disaggregation_mode)
         is_decode_only = mode == DisaggregationMode.DECODE
-        has_mm_data = request.get("multi_modal_data") is not None
-        mixed_embeds: tuple[torch.Tensor, list[int], list[bool]] | None = None
-
-        if (
-            mode == DisaggregationMode.AGGREGATED
-            and self._custom_encoder is not None
-            and has_mm_data
-        ):
-            # A configured CustomEncoder owns the aggregated image path. Bypass
-            # the normal NIXL/HF request processor and assemble an EmbedsPrompt.
-            (
-                mixed_embeds,
-                multi_modal_data,
-                assemble_error,
-            ) = await self._assemble_custom_encoder_prompt(
-                request,
-                request_id,
-                context,
-            )
-            if assemble_error is not None:
-                yield assemble_error
-                return
-            mm_processor_kwargs = None
-            pre_rendered = None
+        engine_generate = _engine_generate_payload(request) is not None
+        if engine_generate:
+            # The native Generate envelope already owns rendered multimodal
+            # features, so bypass the ordinary/custom-encoder preparation path.
+            prompt = _build_engine_generate_prompt(request)
+            embedding_sequence_length = None
+            error = None
         else:
-            try:
-                prepared_input = await self._multimodal_request_processor.prepare_input(
+            has_mm_data = request.get("multi_modal_data") is not None
+            mixed_embeds: tuple[torch.Tensor, list[int], list[bool]] | None = None
+
+            if (
+                mode == DisaggregationMode.AGGREGATED
+                and self._custom_encoder is not None
+                and has_mm_data
+            ):
+                # A configured CustomEncoder owns the aggregated image path. Bypass
+                # the normal NIXL/HF request processor and assemble an EmbedsPrompt.
+                (
+                    mixed_embeds,
+                    multi_modal_data,
+                    assemble_error,
+                ) = await self._assemble_custom_encoder_prompt(
                     request,
                     request_id,
                     context,
-                    mode,
                 )
-            except MissingMultimodalHandoffError as exc:
-                logger.error("Request %s: %s", request_id, exc)
-                yield {
-                    "finish_reason": f"error: {exc}",
-                    "index": 0,
-                    "token_ids": [],
-                }
-                return
-
-            request = prepared_input.request
-            multi_modal_data = prepared_input.multi_modal_data
-            mm_processor_kwargs = prepared_input.mm_processor_kwargs
-            pre_rendered = prepared_input.pre_rendered_prompt
-
-        # Build prompt from request. `prompt` is either a pre-rendered
-        # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
-        # `_build_prompt_from_request`. Declare as Any so mypy accepts both
-        # branches without spelling out the full union.
-        prompt: Any
-        with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
-            if pre_rendered is not None:
-                # pre_rendered is a MultiModalInput dict with "type": "multimodal".
-                # The engine's InputProcessor.process_inputs() will see the "type"
-                # key and skip the HF processor entirely.
-                prompt = pre_rendered
-                embedding_sequence_length = None
-                error = None
-                logger.debug(
-                    "[mm-routing] Request %s: using pre-rendered MultiModalInput",
-                    request_id,
-                )
+                if assemble_error is not None:
+                    yield assemble_error
+                    return
+                mm_processor_kwargs = None
+                pre_rendered = None
             else:
-                (
-                    prompt,
-                    embedding_sequence_length,
-                    error,
-                ) = self._build_prompt_from_request(
-                    request,
-                    request_id,
-                    multi_modal_data,
-                    mm_processor_kwargs=mm_processor_kwargs,
-                    mixed_embeds=mixed_embeds,
-                )
+                try:
+                    prepared_input = (
+                        await self._multimodal_request_processor.prepare_input(
+                            request,
+                            request_id,
+                            context,
+                            mode,
+                        )
+                    )
+                except MissingMultimodalHandoffError as exc:
+                    logger.error("Request %s: %s", request_id, exc)
+                    yield {
+                        "finish_reason": f"error: {exc}",
+                        "index": 0,
+                        "token_ids": [],
+                    }
+                    return
+
+                request = prepared_input.request
+                multi_modal_data = prepared_input.multi_modal_data
+                mm_processor_kwargs = prepared_input.mm_processor_kwargs
+                pre_rendered = prepared_input.pre_rendered_prompt
+
+            # Build prompt from request. `prompt` is either a pre-rendered
+            # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from
+            # `_build_prompt_from_request`. Declare as Any so mypy accepts both
+            # branches without spelling out the full union.
+            prompt: Any
+            with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
+                if pre_rendered is not None:
+                    # pre_rendered is a MultiModalInput dict with "type":
+                    # "multimodal". The engine skips the HF processor for it.
+                    prompt = pre_rendered
+                    embedding_sequence_length = None
+                    error = None
+                    logger.debug(
+                        "[mm-routing] Request %s: using pre-rendered MultiModalInput",
+                        request_id,
+                    )
+                else:
+                    (
+                        prompt,
+                        embedding_sequence_length,
+                        error,
+                    ) = self._build_prompt_from_request(
+                        request,
+                        request_id,
+                        multi_modal_data,
+                        mm_processor_kwargs=mm_processor_kwargs,
+                        mixed_embeds=mixed_embeds,
+                    )
         if error is not None:
             yield error
             return
-
-        engine_generate = _engine_generate_payload(request) is not None
-        if engine_generate:
-            prompt = _build_engine_generate_prompt(request)
-            embedding_sequence_length = None
 
         _apply_nvext_cache_salt(request, prompt)
 
@@ -3446,9 +3450,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
-        sampling_params.extra_args[
-            "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+        sampling_params.extra_args["kv_transfer_params"] = _merge_kv_transfer_params(
+            sampling_params.extra_args.get("kv_transfer_params"),
+            kv_protocol.prefill_request_kv_transfer_params(),
+        )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1

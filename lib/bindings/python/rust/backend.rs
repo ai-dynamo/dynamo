@@ -1531,6 +1531,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
             endpoint: item.getattr("endpoint")?.extract()?,
             topic: item.getattr("topic")?.extract()?,
             dp_rank,
+            image_token_id: item.getattr("image_token_id")?.extract()?,
         }),
         "PushSource" => {
             // Capture the Python callable as a `PyObject` and wrap in a

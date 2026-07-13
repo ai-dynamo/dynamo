@@ -59,10 +59,13 @@ def _output(
     )
 
 
-def _request_output(outputs, *, prompt_token_ids=None, num_cached_tokens=0):
+def _request_output(
+    outputs, *, prompt_token_ids=None, prompt_logprobs=None, num_cached_tokens=0
+):
     return SimpleNamespace(
         outputs=outputs,
         prompt_token_ids=prompt_token_ids if prompt_token_ids is not None else [101],
+        prompt_logprobs=prompt_logprobs,
         num_cached_tokens=num_cached_tokens,
         kv_transfer_params=None,
     )
@@ -389,3 +392,85 @@ async def test_unified_llm_engine_forwards_cache_salt_to_prompt():
 
     prompt = engine.engine_client.calls[0][0][0]
     assert prompt["cache_salt"] == "dynamo-cache-salt:tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_unified_native_generate_preserves_logprobs_priority_and_cache_salt():
+    pytest.importorskip("vllm.usage.usage_lib")
+    from dynamo.vllm.llm_engine import VllmLLMEngine
+    from dynamo.vllm.multimodal_utils.request_processor import (
+        VllmMultimodalRequestProcessor,
+    )
+
+    completion_logprobs = [
+        {
+            7: SimpleNamespace(logprob=-0.7, rank=1, decoded_token="a"),
+            8: SimpleNamespace(logprob=-1.2, rank=2, decoded_token="b"),
+        }
+    ]
+    prompt_logprobs = [
+        None,
+        {11: SimpleNamespace(logprob=-0.2, rank=1, decoded_token="x")},
+    ]
+    responses = [
+        _request_output(
+            [
+                _output(
+                    [7],
+                    logprobs=completion_logprobs,
+                )
+            ],
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=prompt_logprobs,
+        ),
+        _request_output(
+            [_output([], finish_reason="length", logprobs=None)],
+            prompt_token_ids=[10, 11],
+            prompt_logprobs=[],
+        ),
+    ]
+    engine = VllmLLMEngine.__new__(VllmLLMEngine)
+    engine.engine_client = _FakeEngineClient(responses)
+    engine._default_sampling_params = {}
+    engine._model_max_len = None
+    engine.disaggregation_mode = DisaggregationMode.AGGREGATED
+    engine.enable_rl = False
+    engine._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
+    engine._dp_range = None
+    engine._served_model_name = "test-model"
+    engine.engine_args = SimpleNamespace(model="test-model")
+
+    request = {
+        "model": "test-model",
+        "token_ids": [10, 11],
+        "extra_args": {
+            "vllm_tito": {
+                "request_id": "req-1",
+                "model": "test-model",
+                "sampling_params": {
+                    "temperature": 0,
+                    "max_tokens": 2,
+                    "logprobs": 2,
+                    "prompt_logprobs": 1,
+                },
+                "cache_salt": "tenant-native",
+                "priority": -7,
+            }
+        },
+    }
+    chunks = [
+        chunk async for chunk in VllmLLMEngine.generate(engine, request, _FakeContext())
+    ]
+
+    prompt, sampling_params, _request_id = engine.engine_client.calls[0][0]
+    call_kwargs = engine.engine_client.calls[0][1]
+    assert prompt["cache_salt"] == "dynamo-cache-salt:tenant-native"
+    assert sampling_params.logprobs == 2
+    assert sampling_params.prompt_logprobs == 1
+    assert call_kwargs["priority"] == -7
+    assert chunks[0]["log_probs"] == [-0.7]
+    assert [item["token_id"] for item in chunks[0]["top_logprobs"][0]] == [7, 8]
+    assert "prompt_logprobs" in chunks[-1]["engine_data"]

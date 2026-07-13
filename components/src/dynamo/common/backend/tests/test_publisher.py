@@ -38,7 +38,12 @@ pytestmark = [
 
 def test_source_descriptors_carry_payload_and_defaults():
     zmq = ZmqSource(endpoint="tcp://127.0.0.1:5557")
-    assert (zmq.endpoint, zmq.topic, zmq.dp_rank) == ("tcp://127.0.0.1:5557", "", 0)
+    assert (zmq.endpoint, zmq.topic, zmq.dp_rank, zmq.image_token_id) == (
+        "tcp://127.0.0.1:5557",
+        "",
+        0,
+        None,
+    )
 
     seen: list[object] = []
     push = PushSource(on_ready=seen.append, dp_rank=2)
@@ -321,6 +326,7 @@ async def test_vllm_kv_event_sources_return_one_zmq_source_per_dp_rank(monkeypat
 
     engine = mod.VllmLLMEngine.__new__(mod.VllmLLMEngine)
     engine.engine_args = SimpleNamespace(
+        model="test-model",
         enable_prefix_caching=True,
         kv_events_config=SimpleNamespace(
             enable_kv_cache_events=True,
@@ -338,14 +344,17 @@ async def test_vllm_kv_event_sources_return_one_zmq_source_per_dp_rank(monkeypat
             lambda endpoint, data_parallel_rank: f"{endpoint}-{data_parallel_rank}"
         ),
     )
+    monkeypatch.setattr(mod, "resolve_image_token_id", lambda *_args: 248056)
 
     sources = await engine.kv_event_sources()
 
     assert all(isinstance(source, ZmqSource) for source in sources)
-    assert [(source.endpoint, source.dp_rank) for source in sources] == [
-        ("tcp://127.0.0.1:5557-2", 2),
-        ("tcp://127.0.0.1:5557-3", 3),
-        ("tcp://127.0.0.1:5557-4", 4),
+    assert [
+        (source.endpoint, source.dp_rank, source.image_token_id) for source in sources
+    ] == [
+        ("tcp://127.0.0.1:5557-2", 2, 248056),
+        ("tcp://127.0.0.1:5557-3", 3, 248056),
+        ("tcp://127.0.0.1:5557-4", 4, 248056),
     ]
 
     engine.engine_args.enable_prefix_caching = False
