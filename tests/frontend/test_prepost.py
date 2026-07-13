@@ -20,7 +20,13 @@ if HAS_VLLM:
     )
     from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
-    from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
+
+    try:
+        from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
+    except ImportError:
+        from vllm.reasoning.qwen3_engine_reasoning_parser import (
+            Qwen3ParserReasoningAdapter as Qwen3ReasoningParser,
+        )
     from vllm.sampling_params import SamplingParams
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
     from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
