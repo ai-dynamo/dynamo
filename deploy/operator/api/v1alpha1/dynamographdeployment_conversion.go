@@ -431,7 +431,7 @@ func Convert_v1alpha1_DynamoGraphDeployment_To_v1beta1_DynamoGraphDeployment(src
 	}
 	hubOrigin := restoredHubSpec != nil
 
-	var converted v1beta1.DynamoGraphDeployment
+	converted := v1beta1.DynamoGraphDeployment{TypeMeta: dst.TypeMeta}
 	if err := autoConvert_v1alpha1_DynamoGraphDeployment_To_v1beta1_DynamoGraphDeployment(src, &converted, s); err != nil {
 		return err
 	}
@@ -461,7 +461,7 @@ func Convert_v1beta1_DynamoGraphDeployment_To_v1alpha1_DynamoGraphDeployment(src
 		return err
 	}
 
-	var converted DynamoGraphDeployment
+	converted := DynamoGraphDeployment{TypeMeta: dst.TypeMeta}
 	if err := autoConvert_v1beta1_DynamoGraphDeployment_To_v1alpha1_DynamoGraphDeployment(src, &converted, s); err != nil {
 		return err
 	}

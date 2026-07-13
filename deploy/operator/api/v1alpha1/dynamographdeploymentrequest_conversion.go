@@ -1219,7 +1219,7 @@ func dgdrPhaseToState(phase v1beta1.DGDRPhase) string {
 // replaces the internal annotations with a sparse v1alpha1-only save.
 func Convert_v1alpha1_DynamoGraphDeploymentRequest_To_v1beta1_DynamoGraphDeploymentRequest(src *DynamoGraphDeploymentRequest, dst *v1beta1.DynamoGraphDeploymentRequest, s apiconversion.Scope) error {
 	restoredHubSpec, restoredHubStatus := restoreDGDRHubAnnotations(&src.ObjectMeta)
-	var converted v1beta1.DynamoGraphDeploymentRequest
+	converted := v1beta1.DynamoGraphDeploymentRequest{TypeMeta: dst.TypeMeta}
 	if err := autoConvert_v1alpha1_DynamoGraphDeploymentRequest_To_v1beta1_DynamoGraphDeploymentRequest(src, &converted, s); err != nil {
 		return err
 	}
@@ -1246,7 +1246,7 @@ func Convert_v1alpha1_DynamoGraphDeploymentRequest_To_v1beta1_DynamoGraphDeploym
 // replaces the internal annotations with a sparse v1beta1-only save.
 func Convert_v1beta1_DynamoGraphDeploymentRequest_To_v1alpha1_DynamoGraphDeploymentRequest(src *v1beta1.DynamoGraphDeploymentRequest, dst *DynamoGraphDeploymentRequest, s apiconversion.Scope) error {
 	restoredSpokeSpec, restoredSpokeStatus := restoreDGDRSpokeAnnotations(&src.ObjectMeta)
-	var converted DynamoGraphDeploymentRequest
+	converted := DynamoGraphDeploymentRequest{TypeMeta: dst.TypeMeta}
 	if err := autoConvert_v1beta1_DynamoGraphDeploymentRequest_To_v1alpha1_DynamoGraphDeploymentRequest(src, &converted, s); err != nil {
 		return err
 	}

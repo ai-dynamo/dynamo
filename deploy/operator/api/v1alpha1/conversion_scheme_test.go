@@ -43,45 +43,68 @@ func TestGeneratedSchemeConversionsUseCustomConverters(t *testing.T) {
 			name:       "DCD",
 			annotation: annDCDStatus,
 			src: &DynamoComponentDeployment{
-				Status: DynamoComponentDeploymentStatus{PodSelector: map[string]string{"component": "decode"}},
+				TypeMeta: metav1.TypeMeta{APIVersion: GroupVersion.String(), Kind: "DynamoComponentDeployment"},
+				Status:   DynamoComponentDeploymentStatus{PodSelector: map[string]string{"component": "decode"}},
 			},
-			hub: &v1beta1.DynamoComponentDeployment{},
-			got: &DynamoComponentDeployment{},
+			hub: &v1beta1.DynamoComponentDeployment{
+				TypeMeta: metav1.TypeMeta{APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoComponentDeployment"},
+			},
+			got: &DynamoComponentDeployment{
+				TypeMeta: metav1.TypeMeta{APIVersion: GroupVersion.String(), Kind: "DynamoComponentDeployment"},
+			},
 		},
 		{
 			name:       "DGD",
 			annotation: annDGDSpec,
 			src: &DynamoGraphDeployment{
-				Spec: DynamoGraphDeploymentSpec{PVCs: []PVC{{Name: &pvcName}}},
+				TypeMeta: metav1.TypeMeta{APIVersion: GroupVersion.String(), Kind: "DynamoGraphDeployment"},
+				Spec:     DynamoGraphDeploymentSpec{PVCs: []PVC{{Name: &pvcName}}},
 			},
-			hub: &v1beta1.DynamoGraphDeployment{},
-			got: &DynamoGraphDeployment{},
+			hub: &v1beta1.DynamoGraphDeployment{
+				TypeMeta: metav1.TypeMeta{APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment"},
+			},
+			got: &DynamoGraphDeployment{
+				TypeMeta: metav1.TypeMeta{APIVersion: GroupVersion.String(), Kind: "DynamoGraphDeployment"},
+			},
 		},
 		{
 			name:       "DGDR",
 			annotation: annDGDRSpec,
 			src: &DynamoGraphDeploymentRequest{
-				Spec:   DynamoGraphDeploymentRequestSpec{EnableGPUDiscovery: &enableDiscovery},
-				Status: DynamoGraphDeploymentRequestStatus{State: DGDRStatePending},
+				TypeMeta: metav1.TypeMeta{APIVersion: GroupVersion.String(), Kind: "DynamoGraphDeploymentRequest"},
+				Spec:     DynamoGraphDeploymentRequestSpec{EnableGPUDiscovery: &enableDiscovery},
+				Status:   DynamoGraphDeploymentRequestStatus{State: DGDRStatePending},
 			},
-			hub: &v1beta1.DynamoGraphDeploymentRequest{},
-			got: &DynamoGraphDeploymentRequest{},
+			hub: &v1beta1.DynamoGraphDeploymentRequest{
+				TypeMeta: metav1.TypeMeta{APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeploymentRequest"},
+			},
+			got: &DynamoGraphDeploymentRequest{
+				TypeMeta: metav1.TypeMeta{APIVersion: GroupVersion.String(), Kind: "DynamoGraphDeploymentRequest"},
+			},
 		},
 	}
 
 	for i := range tests {
 		tt := &tests[i]
 		t.Run(tt.name, func(t *testing.T) {
+			hubGVK := tt.hub.GetObjectKind().GroupVersionKind()
 			if err := scheme.Convert(tt.src, tt.hub, nil); err != nil {
 				t.Fatalf("alpha to beta: %v", err)
+			}
+			if got := tt.hub.GetObjectKind().GroupVersionKind(); got != hubGVK {
+				t.Fatalf("alpha to beta changed destination GVK: got %s, want %s", got, hubGVK)
 			}
 			annotations := tt.hub.(metav1.Object).GetAnnotations()
 			if _, ok := annotations[tt.annotation]; !ok {
 				t.Fatalf("alpha-only data was not persisted in %q", tt.annotation)
 			}
 
+			gotGVK := tt.got.GetObjectKind().GroupVersionKind()
 			if err := scheme.Convert(tt.hub, tt.got, nil); err != nil {
 				t.Fatalf("beta to alpha: %v", err)
+			}
+			if got := tt.got.GetObjectKind().GroupVersionKind(); got != gotGVK {
+				t.Fatalf("beta to alpha changed destination GVK: got %s, want %s", got, gotGVK)
 			}
 			if diff := cmp.Diff(tt.src, tt.got); diff != "" {
 				t.Fatalf("scheme round-trip mismatch (-want +got):\n%s", diff)

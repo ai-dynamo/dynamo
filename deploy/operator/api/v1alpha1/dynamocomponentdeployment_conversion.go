@@ -219,7 +219,7 @@ func Convert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeploy
 	}
 	hubOrigin := preservedHubSpec != nil
 
-	var converted v1beta1.DynamoComponentDeployment
+	converted := v1beta1.DynamoComponentDeployment{TypeMeta: dst.TypeMeta}
 	if err := autoConvert_v1alpha1_DynamoComponentDeployment_To_v1beta1_DynamoComponentDeployment(src, &converted, s); err != nil {
 		return err
 	}
@@ -282,7 +282,7 @@ func Convert_v1beta1_DynamoComponentDeployment_To_v1alpha1_DynamoComponentDeploy
 		preservedSpokeStatus = &status
 	}
 
-	var converted DynamoComponentDeployment
+	converted := DynamoComponentDeployment{TypeMeta: dst.TypeMeta}
 	if err := autoConvert_v1beta1_DynamoComponentDeployment_To_v1alpha1_DynamoComponentDeployment(src, &converted, s); err != nil {
 		return err
 	}
