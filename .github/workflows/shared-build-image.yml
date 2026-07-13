@@ -530,6 +530,8 @@ jobs:
           # baseline applies); gh_token lets the action fetch it cross-run.
           diff_base_sha: ${{ steps.resolve-diff-base.outputs.base_sha }}
           diff_base_label: ${{ steps.resolve-diff-base.outputs.base_label }}
+          diff_base_artifact_id: ${{ steps.resolve-diff-base.outputs.base_artifact_id }}
+          diff_base_run_id: ${{ steps.resolve-diff-base.outputs.base_run_id }}
           gh_token: ${{ secrets.GITHUB_TOKEN }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}

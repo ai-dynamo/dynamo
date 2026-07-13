@@ -23,10 +23,12 @@ The baseline depends on where the build runs:
                                        excluded and the selected run's
                                        ``head_sha`` names the baseline artifact.
 
-Prints two ``key=value`` lines to stdout (suitable for ``>> "$GITHUB_OUTPUT"``)::
+Prints four ``key=value`` lines to stdout (suitable for ``>> "$GITHUB_OUTPUT"``)::
 
     base_sha=<40-hex-sha or empty>
     base_label=<human description of the baseline>
+    base_artifact_id=<GitHub Actions artifact id or empty>
+    base_run_id=<generating workflow run id or empty>
 
 An empty ``base_sha`` is not an error: it means there is no baseline to diff
 against (first release of a line, unrecognized context, or a commit that could
@@ -206,25 +208,28 @@ def _short(sha: str) -> str:
     return sha[:8] if sha else ""
 
 
-def artifact_exists(repo: str, sha: str, prefix: str) -> bool | None:
-    """Whether a non-expired ``compliance-<sha>-<prefix>`` artifact exists.
-
-    Returns True/False, or None when the API call itself failed — so callers can
-    tell "definitely absent" apart from "couldn't check" (transient API error).
-    """
+def find_artifact(
+    repo: str, sha: str, prefix: str
+) -> tuple[tuple[str, str] | None, bool]:
+    """Return ((artifact_id, run_id), api_error) for a compliance artifact."""
     if not (repo and sha and prefix):
-        return False
+        return None, False
     out = _gh(
         f"/repos/{repo}/actions/artifacts?name=compliance-{sha}-{prefix}",
         "--jq",
-        "[.artifacts[] | select(.expired == false)] | length",
+        "[.artifacts[] | select(.expired == false)] "
+        "| sort_by(.created_at) | last "
+        '| if . == null then "absent" '
+        r'else "\(.id)\t\(.workflow_run.id)" end',
     )
     if out is None:
-        return None
-    try:
-        return int(out.strip()) > 0
-    except ValueError:
-        return False
+        return None, True
+    if out == "absent":
+        return None, False
+    ids = out.split("\t", 1)
+    if len(ids) != 2 or not all(value.isdigit() for value in ids):
+        return None, True
+    return (ids[0], ids[1]), False
 
 
 def _first_parent_shas(ref: str, limit: int) -> list[str]:
@@ -233,25 +238,26 @@ def _first_parent_shas(ref: str, limit: int) -> list[str]:
     return out.splitlines() if out else []
 
 
-def pick_commit_with_artifact(shas, exists_fn) -> tuple[str | None, bool]:
-    """Return (first sha whose exists_fn(sha) is True, saw_error).
+def pick_commit_with_artifact(
+    shas, find_fn
+) -> tuple[str | None, tuple[str, str] | None, bool]:
+    """Return (first matching sha, artifact ids, saw_error).
 
-    saw_error is True if any check returned None (API failure), letting the
+    saw_error is True if any lookup reported an API failure, letting the
     caller fall back instead of mistaking a flaky API for "no baseline".
     """
     saw_error = False
     for sha in shas:
-        result = exists_fn(sha)
-        if result is True:
-            return sha, saw_error
-        if result is None:
-            saw_error = True
-    return None, saw_error
+        artifact, api_error = find_fn(sha)
+        saw_error = saw_error or api_error
+        if artifact:
+            return sha, artifact, saw_error
+    return None, None, saw_error
 
 
 def _resolve_main_baseline(
     start_ref: str, repo: str, artifact_prefix: str, limit: int = 25
-) -> tuple[str, str]:
+) -> tuple[str, str, str, str]:
     """Baseline for the main cases: the most recent commit on main's first-parent
     history (from ``start_ref`` backward) that actually has a
     ``compliance-<sha>-<prefix>`` artifact.
@@ -263,26 +269,53 @@ def _resolve_main_baseline(
     """
     tip = _git("rev-parse", start_ref)
     if not tip:
-        return "", f"main baseline ({start_ref} unresolved; shallow clone?)"
+        return (
+            "",
+            f"main baseline ({start_ref} unresolved; shallow clone?)",
+            "",
+            "",
+        )
     # Without a prefix (or token) we can't check availability -> use the tip,
     # preserving the original behavior.
     if not artifact_prefix:
-        return tip, f"main {_short(tip)}"
+        return tip, f"main {_short(tip)}", "", ""
     shas = _first_parent_shas(start_ref, limit)
-    chosen, saw_error = pick_commit_with_artifact(
-        shas, lambda s: artifact_exists(repo, s, artifact_prefix)
+    chosen, artifact, saw_error = pick_commit_with_artifact(
+        shas, lambda s: find_artifact(repo, s, artifact_prefix)
     )
-    if chosen:
+    if chosen and artifact:
+        artifact_id, run_id = artifact
         if chosen == tip:
-            return chosen, f"main {_short(chosen)}"
+            return chosen, f"main {_short(chosen)}", artifact_id, run_id
         return (
             chosen,
             f"main {_short(chosen)} (nearest with {artifact_prefix} artifact)",
+            artifact_id,
+            run_id,
         )
     if saw_error:
-        # Artifacts API was unreachable; don't discard a possibly-valid diff.
-        return tip, f"main {_short(tip)} (artifact availability unchecked)"
-    return "", f"no main commit with a {artifact_prefix} artifact in last {limit}"
+        # Preserve the candidate SHA for diagnostics. Without an artifact id,
+        # the download soft-degrades to a baseline_unavailable diff.
+        return tip, f"main {_short(tip)} (artifact availability unchecked)", "", ""
+    return (
+        "",
+        f"no main commit with a {artifact_prefix} artifact in last {limit}",
+        "",
+        "",
+    )
+
+
+def _with_artifact(
+    sha: str, label: str, repo: str, artifact_prefix: str
+) -> tuple[str, str, str, str]:
+    """Attach the exact artifact and run ids to a resolved baseline."""
+    if not (sha and artifact_prefix):
+        return sha, label, "", ""
+    artifact, _ = find_artifact(repo, sha, artifact_prefix)
+    if not artifact:
+        return sha, label, "", ""
+    artifact_id, run_id = artifact
+    return sha, label, artifact_id, run_id
 
 
 def resolve(
@@ -293,19 +326,24 @@ def resolve(
     repo: str = "",
     current_run_id: str = "",
     artifact_prefix: str = "",
-) -> tuple[str, str]:
-    """Return (base_sha, base_label). base_sha empty when there is no baseline."""
+) -> tuple[str, str, str, str]:
+    """Return (base_sha, base_label, artifact_id, run_id)."""
     # Rule 4: nightly build -> previous successful scheduled run of the same
     # workflow. Manual workflow_dispatch runs are deliberately excluded.
     if event_context == "nightly":
         try:
             rid = int(current_run_id)
         except (TypeError, ValueError):
-            return "", "nightly baseline (no current run id)"
+            return "", "nightly baseline (no current run id)", "", ""
         sha = pick_previous_run_sha(rid, _fetch_workflow_runs(repo, rid))
         if sha:
-            return sha, f"previous scheduled nightly {_short(sha)}"
-        return "", "no previous successful scheduled nightly run found"
+            return _with_artifact(
+                sha,
+                f"previous scheduled nightly {_short(sha)}",
+                repo,
+                artifact_prefix,
+            )
+        return "", "no previous successful scheduled nightly run found", "", ""
 
     # Rule 1: PR targeting main -> most recent main commit that has this
     # container's artifact (walk back main; the tip often isn't built yet).
@@ -325,20 +363,29 @@ def resolve(
             return (
                 "",
                 f"release baseline (no parseable current version '{current_version}')",
+                "",
+                "",
             )
         tag = pick_prior_release_tag(current_version, _tag_dates())
         if tag is None:
             return (
                 "",
                 f"no prior release tag older than {current_version} (first of its line)",
+                "",
+                "",
             )
         sha = _git("rev-list", "-n", "1", tag)
         if sha:
-            return sha, f"release baseline {tag} ({_short(sha)})"
-        return "", f"release baseline {tag} (could not resolve tag commit)"
+            return _with_artifact(
+                sha,
+                f"release baseline {tag} ({_short(sha)})",
+                repo,
+                artifact_prefix,
+            )
+        return "", f"release baseline {tag} (could not resolve tag commit)", "", ""
 
     # Fallback: unrecognized context -> no baseline.
-    return "", "no baseline (unrecognized build context)"
+    return "", "no baseline (unrecognized build context)", "", ""
 
 
 def main() -> None:
@@ -382,7 +429,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    base_sha, base_label = resolve(
+    base_sha, base_label, base_artifact_id, base_run_id = resolve(
         args.event_context,
         args.current_branch,
         args.base_branch,
@@ -399,6 +446,8 @@ def main() -> None:
     # stdout carries ONLY the GITHUB_OUTPUT key=value lines.
     print(f"base_sha={base_sha}")
     print(f"base_label={base_label}")
+    print(f"base_artifact_id={base_artifact_id}")
+    print(f"base_run_id={base_run_id}")
 
 
 if __name__ == "__main__":

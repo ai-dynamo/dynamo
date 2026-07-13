@@ -62,18 +62,26 @@ inputs:
       Commit SHA of the baseline build to diff this build's OSRB CSV against
       (resolved by container/compliance/resolve_diff_base.py in the caller).
       Empty means "no baseline" — the diff step then writes a baseline_unavailable
-      marker instead of a real diff. The baseline is fetched by downloading the
-      prior build's `compliance-<diff_base_sha>-<artifact_name_prefix>` artifact.
+      marker instead of a real diff. resolve_diff_base.py also supplies the exact
+      artifact id used to fetch the prior build's CSV.
     required: false
     default: ''
   diff_base_label:
     description: 'Human label for the diff baseline (from resolve_diff_base.py); shown in the baseline_unavailable marker row when the baseline can''t be fetched.'
     required: false
     default: ''
+  diff_base_artifact_id:
+    description: 'Exact GitHub Actions artifact id resolved by resolve_diff_base.py.'
+    required: false
+    default: ''
+  diff_base_run_id:
+    description: 'Workflow run id that generated the baseline artifact; used for the link in BASELINE.md.'
+    required: false
+    default: ''
   gh_token:
     description: |
-      Token with `actions: read` used to locate and download the baseline
-      compliance artifact from its (different) workflow run. Pass
+      Token with `actions: read` used to download the baseline compliance
+      artifact from its (different) workflow run. Pass
       secrets.GITHUB_TOKEN. When empty, the diff step skips the fetch and emits a
       baseline_unavailable marker.
     required: false
@@ -188,42 +196,30 @@ runs:
         find /tmp/compliance -name 'osrb-*' -print
 
     # Download the baseline build's compliance artifact so we can diff against
-    # it. Baselines live only as GitHub Actions artifacts named
-    # compliance-<sha>-<container>; we resolve the run that produced the baseline
-    # SHA's artifact and pull it. Any miss (expired retention, never built, no
-    # token) leaves /tmp/compliance-base empty — the diff step then writes a
+    # it. The resolver supplies the exact artifact id and generating run id, so
+    # this step downloads directly without searching the artifact list again.
+    # Any miss (expired retention, never built, no token) leaves
+    # /tmp/compliance-base empty — the diff step then writes a
     # baseline_unavailable marker rather than failing the build.
     - name: Fetch baseline compliance artifact
       id: fetch-baseline
-      if: ${{ inputs.diff_base_sha != '' && inputs.gh_token != '' }}
+      if: ${{ inputs.diff_base_artifact_id != '' && inputs.gh_token != '' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.gh_token }}
         REPO: ${{ github.repository }}
-        BASE_SHA: ${{ inputs.diff_base_sha }}
-        PREFIX: ${{ inputs.artifact_name_prefix }}
+        ARTIFACT_ID: ${{ inputs.diff_base_artifact_id }}
+        BASE_RUN_ID: ${{ inputs.diff_base_run_id }}
       run: |
         set -euo pipefail
-        BASE_ARTIFACT="compliance-${BASE_SHA}-${PREFIX}"
-        echo "Looking for baseline artifact: ${BASE_ARTIFACT}"
-        # The artifacts API returns matches across all runs in the repo; take the
-        # most recently created one (a SHA may have been built more than once).
-        # No --paginate: with --paginate, gh applies --jq PER PAGE (yielding one
-        # id per page), and an exact-name filter never fills even one 30-item
-        # page, so a single request + one sort_by|last is correct here.
-        RUN_ID=$(gh api -X GET "/repos/${REPO}/actions/artifacts" \
-          -f name="${BASE_ARTIFACT}" \
-          --jq '.artifacts | sort_by(.created_at) | last | .workflow_run.id' 2>/dev/null || true)
-        if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" = "null" ]; then
-          echo "No baseline artifact found (expired or never built); diff will mark it unavailable."
-          echo "baseline_available=false" >> "$GITHUB_OUTPUT"
-          exit 0
+        ARCHIVE="${RUNNER_TEMP}/compliance-baseline-${ARTIFACT_ID}.zip"
+        mkdir -p /tmp/compliance-base
+        if [ -n "${BASE_RUN_ID}" ]; then
+          echo "baseline_run_id=${BASE_RUN_ID}" >> "$GITHUB_OUTPUT"
         fi
-        # Record the run that produced the baseline so the diff step can link to
-        # it (https://github.com/<repo>/actions/runs/<id>) in the baseline/ folder.
-        echo "baseline_run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
-        if gh run download "${RUN_ID}" -n "${BASE_ARTIFACT}" -D /tmp/compliance-base; then
-          echo "Downloaded baseline from run ${RUN_ID}."
+        if gh api -X GET "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+          > "${ARCHIVE}" && unzip -q "${ARCHIVE}" -d /tmp/compliance-base; then
+          echo "Downloaded baseline artifact ${ARTIFACT_ID}."
           echo "baseline_available=true" >> "$GITHUB_OUTPUT"
         else
           echo "Baseline download failed; diff will mark it unavailable."

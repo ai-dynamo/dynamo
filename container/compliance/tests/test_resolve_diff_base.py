@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 from compliance import resolve_diff_base
 from compliance.resolve_diff_base import (
+    find_artifact,
     is_release_branch,
     parse_release_tuple,
     pick_commit_with_artifact,
@@ -151,44 +152,71 @@ class TestPickCommitWithArtifact:
     def test_returns_first_with_artifact(self):
         # tip (sha_a) has none; walk back to sha_b which does.
         have = {"sha_b"}
-        chosen, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b", "sha_c"], lambda s: s in have
+        chosen, artifact, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b", "sha_c"],
+            lambda s: (("artifact", "run"), False) if s in have else (None, False),
         )
         assert chosen == "sha_b"
+        assert artifact == ("artifact", "run")
         assert saw_error is False
 
     def test_tip_has_artifact(self):
-        chosen, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b"], lambda s: True
+        chosen, artifact, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b"], lambda s: (("artifact", "run"), False)
         )
         assert chosen == "sha_a"
+        assert artifact == ("artifact", "run")
         assert saw_error is False
 
     def test_none_found(self):
-        chosen, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b"], lambda s: False
+        chosen, artifact, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b"], lambda s: (None, False)
         )
         assert chosen is None
+        assert artifact is None
         assert saw_error is False
 
     def test_api_error_then_hit(self):
-        # None = API couldn't check; a later True still wins.
-        results = {"sha_a": None, "sha_b": True}
-        chosen, saw_error = pick_commit_with_artifact(
+        results = {
+            "sha_a": (None, True),
+            "sha_b": (("artifact", "run"), False),
+        }
+        chosen, artifact, saw_error = pick_commit_with_artifact(
             ["sha_a", "sha_b"], lambda s: results[s]
         )
         assert chosen == "sha_b"
+        assert artifact == ("artifact", "run")
         assert saw_error is True
 
     def test_all_api_error(self):
-        chosen, saw_error = pick_commit_with_artifact(
-            ["sha_a", "sha_b"], lambda s: None
+        chosen, artifact, saw_error = pick_commit_with_artifact(
+            ["sha_a", "sha_b"], lambda s: (None, True)
         )
         assert chosen is None
+        assert artifact is None
         assert saw_error is True
 
     def test_empty(self):
-        assert pick_commit_with_artifact([], lambda s: True) == (None, False)
+        assert pick_commit_with_artifact([], lambda s: (None, False)) == (
+            None,
+            None,
+            False,
+        )
+
+
+class TestFindArtifact:
+    def test_returns_exact_artifact_and_run_ids(self, monkeypatch):
+        monkeypatch.setattr(resolve_diff_base, "_gh", lambda *args: "123\t456")
+        assert find_artifact("ai-dynamo/dynamo", "sha", "vllm-runtime") == (
+            ("123", "456"),
+            False,
+        )
+
+    def test_distinguishes_absent_from_api_error(self, monkeypatch):
+        monkeypatch.setattr(resolve_diff_base, "_gh", lambda *args: "absent")
+        assert find_artifact("repo", "sha", "prefix") == (None, False)
+        monkeypatch.setattr(resolve_diff_base, "_gh", lambda *args: None)
+        assert find_artifact("repo", "sha", "prefix") == (None, True)
 
 
 class TestIsReleaseBranch:
@@ -208,23 +236,24 @@ class TestResolveDispatch:
     unparseable-version paths do not."""
 
     def test_fallback_no_baseline(self):
-        sha, label = resolve("push", "some-feature-branch", "", "")
+        sha, label, artifact_id, run_id = resolve("push", "some-feature-branch", "", "")
         assert sha == ""
         assert "unrecognized" in label
+        assert artifact_id == run_id == ""
 
     def test_release_push_without_version(self):
         # Release context but no parseable version -> no git rev-list, empty sha.
-        sha, label = resolve("push", "release/1.3.0", "", "")
+        sha, label, _, _ = resolve("push", "release/1.3.0", "", "")
         assert sha == ""
         assert "no parseable current version" in label
 
     def test_pr_to_release_without_version(self):
-        sha, label = resolve("pr", "pull-request/7", "release/1.3.0", "")
+        sha, label, _, _ = resolve("pr", "pull-request/7", "release/1.3.0", "")
         assert sha == ""
         assert "no parseable current version" in label
 
     def test_nightly_without_run_id(self):
         # No run id -> no API call, empty sha, descriptive label.
-        sha, label = resolve("nightly", "main", "", "", repo="ai-dynamo/dynamo")
+        sha, label, _, _ = resolve("nightly", "main", "", "", repo="ai-dynamo/dynamo")
         assert sha == ""
         assert "no current run id" in label
