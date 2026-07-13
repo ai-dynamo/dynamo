@@ -19,6 +19,7 @@ pub mod grpc;
 pub mod http;
 pub mod hub;
 // pub mod key_value_store;
+pub mod kv_cache_sol;
 pub mod kv_router;
 pub mod local_model;
 pub mod lora;

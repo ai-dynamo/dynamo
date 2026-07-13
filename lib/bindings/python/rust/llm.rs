@@ -29,6 +29,7 @@ pub mod engine_perf;
 pub mod entrypoint;
 pub mod fpm;
 pub mod kv;
+pub mod kv_cache_sol;
 pub mod local_model;
 pub mod lora;
 pub mod model_card;

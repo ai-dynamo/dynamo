@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use dynamo_renderer::PromptFormatter;
@@ -12,6 +13,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
+    kv_cache_sol::KvCacheSolTap,
     kv_router::indexer::try_build_cache_indexer,
     kv_router::{
         EncoderRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
@@ -39,14 +41,13 @@ use crate::{
 use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
     DistributedRuntime,
-    component::Client,
+    component::{Client, Component},
     engine::{AsyncEngineStream, Data},
     pipeline::{
         Context, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
         SegmentSource, ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
-use std::sync::Arc;
 
 fn multimodal_cache_key_from_url(url: &str) -> String {
     blake3::hash(url.as_bytes()).to_hex().to_string()
@@ -82,6 +83,10 @@ pub struct PreprocessedRouting {
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     prefill_router: Arc<PrefillRouter>,
     encoder_router: Arc<EncoderRouter>,
+    component: Component,
+    is_eagle: bool,
+    router_mode: RouterMode,
+    kv_cache_sol_tap: Arc<OnceLock<Option<Arc<KvCacheSolTap>>>>,
 }
 
 pub struct PreparedEngine {
@@ -243,6 +248,7 @@ pub async fn build_preprocessed_routing(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    is_eagle: bool,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -308,6 +314,10 @@ pub async fn build_preprocessed_routing(
         backend_engine,
         prefill_router,
         encoder_router,
+        component: client.endpoint.component().clone(),
+        is_eagle,
+        router_mode,
+        kv_cache_sol_tap: Arc::new(OnceLock::new()),
     })
 }
 
@@ -459,6 +469,23 @@ where
 }
 
 impl PreprocessedRouting {
+    fn kv_cache_sol_tap(
+        &self,
+        card: &ModelDeploymentCard,
+    ) -> anyhow::Result<Option<Arc<KvCacheSolTap>>> {
+        if let Some(tap) = self.kv_cache_sol_tap.get() {
+            return Ok(tap.clone());
+        }
+        let tap = KvCacheSolTap::from_env(
+            self.component.clone(),
+            card.kv_cache_block_size,
+            self.is_eagle,
+            self.router_mode.is_kv_routing(),
+        )?;
+        let _ = self.kv_cache_sol_tap.set(tap.clone());
+        Ok(self.kv_cache_sol_tap.get().cloned().unwrap_or(tap))
+    }
+
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,
@@ -487,10 +514,25 @@ impl PreprocessedRouting {
         let prefill_op = self.prefill_router.into_operator();
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
+        let preprocessor_forward = preprocessor_op.forward_edge();
+        let preprocessor_backward = preprocessor_op.backward_edge();
+        let migration_forward = migration.forward_edge();
+        let migration_backward = migration.backward_edge();
 
-        let engine = frontend
-            .link(preprocessor_op.forward_edge())?
-            .link(migration.forward_edge())?
+        frontend.link(preprocessor_forward.clone())?;
+        if let Some(tap) = self.kv_cache_sol_tap(card)? {
+            let tap = tap.into_operator_for::<BackendOutput>();
+            preprocessor_forward
+                .link(tap.forward_edge())?
+                .link(migration_forward.clone())?;
+            migration_backward
+                .link(tap.backward_edge())?
+                .link(preprocessor_backward.clone())?;
+        } else {
+            preprocessor_forward.link(migration_forward.clone())?;
+            migration_backward.link(preprocessor_backward.clone())?;
+        }
+        migration_forward
             .link(token_backend.forward_edge())?
             .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
@@ -498,11 +540,10 @@ impl PreprocessedRouting {
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
             .link(token_backend.backward_edge())?
-            .link(migration.backward_edge())?
-            .link(preprocessor_op.backward_edge())?
-            .link(frontend)?;
+            .link(migration_backward)?;
+        preprocessor_backward.link(frontend.clone())?;
 
-        Ok(engine)
+        Ok(frontend)
     }
 
     /// Bring your own pre/post processor. Used when frontend has `--dyn-chat-processor
@@ -525,18 +566,30 @@ impl PreprocessedRouting {
         let prefill_op = self.prefill_router.into_operator();
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
+        let migration_forward = migration.forward_edge();
+        let migration_backward = migration.backward_edge();
 
-        let engine = frontend
-            .link(migration.forward_edge())?
+        if let Some(tap) = self.kv_cache_sol_tap(card)? {
+            let tap = tap.into_operator_for::<LLMEngineOutput>();
+            frontend
+                .link(tap.forward_edge())?
+                .link(migration_forward.clone())?;
+            migration_backward
+                .link(tap.backward_edge())?
+                .link(frontend.clone())?;
+        } else {
+            frontend.link(migration_forward.clone())?;
+            migration_backward.link(frontend.clone())?;
+        }
+        migration_forward
             .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
-            .link(migration.backward_edge())?
-            .link(frontend)?;
+            .link(migration_backward)?;
 
-        Ok(engine)
+        Ok(frontend)
     }
 }
 

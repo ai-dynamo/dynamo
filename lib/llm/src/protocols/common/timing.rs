@@ -16,10 +16,18 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use utoipa::ToSchema;
 
+use dynamo_kv_router::indexer::RoutingDecisionHashes;
+
 use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
+
+#[derive(Debug, Default)]
+struct KvCacheSolTracking {
+    prompt_hashes: OnceLock<RoutingDecisionHashes>,
+    worker_observed_cached_tokens: OnceLock<usize>,
+}
 use crate::protocols::common::extensions::WorkerIdInfo;
 
 /// Worker type constants for Prometheus metric labels.
@@ -116,6 +124,10 @@ pub struct RequestTracker {
 
     /// Number of cached tokens derived from the effective cache hit - set once via OnceLock
     cached_tokens: OnceLock<usize>,
+
+    /// Optional speed-of-light state. Keeping the feature behind one lazy cell avoids
+    /// spreading its state across every request tracker when the feature is disabled.
+    kv_cache_sol_tracking: OnceLock<KvCacheSolTracking>,
 
     /// Output sequence length in tokens - updated atomically as tokens stream back
     osl_tokens: AtomicU64,
@@ -222,6 +234,7 @@ impl RequestTracker {
             isl_blocks: OnceLock::new(),
             isl_tokens: OnceLock::new(),
             cached_tokens: OnceLock::new(),
+            kv_cache_sol_tracking: OnceLock::new(),
             osl_tokens: AtomicU64::new(0),
             prefill_worker_id: OnceLock::new(),
             prefill_dp_rank: OnceLock::new(),
@@ -281,6 +294,44 @@ impl RequestTracker {
 
     pub fn cached_tokens(&self) -> Option<usize> {
         self.cached_tokens.get().copied()
+    }
+
+    /// Record a cache hit count reported by the inference backend.
+    pub(crate) fn record_worker_observed_cached_tokens(&self, cached_tokens: usize) -> bool {
+        self.kv_cache_sol_tracking.get().is_some_and(|tracking| {
+            tracking
+                .worker_observed_cached_tokens
+                .set(cached_tokens)
+                .is_ok()
+        })
+    }
+
+    pub(crate) fn worker_observed_cached_tokens(&self) -> Option<usize> {
+        self.kv_cache_sol_tracking
+            .get()
+            .and_then(|tracking| tracking.worker_observed_cached_tokens.get())
+            .copied()
+    }
+
+    pub(crate) fn enable_kv_cache_sol_tracking(&self) {
+        self.kv_cache_sol_tracking
+            .get_or_init(KvCacheSolTracking::default);
+    }
+
+    pub(crate) fn kv_cache_sol_tracking_enabled(&self) -> bool {
+        self.kv_cache_sol_tracking.get().is_some()
+    }
+
+    pub(crate) fn record_kv_cache_sol_prompt_hashes(&self, hashes: RoutingDecisionHashes) -> bool {
+        self.kv_cache_sol_tracking
+            .get()
+            .is_some_and(|tracking| tracking.prompt_hashes.set(hashes).is_ok())
+    }
+
+    pub(crate) fn kv_cache_sol_prompt_hashes(&self) -> Option<&RoutingDecisionHashes> {
+        self.kv_cache_sol_tracking
+            .get()
+            .and_then(|tracking| tracking.prompt_hashes.get())
     }
 
     /// Record current output sequence length in tokens. Updated at each output block boundary.
@@ -747,8 +798,11 @@ mod tests {
         let tracker = RequestTracker::new();
 
         tracker.record_isl(512, Some(256));
+        tracker.enable_kv_cache_sol_tracking();
+        tracker.record_worker_observed_cached_tokens(192);
         assert_eq!(tracker.isl_tokens(), Some(512));
         assert_eq!(tracker.cached_tokens(), Some(256));
+        assert_eq!(tracker.worker_observed_cached_tokens(), Some(192));
 
         tracker.record_osl(100);
         assert_eq!(tracker.osl_tokens(), 100);
