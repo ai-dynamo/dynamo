@@ -9,9 +9,19 @@ This module implements ThunderAgent as one `PolicyClassAdmissionStrategy`. It co
 - `registration.rs` constructs the configured strategy for a policy class.
 - `strategy.rs` contains the session state machine, accounting, pause/resume policy, placement, and tests.
 
+## Current policy defaults
+
+| Field | Default | Role |
+|---|---:|---|
+| `pause_threshold` | `0.95` | Start pressure handling above this fraction of logical worker capacity. |
+| `pause_target` | `0.80` | Pause down to, and greedily resume up to, this fraction. There is no separate resume watermark. |
+| `resume_timeout_seconds` | `1800` | Bound starvation by releasing a timed-out request to normal worker selection. |
+| `session_retention_seconds` | `1800` | Retain quiescent placement and footprint state after the last successful turn. |
+| `scheduler_interval_seconds` | `5` | Minimum interval between reconciliation passes. |
+
 ## State model
 
-ThunderAgent keys state by `session_id`.
+ThunderAgent keys state by `session_id`. The ID must remain stable across a trajectory's turns; a fresh per-request ID creates unrelated programs and defeats continuation admission and affinity.
 
 Each retained program is in exactly one state:
 
@@ -32,8 +42,8 @@ AdmissionRequest
        -> suspended session: Defer
        -> valid sticky worker available: Ready(Exact)
        -> sticky worker temporarily overloaded: Defer without migration
-       -> new session while any session is paused: Defer for fairness
-       -> capacity unavailable: Ready(Any), letting the normal router fail open
+       -> new session while any session is suspended: Defer for fairness
+       -> no eligible worker has usable capacity metadata: Ready(Any), letting the normal router fail open
        -> enough projected capacity: Ready(Exact) on least-used eligible worker
        -> otherwise: Defer
   -> router queue and selector
@@ -74,17 +84,17 @@ Resume-before-pause is intentional source behavior.
 
 ### Greedy resume
 
-The usable ceiling is `pause_target * capacity`. Paused sessions are considered in these groups, then by increasing context size:
+The usable ceiling is `pause_target * capacity`. Suspended programs are considered in these groups, then by increasing context size:
 
-1. Continuing Running sessions after their first step.
-2. First-step sessions.
-3. IdleResident sessions.
+1. A waiting continuation after at least one completed turn.
+2. A first-step program, whether waiting or idle.
+3. An idle multi-step program with no waiting request.
 
 Sessions that cannot fit an eligible worker are skipped. The remaining candidates are placed largest-context first onto the eligible worker with the most remaining capacity. Resuming a session with a deferred request emits `MakeReady`; resuming an idle session only changes its program state.
 
 ### Forced resume
 
-A session deferred for `resume_timeout_seconds` bypasses the normal fit test and returns to normal worker selection. A session waiting only because all structurally valid workers are temporarily overloaded remains deferred.
+A current request suspended for `resume_timeout_seconds` bypasses the normal fit test, clears its assignment, and returns to normal worker selection with `WorkerPlacement::Any`. This is the starvation backstop and the only pressure-policy path that relaxes an otherwise structurally valid assignment. A session waiting only because every structurally valid worker is temporarily overloaded remains deferred.
 
 ### Pause
 
@@ -99,7 +109,7 @@ When a worker exceeds `pause_threshold * capacity`, ThunderAgent suspends the sm
 | Block and resume | `Defer` keeps the request in the KV-router admission controller; `MakeReady` releases it. |
 | Retention capacity | Static device KV plus native-offload capacity from worker configuration. |
 | Pack and fairness | New-session fairness, grouped resume, largest-first placement, smallest-resident suspension, deferred Running suspension, high/low watermarks, and timeout. |
-| Sticky placement | `WorkerPlacement::Exact` preserves the selected worker/rank across turns. |
+| Sticky placement | `WorkerPlacement::Exact` preserves the selected worker/rank across turns and pressure suspension. Structural worker removal or the starvation timeout can clear it. |
 | Session expiry | A quiescent retained session is forgotten after `session_retention_seconds`; a later request starts a new program. |
 
 ## Invariants
@@ -107,10 +117,10 @@ When a worker exceeds `pause_threshold * capacity`, ThunderAgent suspends the sm
 - Sessionless requests allocate no ThunderAgent state.
 - At most one request per session mutates program state at a time.
 - Placement never widens the request's router-owned eligibility.
-- Temporary overload does not silently migrate a sticky session.
+- Temporary overload does not migrate a sticky session before the configured starvation timeout.
 - A request is released at most once.
 - Abort restores the exact program state that existed before admission.
-- Paused requests remain owned and accounted for by the KV-router queue, not this module.
+- Deferred requests remain owned and accounted for by the KV-router queue, not this module.
 - Retention expiry never removes a Running session or a session with a current or waiting request.
 
 ## Deliberately absent
