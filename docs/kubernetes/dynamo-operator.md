@@ -70,7 +70,8 @@ cluster. It is not a multi-tenancy boundary.
 If the namespace-restricted Pod becomes unavailable, Lease expiration lets the cluster-wide operator
 resume reconciliation, but does not remove the namespace-restricted webhook configurations. Admission
 continues to target the unavailable Service. Recover the Pod to restore namespace-restricted admission,
-or uninstall the release to remove its webhook configurations and restore cluster-wide admission.
+or uninstall the release to remove its webhook configurations. Cluster-wide admission resumes after the
+Lease is deleted or expires.
 
 > [!CAUTION]
 > Pass `--skip-crds` and set `dynamo-operator.upgradeCRD=false`. Helm installs the chart's `crds/`
