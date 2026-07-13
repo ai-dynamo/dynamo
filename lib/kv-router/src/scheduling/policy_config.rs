@@ -629,6 +629,7 @@ models:
         policy_family: latency
         cache_bucket: uncached
         quantum: 4
+        prefill_busy_threshold_frac: 0.0
 "#,
         )
         .unwrap();
@@ -638,6 +639,11 @@ models:
         assert_eq!(exact.default_class().name, "model-cached");
         assert_eq!(exact.default_class().prefill_busy_threshold_frac, None);
         assert!(!exact.default_class().queueing_enabled());
+        assert!(
+            exact
+                .class(exact.resolve_class_index(None, usize::MAX))
+                .queueing_enabled()
+        );
         assert_eq!(exact.default_class().queue_policy, RouterQueuePolicy::Fcfs);
         assert_eq!(
             exact.default_class().request_queue_limit_per_worker,

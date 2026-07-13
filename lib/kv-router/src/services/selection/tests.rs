@@ -270,6 +270,35 @@ async fn incomplete_worker_is_accepted_but_not_schedulable() {
 }
 
 #[tokio::test]
+async fn threshold_free_policy_does_not_require_max_num_batched_tokens() {
+    let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
+    std::fs::write(
+        policy_file.path(),
+        r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: standard
+    policy_family: standard
+    cache_bucket: all
+    quantum: 1
+"#,
+    )
+    .expect("write policy file");
+
+    let mut config = test_config();
+    config.router_policy_config = Some(policy_file.path().to_string_lossy().into_owned());
+    let service = Arc::new(SelectionService::new_local_for_test(config, 1));
+    let app = create_router(Arc::new(AppState { service }));
+
+    let response = register_worker(app, None).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response_json(response).await["lifecycle"], "schedulable");
+}
+
+#[tokio::test]
 async fn select_echoes_selection_id_and_does_not_book_load() {
     let app = app();
     assert_eq!(
