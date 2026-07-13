@@ -1010,7 +1010,7 @@ policy_classes:
     cache_bucket: all
     queue_policy: wspt
     queue_admission:
-      type: test
+      type: session_aware
     quantum: 1000
 "#,
         ));

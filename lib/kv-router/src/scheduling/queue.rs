@@ -2289,7 +2289,7 @@ policy_classes:
     quantum: 1
   - name: agents
     queue_admission:
-      type: test
+      type: session_aware
     prefill_busy_threshold: 0
     quantum: 1
 "#,
@@ -2836,7 +2836,7 @@ policy_classes:
     policy_family: agents
     cache_bucket: all
     queue_admission:
-      type: test
+      type: session_aware
     prefill_busy_threshold: 0
     quantum: 1
 "#,

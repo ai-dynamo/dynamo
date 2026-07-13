@@ -61,12 +61,10 @@ impl PolicyClassAdmissionController {
             .iter()
             .map(|class| {
                 let strategy = strategies.remove(&class.name);
-                if let Some(config) = &class.queue_admission
-                    && strategy.is_none()
-                {
+                if class.queue_admission.is_some() && strategy.is_none() {
                     return Err(KvSchedulerError::InitFailed(format!(
-                        "policy class {:?} configures admission strategy {:?}, but no implementation was registered",
-                        class.name, config.strategy
+                        "policy class {:?} configures queue admission, but no implementation was registered",
+                        class.name
                     )));
                 }
                 Ok(strategy.map(|strategy| {
@@ -262,7 +260,7 @@ policy_classes:
     quantum: 1
   - name: agents
     queue_admission:
-      type: test
+      type: session_aware
     quantum: 1
 "#,
         )
@@ -281,7 +279,7 @@ policy_classes:
         .unwrap();
 
         assert!(matches!(error, KvSchedulerError::InitFailed(message) if
-            message.contains("agents") && message.contains("test")));
+            message.contains("agents") && message.contains("queue admission")));
     }
 
     #[test]
