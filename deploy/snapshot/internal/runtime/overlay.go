@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -21,9 +23,46 @@ const (
 
 // RootfsDiffApplyStats contains low-overhead restore measurements.
 type RootfsDiffApplyStats struct {
-	SizeBytes       int64
-	StatDuration    time.Duration
-	ExtractDuration time.Duration
+	SizeBytes        int64
+	StatDuration     time.Duration
+	ExtractDuration  time.Duration
+	ChildRusage      ChildRusageStats
+	CgroupBefore     CgroupResourceSnapshot
+	CgroupAfter      CgroupResourceSnapshot
+	CgroupDelta      CgroupResourceDelta
+	CgroupReadErrors []string
+}
+
+// ChildRusageStats contains wait4 resource usage for the tar extraction child.
+type ChildRusageStats struct {
+	UserDuration               time.Duration
+	SystemDuration             time.Duration
+	MaxRSSKiB                  int64
+	MinorFaults                int64
+	MajorFaults                int64
+	BlockInputOperations       int64
+	BlockOutputOperations      int64
+	VoluntaryContextSwitches   int64
+	InvoluntaryContextSwitches int64
+}
+
+// CgroupResourceSnapshot contains low-cost cgroup-v2 counters relevant to rootfs extraction.
+type CgroupResourceSnapshot struct {
+	Path                string
+	MemoryCurrentBytes  uint64
+	MemoryEvents        map[string]uint64
+	MemoryDirectReclaim map[string]uint64
+	IOTotals            map[string]uint64
+	CPUStat             map[string]uint64
+}
+
+// CgroupResourceDelta is the signed difference between two cgroup snapshots.
+type CgroupResourceDelta struct {
+	MemoryCurrentBytes  int64
+	MemoryEvents        map[string]int64
+	MemoryDirectReclaim map[string]int64
+	IOTotals            map[string]int64
+	CPUStat             map[string]int64
 }
 
 // DeletedFilesApplyStats contains low-overhead restore measurements.
@@ -164,13 +203,188 @@ func ApplyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 	cmd := exec.Command("tar", "--skip-old-files", "-C", targetRoot, "-xf", rootfsDiffPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cgroupBefore, beforeErr := readCgroupResourceSnapshot()
+	if beforeErr != nil {
+		stats.CgroupReadErrors = append(stats.CgroupReadErrors, "before: "+beforeErr.Error())
+	} else {
+		stats.CgroupBefore = cgroupBefore
+	}
 	extractStart := time.Now()
 	err = cmd.Run()
 	stats.ExtractDuration = time.Since(extractStart)
+	if cmd.ProcessState != nil {
+		if usage, ok := cmd.ProcessState.SysUsage().(*syscall.Rusage); ok {
+			stats.ChildRusage = childRusageStats(usage)
+		}
+	}
+	cgroupAfter, afterErr := readCgroupResourceSnapshot()
+	if afterErr != nil {
+		stats.CgroupReadErrors = append(stats.CgroupReadErrors, "after: "+afterErr.Error())
+	} else {
+		stats.CgroupAfter = cgroupAfter
+		if beforeErr == nil {
+			stats.CgroupDelta = diffCgroupResourceSnapshots(cgroupBefore, cgroupAfter)
+		}
+	}
+	log.Info("Rootfs diff extraction resource usage",
+		"child_rusage", stats.ChildRusage,
+		"cgroup_before", stats.CgroupBefore,
+		"cgroup_after", stats.CgroupAfter,
+		"cgroup_delta", stats.CgroupDelta,
+		"cgroup_read_errors", stats.CgroupReadErrors,
+	)
 	if err != nil {
 		return stats, fmt.Errorf("tar extract failed: %w", err)
 	}
 	return stats, nil
+}
+
+func childRusageStats(usage *syscall.Rusage) ChildRusageStats {
+	return ChildRusageStats{
+		UserDuration:               timevalDuration(usage.Utime),
+		SystemDuration:             timevalDuration(usage.Stime),
+		MaxRSSKiB:                  usage.Maxrss,
+		MinorFaults:                usage.Minflt,
+		MajorFaults:                usage.Majflt,
+		BlockInputOperations:       usage.Inblock,
+		BlockOutputOperations:      usage.Oublock,
+		VoluntaryContextSwitches:   usage.Nvcsw,
+		InvoluntaryContextSwitches: usage.Nivcsw,
+	}
+}
+
+func timevalDuration(value syscall.Timeval) time.Duration {
+	return time.Duration(value.Sec)*time.Second + time.Duration(value.Usec)*time.Microsecond
+}
+
+func readCgroupResourceSnapshot() (CgroupResourceSnapshot, error) {
+	path, err := selfCgroupV2Path()
+	if err != nil {
+		return CgroupResourceSnapshot{}, err
+	}
+
+	memoryCurrent, err := readUintFile(filepath.Join(path, "memory.current"))
+	if err != nil {
+		return CgroupResourceSnapshot{}, err
+	}
+	memoryEvents, err := readFlatCounters(filepath.Join(path, "memory.events"))
+	if err != nil {
+		return CgroupResourceSnapshot{}, err
+	}
+	memoryStat, err := readFlatCounters(filepath.Join(path, "memory.stat"))
+	if err != nil {
+		return CgroupResourceSnapshot{}, err
+	}
+	memoryDirectReclaim := make(map[string]uint64)
+	for name, value := range memoryStat {
+		if strings.Contains(name, "direct") || strings.HasPrefix(name, "allocstall") {
+			memoryDirectReclaim[name] = value
+		}
+	}
+	ioTotals, err := readIOStatTotals(filepath.Join(path, "io.stat"))
+	if err != nil {
+		return CgroupResourceSnapshot{}, err
+	}
+	cpuStat, err := readFlatCounters(filepath.Join(path, "cpu.stat"))
+	if err != nil {
+		return CgroupResourceSnapshot{}, err
+	}
+
+	return CgroupResourceSnapshot{
+		Path:                path,
+		MemoryCurrentBytes:  memoryCurrent,
+		MemoryEvents:        memoryEvents,
+		MemoryDirectReclaim: memoryDirectReclaim,
+		IOTotals:            ioTotals,
+		CPUStat:             cpuStat,
+	}, nil
+}
+
+func selfCgroupV2Path() (string, error) {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return "", fmt.Errorf("read /proc/self/cgroup: %w", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "0::") {
+			continue
+		}
+		return filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(line, "0::/")), nil
+	}
+	return "", fmt.Errorf("cgroup v2 entry not found")
+}
+
+func readUintFile(path string) (uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	value, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return value, nil
+}
+
+func readFlatCounters(path string) (map[string]uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	counters := make(map[string]uint64)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("parse %s: unexpected line %q", path, line)
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s counter %s: %w", path, fields[0], err)
+		}
+		counters[fields[0]] = value
+	}
+	return counters, nil
+}
+
+func readIOStatTotals(path string) (map[string]uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	totals := make(map[string]uint64)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		for _, field := range fields[1:] {
+			name, rawValue, ok := strings.Cut(field, "=")
+			if !ok {
+				return nil, fmt.Errorf("parse %s: unexpected field %q", path, field)
+			}
+			value, err := strconv.ParseUint(rawValue, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("parse %s counter %s: %w", path, name, err)
+			}
+			totals[name] += value
+		}
+	}
+	return totals, nil
+}
+
+func diffCgroupResourceSnapshots(before, after CgroupResourceSnapshot) CgroupResourceDelta {
+	return CgroupResourceDelta{
+		MemoryCurrentBytes:  int64(after.MemoryCurrentBytes) - int64(before.MemoryCurrentBytes),
+		MemoryEvents:        diffCounters(before.MemoryEvents, after.MemoryEvents),
+		MemoryDirectReclaim: diffCounters(before.MemoryDirectReclaim, after.MemoryDirectReclaim),
+		IOTotals:            diffCounters(before.IOTotals, after.IOTotals),
+		CPUStat:             diffCounters(before.CPUStat, after.CPUStat),
+	}
+}
+
+func diffCounters(before, after map[string]uint64) map[string]int64 {
+	delta := make(map[string]int64, len(after))
+	for name, value := range after {
+		delta[name] = int64(value) - int64(before[name])
+	}
+	return delta
 }
 
 // ApplyDeletedFiles removes files marked as deleted in the checkpoint.
