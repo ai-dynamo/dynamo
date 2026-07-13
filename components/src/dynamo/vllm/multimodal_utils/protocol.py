@@ -192,6 +192,9 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     # Add these fields for Qwen VL (mRoPE) decode-only worker
     image_grid_thw: Optional[List[List[int]]] = None
     embeddings_shape: Optional[List[int]] = None
+    # Per-request overrides for the multimodal processor. Encode workers merge
+    # these over their engine-level defaults before preprocessing the media.
+    mm_processor_kwargs: Optional[dict[str, Any]] = None
 
 
 class MyRequestOutput(BaseModel):

@@ -33,6 +33,7 @@ from .multimodal_utils.protocol import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
 )
+from .multimodal_utils.request_processor import get_mm_processor_kwargs
 
 _IMAGE_URL_KEY = "image_url"
 _URL_VARIANT_KEY = "Url"
@@ -128,6 +129,7 @@ class VllmEncodeEngine(LLMEngine):
             sampling_params=SamplingParams(),
             request_id=context.id(),
             multimodal_inputs=groups,
+            mm_processor_kwargs=get_mm_processor_kwargs(request),
         )
 
         payload: dict[str, Any] | None = None

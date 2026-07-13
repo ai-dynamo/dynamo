@@ -12,6 +12,7 @@ pytest.importorskip("vllm.sampling_params")
 from dynamo.common.constants import DisaggregationMode  # noqa: E402
 from dynamo.vllm import encode_engine as encode_engine_mod  # noqa: E402
 from dynamo.vllm.encode_engine import VllmEncodeEngine  # noqa: E402
+from dynamo.vllm.multimodal_handlers import EncodeWorkerHandler  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -51,6 +52,10 @@ async def test_encode_engine_emits_versioned_terminal():
                 "multi_modal_data": {
                     "image_url": [{"Url": "https://example.com/image.png"}]
                 },
+                "mm_processor_kwargs": {
+                    "min_pixels": 3136,
+                    "max_pixels": 1003520,
+                },
             },
             _Context(),
         )
@@ -70,6 +75,56 @@ async def test_encode_engine_emits_versioned_terminal():
     assert handler.requests[0][0].multimodal_inputs[0].multimodal_input.image_url == (
         "https://example.com/image.png"
     )
+    assert handler.requests[0][0].mm_processor_kwargs == {
+        "min_pixels": 3136,
+        "max_pixels": 1003520,
+    }
+
+
+def test_encode_worker_merges_and_filters_processor_kwargs():
+    class _ImageProcessor:
+        def __call__(
+            self,
+            images,
+            return_tensors=None,
+            *,
+            min_pixels=None,
+            max_pixels=None,
+        ):
+            del images, return_tensors, min_pixels, max_pixels
+
+    handler = object.__new__(EncodeWorkerHandler)
+    handler.engine_args = SimpleNamespace(
+        mm_processor_kwargs={
+            "min_pixels": 3136,
+            "max_pixels": 1003520,
+            "unsupported": True,
+        }
+    )
+    handler.image_processor = _ImageProcessor()
+
+    actual = handler._effective_mm_processor_kwargs(
+        {"max_pixels": 501760, "unsupported": False}
+    )
+
+    assert actual == {"min_pixels": 3136, "max_pixels": 501760}
+
+
+def test_encode_worker_cache_key_includes_processor_kwargs():
+    image_url = "https://example.com/image.png"
+
+    first = EncodeWorkerHandler._embedding_cache_key(
+        image_url, {"min_pixels": 3136, "max_pixels": 1003520}
+    )
+    reordered = EncodeWorkerHandler._embedding_cache_key(
+        image_url, {"max_pixels": 1003520, "min_pixels": 3136}
+    )
+    resized = EncodeWorkerHandler._embedding_cache_key(
+        image_url, {"min_pixels": 3136, "max_pixels": 501760}
+    )
+
+    assert first == reordered
+    assert first != resized
 
 
 @pytest.mark.asyncio

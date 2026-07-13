@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -11,6 +12,7 @@ from typing import Any, AsyncIterator
 import torch
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 import dynamo.nixl_connect as connect
 from dynamo.common.multimodal import (
@@ -136,6 +138,34 @@ class EncodeWorkerHandler:
         """Initialize a unified engine, which does not own a Python runtime."""
         self._init_connector()
 
+    def _effective_mm_processor_kwargs(
+        self, request_kwargs: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Merge engine defaults with request overrides using vLLM semantics."""
+        engine_kwargs = self.engine_args.mm_processor_kwargs or {}
+        merged_kwargs = dict(engine_kwargs) | dict(request_kwargs or {})
+        return get_allowed_kwarg_only_overrides(
+            self.image_processor,
+            merged_kwargs,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
+        )
+
+    @staticmethod
+    def _embedding_cache_key(
+        image_url: str, mm_processor_kwargs: dict[str, Any]
+    ) -> str:
+        """Key an embedding by both its source and effective preprocessing."""
+        cache_identity = json.dumps(
+            {
+                "image_url": image_url,
+                "mm_processor_kwargs": mm_processor_kwargs,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return EmbeddingCache.generate_hash_key(cache_identity)
+
     @_nvtx.range_decorator("mm:encode_worker_generate", color="blue")
     async def generate(
         self, request: vLLMMultimodalRequest, context
@@ -151,6 +181,9 @@ class EncodeWorkerHandler:
         assert (
             request.multimodal_inputs is not None
         ), "multimodal_inputs must not be None for encode worker"
+        mm_processor_kwargs = self._effective_mm_processor_kwargs(
+            request.mm_processor_kwargs
+        )
 
         # The following steps encode the requested image and provided useful embeddings.
         # 1. Open the image from the provided URL.
@@ -178,7 +211,9 @@ class EncodeWorkerHandler:
 
                     image_url = group_input.image_url
                     # see if we have local cache
-                    embedding_key = EmbeddingCache.generate_hash_key(image_url)
+                    embedding_key = self._embedding_cache_key(
+                        image_url, mm_processor_kwargs
+                    )
                     if (
                         self.embedding_cache is not None
                         and self.embedding_cache.has_key(embedding_key)
@@ -237,7 +272,10 @@ class EncodeWorkerHandler:
                     f"[ENCODE] request: {request_id} image processing"
                 ):
                     image_embeds = await asyncio.to_thread(
-                        self.image_processor, images=loaded_images, return_tensors="pt"
+                        self.image_processor,
+                        images=loaded_images,
+                        return_tensors="pt",
+                        **mm_processor_kwargs,
                     )
 
                 with _nvtx.annotate(
