@@ -4191,8 +4191,21 @@ mod tests {
             }))
             .unwrap()
         };
+        let json_object_request = |enable_thinking: bool| {
+            serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "return json"}],
+                "chat_template_kwargs": {"enable_thinking": enable_thinking},
+                "response_format": {"type": "json_object"}
+            }))
+            .unwrap()
+        };
         assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
             &structured_request(true),
+            Some("qwen3")
+        ));
+        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+            &json_object_request(true),
             Some("qwen3")
         ));
         assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
@@ -4201,6 +4214,10 @@ mod tests {
         ));
         assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
             &structured_request(true),
+            Some("gpt_oss")
+        ));
+        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+            &json_object_request(true),
             Some("gpt_oss")
         ));
         assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
