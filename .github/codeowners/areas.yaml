@@ -575,10 +575,6 @@ shared:
   owners:
   - docs
   - agents
-- glob: components/src/dynamo/sglang_sidecar/
-  owners:
-  - backend-sglang
-  - '@connorcarpenter15'
 - glob: tests/frontend/agent_smoke_inputs.py
   owners:
   - frontend
