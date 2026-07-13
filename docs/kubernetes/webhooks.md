@@ -127,8 +127,8 @@ dynamo-operator:
     failurePolicy: Fail        # Fail (reject on error) or Ignore (allow on error)
     timeoutSeconds: 10         # Webhook timeout
 
-    # Namespace filtering (advanced)
-    namespaceSelector: {}      # Kubernetes label selector for namespaces
+    # User-configured namespace filtering is unsupported
+    namespaceSelector: {}
 ```
 
 #### Failure Policy
@@ -147,25 +147,10 @@ webhook:
 
 #### Namespace Filtering
 
-Control which namespaces are validated (applies to **cluster-wide operator** only):
-
-```yaml
-# Only validate resources in namespaces with specific labels
-webhook:
-  namespaceSelector:
-    matchLabels:
-      dynamo-validation: enabled
-
-# Or exclude specific namespaces
-webhook:
-  namespaceSelector:
-    matchExpressions:
-    - key: dynamo-validation
-      operator: NotIn
-      values: ["disabled"]
-```
-
-**Note:** For **namespace-restricted operators** (deprecated), the namespace selector is automatically set to validate only the operator's namespace. This configuration is ignored in namespace-restricted mode.
+User-configured webhook namespace filtering is not supported. Helm rejects a non-empty
+`webhook.namespaceSelector` value. The cluster-wide webhook configurations cover every namespace,
+while namespace-restricted webhook configurations use a Helm-generated selector for their target
+namespace. The cluster-wide handlers skip namespaces claimed by an active ownership Lease.
 
 ---
 
@@ -335,61 +320,45 @@ helm install dynamo-platform . -n <namespace> -f values.yaml
 
 ---
 
-## Multi-Operator Deployments (DEPRECATED)
+## Development and Test Multi-Operator Deployments
 
-> **DEPRECATED:** Namespace-restricted mode and multi-operator deployments are deprecated and will be removed in a future release. Use a single cluster-wide operator instead.
+> [!WARNING]
+> Namespace-restricted and multi-operator configurations are only for development and testing.
+> They are not supported for production. Use one cluster-wide operator in production.
 
-The operator supports running both **cluster-wide** and **namespace-restricted** instances simultaneously using a **lease-based coordination mechanism**.
+The operator can run one cluster-wide instance and namespace-restricted instances using a
+Lease-based ownership mechanism.
 
 ### Scenario
 
 ```
 Cluster:
 ├─ Operator A (cluster-wide, namespace: platform-system)
-│  └─ Validates all namespaces EXCEPT team-a
+│  └─ Skips reconciliation and admission in team-a
 └─ Operator B (namespace-restricted, namespace: team-a)
-   └─ Validates only team-a namespace
+   └─ Reconciles, validates, and mutates only team-a
 ```
 
 ### How It Works
 
-1. **Namespace-restricted operator** creates a Lease in its namespace
-2. **Cluster-wide operator** watches for Leases named `dynamo-operator-ns-lock`
-3. **Cluster-wide operator** skips validation for namespaces with active Leases
-4. **Namespace-restricted operator** validates resources in its namespace
-
-### Lease Configuration
-
-The lease mechanism is **automatically configured** based on deployment mode:
-
-```yaml
-# Cluster-wide operator (default)
-namespaceRestriction:
-  enabled: false
-# → Watches for leases in all namespaces
-# → Skips validation for namespaces with active leases
-
-# Namespace-restricted operator
-namespaceRestriction:
-  enabled: true
-  namespace: team-a
-# → Creates lease in team-a namespace
-# → Does NOT check for leases (no cluster permissions)
-```
+1. The namespace-restricted operator creates a Lease named `dynamo-operator-namespace-scope`.
+2. The cluster-wide operator skips reconciliation, validation, and mutation for that namespace.
+3. The namespace-restricted operator's webhook configurations select only its target namespace.
+4. Each operator manages the certificate and CA bundles for its own admission configurations.
+5. Only the cluster-wide operator updates CRDs, conversion service references, and conversion CA bundles.
 
 ### Deployment Example
 
 ```bash
-# 1. Deploy cluster-wide operator
-helm install platform-operator dynamo-platform \
-  -n platform-system \
-  --set namespaceRestriction.enabled=false
+# 1. Deploy the cluster-wide operator
+helm install platform-operator dynamo-platform -n platform-system
 
-# 2. Deploy namespace-restricted operator for team-a
+# 2. Deploy a namespace-restricted operator for team-a
 helm install team-a-operator dynamo-platform \
   -n team-a \
-  --set namespaceRestriction.enabled=true \
-  --set namespaceRestriction.namespace=team-a
+  --skip-crds \
+  --set dynamo-operator.namespaceRestriction.enabled=true \
+  --set dynamo-operator.upgradeCRD=false
 ```
 
 ### ValidatingWebhookConfiguration Naming
@@ -409,13 +378,21 @@ platform-operator-validating
 team-a-operator-validating-team-a
 ```
 
-This allows multiple webhook configurations to coexist without conflicts.
+Helm fixes every webhook in the namespace-restricted configurations to the target namespace. Do not
+set `webhook.namespaceSelector` manually.
 
 ### Lease Health
 
-If the namespace-restricted operator is deleted or becomes unhealthy:
-- Lease expires after `leaseDuration + gracePeriod` (default: ~30 seconds)
-- Cluster-wide operator automatically resumes validation for that namespace
+After you uninstall the namespace-restricted release, its webhook configurations are removed and
+its Lease expires. Cluster-wide reconciliation and admission then resume for the namespace. If only
+the operator Pod is unhealthy, its webhook configurations remain and can block admission according
+to `failurePolicy` until the release recovers or is uninstalled.
+
+Run the same operator version in parallel whenever possible. The cluster-wide operator should be
+the same version or newer and must provide the newest APIs. A newer namespaced controller is
+acceptable for development when it remains compatible with the installed CRDs.
+Install every operator Helm release in a separate namespace so each release owns a distinct
+admission certificate and webhook configuration set.
 
 ---
 
@@ -440,7 +417,7 @@ kubectl get validatingwebhookconfiguration <name> -o yaml
 # Verify:
 # - caBundle is present and non-empty
 # - clientConfig.service points to correct service
-# - webhooks[].namespaceSelector matches your namespace
+# - webhooks[].namespaceSelector is absent for cluster-wide admission or matches the target namespace
 ```
 
 3. **Verify webhook service exists**:
@@ -642,7 +619,7 @@ helm upgrade <release> dynamo-platform -n <namespace>
 ### Multi-Tenant Deployments
 
 1. ✅ **Deploy one cluster-wide operator** for platform-wide validation
-2. ~~Deploy namespace-restricted operators for tenant-specific namespaces~~ (**DEPRECATED** - use cluster-wide mode instead)
+2. Use namespace-restricted operators only for development or testing, never as a production tenant-isolation mechanism
 
 ---
 
@@ -661,4 +638,3 @@ For issues or questions:
 - Check [Troubleshooting](#troubleshooting) section
 - Review operator logs: `kubectl logs -n <namespace> deployment/<release>-dynamo-operator`
 - Open an issue on GitHub
-

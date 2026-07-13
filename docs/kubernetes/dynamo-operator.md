@@ -30,75 +30,77 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 ## Deployment Modes
 
-The Dynamo operator supports three deployment modes to accommodate different cluster environments and use cases:
+The Dynamo operator has one supported production mode and one development/test mode.
 
-### 1. Cluster-Wide Mode (Default, Recommended)
+### Cluster-Wide Mode
 
 The operator monitors and manages DynamoGraph resources across **all namespaces** in the cluster.
+It owns the cluster-wide Custom Resource Definitions (CRDs), conversion webhook, and conversion
+certificate authority (CA). Deploy exactly one cluster-wide operator per cluster.
 
 **When to Use:**
+
 - You have full cluster admin access
 - You want centralized management of all Dynamo workloads
 - Standard production deployment on a dedicated cluster
 
----
+### Namespace-Restricted Mode
 
-### 2. Namespace-Scoped Mode (DEPRECATED)
+> [!WARNING]
+> Namespace-restricted mode is only for development and testing. It is not supported for production.
 
-> **DEPRECATED:** Namespace-scoped mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode instead. Do not use this for new deployments.
+A namespace-restricted operator reconciles, validates, and mutates resources only in its target
+namespace. It creates a Lease that makes the cluster-wide operator skip reconciliation and
+admission in that namespace. The namespace-restricted operator serves its own admission webhooks
+using its local feature settings.
 
-The operator monitors and manages DynamoGraph resources **only in a specific namespace**. A lease marker is created to signal the operator's presence to any cluster-wide operators.
-
-**When to Use:**
-- You're on a shared/multi-tenant cluster
-- You only have namespace-level permissions
-- You want to test a new operator version in isolation
-- You need to avoid conflicts with other operators
-
-**Installation:**
-```bash
-helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
-  --namespace my-namespace \
-  --create-namespace \
-  --set dynamo-operator.namespaceRestriction.enabled=true
-```
-
----
-
-### 3. Hybrid Mode (DEPRECATED)
-
-> **DEPRECATED:** Hybrid mode relies on namespace-scoped operators, which are deprecated and will be removed in a future release. Use a single cluster-wide operator instead.
-
-A **cluster-wide operator** manages most namespaces, while **one or more namespace-scoped operators** run in specific namespaces (e.g., for testing new versions). The cluster-wide operator automatically detects and excludes namespaces with namespace-scoped operators using lease markers.
-
-**When to Use:**
-- Running production workloads with a stable operator version
-- Testing new operator versions in isolated namespaces without affecting production
-- Gradual rollout of operator updates
-- Development/staging environments on production clusters
+Use this mode to test controller changes or feature settings in one namespace on a development
+cluster. It is not a multi-tenancy boundary.
 
 **How It Works:**
-1. Namespace-scoped operator creates a lease named `dynamo-operator-namespace-scope` in its namespace
-2. Cluster-wide operator watches for these lease markers across all namespaces
-3. Cluster-wide operator automatically excludes any namespace with a lease marker
-4. If namespace-scoped operator stops, its lease expires (TTL: 30s by default)
-5. Cluster-wide operator automatically resumes managing that namespace
 
-**Setup Example:**
+1. The namespace-restricted operator creates a Lease named `dynamo-operator-namespace-scope`.
+2. The cluster-wide operator watches these Leases and skips the claimed namespace.
+3. The namespace-restricted ValidatingWebhookConfiguration and MutatingWebhookConfiguration select
+   only the target namespace.
+4. The namespace-restricted operator manages the TLS certificate and CA bundles for its own
+   admission configurations.
+5. The cluster-wide operator remains the only owner of CRDs, conversion, and conversion CA bundles.
+
+If the namespace-restricted Pod becomes unavailable while its webhook configurations remain,
+admission can fail according to `webhook.failurePolicy`. Recover or uninstall the development/test
+release before relying on cluster-wide admission again.
+
+> [!CAUTION]
+> Pass `--skip-crds` and set `dynamo-operator.upgradeCRD=false`. Helm installs the chart's `crds/`
+> directory before rendering templates, so the chart cannot detect a missing `--skip-crds` flag.
 
 ```bash
-# 1. Install cluster-wide operator (production, v1.0.0)
+# Install the cluster-wide operator first
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
   --namespace dynamo-system \
   --create-namespace
 
-# 2. Install namespace-scoped operator (testing, v2.0.0-beta)
+# Install a namespace-restricted operator for development or testing
 helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
   --namespace test-namespace \
   --create-namespace \
+  --skip-crds \
   --set dynamo-operator.namespaceRestriction.enabled=true \
+  --set dynamo-operator.upgradeCRD=false \
   --set dynamo-operator.controllerManager.manager.image.tag=v2.0.0-beta
 ```
+
+Set `dynamo-operator.namespaceRestriction.targetNamespace` when the target differs from the Helm
+release namespace.
+
+Install every operator Helm release in a separate namespace. Multiple Dynamo operator releases in
+the same Helm release namespace are not supported.
+
+Run the same operator version in parallel whenever possible. The cluster-wide operator should be
+the same version or newer and must provide the newest APIs in the cluster. A newer namespaced
+controller can be used for development when it does not require CRD fields absent from the
+cluster-wide installation.
 
 **Observability:**
 
@@ -196,7 +198,9 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
-> **Note:** Namespace-scoped and hybrid deployment modes are deprecated. Use cluster-wide mode for all new deployments. See [Deployment Modes](#deployment-modes) above if you need backward-compatible configurations.
+> [!NOTE]
+> Namespace-restricted mode is only for development and testing. Use cluster-wide mode for
+> production deployments.
 
 ### Building from Source
 
