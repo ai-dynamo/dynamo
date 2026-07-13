@@ -189,7 +189,7 @@ Values you will see in the `dynamo_endpoint` label on backend workers:
 | Value | Meaning |
 |-------|---------|
 | `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls (one per request the router routes through); on a decode worker this counts decode-stage `generate` calls. |
-| `clear_kv_blocks` | Admin RPC to flush the worker's KV cache. Registered on both prefill and decode workers. |
+| `clear_kv_blocks` | Legacy vLLM distributed admin RPC to flush the worker's KV cache, registered on prefill and decode workers. Unified vLLM workers expose the operation through `/engine/control/clear_kv_blocks` on the system server instead; that route is not a component endpoint and does not emit this `dynamo_endpoint` label. |
 | `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
 
 #### Component Error Types
@@ -224,6 +224,10 @@ The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_
 - `dynamo_frontend_disconnected_clients`: Number of disconnected clients (gauge)
 - `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
 - `dynamo_frontend_cached_tokens`: Number of cached tokens (prefix cache hits) per request (histogram)
+- `dynamo_frontend_tokenizer_cache_hits_total`: L1 tokenizer prefix-cache hits across all models (counter)
+- `dynamo_frontend_tokenizer_cache_misses_total`: L1 tokenizer prefix-cache misses across all models (counter)
+- `dynamo_frontend_tokenizer_cache_cached_tokens_total`: Tokens returned from the L1 tokenizer prefix cache (counter, label: `model`)
+- `dynamo_frontend_tokenizer_cache_uncached_tokens_total`: Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (counter, label: `model`)
 - `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
 - `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
 - `dynamo_frontend_output_tokens_total`: Total number of output tokens generated (counter)
@@ -236,6 +240,33 @@ The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_
 ```bash
 curl http://localhost:8000/metrics
 ```
+
+#### Tokenizer Cache Metrics
+
+The hit and miss counters record one cache outcome per encode operation across the frontend process.
+A batch encode records one outcome per item. The cached and uncached token counters report exact
+token totals for each served model. When L1 is active, a partial hit increments both token counters
+because it returns a cached prefix and freshly encodes the remaining suffix. A full hit increments
+only the cached-token counter, and a full miss increments only the uncached-token counter.
+
+Use the following PromQL expression to calculate the token reuse ratio for each model over five
+minutes:
+
+```promql
+sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+/
+(
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_cached_tokens_total[5m]))
+  +
+  sum by (model) (rate(dynamo_frontend_tokenizer_cache_uncached_tokens_total[5m]))
+)
+```
+
+The ratio is meaningful only for a model with an active L1 cache and observed tokens. The token
+counters do not increment when `DYN_TOKENIZER_CACHE=0`, when encoding fails, or when the cache has no
+registered special-token boundaries. The tiktoken path currently has no registered boundaries, so it
+bypasses L1 and exposes zero-valued token counter series; its ratio remains undefined until the cache
+observes tokens.
 
 #### Stage and phase labels
 

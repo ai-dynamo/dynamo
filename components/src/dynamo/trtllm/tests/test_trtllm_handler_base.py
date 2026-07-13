@@ -4,7 +4,7 @@
 import asyncio
 import re as re_mod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -30,8 +30,10 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
     pytest.mark.gpu_1,
-    pytest.mark.profiled_vram_gib(0),
 ]
+
+# Intentionally omit profiled_vram_gib so this import-heavy module runs in the
+# sequential GPU stage instead of starting one TRT-LLM subprocess per test node.
 
 
 @dataclass
@@ -191,6 +193,16 @@ class TestOverrideSamplingParams:
 class TestLLMEngineOverrideSamplingParams:
     """Tests for the unified LLMEngine _override_sampling_params path."""
 
+    JSON_SCHEMA: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    JSON_SCHEMA_STRING: ClassVar[str] = (
+        '{"type":"object","properties":{"answer":{"type":"string"}},'
+        '"required":["answer"]}'
+    )
+
     def test_n_is_passed_through(self):
         sampling_params = MockSamplingParams()
         request = {"sampling_options": {"n": 2}}
@@ -208,6 +220,65 @@ class TestLLMEngineOverrideSamplingParams:
 
         assert result.n == 2
         assert result.best_of == 4
+
+    @pytest.mark.parametrize(
+        ("guided_decoding", "expected_attribute", "expected_value"),
+        [
+            ({"json": JSON_SCHEMA}, "json", JSON_SCHEMA),
+            ({"json": JSON_SCHEMA_STRING}, "json", JSON_SCHEMA_STRING),
+            ({"regex": "[0-9]+"}, "regex", "[0-9]+"),
+            (
+                {"grammar": 'root ::= "yes" | "no"'},
+                "grammar",
+                'root ::= "yes" | "no"',
+            ),
+            ({"choice": ["yes", "no", "maybe"]}, "regex", "(yes|no|maybe)"),
+        ],
+        ids=["json-object", "json-string", "regex", "grammar", "choice"],
+    )
+    def test_guided_decoding_constraints_are_converted(
+        self, guided_decoding, expected_attribute, expected_value
+    ):
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"guided_decoding": guided_decoding}}
+
+        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        assert getattr(result.guided_decoding, expected_attribute) == expected_value
+
+    def test_guided_decoding_choice_escapes_regex_metacharacters(self):
+        sampling_params = MockSamplingParams()
+        choices = ["yes (confirmed)", "no [rejected]", "maybe?"]
+        request = {"sampling_options": {"guided_decoding": {"choice": choices}}}
+
+        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
+
+        expected = "(" + "|".join(re_mod.escape(choice) for choice in choices) + ")"
+        assert result.guided_decoding.regex == expected
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        (None, "xgrammar"),
+        ('{"guided_decoding_backend": "llguidance"}', "llguidance"),
+    ],
+    ids=["configured", "engine-override"],
+)
+def test_unified_guided_decoding_backend_matches_legacy(override, expected):
+    argv = [
+        "--model-path",
+        "Qwen/Qwen3-0.6B",
+        "--guided-decoding-backend",
+        "xgrammar",
+    ]
+    if override is not None:
+        argv.extend(["--override-engine-args", override])
+
+    engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
+
+    assert engine.engine_args["guided_decoding_backend"] == expected
 
 
 class TestGuidedDecodingFromToolChoice:
@@ -731,3 +802,25 @@ class TestHealthCheckPriority:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    async def test_routing_cache_salt_forwarded_to_generate_async(self):
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {"temperature": 0.7},
+            "routing": {"cache_salt": "tenant-a"},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert len(chunks) > 0
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["cache_salt"] == "tenant-a"

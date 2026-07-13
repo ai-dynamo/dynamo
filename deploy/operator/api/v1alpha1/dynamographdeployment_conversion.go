@@ -35,6 +35,7 @@ package v1alpha1
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,9 +47,16 @@ import (
 )
 
 const (
-	annDGDSpec   = "nvidia.com/dgd-spec"
-	annDGDStatus = "nvidia.com/dgd-status"
+	dgdConversionAnnotationPrefix = "nvidia.com/dgd-"
+	annDGDSpec                    = dgdConversionAnnotationPrefix + "spec"
+	annDGDStatus                  = dgdConversionAnnotationPrefix + "status"
 )
+
+// IsDynamoGraphDeploymentConversionAnnotation reports whether key is reserved
+// for DGD conversion bookkeeping.
+func IsDynamoGraphDeploymentConversionAnnotation(key string) bool {
+	return strings.HasPrefix(key, dgdConversionAnnotationPrefix)
+}
 
 // DynamoGraphDeploymentConversionContext carries DGD-level conversion context
 // that component converters cannot derive from their local inputs.
@@ -767,10 +775,11 @@ func ConvertToRollingUpdateStatus(src *v1beta1.RollingUpdateStatus, dst *Rolling
 // v1beta1.
 func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.ComponentReplicaStatus) {
 	*dst = v1beta1.ComponentReplicaStatus{
-		ComponentKind:   v1beta1.ComponentKind(src.ComponentKind),
-		ComponentNames:  componentNamesToHub(src),
-		Replicas:        src.Replicas,
-		UpdatedReplicas: src.UpdatedReplicas,
+		ComponentKind:    v1beta1.ComponentKind(src.ComponentKind),
+		ComponentNames:   componentNamesToHub(src),
+		RuntimeNamespace: src.RuntimeNamespace,
+		Replicas:         src.Replicas,
+		UpdatedReplicas:  src.UpdatedReplicas,
 	}
 	if src.ReadyReplicas != nil {
 		dst.ReadyReplicas = ptr.To(*src.ReadyReplicas)
@@ -786,10 +795,11 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 	componentNames := slices.Clone(src.ComponentNames)
 
 	*dst = ServiceReplicaStatus{
-		ComponentKind:   ComponentKind(src.ComponentKind),
-		ComponentNames:  componentNames,
-		Replicas:        src.Replicas,
-		UpdatedReplicas: src.UpdatedReplicas,
+		ComponentKind:    ComponentKind(src.ComponentKind),
+		ComponentNames:   componentNames,
+		RuntimeNamespace: src.RuntimeNamespace,
+		Replicas:         src.Replicas,
+		UpdatedReplicas:  src.UpdatedReplicas,
 	}
 	if len(componentNames) > 0 {
 		dst.ComponentName = componentNames[len(componentNames)-1]

@@ -49,12 +49,13 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "3.0.0" }
+dynamo-parsers = { version = "4.1.1" }
 dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
+bytes = { version = "1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }
 rmp = { version = "0.8" }
@@ -62,6 +63,7 @@ once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
+serde-transcode = "1.1"
 thiserror = { version = "2.0" }
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }

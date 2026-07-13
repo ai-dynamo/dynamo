@@ -5,8 +5,6 @@ title: Tool Call Parsing (Dynamo)
 subtitle: Connect Dynamo to external tools and services using Dynamo's built-in tool call parsers
 ---
 
-[简体中文](./README.zh-CN.md)
-
 You can connect Dynamo to external tools and services using tool calling. By
 providing a list of available functions, Dynamo can choose to output function
 arguments for the relevant function(s) which you can execute to augment the
@@ -82,7 +80,7 @@ parser exists for this format.
 
 ```bash
 # launch backend worker (or dynamo.vllm)
-python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
+python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --reasoning-parser qwen3 --dyn-reasoning-parser qwen3
 
 # launch frontend worker
 python -m dynamo.frontend

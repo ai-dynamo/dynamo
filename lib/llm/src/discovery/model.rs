@@ -154,6 +154,16 @@ impl Model {
         self.worker_sets.len()
     }
 
+    /// Snapshot all WorkerSets. Used by cross-role lifecycle coordination
+    /// where storage keys include role/surface suffixes but deployment
+    /// matching is based on `WorkerSet::namespace()`.
+    pub(crate) fn worker_sets(&self) -> Vec<Arc<WorkerSet>> {
+        self.worker_sets
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// Check if this model has any decode engine (chat or completions) across any WorkerSet.
     pub fn has_decode_engine(&self) -> bool {
         self.worker_sets
@@ -493,7 +503,7 @@ impl Model {
     ///
     /// Differs from [`Self::is_displayable`] in that it does **not** fall back
     /// to prefill-only WorkerSets: requires a WorkerSet that has a serving
-    /// engine attached, workers connected, and `can_serve_requests()` true.
+    /// engine attached and workers connected.
     /// Used by KServe gRPC `model_ready` / `server_ready` to avoid the race
     /// where a `ModelDeploymentCard` is registered before its WorkerSet has
     /// been wired up.
@@ -517,7 +527,7 @@ impl Model {
 
         self.worker_sets.iter().any(|entry| {
             let ws = entry.value();
-            if ws.worker_count() == 0 || !ws.can_serve_requests() {
+            if ws.worker_count() == 0 {
                 return false;
             }
             ws.has_any_serving_engine() || (!any_set_has_engine && ws.is_prefill_set())
@@ -695,28 +705,21 @@ impl Model {
         // Fast path: single set (same zero-worker filtering as the multi-set path below)
         if snapshot.len() == 1 {
             let ws = &snapshot[0];
-            if ws.worker_count() == 0
-                || !ws.can_serve_requests()
-                || !ready_namespaces.contains(ws.namespace())
-            {
+            if ws.worker_count() == 0 || !ready_namespaces.contains(ws.namespace()) {
                 return None;
             }
             return extract(ws);
         }
 
-        // Collect eligible sets with their worker counts, skipping sets with no workers,
-        // sets whose prefill router has died under enforce_disagg, or sets in a namespace
-        // whose worker set is incomplete.
+        // Collect eligible sets with their worker counts, skipping sets with no workers or sets in
+        // a namespace whose worker set is incomplete.
         // In-process models (no discovery watcher) return count=1, so they always participate.
         // Discovery models with count=0 have no available workers and are skipped.
         let eligible: Vec<(T, usize)> = snapshot
             .iter()
             .filter_map(|ws| {
                 let count = ws.worker_count();
-                if count == 0
-                    || !ws.can_serve_requests()
-                    || !ready_namespaces.contains(ws.namespace())
-                {
+                if count == 0 || !ready_namespaces.contains(ws.namespace()) {
                     return None;
                 }
                 extract(ws).map(|val| (val, count))
@@ -1030,7 +1033,7 @@ mod tests {
 
     /// Build a WorkerSet with a deactivated PrefillRouter simulating "was activated, now dead".
     /// worker_count defaults to 1 (no instance_count_rx -> in-process default).
-    fn make_worker_set_with_dead_prefill(namespace: &str, enforce_disagg: bool) -> Arc<WorkerSet> {
+    fn make_worker_set_with_dead_prefill(namespace: &str) -> Arc<WorkerSet> {
         let mut ws = WorkerSet::new(
             namespace.to_string(),
             "abc".to_string(),
@@ -1039,7 +1042,6 @@ mod tests {
         let pr = PrefillRouter::disabled(
             std::sync::Arc::new(crate::discovery::ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
-            enforce_disagg,
             None,
         );
         pr.mark_active_for_test();
@@ -1049,7 +1051,7 @@ mod tests {
     }
 
     /// Baseline: a WorkerSet without a PrefillRouter is always displayable
-    /// (worker_count=1, is_prefill_set=true, no can_serve_requests block).
+    /// (worker_count=1, is_prefill_set=true).
     #[test]
     fn test_is_displayable_true_basic() {
         let model = Model::new("llama".to_string());
@@ -1060,77 +1062,16 @@ mod tests {
         );
     }
 
-    /// When the prefill engine dies and enforce_disagg is set, the model must be
-    /// hidden from /v1/models.
+    /// Prefill-router lifecycle is not a separate model-visibility policy. Registered worker
+    /// topology gates the serving-ready model list and request selection.
     #[test]
-    fn test_is_displayable_false_when_prefill_dies_enforce_disagg() {
+    fn test_is_displayable_ignores_prefill_router_lifecycle() {
         let model = Model::new("llama".to_string());
-        model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", true),
-        );
-
-        assert!(
-            !model.is_displayable(),
-            "model must be hidden when prefill died and enforce_disagg=true"
-        );
-    }
-
-    /// When enforce_disagg is false the deployment can fall back to aggregated mode,
-    /// so the model should remain visible in /v1/models.
-    #[test]
-    fn test_is_displayable_true_when_prefill_dies_no_enforce() {
-        let model = Model::new("llama".to_string());
-        model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", false),
-        );
+        model.add_worker_set("ns1".to_string(), make_worker_set_with_dead_prefill("ns1"));
 
         assert!(
             model.is_displayable(),
-            "model must remain visible when prefill died but enforce_disagg=false (fallback)"
-        );
-    }
-
-    /// A single WorkerSet with a deactivated prefill router (enforce_disagg=true) must be
-    /// skipped by select_worker_set_with(), causing engine accessors to return Err.
-    #[test]
-    fn test_dead_prefill_single_set_not_selectable() {
-        let model = Model::new("llama".to_string());
-        model.add_worker_set(
-            "ns1".to_string(),
-            make_worker_set_with_dead_prefill("ns1", true),
-        );
-
-        assert!(model.get_chat_engine().is_err());
-        assert!(model.get_completions_engine().is_err());
-    }
-
-    /// With two WorkerSets -- one healthy, one with dead prefill -- the healthy set
-    /// keeps the model displayable. Removing the healthy set hides the model.
-    #[test]
-    fn test_dead_prefill_multi_set_skips_dead_namespace() {
-        let model = Model::new("llama".to_string());
-
-        // Healthy set (no prefill constraint)
-        model.add_worker_set("healthy".to_string(), make_worker_set("healthy", "abc"));
-
-        // Dead set (deactivated prefill + enforce_disagg)
-        model.add_worker_set(
-            "dead".to_string(),
-            make_worker_set_with_dead_prefill("dead", true),
-        );
-
-        assert!(
-            model.is_displayable(),
-            "model must be displayable when at least one healthy set exists"
-        );
-
-        // Removing the healthy set leaves only the dead set -- model must be hidden.
-        model.remove_worker_set("healthy");
-        assert!(
-            !model.is_displayable(),
-            "model must be hidden when only the dead prefill set remains"
+            "prefill-router lifecycle must not override registered topology"
         );
     }
 
