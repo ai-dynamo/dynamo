@@ -9,7 +9,7 @@ use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
 use crate::protocols::BlockExtraInfo;
 
-use super::extra_keys::{extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace};
+use super::extra_keys::{extra_keys_to_block_mm_infos_with_lora, extra_keys_to_cache_namespace};
 use super::filter::{BlockStoredTrailingField, KvCacheEventMetadata, KvCacheEventTrailingField};
 use super::types::{BlockHashValue, ExtraKeyItem, KvTokenIds, RawKvEvent};
 
@@ -115,9 +115,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 let cache_namespace = cache_namespace.unwrap_or(None).or_else(|| {
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref())
                 });
-                let block_mm_infos = block_mm_infos
-                    .unwrap_or(None)
-                    .or_else(|| extra_keys_to_block_mm_infos(extra_keys));
+                let block_mm_infos = block_mm_infos.unwrap_or(None).or_else(|| {
+                    extra_keys_to_block_mm_infos_with_lora(extra_keys, lora_name.as_deref())
+                });
                 Ok(RawKvEvent::BlockStored {
                     block_hashes,
                     parent_block_hash: parent_block_hash.unwrap_or(None),
@@ -206,8 +206,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 
                 let cache_namespace =
                     extra_keys_to_cache_namespace(extra_keys.as_deref(), lora_name.as_deref());
-                let block_mm_infos =
-                    block_mm_infos.or_else(|| extra_keys_to_block_mm_infos(extra_keys));
+                let block_mm_infos = block_mm_infos.or_else(|| {
+                    extra_keys_to_block_mm_infos_with_lora(extra_keys, lora_name.as_deref())
+                });
                 let (raw_token_ids, is_eagle) = normalize_token_ids(token_ids);
 
                 Ok(RawKvEvent::BlockStored {

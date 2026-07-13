@@ -467,6 +467,7 @@ pub enum KvEventSource {
         endpoint: String,
         topic: String,
         dp_rank: u32,
+        image_token_id: Option<u32>,
     },
     Push {
         on_ready: OnPublisherReady,
