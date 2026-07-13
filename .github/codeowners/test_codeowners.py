@@ -517,24 +517,59 @@ class TestEmissionIsTreeIndependent:
             "docs/new.md",  # add under docs
             "container/templates/args.Dockerfile",  # add matching filetype
         ]
-        model_base = compute_resolution(spec, base_tree)
-        model_mut = compute_resolution(spec, mutated_tree)
-        assert model_base == model_mut
-
-        # And the emitted body is byte-identical regardless of which tree
-        # the caller pretends to pass.
-        assert self._render(spec) == self._render(spec)
+        assert compute_resolution(spec, base_tree) == compute_resolution(
+            spec, mutated_tree
+        )
 
     def test_delete_or_move_under_owned_prefix_does_not_change_output(
         self,
     ) -> None:
+        # The delete + move half of the pure-emit contract. Prove that
+        # (a) removing tracked files from under an owned prefix and
+        # (b) reshuffling their paths do not change the resolved model or
+        # the rendered body -- both are pure functions of the spec.
         spec = self._spec()
-        first = self._render(spec)
-        # Simulate a "second run" against a wildly different tree via a
-        # spec-level noop: the resolver only reads the spec, so identical
-        # spec means identical output. This is the property CI relies on.
-        second = self._render(spec)
-        assert first == second
+        base_tree = [
+            "lib/llm/a.rs",
+            "lib/llm/preprocessor.rs",
+            "lib/llm/kv/x.rs",
+            "lib/llm/kv/y.rs",
+            "lib/llm/shared/z.rs",
+            "docs/intro.md",
+            "docs/api/ref.md",
+            "README.md",
+            "container/Dockerfile",
+            "container/templates/args.Dockerfile",
+        ]
+        deleted_tree = [
+            # dropped: lib/llm/a.rs, lib/llm/kv/y.rs, docs/api/ref.md,
+            # container/templates/args.Dockerfile.
+            "lib/llm/preprocessor.rs",
+            "lib/llm/kv/x.rs",
+            "lib/llm/shared/z.rs",
+            "docs/intro.md",
+            "README.md",
+            "container/Dockerfile",
+        ]
+        moved_tree = [
+            "lib/llm/preprocessor.rs",  # unchanged
+            "lib/llm/renamed_a.rs",  # moved from lib/llm/a.rs
+            "lib/llm/kv/renamed_x.rs",  # moved from lib/llm/kv/x.rs
+            "lib/llm/kv/y.rs",
+            "lib/llm/shared/moved_z.rs",  # moved within owned prefix
+            "docs/intro_renamed.md",  # moved within docs
+            "docs/api/ref.md",
+            "README.md",
+            "deploy/Dockerfile",  # moved from container/Dockerfile
+            "deploy/templates/args.Dockerfile",  # moved from container/
+        ]
+        model_base = compute_resolution(spec, base_tree)
+        assert model_base == compute_resolution(spec, deleted_tree)
+        assert model_base == compute_resolution(spec, moved_tree)
+        # And the emitted body is byte-identical: the render path never
+        # reads the tree, so the three "runs" produce the same file even
+        # though the underlying trees differ wildly.
+        assert self._render(spec) == self._render(spec)
 
     def test_emitter_has_no_tree_parameter(self) -> None:
         # Guard against a future regression re-introducing the tree walk:
@@ -542,9 +577,9 @@ class TestEmissionIsTreeIndependent:
         import inspect
 
         sig = inspect.signature(_render_codeowners)
-        assert (
-            "tree" not in sig.parameters
-        ), "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
+        assert "tree" not in sig.parameters, (
+            "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
+        )
         sig_base = inspect.signature(compute_resolution)
         # tree is still accepted (backward-compat) but must default to None
         # so callers that omit it get pure behavior for free.

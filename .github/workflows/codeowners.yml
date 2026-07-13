@@ -32,10 +32,10 @@ jobs:
           python-version: "3.12"
       - run: pip install pyyaml pytest
 
-      # Unit tests for the canonical matcher + min-cost cover. These are the
-      # only piece the gates below trust -- if they fail, nothing else means
-      # anything.
-      - name: Unit tests (matcher + minimal_cover)
+      # Unit tests for the canonical matcher + the emitter's tree-independence
+      # contract. These are the only piece the gates below trust -- if they
+      # fail, nothing else means anything.
+      - name: Unit tests (matcher + tree-independence)
         run: |
           python -m pytest .github/codeowners/test_codeowners.py -v \
             -p no:cacheprovider \
