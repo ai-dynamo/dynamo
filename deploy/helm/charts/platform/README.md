@@ -33,7 +33,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## 📋 Prerequisites
 
-- Kubernetes cluster (v1.32+)
+- Kubernetes cluster (v1.30+)
 - Helm 3.8+
 - Sufficient cluster resources for your deployment scale
 - Container registry access (if using private images)
@@ -79,7 +79,7 @@ rejects custom `webhook.namespaceSelector` values.
 
 ## Requirements
 
-Kubernetes: `>=1.32.0-0`
+Kubernetes: `>=1.30.0-0`
 
 | Repository | Name | Version |
 |------------|------|---------|
