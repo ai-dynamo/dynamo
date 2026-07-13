@@ -109,6 +109,17 @@ spec:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
           imagePullPolicy: IfNotPresent
+          # Request resources so the EPP pod is Burstable rather than BestEffort
+          # QoS. Without requests it is the first pod the kubelet evicts under
+          # node DiskPressure; once evicted the InferencePool has no endpoint
+          # picker and the whole deployment stalls (this stalled a Post Merge
+          # run to a 900s timeout). The ephemeral-storage request also lowers
+          # EPP's ranking in the kubelet's DiskPressure eviction ordering.
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 256Mi
+              ephemeral-storage: 1Gi
   - name: VllmDecodeWorker
     type: decode
     replicas: 1
