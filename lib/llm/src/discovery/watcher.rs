@@ -36,7 +36,7 @@ use crate::{
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::PrefillRouter,
+    kv_router::{EncoderRouter, PrefillRouter},
     local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -144,6 +144,17 @@ fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
         card.runtime_config
             .runtime_data
             .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        Some(serde_json::Value::Bool(true))
+    )
+}
+
+const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
+
+fn supports_encoder_result_handoff(card: &ModelDeploymentCard) -> bool {
+    matches!(
+        card.runtime_config
+            .runtime_data
+            .get(ENCODER_RESULT_HANDOFF_CAPABILITY),
         Some(serde_json::Value::Bool(true))
     )
 }
@@ -1089,13 +1100,12 @@ impl ModelWatcher {
                         .deactivate_prefill_router_for_decode(&model_name, worker_namespace);
                 }
                 Some(WorkerType::Encode) if card.model_type.is_empty() => {
-                    // A surface-less encode helper (e.g. vLLM) never ran the
-                    // model_type pipeline chain, so it created no prefill/decode
-                    // activator state. Skip the decode waiter cleanup — that map
-                    // is keyed by (model, namespace) and clearing it on an
-                    // unrelated encode removal could drop a live DecodeWaiting
-                    // and recreate the stale-prefill-router rebuild failure
-                    // described above.
+                    if removed.is_some() {
+                        self.manager
+                            .remove_encoder_activator(&model_name, worker_namespace);
+                    }
+                    self.manager
+                        .deactivate_encoder_router_for_consumers(&model_name, worker_namespace);
                 }
                 Some(WorkerType::Decode)
                 | Some(WorkerType::Aggregated)
@@ -1116,6 +1126,8 @@ impl ModelWatcher {
                     // is a no-op.
                     self.manager
                         .remove_decode_prefill_waiter(&model_name, worker_namespace);
+                    self.manager
+                        .remove_consumer_encoder_waiter(&model_name, worker_namespace);
                 }
             }
         }
@@ -1367,6 +1379,37 @@ impl ModelWatcher {
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
         worker_set.set_instance_watcher(instance_watcher);
 
+        // A surface-less Encode worker is reached only through EncoderRouter.
+        // Register it for serving readiness, publish its endpoint to any
+        // waiting token pipeline, and do not build a public OpenAI surface.
+        if effective_worker_type(card.worker_type, card.model_type) == WorkerType::Encode
+            && card.model_type.is_empty()
+        {
+            if card.model_input != ModelInput::Tokens {
+                anyhow::bail!(
+                    "Encode workers must use ModelInput::Tokens, got {}",
+                    card.model_input.as_str()
+                );
+            }
+            self.manager
+                .add_worker_set(card.name(), &ws_key, worker_set);
+
+            if let Some(tx) = &self.model_update_tx {
+                tx.send(ModelUpdate::Added(card.clone())).await.ok();
+            }
+            self.manager.activate_encoder_router(
+                card.name(),
+                &namespace,
+                component.endpoint(&mcid.endpoint),
+            );
+            tracing::info!(
+                model_name = card.name(),
+                namespace = %namespace,
+                "Encode worker registered and router activated"
+            );
+            return Ok(());
+        }
+
         // worker_type-driven short circuit for Prefill.
         //
         // A prefill worker carries no OpenAI-style engine — it is reached only
@@ -1403,6 +1446,10 @@ impl ModelWatcher {
             // and go.
             self.manager
                 .add_worker_set(card.name(), &ws_key, worker_set);
+
+            if supports_encoder_result_handoff(card) {
+                self.manager.enable_encoder_routing(card.name(), &namespace);
+            }
 
             if let Some(tx) = &self.model_update_tx {
                 tx.send(ModelUpdate::Added(card.clone())).await.ok();
@@ -1548,12 +1595,24 @@ impl ModelWatcher {
                 None
             };
 
+            let encoder_chooser = if needs_preprocessed_routing {
+                if supports_encoder_result_handoff(card) {
+                    self.manager.enable_encoder_routing(&model_name, &namespace);
+                }
+                self.manager
+                    .register_encoder_router(&model_name, &namespace)
+                    .map(|rx| EncoderRouter::new(rx, model_name.clone(), namespace.clone()))
+            } else {
+                None
+            };
+
             // Store KV router, worker monitor, and prefill router on the WorkerSet.
             // The prefill router is stored so the watcher can deactivate/reactivate it
             // when prefill workers die or rejoin.
             worker_set.kv_router = kv_chooser.clone();
             worker_set.worker_monitor = worker_monitor.clone();
             worker_set.prefill_router = prefill_chooser.clone();
+            worker_set.encoder_router = encoder_chooser.clone();
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
@@ -1564,6 +1623,7 @@ impl ModelWatcher {
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
+                        encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
                     )
@@ -1978,6 +2038,23 @@ mod tests {
             .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, false)
             .unwrap();
         assert!(!supports_vllm_generate(&card));
+    }
+
+    #[test]
+    fn encoder_result_handoff_requires_explicit_worker_capability() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.needs = vec![vec![WorkerType::Encode]];
+        assert!(!supports_encoder_result_handoff(&card));
+
+        card.runtime_config
+            .set_engine_specific(ENCODER_RESULT_HANDOFF_CAPABILITY, true)
+            .unwrap();
+        assert!(supports_encoder_result_handoff(&card));
+
+        card.runtime_config
+            .set_engine_specific(ENCODER_RESULT_HANDOFF_CAPABILITY, false)
+            .unwrap();
+        assert!(!supports_encoder_result_handoff(&card));
     }
 
     #[test]

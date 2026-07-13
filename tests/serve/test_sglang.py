@@ -783,6 +783,39 @@ sglang_configs = {
             ),
         ],
     ),
+    "diffusion_llada": SGLangConfig(
+        # LLaDA2.0 diffusion LM: text via iterative refinement (not autoregressive),
+        # served over /v1/chat/completions, so it uses a chat payload.
+        name="diffusion_llada",
+        directory=sglang_dir,
+        script_name="diffusion_llada.sh",
+        # diffusion_llada.sh forwards "$@"; 0.4 OOMs the sglang scheduler, 0.7 boots.
+        script_args=["--mem-fraction-static", "0.7"],
+        marks=[
+            # Text diffusion LM (not image/video), so component marker is core.
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.h100,
+            pytest.mark.profiled_vram_gib(56.0),
+            # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
+            pytest.mark.timeout(600),
+            pytest.mark.nightly,
+        ],
+        model="inclusionAI/LLaDA2.0-mini-preview",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # Non-deterministic diffusion output: accept any non-empty response.
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=[],
+                # Small: diffusion decode cost scales with tokens.
+                max_tokens=32,
+                temperature=0.0,
+            ),
+        ],
+    ),
     "anthropic_messages": SGLangConfig(
         name="anthropic_messages",
         directory=sglang_dir,

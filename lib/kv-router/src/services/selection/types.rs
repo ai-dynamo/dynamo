@@ -435,8 +435,6 @@ pub struct SelectAndReserveRequest {
     pub routing_group: String,
     #[serde(default)]
     pub selection_id: Option<String>,
-    #[serde(default)]
-    pub reservation_id: Option<String>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
     #[serde(default)]
@@ -463,7 +461,7 @@ pub struct ReservationRequest {
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    pub reservation_id: String,
+    pub selection_id: String,
     pub worker_id: WorkerId,
     #[serde(default)]
     pub dp_rank: Option<DpRank>,
@@ -511,8 +509,6 @@ pub struct OverlapScoresRequest {
 pub struct SelectResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reservation_id: Option<String>,
     pub model_name: String,
     pub routing_group: String,
     pub worker_id: WorkerId,
@@ -525,7 +521,7 @@ pub struct SelectResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ReservationResponse {
-    pub reservation_id: String,
+    pub selection_id: String,
     pub model_name: String,
     pub routing_group: String,
     pub worker_id: WorkerId,
