@@ -295,6 +295,7 @@
 /lib/llm/src/protocols/openai/videos/                                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /lib/runtime/examples/system_metrics/                                                         @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/frontend/agent_smoke_inputs.py                                                         @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
+/components/src/dynamo/sglang_sidecar/                                                        @ai-dynamo/dynamo-backend-sglang-codeowners @connorcarpenter15
 /lib/llm/src/kv_router/shared_cache.rs                                                        @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/runtime/examples/service_metrics/                                                        @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/handlers.py                                                       @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-rl-codeowners
