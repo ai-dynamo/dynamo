@@ -198,7 +198,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     self.prompt_registry
                         .apply_membership_delta_and_load_without_cleanup(
                             event_worker,
-                            &slot.trie_lookup,
                             outcome.membership_delta,
                             load,
                         );
@@ -224,12 +223,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     let delta = seq.free(&request_id, decay_now);
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(
-                            worker,
-                            &slot.trie_lookup,
-                            delta,
-                            load,
-                        );
+                        .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
                     load
                 };
                 drop(table);

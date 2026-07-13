@@ -297,6 +297,13 @@ pub mod llm {
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
+    /// HTTP status code returned when the frontend rejects a request because
+    /// all workers are overloaded. Defaults to 529 ("Site is overloaded"); set
+    /// to 503 for Service Unavailable retry semantics. Any valid HTTP status
+    /// code (100–999) is accepted; an unparseable or out-of-range value falls
+    /// back to 529.
+    pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -532,6 +539,12 @@ pub mod llm {
         /// First-frame ZMQ topic filter override for harness tool events.
         pub const DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC: &str =
             "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
+
+        /// Comma/whitespace-separated allowlist of HTTP request header names to
+        /// record in request payload records. Unset/empty captures none. Values
+        /// are recorded unredacted; avoid credential-bearing headers.
+        pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
+            "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
     }
 }
 
@@ -774,6 +787,7 @@ mod tests {
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
@@ -823,6 +837,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+            llm::request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
             llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,

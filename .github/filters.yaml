@@ -80,6 +80,10 @@ ignore:
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
+  - 'scripts/validate_skills.py'
+  # CODEOWNERS generation tooling (data + scripts). Validated by its own
+  # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
+  - '.github/codeowners/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -134,6 +138,9 @@ operator:
   - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
+  # The operator check owns the real Go/Python DGD override contract test.
+  - 'components/src/dynamo/profiler/utils/dgd_override.py'
+  - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:

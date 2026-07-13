@@ -686,9 +686,9 @@ class SelectionService:
         ...
 
     def list_workers(
-        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:
-        """List catalog records, optionally filtered by model and tenant."""
+        """List catalog records, optionally filtered by model and routing group."""
         ...
 
     def ready(self) -> JsonLike:
@@ -711,22 +711,22 @@ class SelectionService:
         """Book a request's load against a chosen worker."""
         ...
 
-    async def prefill_complete(self, reservation_id: str) -> None:
+    async def prefill_complete(self, selection_id: str) -> None:
         """Mark a reservation's prefill complete; its load shifts prefill -> decode."""
         ...
 
     def add_output_block(
-        self, reservation_id: str, *, decay_fraction: Optional[float] = None
+        self, selection_id: str, *, decay_fraction: Optional[float] = None
     ) -> None:
         """Record one decode output block for a reservation, advancing its decode load."""
         ...
 
-    async def free_reservation(self, reservation_id: str) -> None:
+    async def free_reservation(self, selection_id: str) -> None:
         """Free a finished reservation, releasing its tracked load."""
         ...
 
     def loads(
-        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+        self, *, model_name: Optional[str] = None, routing_group: Optional[str] = None
     ) -> JsonLike:
         """Current per-model active load (pending counts + per-worker potential loads)."""
         ...

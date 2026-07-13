@@ -7,8 +7,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,21 +21,14 @@ import (
 func TestRunAppliesVersionedOverride(t *testing.T) {
 	t.Parallel()
 
-	directory := t.TempDir()
-	blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-	overridePath := writeTestFile(t, directory, "override.json", alphaOverrideDGDJSON)
-	outputPath := filepath.Join(directory, "effective.yaml")
 	stderr := &bytes.Buffer{}
+	stdout := &bytes.Buffer{}
 
-	err := run([]string{
-		"--blueprint", blueprintPath,
-		"--override", overridePath,
-		"--output", outputPath,
-	}, stderr)
+	err := run(nil, applyRequestReader(t, betaBlueprintJSON, alphaOverrideDGDJSON), stdout, stderr)
 	require.NoError(t, err)
 	assert.Empty(t, stderr.String())
 
-	effective := mustReadDGD(t, outputPath)
+	effective := mustDecodeDGD(t, stdout.Bytes())
 	assert.Equal(t, "nvidia.com/v1beta1", effective.GetAPIVersion())
 	assert.Equal(t, "DynamoGraphDeployment", effective.GetKind())
 	assert.Equal(t, "generated", effective.GetName())
@@ -43,76 +38,64 @@ func TestRunAppliesVersionedOverride(t *testing.T) {
 func TestRunWithEmptyOverridePreservesBlueprint(t *testing.T) {
 	t.Parallel()
 
-	directory := t.TempDir()
-	blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-	overridePath := writeTestFile(t, directory, "override.yaml", `
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-`)
-	outputPath := filepath.Join(directory, "effective.yaml")
+	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 
-	err := run([]string{
-		"--blueprint", blueprintPath,
-		"--override", overridePath,
-		"--output", outputPath,
-	}, stderr)
+	err := run(
+		nil,
+		applyRequestReader(t, betaBlueprintJSON, `{
+			"apiVersion": "nvidia.com/v1beta1",
+			"kind": "DynamoGraphDeployment"
+		}`),
+		stdout,
+		stderr,
+	)
 	require.NoError(t, err)
 	assert.Empty(t, stderr.String())
-	assert.Equal(t, mustReadDGD(t, blueprintPath), mustReadDGD(t, outputPath))
+	assert.Equal(t, mustDecodeDGD(t, []byte(betaBlueprintJSON)), mustDecodeDGD(t, stdout.Bytes()))
 }
 
 func TestRunEmitsWarningsForIgnoredTopology(t *testing.T) {
 	t.Parallel()
 
-	directory := t.TempDir()
-	blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-	overridePath := writeTestFile(t, directory, "override.yaml", `
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-spec:
-  components:
-  - name: Missing
-    replicas: 2
-`)
-	outputPath := filepath.Join(directory, "effective.yaml")
+	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 
-	err := run([]string{
-		"--blueprint", blueprintPath,
-		"--override", overridePath,
-		"--output", outputPath,
-	}, stderr)
+	err := run(
+		nil,
+		applyRequestReader(t, betaBlueprintJSON, `{
+			"apiVersion": "nvidia.com/v1beta1",
+			"kind": "DynamoGraphDeployment",
+			"spec": {"components": [{"name": "Missing", "replicas": 2}]}
+		}`),
+		stdout,
+		stderr,
+	)
 	require.NoError(t, err)
 	assert.Contains(
 		t,
 		stderr.String(),
 		"warning: spec.components[name=Missing]: ignored because the generated blueprint has no such component",
 	)
-	assert.Equal(t, "old-image", mainContainerImage(t, mustReadDGD(t, outputPath)))
+	assert.Equal(t, "old-image", mainContainerImage(t, mustDecodeDGD(t, stdout.Bytes())))
 }
 
-func TestRunDoesNotReplaceOutputOnFailure(t *testing.T) {
+func TestRunDoesNotWriteOutputOnFailure(t *testing.T) {
 	t.Parallel()
 
-	directory := t.TempDir()
-	blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-	overridePath := writeTestFile(t, directory, "override.yaml", `
-apiVersion: nvidia.com/v2
-kind: DynamoGraphDeployment
-`)
-	outputPath := writeTestFile(t, directory, "effective.yaml", "existing output\n")
-
-	err := run([]string{
-		"--blueprint", blueprintPath,
-		"--override", overridePath,
-		"--output", outputPath,
-	}, &bytes.Buffer{})
+	stdout := &bytes.Buffer{}
+	err := run(
+		nil,
+		applyRequestReader(t, betaBlueprintJSON, `{
+			"apiVersion": "nvidia.com/v2",
+			"kind": "DynamoGraphDeployment"
+		}`),
+		stdout,
+		&bytes.Buffer{},
+	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "apply DGD override")
-	content, readErr := os.ReadFile(outputPath)
-	require.NoError(t, readErr)
-	assert.Equal(t, "existing output\n", string(content))
+	assert.Empty(t, stdout.String())
 }
 
 func TestRunInstallsExecutable(t *testing.T) {
@@ -120,7 +103,7 @@ func TestRunInstallsExecutable(t *testing.T) {
 
 	installPath := filepath.Join(t.TempDir(), "dgd-apply-overrides")
 	stderr := &bytes.Buffer{}
-	require.NoError(t, run([]string{"--install-to", installPath}, stderr))
+	require.NoError(t, run([]string{"--install-to", installPath}, strings.NewReader(""), &bytes.Buffer{}, stderr))
 	assert.Empty(t, stderr.String())
 
 	installed, err := os.Stat(installPath)
@@ -133,82 +116,110 @@ func TestRunInstallsExecutable(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o755), installed.Mode().Perm())
 }
 
+func TestRunPrintsProtocolVersion(t *testing.T) {
+	t.Parallel()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	require.NoError(t, run([]string{"--protocol-version"}, strings.NewReader(""), stdout, stderr))
+	assert.Equal(t, protocolVersion+"\n", stdout.String())
+	assert.Empty(t, stderr.String())
+}
+
 func TestRunRejectsInvalidArgumentsAndInput(t *testing.T) {
 	t.Parallel()
 
-	t.Run("missing flags", func(t *testing.T) {
-		err := run(nil, &bytes.Buffer{})
+	t.Run("empty request", func(t *testing.T) {
+		err := run(nil, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--blueprint, --override, --output")
+		assert.Contains(t, err.Error(), "decode request JSON")
 	})
 
 	t.Run("unexpected positional argument", func(t *testing.T) {
-		err := run([]string{"extra"}, &bytes.Buffer{})
+		err := run([]string{"extra"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unexpected positional arguments")
 	})
 
-	t.Run("install mixed with merge flags", func(t *testing.T) {
-		err := run([]string{"--install-to", "/tmp/tool", "--blueprint", "/tmp/blueprint"}, &bytes.Buffer{})
+	t.Run("removed file flag", func(t *testing.T) {
+		err := run([]string{"--blueprint", "/tmp/blueprint"}, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--install-to cannot be combined")
+		assert.Contains(t, err.Error(), "flag provided but not defined: -blueprint")
 	})
 
-	t.Run("malformed blueprint", func(t *testing.T) {
-		directory := t.TempDir()
-		blueprintPath := writeTestFile(t, directory, "blueprint.yaml", "spec: [\n")
-		overridePath := writeTestFile(t, directory, "override.yaml", alphaOverrideDGDJSON)
-		err := run([]string{
-			"--blueprint", blueprintPath,
-			"--override", overridePath,
-			"--output", filepath.Join(directory, "effective.yaml"),
-		}, &bytes.Buffer{})
+	t.Run("protocol version mixed with install mode", func(t *testing.T) {
+		err := run(
+			[]string{"--protocol-version", "--install-to", "/tmp/tool"},
+			strings.NewReader(""),
+			&bytes.Buffer{},
+			&bytes.Buffer{},
+		)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "decode blueprint YAML")
+		assert.Contains(t, err.Error(), "--install-to and --protocol-version are mutually exclusive")
 	})
 
-	t.Run("malformed override", func(t *testing.T) {
-		directory := t.TempDir()
-		blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-		overridePath := writeTestFile(t, directory, "override.yaml", "spec: [\n")
-		err := run([]string{
-			"--blueprint", blueprintPath,
-			"--override", overridePath,
-			"--output", filepath.Join(directory, "effective.yaml"),
-		}, &bytes.Buffer{})
+	t.Run("malformed request", func(t *testing.T) {
+		err := run(nil, strings.NewReader("{"), &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "decode override YAML")
+		assert.Contains(t, err.Error(), "decode request JSON")
+	})
+
+	t.Run("missing blueprint", func(t *testing.T) {
+		err := run(nil, strings.NewReader(`{"override": {}}`), &bytes.Buffer{}, &bytes.Buffer{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request blueprint is required")
+	})
+
+	t.Run("missing override", func(t *testing.T) {
+		err := run(nil, strings.NewReader(`{"blueprint": {}}`), &bytes.Buffer{}, &bytes.Buffer{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "request override is required")
+	})
+
+	t.Run("unknown request field", func(t *testing.T) {
+		err := run(nil, strings.NewReader(`{"blueprint": {}, "override": {}, "extra": {}}`), &bytes.Buffer{}, &bytes.Buffer{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown field "extra"`)
+	})
+
+	t.Run("multiple request values", func(t *testing.T) {
+		input := `{"blueprint":` + betaBlueprintJSON + `,"override":` + alphaOverrideDGDJSON + `}{}`
+		err := run(nil, strings.NewReader(input), &bytes.Buffer{}, &bytes.Buffer{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple JSON values")
+	})
+
+	t.Run("non-object blueprint", func(t *testing.T) {
+		err := run(nil, applyRequestReader(t, `"not-an-object"`, alphaOverrideDGDJSON), &bytes.Buffer{}, &bytes.Buffer{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "decode request blueprint object")
 	})
 
 	t.Run("DGDR resource instead of DGD override", func(t *testing.T) {
-		directory := t.TempDir()
-		blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-		overridePath := writeTestFile(t, directory, "dgdr.yaml", `
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeploymentRequest
-spec: {}
-`)
-		err := run([]string{
-			"--blueprint", blueprintPath,
-			"--override", overridePath,
-			"--output", filepath.Join(directory, "effective.yaml"),
-		}, &bytes.Buffer{})
+		err := run(nil, applyRequestReader(t, betaBlueprintJSON, `{
+			"apiVersion": "nvidia.com/v1beta1",
+			"kind": "DynamoGraphDeploymentRequest",
+			"spec": {}
+		}`), &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "apply DGD override")
 		assert.Contains(t, err.Error(), `kind "DynamoGraphDeploymentRequest"`)
 	})
 }
 
-func writeTestFile(t *testing.T, directory string, name string, content string) string {
+func applyRequestReader(t *testing.T, blueprint string, override string) *bytes.Reader {
 	t.Helper()
-	path := filepath.Join(directory, name)
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
-	return path
+	request, err := json.Marshal(applyRequest{
+		Blueprint: json.RawMessage(blueprint),
+		Override:  json.RawMessage(override),
+	})
+	require.NoError(t, err)
+	return bytes.NewReader(request)
 }
 
-func mustReadDGD(t *testing.T, path string) *unstructured.Unstructured {
+func mustDecodeDGD(t *testing.T, data []byte) *unstructured.Unstructured {
 	t.Helper()
-	object, err := readDGD(path, "test DGD")
+	object, err := decodeDGD(data, "test DGD")
 	require.NoError(t, err)
 	return object
 }
@@ -239,24 +250,38 @@ func mainContainerImage(t *testing.T, dgd *unstructured.Unstructured) string {
 	return ""
 }
 
-const betaBlueprintYAML = `
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: generated
-  namespace: default
-spec:
-  backendFramework: vllm
-  components:
-  - name: Frontend
-    type: frontend
-  - name: Worker
-    type: worker
-    podTemplate:
-      spec:
-        containers:
-        - name: main
-          image: old-image
+const betaBlueprintJSON = `
+{
+  "apiVersion": "nvidia.com/v1beta1",
+  "kind": "DynamoGraphDeployment",
+  "metadata": {
+    "name": "generated",
+    "namespace": "default"
+  },
+  "spec": {
+    "backendFramework": "vllm",
+    "components": [
+      {
+        "name": "Frontend",
+        "type": "frontend"
+      },
+      {
+        "name": "Worker",
+        "type": "worker",
+        "podTemplate": {
+          "spec": {
+            "containers": [
+              {
+                "name": "main",
+                "image": "old-image"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  }
+}
 `
 
 const alphaOverrideDGDJSON = `
