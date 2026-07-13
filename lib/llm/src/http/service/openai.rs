@@ -539,7 +539,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-fn context_from_headers<T: Send + Sync + 'static>(
+pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request: T,
     request_id: String,
     headers: &HeaderMap,
@@ -1255,7 +1255,13 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
+    if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
+        request.insert(
+            crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+            captured,
+        );
+    }
     let context = request.context();
 
     // create the connection handles
@@ -2160,7 +2166,13 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
+    if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
+        request.insert(
+            crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+            captured,
+        );
+    }
     let context = request.context();
 
     // create the connection handles

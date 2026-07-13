@@ -189,7 +189,7 @@ Values you will see in the `dynamo_endpoint` label on backend workers:
 | Value | Meaning |
 |-------|---------|
 | `generate` | Main inference RPC; one increment per request received. On a prefill worker this counts prefill-stage `generate` calls (one per request the router routes through); on a decode worker this counts decode-stage `generate` calls. |
-| `clear_kv_blocks` | Admin RPC to flush the worker's KV cache. Registered on both prefill and decode workers. |
+| `clear_kv_blocks` | Legacy vLLM distributed admin RPC to flush the worker's KV cache, registered on prefill and decode workers. Unified vLLM workers expose the operation through `/engine/control/clear_kv_blocks` on the system server instead; that route is not a component endpoint and does not emit this `dynamo_endpoint` label. |
 | `worker_kv_indexer_query_dp{N}` | KV-router queries to the worker's local KV indexer about its cached prefix blocks. One endpoint per data-parallel rank (`_dp0`, `_dp1`, …). Appears on the worker that owns the prefix caches the router consults — in disaggregated serving that is the prefill worker. |
 
 #### Component Error Types
