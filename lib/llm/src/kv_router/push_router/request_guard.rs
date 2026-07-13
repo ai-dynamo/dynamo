@@ -57,7 +57,7 @@ impl RequestCleanup {
             if let RequestOutcome::Completed { context_tokens } = outcome {
                 lease.mark_completed(context_tokens);
             }
-            // AdmissionLease reports the terminal outcome through the shared dirty set.
+            // AdmissionLease reports the terminal outcome to the scheduler actor.
             // The scheduler actor remains the sole owner of booking and queue cleanup.
             drop(lease);
             Ok(())
@@ -93,7 +93,7 @@ impl Drop for RequestCleanup {
             return;
         }
 
-        // AdmissionLease drops after this method and performs coalesced actor-owned cleanup.
+        // AdmissionLease drops after this method and performs actor-owned cleanup.
         if self.admission_lease.is_some() {
             return;
         }

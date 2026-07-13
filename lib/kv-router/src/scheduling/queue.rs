@@ -83,6 +83,10 @@ enum AdmissionCommand {
     Dispatched {
         request_id: String,
     },
+    Cleanup {
+        request_id: String,
+        outcome: RequestOutcome,
+    },
     Finished {
         request_id: String,
         outcome: RequestOutcome,
@@ -116,12 +120,12 @@ impl AdmissionCleanup {
 /// Single-owner cleanup lease for one scheduler-tracked request.
 ///
 /// Ownership moves from worker selection into the response stream. Dropping
-/// either phase retains one dirty outcome for actor-owned cleanup and wakes the
-/// actor without allocating a Tokio task.
+/// either phase reports one terminal outcome to the actor, falling back to the
+/// coalesced dirty set only when the actor channel is full.
 #[must_use = "dropping the lease reports the request outcome to the scheduler actor"]
 pub struct AdmissionLease {
     cleanup: Arc<AdmissionCleanup>,
-    _actor_tx: mpsc::Sender<AdmissionCommand>,
+    actor_tx: mpsc::Sender<AdmissionCommand>,
     request_id: Option<String>,
     outcome: RequestOutcome,
 }
@@ -151,7 +155,23 @@ impl Drop for AdmissionLease {
         let Some(request_id) = self.request_id.take() else {
             return;
         };
-        self.cleanup.enqueue(request_id, self.outcome);
+        let command = AdmissionCommand::Cleanup {
+            request_id,
+            outcome: self.outcome,
+        };
+        match self.actor_tx.try_send(command) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(command)) => {
+                let AdmissionCommand::Cleanup {
+                    request_id,
+                    outcome,
+                } = command
+                else {
+                    unreachable!("lease cleanup only sends terminal outcomes")
+                };
+                self.cleanup.enqueue(request_id, outcome);
+            }
+        }
     }
 }
 
@@ -565,7 +585,7 @@ impl<
         let request_id = request_id?.to_owned();
         Some(AdmissionLease {
             cleanup: Arc::clone(&self.cleanup),
-            _actor_tx: self.admission_tx.clone(),
+            actor_tx: self.admission_tx.clone(),
             request_id: Some(request_id),
             outcome: RequestOutcome::Aborted,
         })
@@ -659,14 +679,14 @@ impl<
                 biased;
                 command = rx.recv() => command,
                 _ = self.cleanup.notify.notified() => {
-                    if self.drain_cleanup() {
+                    if self.drain_cleanup(None) {
                         self.handle_update(None).await;
                     }
                     continue;
                 }
             };
             let Some(command) = command else {
-                self.drain_cleanup();
+                self.drain_cleanup(None);
                 break;
             };
             match command {
@@ -676,7 +696,7 @@ impl<
                     ack_tx,
                 } => {
                     let made_ready =
-                        self.handle_enqueue(request, block_hashes) | self.drain_cleanup();
+                        self.handle_enqueue(request, block_hashes) | self.drain_cleanup(None);
                     if made_ready {
                         self.handle_update(None).await;
                     }
@@ -684,20 +704,28 @@ impl<
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
                     self.handle_update(worker).await;
-                    if self.drain_cleanup() {
+                    if self.drain_cleanup(None) {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
                 }
                 AdmissionCommand::Reconcile { force, ack_tx } => {
                     self.handle_reconcile(force).await;
-                    if self.drain_cleanup() {
+                    if self.drain_cleanup(None) {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
                 }
                 AdmissionCommand::Dispatched { request_id } => {
-                    if self.handle_dispatched(&request_id) | self.drain_cleanup() {
+                    if self.handle_dispatched(&request_id) | self.drain_cleanup(None) {
+                        self.handle_update(None).await;
+                    }
+                }
+                AdmissionCommand::Cleanup {
+                    request_id,
+                    outcome,
+                } => {
+                    if self.drain_cleanup(Some((request_id, outcome))) {
                         self.handle_update(None).await;
                     }
                 }
@@ -705,7 +733,7 @@ impl<
                     request_id,
                     outcome,
                 } => {
-                    if self.handle_finished(&request_id, outcome) | self.drain_cleanup() {
+                    if self.handle_finished(&request_id, outcome) | self.drain_cleanup(None) {
                         self.handle_update(None).await;
                     }
                 }
@@ -958,8 +986,11 @@ impl<
         self.apply_admission_actions(actions)
     }
 
-    fn drain_cleanup(&mut self) -> bool {
-        let dirty = self.cleanup.drain();
+    fn drain_cleanup(&mut self, initial: Option<(String, RequestOutcome)>) -> bool {
+        let mut dirty = self.cleanup.drain();
+        if let Some((request_id, outcome)) = initial {
+            dirty.insert(request_id, outcome);
+        }
         if dirty.is_empty() {
             return false;
         }
@@ -2485,6 +2516,36 @@ policy_classes:
         .expect("completed lease did not commit admission context");
         slots.assert_completely_drained(decay_now());
         assert!(state.lock().unwrap().aborted.is_empty());
+    }
+
+    #[test]
+    fn lease_drop_uses_actor_channel_then_overflow_cleanup() {
+        let cleanup = Arc::new(AdmissionCleanup::default());
+        let (actor_tx, mut actor_rx) = mpsc::channel(1);
+        let lease = |request_id: &str| AdmissionLease {
+            cleanup: Arc::clone(&cleanup),
+            actor_tx: actor_tx.clone(),
+            request_id: Some(request_id.to_owned()),
+            outcome: RequestOutcome::Aborted,
+        };
+
+        drop(lease("fast-path"));
+        assert!(matches!(
+            actor_rx.try_recv(),
+            Ok(AdmissionCommand::Cleanup { request_id, .. }) if request_id == "fast-path"
+        ));
+        assert!(cleanup.drain().is_empty());
+
+        actor_tx
+            .try_send(AdmissionCommand::Dispatched {
+                request_id: "occupied".to_owned(),
+            })
+            .unwrap();
+        drop(lease("overflow"));
+        assert!(matches!(
+            cleanup.drain().get("overflow"),
+            Some(RequestOutcome::Aborted)
+        ));
     }
 
     #[tokio::test]
