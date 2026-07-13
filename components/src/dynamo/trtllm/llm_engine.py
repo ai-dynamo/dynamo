@@ -867,6 +867,20 @@ class TrtllmLLMEngine(LLMEngine):
         # id so the engine's no-id balancing fallback runs. Otherwise honour the router's DP
         # rank decision; without it TRT-LLM picks its own rank and KV events land on the wrong
         # publisher.
+        #
+        # TODO(TRT-LLM tracking issue): rank-ownership mismatch. TRT-LLM's
+        # `ConversationAwareADPRouter` currently honors an explicit
+        # `attention_dp_rank` BEFORE looking up affinity AND does NOT record a
+        # `conversation_id -> rank` binding when explicit placement wins. Sticky
+        # routing here relies on Dynamo always suppressing the rank when
+        # affinity is enabled (as this branch does); if any other path leaks an
+        # explicit rank into an affinity-enabled request (e.g. frontend
+        # `push_router` still stamps a rank in some flows), the engine will
+        # honor the leaked rank without laying down a binding, and turn 2 will
+        # silently drift off the KV-cache-warmed worker. The safer fix is on
+        # the engine side (always record the binding, whether the rank came
+        # from explicit placement or fresh selection). Track upstream and drop
+        # this note when the router records unconditionally.
         conversation_params = None
         if self._conversation_affinity:
             scheduling_params = None
