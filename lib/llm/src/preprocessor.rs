@@ -849,14 +849,17 @@ impl OpenAIPreprocessor {
         }
 
         let mut preprocessed = builder.build()?;
-        if prompt_injected_reasoning && self.runtime_config.reasoning_parser.is_some() {
+        if let Some(reasoning_ended) = Self::prompt_injected_reasoning_ended_arg(
+            self.runtime_config.reasoning_parser.as_deref(),
+            formatted_prompt.as_deref(),
+        ) {
             let extra_args = preprocessed
                 .extra_args
                 .get_or_insert_with(|| serde_json::json!({}));
             let extra_args = extra_args
                 .as_object_mut()
                 .context("preprocessed extra_args must be an object")?;
-            extra_args.insert("reasoning_ended".to_string(), false.into());
+            extra_args.insert("reasoning_ended".to_string(), reasoning_ended.into());
         }
 
         // If omitted, allow generation up to the remaining context length. Responses requests
@@ -1430,11 +1433,10 @@ impl OpenAIPreprocessor {
             if let Some(serde_json::Value::Object(backend_extra_args)) = Self::backend_extra_args(
                 request,
                 self.runtime_config.reasoning_parser.is_some(),
-                Self::prompt_injected_reasoning_start(
+                Self::prompt_injected_reasoning_ended_arg(
                     self.runtime_config.reasoning_parser.as_deref(),
                     formatted_prompt,
-                )
-                .then_some(false),
+                ),
             ) {
                 let extra_args_obj = extra_args
                     .as_object_mut()
@@ -2876,6 +2878,23 @@ impl OpenAIPreprocessor {
         }
     }
 
+    fn prompt_injected_reasoning_ended_arg(
+        reasoning_parser: Option<&str>,
+        formatted_prompt: Option<&str>,
+    ) -> Option<bool> {
+        let should_forward = matches!(
+            reasoning_parser,
+            Some("minimax_m2" | "minimax_m3" | "minimax-m3")
+        );
+        if should_forward
+            && Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt)
+        {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For Nemotron force-reasoning aliases: disabled when chat_template_args
@@ -3984,6 +4003,56 @@ mod tests {
         for (parser, prompt, expected, desc) in cases {
             assert_eq!(
                 OpenAIPreprocessor::prompt_injected_reasoning_start(parser, prompt),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_prompt_injected_reasoning_ended_backend_arg_by_parser() {
+        let cases = [
+            (
+                Some("minimax_m2"),
+                Some("...<think>\n"),
+                Some(false),
+                "MiniMax M2 needs native backend reasoning state aligned with the prompt",
+            ),
+            (
+                Some("minimax_m3"),
+                Some("...<mm:think>\n"),
+                Some(false),
+                "MiniMax M3 needs native backend reasoning state aligned with the prompt",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some("...<think>\n"),
+                None,
+                "DeepSeek V4 native guided JSON must not be forced into reasoning mode",
+            ),
+            (
+                Some("deepseek-v4"),
+                Some("...<think>\n"),
+                None,
+                "DeepSeek V4 alias must not receive reasoning_ended=false",
+            ),
+            (
+                Some("qwen3"),
+                Some("...<think>\n"),
+                None,
+                "Qwen-style prompt injection is handled by Dynamo postprocessing only",
+            ),
+            (
+                Some("minimax_m2"),
+                Some("plain prompt"),
+                None,
+                "no injected reasoning opener means no backend state override",
+            ),
+        ];
+
+        for (parser, prompt, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(parser, prompt),
                 expected,
                 "FAILED: {desc}",
             );
