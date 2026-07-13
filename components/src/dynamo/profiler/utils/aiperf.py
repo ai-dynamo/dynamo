@@ -61,8 +61,6 @@ def _get_common_aiperf_cmd(
         base_url,
         "--extra-inputs",
         "ignore_eos:true",
-        "--extra-inputs",
-        '{"nvext":{"ignore_eos":true}}',
         "--warmup-request-count",
         str(warmup_request_count),
         "--artifact-dir",
@@ -203,8 +201,9 @@ def benchmark_prefill(
         aiperf_result = get_aiperf_result(aiperf_artifact_dir)
         return aiperf_result
     else:
-        logger.error(f"AIPerf failed with error code: {aiperf_process.returncode}")
-        logger.error(f"stderr: {stderr}")
+        logger.error("AIPerf failed with error code: %s", aiperf_process.returncode)
+        logger.error("stdout: %s", stdout)
+        logger.error("stderr: %s", stderr)
         return None
 
 
@@ -370,6 +369,7 @@ def benchmark_decode(
         aiperf_result = get_aiperf_result(aiperf_artifact_dir)
         return aiperf_result
     else:
-        logger.error(f"AIPerf failed with error code: {aiperf_process.returncode}")
-        logger.error(f"stderr: {stderr}")
+        logger.error("AIPerf failed with error code: %s", aiperf_process.returncode)
+        logger.error("stdout: %s", stdout)
+        logger.error("stderr: %s", stderr)
         return None
