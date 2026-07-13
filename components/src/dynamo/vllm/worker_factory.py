@@ -49,6 +49,12 @@ from .publisher import StatLoggerFactory
 
 logger = logging.getLogger(__name__)
 
+# The active point has an 8s FPM deadline. ADP schedule/result, decision/commit,
+# boundary, and final cleanup phases each have a 10s bound. Their worst-case
+# healthy stop path is about 70s, with the remainder reserved for JSON writing
+# and scheduler-loop slack before failing closed.
+BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
+
 # (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
@@ -69,6 +75,73 @@ def _benchmark_merged_path(base_path: Path, dp_start: int) -> Path:
     return Path(f"{stem}{rank_suffix}_merged{ext}")
 
 
+def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
+    """Validate status/coverage invariants before accepting a rank artifact."""
+    status = data.get("status", "complete" if data.get("valid") is True else "failed")
+
+    def invalid(reason: str) -> RuntimeError:
+        return RuntimeError(
+            f"Self-benchmark produced incomplete results at {path}: {reason}; "
+            f"coverage={data.get('coverage')} "
+            f"skipped_points={data.get('skipped_points')} "
+            f"missing_phases={data.get('missing_phases')}"
+        )
+
+    if status not in {"complete", "partial"}:
+        raise invalid(f"status={status!r}")
+
+    coverage = data.get("coverage")
+    if not isinstance(coverage, dict):
+        raise invalid("missing coverage")
+    expected = coverage.get("expected_points")
+    completed = coverage.get("completed_points")
+    skipped = coverage.get("skipped_points")
+    if (
+        not isinstance(expected, int)
+        or not isinstance(completed, int)
+        or not isinstance(skipped, int)
+        or min(expected, completed, skipped) < 0
+        or completed + skipped > expected
+    ):
+        raise invalid("invalid coverage arithmetic")
+
+    skipped_points = data.get("skipped_points", [])
+    missing_phases = data.get("missing_phases", [])
+    results = data.get("results")
+    iteration_groups = data.get("iteration_groups")
+    if not isinstance(skipped_points, list) or len(skipped_points) != skipped:
+        raise invalid("skipped point count mismatch")
+    if not isinstance(missing_phases, list):
+        raise invalid("invalid missing phases")
+    if not isinstance(results, list) or len(results) != completed:
+        raise invalid("result count does not match completed coverage")
+    if not isinstance(iteration_groups, list) or len(iteration_groups) != completed:
+        raise invalid("iteration group count does not match completed coverage")
+
+    if status == "complete":
+        if (
+            data.get("valid") is not True
+            or ("usable" in data and data.get("usable") is not True)
+            or data.get("stop_reason") is not None
+            or completed != expected
+            or skipped != 0
+            or missing_phases
+            or data.get("error") is not None
+        ):
+            raise invalid("inconsistent complete status")
+    elif (
+        data.get("valid") is not False
+        or data.get("usable") is not True
+        or data.get("stop_reason") != "timeout"
+        or completed >= expected
+        or skipped != 0
+        or missing_phases
+        or data.get("error") is not None
+    ):
+        raise invalid("inconsistent partial status")
+    return status
+
+
 def _merge_benchmark_rank_results(
     rank_data: list[tuple[int, Path, dict]],
     merged_path: Path,
@@ -78,7 +151,7 @@ def _merge_benchmark_rank_results(
         raise RuntimeError("No self-benchmark rank results were loaded")
 
     source_ranks = [rank for rank, _, _ in rank_data]
-    reference_rank, _, reference = rank_data[0]
+    reference_rank, reference_path, reference = rank_data[0]
     run_id = reference.get("run_id")
     grid_digest = reference.get("grid_digest")
     if not isinstance(run_id, str) or not run_id:
@@ -86,20 +159,7 @@ def _merge_benchmark_rank_results(
     if not isinstance(grid_digest, str) or not grid_digest:
         raise RuntimeError("Self-benchmark rank results are missing grid_digest")
 
-    reference_status = reference.get(
-        "status", "complete" if reference.get("valid") is True else "failed"
-    )
-    if reference_status not in {"complete", "partial"}:
-        raise RuntimeError(
-            f"Self-benchmark rank {reference_rank} has unusable status "
-            f"{reference_status!r}"
-        )
-    if reference_status == "partial" and (
-        reference.get("stop_reason") != "timeout" or reference.get("usable") is not True
-    ):
-        raise RuntimeError(
-            f"Self-benchmark rank {reference_rank} has invalid partial results"
-        )
+    reference_status = _validate_benchmark_rank_payload(reference, reference_path)
 
     reference_coverage = reference.get("coverage")
     if not isinstance(reference_coverage, dict):
@@ -214,9 +274,7 @@ def _merge_benchmark_rank_results(
     rank_timings: list[tuple[int, dict]] = []
 
     for dp_rank, path, data in rank_data:
-        data_status = data.get(
-            "status", "complete" if data.get("valid") is True else "failed"
-        )
+        data_status = _validate_benchmark_rank_payload(data, path)
         if data_status != reference_status:
             raise RuntimeError(
                 f"Self-benchmark status mismatch at {path}: "
@@ -229,8 +287,6 @@ def _merge_benchmark_rank_results(
             )
         if data.get("stop_reason") != reference.get("stop_reason"):
             raise RuntimeError(f"Self-benchmark stop reason mismatch at {path}")
-        if reference_status == "partial" and data.get("usable") is not True:
-            raise RuntimeError(f"Self-benchmark partial rank {dp_rank} is unusable")
         if data.get("run_id") != run_id:
             raise RuntimeError(
                 f"Self-benchmark run_id mismatch at {path}: "
@@ -421,41 +477,37 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     )
 
     deadline = _time.monotonic() + timeout
+    hard_deadline = deadline + BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS
     timeout_warning_emitted = False
     while True:
         missing_paths = [path for path in rank_paths if not path.exists()]
         if not missing_paths:
             break
-        if _time.monotonic() > deadline and not timeout_warning_emitted:
-            logger.warning(
-                "Self-benchmark exceeded the %ds soft timeout; waiting for the "
-                "current profiling iteration to finish and partial results to be "
-                "written. Missing: %s",
-                timeout,
-                missing_paths,
-            )
-            timeout_warning_emitted = True
+        now = _time.monotonic()
+        if now > deadline:
+            if not timeout_warning_emitted:
+                logger.warning(
+                    "Self-benchmark exceeded the %ds soft timeout; waiting up to "
+                    "%ds for the current profiling iteration, rank cleanup, and "
+                    "partial result write. Missing: %s",
+                    timeout,
+                    BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS,
+                    missing_paths,
+                )
+                timeout_warning_emitted = True
+            if now > hard_deadline:
+                raise TimeoutError(
+                    "Self-benchmark did not publish results within the soft "
+                    f"timeout plus {BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS}s cleanup "
+                    f"grace. Missing: {missing_paths}"
+                )
         await asyncio.sleep(0.1)
 
     rank_data: list[tuple[int, Path, dict]] = []
     for dp_rank, p in zip(dp_ranks, rank_paths):
         with open(p) as f:
             data = json.load(f)
-        status = data.get(
-            "status", "complete" if data.get("valid") is True else "failed"
-        )
-        if status == "partial":
-            if data.get("stop_reason") != "timeout" or data.get("usable") is not True:
-                raise RuntimeError(
-                    f"Self-benchmark produced unusable partial results at {p}"
-                )
-        elif data.get("valid") is False:
-            raise RuntimeError(
-                f"Self-benchmark produced incomplete results at {p}: "
-                f"coverage={data.get('coverage')} "
-                f"skipped_points={data.get('skipped_points')} "
-                f"missing_phases={data.get('missing_phases')}"
-            )
+        _validate_benchmark_rank_payload(data, p)
         rank_data.append((dp_rank, p, data))
 
     merged = _merge_benchmark_rank_results(rank_data, merged_path)

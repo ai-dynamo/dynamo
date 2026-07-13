@@ -340,6 +340,7 @@ class _BenchmarkSynchronizer:
             self._endpoint = endpoint or f"tcp://{master_ip}:{port}"
             self._socket.connect(self._endpoint)
         self._socket.setsockopt(zmq.LINGER, 0)
+        self._cleanup_complete = False
 
     @property
     def run_id(self) -> str | None:
@@ -350,7 +351,12 @@ class _BenchmarkSynchronizer:
         return self._timeout_ms / 1000
 
     def close(self) -> None:
-        self._socket.close(linger=0)
+        linger = (
+            self._timeout_ms + int(self.FINAL_GO_GRACE_SECONDS * 1000)
+            if self._cleanup_complete
+            else 0
+        )
+        self._socket.close(linger=linger)
 
     def synchronize(
         self,
@@ -395,6 +401,7 @@ class _BenchmarkSynchronizer:
         fpms: list[dict],
         *,
         stop_requested: bool = False,
+        stop_deadline_monotonic: float | None = None,
     ) -> _BenchmarkGroupResult:
         """Gather one completed iteration and agree whether to stop the sweep."""
         result = {
@@ -406,10 +413,23 @@ class _BenchmarkSynchronizer:
             "stop_requested": stop_requested,
         }
         if self.dp_rank == 0:
-            return self._coordinate_results(result)
+            return self._coordinate_results(result, stop_deadline_monotonic)
 
         deadline = time.monotonic() + self.timeout_seconds
         self._socket.send_json(result)
+        self._recv_follower(deadline, point.benchmark_id, "group_prepare")
+        stop_requested = stop_requested or self._deadline_elapsed(
+            stop_deadline_monotonic
+        )
+        self._socket.send_json(
+            {
+                "type": "group_prepared",
+                "dp_rank": self.dp_rank,
+                "benchmark_id": point.benchmark_id,
+                "stop_requested": stop_requested,
+            }
+        )
+        deadline = time.monotonic() + self.timeout_seconds
         reply = self._recv_follower(deadline, point.benchmark_id, "group")
         rank_results = reply.get("rank_results")
         if not isinstance(rank_results, list):
@@ -417,7 +437,94 @@ class _BenchmarkSynchronizer:
         group_stop_requested = reply.get("stop_requested")
         if not isinstance(group_stop_requested, bool):
             raise RuntimeError("attention-DP benchmark group has invalid stop decision")
+        self._socket.send_json(
+            {
+                "type": "group_ack",
+                "dp_rank": self.dp_rank,
+                "benchmark_id": point.benchmark_id,
+            }
+        )
+        deadline = time.monotonic() + self.timeout_seconds + self.FINAL_GO_GRACE_SECONDS
+        self._recv_follower(deadline, point.benchmark_id, "group_commit")
         return _BenchmarkGroupResult(rank_results, group_stop_requested)
+
+    def synchronize_boundary(
+        self,
+        benchmark_id: int,
+        stop_requested: bool,
+        *,
+        stop_deadline_monotonic: float | None = None,
+    ) -> bool:
+        """Agree whether another benchmark point may start."""
+        boundary = {
+            "type": "boundary",
+            "dp_rank": self.dp_rank,
+            "benchmark_id": benchmark_id,
+            "stop_requested": stop_requested,
+        }
+        if self.dp_rank == 0:
+            return self._coordinate_boundary(boundary, stop_deadline_monotonic)
+
+        deadline = time.monotonic() + self.timeout_seconds
+        self._socket.send_json(boundary)
+        self._recv_follower(deadline, benchmark_id, "boundary_prepare")
+        stop_requested = stop_requested or self._deadline_elapsed(
+            stop_deadline_monotonic
+        )
+        self._socket.send_json(
+            {
+                "type": "boundary_prepared",
+                "dp_rank": self.dp_rank,
+                "benchmark_id": benchmark_id,
+                "stop_requested": stop_requested,
+            }
+        )
+        deadline = time.monotonic() + self.timeout_seconds
+        reply = self._recv_follower(deadline, benchmark_id, "boundary_decision")
+        group_stop_requested = reply.get("stop_requested")
+        if not isinstance(group_stop_requested, bool):
+            raise RuntimeError("attention-DP benchmark boundary has invalid decision")
+        self._socket.send_json(
+            {
+                "type": "boundary_ack",
+                "dp_rank": self.dp_rank,
+                "benchmark_id": benchmark_id,
+            }
+        )
+        deadline = time.monotonic() + self.timeout_seconds + self.FINAL_GO_GRACE_SECONDS
+        self._recv_follower(deadline, benchmark_id, "boundary_commit")
+        return group_stop_requested
+
+    def synchronize_cleanup(self) -> None:
+        """Confirm every rank cleared synthetic state before publishing results."""
+        benchmark_id = 0
+        ready = {
+            "type": "cleanup_ready",
+            "dp_rank": self.dp_rank,
+            "benchmark_id": benchmark_id,
+        }
+        if self.dp_rank == 0:
+            self._coordinate_cleanup(ready)
+            self._cleanup_complete = True
+            return
+
+        deadline = time.monotonic() + self.timeout_seconds
+        self._socket.send_json(ready)
+        self._recv_follower(deadline, benchmark_id, "cleanup_release")
+        self._socket.send_json(
+            {
+                "type": "cleanup_ack",
+                "dp_rank": self.dp_rank,
+                "benchmark_id": benchmark_id,
+            }
+        )
+        deadline = time.monotonic() + self.timeout_seconds + self.FINAL_GO_GRACE_SECONDS
+        self._recv_follower(deadline, benchmark_id, "cleanup_complete")
+        self._cleanup_complete = True
+
+    @staticmethod
+    def _deadline_elapsed(deadline: float | None) -> bool:
+        return deadline is not None and time.monotonic() >= deadline
 
     def _follower_phase(
         self,
@@ -608,7 +715,11 @@ class _BenchmarkSynchronizer:
                 )
             pending.remove(rank)
 
-    def _coordinate_results(self, local_result: dict) -> _BenchmarkGroupResult:
+    def _coordinate_results(
+        self,
+        local_result: dict,
+        stop_deadline_monotonic: float | None,
+    ) -> _BenchmarkGroupResult:
         benchmark_id = local_result["benchmark_id"]
         point_digest = local_result["point_digest"]
         deadline = time.monotonic() + self.timeout_seconds
@@ -657,13 +768,208 @@ class _BenchmarkSynchronizer:
             self._send_to_all(
                 identities,
                 {
+                    "type": "group_prepare",
+                    "benchmark_id": benchmark_id,
+                },
+            )
+            stop_requested = stop_requested or self._deadline_elapsed(
+                stop_deadline_monotonic
+            )
+            stop_requested = self._coordinate_group_prepared(
+                identities,
+                benchmark_id,
+                stop_requested,
+            )
+            self._send_to_all(
+                identities,
+                {
                     "type": "group",
                     "benchmark_id": benchmark_id,
                     "rank_results": rank_results,
                     "stop_requested": stop_requested,
                 },
             )
+            self._coordinate_phase(
+                identities,
+                time.monotonic() + self.timeout_seconds,
+                benchmark_id=benchmark_id,
+                expected_type="group_ack",
+            )
+            self._send_to_all(
+                identities,
+                {"type": "group_commit", "benchmark_id": benchmark_id},
+            )
             return _BenchmarkGroupResult(rank_results, stop_requested)
+        except Exception as error:
+            self._notify_error(identities.values(), str(error))
+            raise
+
+    def _coordinate_group_prepared(
+        self,
+        identities: dict[int, bytes],
+        benchmark_id: int,
+        stop_requested: bool,
+    ) -> bool:
+        deadline = time.monotonic() + self.timeout_seconds
+        pending = set(identities)
+        identity_to_rank = {
+            identity: dp_rank for dp_rank, identity in identities.items()
+        }
+        while pending:
+            identity, message = self._recv_router(deadline, benchmark_id)
+            rank = identity_to_rank.get(identity)
+            if (
+                rank is None
+                or message.get("dp_rank") != rank
+                or rank not in pending
+                or message.get("type") != "group_prepared"
+            ):
+                raise RuntimeError(
+                    "attention-DP benchmark group prepare phase mismatch"
+                )
+            rank_stop_requested = message.get("stop_requested")
+            if not isinstance(rank_stop_requested, bool):
+                raise RuntimeError(
+                    f"attention-DP benchmark rank {rank} prepared an invalid "
+                    "stop decision"
+                )
+            stop_requested = stop_requested or rank_stop_requested
+            pending.remove(rank)
+        return stop_requested
+
+    def _coordinate_boundary(
+        self,
+        local_boundary: dict,
+        stop_deadline_monotonic: float | None,
+    ) -> bool:
+        benchmark_id = local_boundary["benchmark_id"]
+        stop_requested = local_boundary["stop_requested"]
+        identities: dict[int, bytes] = {}
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            while len(identities) < self.dp_size - 1:
+                identity, message = self._recv_router(deadline, benchmark_id)
+                rank = message.get("dp_rank")
+                rank_stop_requested = message.get("stop_requested")
+                if (
+                    message.get("type") != "boundary"
+                    or not isinstance(rank, int)
+                    or not 1 <= rank < self.dp_size
+                    or not isinstance(rank_stop_requested, bool)
+                    or rank in identities
+                    or identity != str(rank).encode()
+                ):
+                    raise RuntimeError(
+                        f"invalid attention-DP benchmark boundary: {message}"
+                    )
+                identities[rank] = identity
+                stop_requested = stop_requested or rank_stop_requested
+            self._send_to_all(
+                identities,
+                {"type": "boundary_prepare", "benchmark_id": benchmark_id},
+            )
+            stop_requested = stop_requested or self._deadline_elapsed(
+                stop_deadline_monotonic
+            )
+            stop_requested = self._coordinate_boundary_prepared(
+                identities,
+                benchmark_id,
+                stop_requested,
+            )
+            # Re-sample rank 0 immediately before the decision broadcast so
+            # time spent gathering prepared followers cannot release a point.
+            stop_requested = stop_requested or self._deadline_elapsed(
+                stop_deadline_monotonic
+            )
+            self._send_to_all(
+                identities,
+                {
+                    "type": "boundary_decision",
+                    "benchmark_id": benchmark_id,
+                    "stop_requested": stop_requested,
+                },
+            )
+            self._coordinate_phase(
+                identities,
+                time.monotonic() + self.timeout_seconds,
+                benchmark_id=benchmark_id,
+                expected_type="boundary_ack",
+            )
+            self._send_to_all(
+                identities,
+                {"type": "boundary_commit", "benchmark_id": benchmark_id},
+            )
+            return stop_requested
+        except Exception as error:
+            self._notify_error(identities.values(), str(error))
+            raise
+
+    def _coordinate_boundary_prepared(
+        self,
+        identities: dict[int, bytes],
+        benchmark_id: int,
+        stop_requested: bool,
+    ) -> bool:
+        deadline = time.monotonic() + self.timeout_seconds
+        pending = set(identities)
+        identity_to_rank = {
+            identity: dp_rank for dp_rank, identity in identities.items()
+        }
+        while pending:
+            identity, message = self._recv_router(deadline, benchmark_id)
+            rank = identity_to_rank.get(identity)
+            if (
+                rank is None
+                or message.get("dp_rank") != rank
+                or rank not in pending
+                or message.get("type") != "boundary_prepared"
+            ):
+                raise RuntimeError(
+                    "attention-DP benchmark boundary prepare phase mismatch"
+                )
+            rank_stop_requested = message.get("stop_requested")
+            if not isinstance(rank_stop_requested, bool):
+                raise RuntimeError(
+                    f"attention-DP benchmark rank {rank} prepared an invalid "
+                    "boundary decision"
+                )
+            stop_requested = stop_requested or rank_stop_requested
+            pending.remove(rank)
+        return stop_requested
+
+    def _coordinate_cleanup(self, local_ready: dict) -> None:
+        benchmark_id = local_ready["benchmark_id"]
+        identities: dict[int, bytes] = {}
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            while len(identities) < self.dp_size - 1:
+                identity, message = self._recv_router(deadline, benchmark_id)
+                rank = message.get("dp_rank")
+                if (
+                    message.get("type") != "cleanup_ready"
+                    or not isinstance(rank, int)
+                    or not 1 <= rank < self.dp_size
+                    or rank in identities
+                    or identity != str(rank).encode()
+                ):
+                    raise RuntimeError(
+                        f"invalid attention-DP benchmark cleanup ready: {message}"
+                    )
+                identities[rank] = identity
+            self._send_to_all(
+                identities,
+                {"type": "cleanup_release", "benchmark_id": benchmark_id},
+            )
+            self._coordinate_phase(
+                identities,
+                time.monotonic() + self.timeout_seconds,
+                benchmark_id=benchmark_id,
+                expected_type="cleanup_ack",
+            )
+            self._send_to_all(
+                identities,
+                {"type": "cleanup_complete", "benchmark_id": benchmark_id},
+            )
         except Exception as error:
             self._notify_error(identities.values(), str(error))
             raise
@@ -2354,6 +2660,37 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_phase = _BenchPhase.DONE
         return True
 
+    def _bench_stop_at_timeout_boundary(self, point_type: str) -> bool:
+        """Coordinate the soft-timeout decision before starting another point."""
+        if getattr(self, "_bench_stop_requested", False):
+            return self._bench_transition_to_timeout_done()
+        results = getattr(self, "_bench_results", [])
+        skipped_points = getattr(self, "_bench_skipped_points", [])
+        if not results and not skipped_points:
+            return False
+        if len(results) == self._bench_expected_points:
+            return False
+        if not self._bench_grid or self._bench_grid[0].point_type != point_type:
+            return False
+
+        next_benchmark_id = self._bench_grid[0].benchmark_id
+        stop_requested = self._bench_soft_timeout_elapsed()
+        if self._bench_synchronizer is not None:
+            stop_requested = self._bench_synchronizer.synchronize_boundary(
+                next_benchmark_id,
+                stop_requested,
+                stop_deadline_monotonic=self._bench_deadline_monotonic,
+            )
+        if not stop_requested:
+            return False
+
+        if results:
+            last_point = results[-1].point
+        else:
+            last_point = skipped_points[-1].point
+        self._bench_request_timeout_stop(last_point)
+        return self._bench_transition_to_timeout_done()
+
     def _bench_finish_timing(self) -> None:
         if getattr(self, "_bench_elapsed_seconds", None) is not None:
             return
@@ -2381,9 +2718,11 @@ class InstrumentedScheduler(AsyncScheduler):
             return self._bench_step_decode()
         if self._bench_phase == _BenchPhase.DONE:
             self._bench_clear_prefix_cache()
+            if self._bench_synchronizer is not None:
+                self._bench_synchronizer.synchronize_cleanup()
             self._bench_finish_timing()
-            self._bench_write_results()
             self._bench_deactivate()
+            self._bench_write_results()
             logger.info("Benchmark complete")
         return None
 
@@ -2443,6 +2782,9 @@ class InstrumentedScheduler(AsyncScheduler):
             if self._bench_transition_to_timeout_done():
                 return None
             self._bench_drain_pending = True
+            return None
+
+        if self._bench_stop_at_timeout_boundary("prefill"):
             return None
 
         next_point = self._bench_pop_next("prefill")
@@ -2549,6 +2891,9 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_drain_pending = True
             return None
 
+        if self._bench_stop_at_timeout_boundary("decode"):
+            return None
+
         point = self._bench_pop_next("decode")
         if point is None:
             self._bench_phase = _BenchPhase.DONE
@@ -2598,17 +2943,16 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._bench_current_point is not None:
             point = self._bench_current_point
             local_fpms = list(self._bench_current_fpms)
-            local_stop_requested = self._bench_soft_timeout_elapsed()
             if self._bench_synchronizer is not None:
                 group_result = self._bench_synchronizer.collect_result(
                     point,
                     local_fpms,
-                    stop_requested=local_stop_requested,
+                    stop_deadline_monotonic=self._bench_deadline_monotonic,
                 )
             else:
                 group_result = _BenchmarkGroupResult(
                     rank_results=[{"dp_rank": self._fpm_dp_rank, "fpms": local_fpms}],
-                    stop_requested=local_stop_requested,
+                    stop_requested=self._bench_soft_timeout_elapsed(),
                 )
             rank_results = group_result.rank_results
 
@@ -2747,6 +3091,8 @@ class InstrumentedScheduler(AsyncScheduler):
             and completed_points > 0
             and len(iteration_groups) == completed_points
             and all(group.get("complete") for group in iteration_groups)
+            and skipped_points == 0
+            and not missing_phases
             and timing_valid
         )
         output = {

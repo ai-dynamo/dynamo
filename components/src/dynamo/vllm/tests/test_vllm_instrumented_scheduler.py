@@ -547,7 +547,9 @@ def test_benchmark_synchronizer_shares_timeout_stop_decision():
         follower_result["group"] = rank1.collect_result(
             point,
             [{"counter_id": 1, "dp_rank": 1}],
-            stop_requested=True,
+            stop_deadline_monotonic=(
+                instrumented_scheduler_module.time.monotonic() - 1
+            ),
         )
 
     follower = threading.Thread(target=run_follower)
@@ -565,6 +567,127 @@ def test_benchmark_synchronizer_shares_timeout_stop_decision():
     finally:
         rank1.close()
         rank0.close()
+
+
+def test_benchmark_synchronizer_coordinates_boundary_and_cleanup():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    rank0 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=0,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    rank1 = instrumented_scheduler_module._BenchmarkSynchronizer(
+        dp_rank=1,
+        dp_size=2,
+        master_ip="unused",
+        port=0,
+        timeout=1,
+        endpoint=endpoint,
+    )
+    follower_result = {}
+
+    def run_follower():
+        follower_result["stop"] = rank1.synchronize_boundary(
+            2,
+            False,
+            stop_deadline_monotonic=(
+                instrumented_scheduler_module.time.monotonic() - 1
+            ),
+        )
+        rank1.synchronize_cleanup()
+        follower_result["cleaned"] = True
+
+    follower = threading.Thread(target=run_follower)
+    follower.start()
+    try:
+        assert rank0.synchronize_boundary(2, False) is True
+        rank0.synchronize_cleanup()
+        follower.join(timeout=2)
+        assert not follower.is_alive()
+        assert follower_result == {"stop": True, "cleaned": True}
+        assert rank0._cleanup_complete is True
+        assert rank1._cleanup_complete is True
+    finally:
+        rank1.close()
+        rank0.close()
+
+
+def test_benchmark_synchronizer_close_flushes_after_cleanup():
+    synchronizer = instrumented_scheduler_module._BenchmarkSynchronizer.__new__(
+        instrumented_scheduler_module._BenchmarkSynchronizer
+    )
+    synchronizer._socket = MagicMock()
+    synchronizer._timeout_ms = 1_000
+    synchronizer._cleanup_complete = False
+
+    synchronizer.close()
+    synchronizer._socket.close.assert_called_once_with(linger=0)
+
+    synchronizer._socket.close.reset_mock()
+    synchronizer._cleanup_complete = True
+    synchronizer.close()
+    synchronizer._socket.close.assert_called_once_with(linger=2_000)
+
+
+def test_benchmark_synchronizer_commits_before_fast_rank_advances():
+    endpoint = f"inproc://benchmark-sync-{uuid.uuid4().hex}"
+    synchronizers = [
+        instrumented_scheduler_module._BenchmarkSynchronizer(
+            dp_rank=rank,
+            dp_size=3,
+            master_ip="unused",
+            port=0,
+            timeout=1,
+            endpoint=endpoint,
+        )
+        for rank in range(3)
+    ]
+    rank0, rank1, rank2 = synchronizers
+    point = BenchmarkPoint(point_type="decode", benchmark_id=1)
+    original_rank2_recv = rank2._recv_follower
+
+    def delay_rank2_group_ack(deadline, benchmark_id, expected_type):
+        reply = original_rank2_recv(deadline, benchmark_id, expected_type)
+        if expected_type == "group":
+            instrumented_scheduler_module.time.sleep(0.05)
+        return reply
+
+    rank2._recv_follower = delay_rank2_group_ack
+    follower_errors = []
+
+    def run_follower(synchronizer, rank):
+        try:
+            synchronizer.synchronize(point)
+            synchronizer.collect_result(
+                point,
+                [{"counter_id": 1, "dp_rank": rank}],
+            )
+            assert synchronizer.synchronize_boundary(2, False) is False
+            synchronizer.synchronize_cleanup()
+        except Exception as error:  # pragma: no cover - asserted below
+            follower_errors.append(error)
+
+    followers = [
+        threading.Thread(target=run_follower, args=(rank1, 1)),
+        threading.Thread(target=run_follower, args=(rank2, 2)),
+    ]
+    for follower in followers:
+        follower.start()
+    try:
+        rank0.synchronize(point)
+        rank0.collect_result(point, [{"counter_id": 1, "dp_rank": 0}])
+        assert rank0.synchronize_boundary(2, False) is False
+        rank0.synchronize_cleanup()
+        for follower in followers:
+            follower.join(timeout=2)
+            assert not follower.is_alive()
+        assert follower_errors == []
+    finally:
+        for synchronizer in reversed(synchronizers):
+            synchronizer.close()
 
 
 def test_benchmark_synchronizer_rejects_different_points():
@@ -2180,6 +2303,63 @@ def test_benchmark_soft_timeout_stops_after_saving_current_point(monkeypatch):
     assert stub._bench_drain_pending is False
 
 
+def test_benchmark_soft_timeout_is_checked_before_next_point(monkeypatch):
+    completed_point = BenchmarkPoint(point_type="decode", benchmark_id=1, batch_size=1)
+    next_point = BenchmarkPoint(point_type="decode", benchmark_id=2, batch_size=2)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(timeout=1)
+    stub._bench_start_monotonic = 0.0
+    stub._bench_deadline_monotonic = 1.0
+    stub._bench_expected_points = 2
+    stub._bench_results = [
+        instrumented_scheduler_module.BenchmarkPointResult(
+            point=completed_point, fpms=[]
+        )
+    ]
+    stub._bench_skipped_points = []
+    stub._bench_grid = deque([next_point])
+    stub._bench_synchronizer = None
+    stub._bench_stop_requested = False
+    stub._bench_stop_reason = None
+    stub._bench_drain_pending = False
+    stub._bench_phase = _BenchPhase.DECODE_SWEEP
+    monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", lambda: 2.0)
+
+    assert InstrumentedScheduler._bench_stop_at_timeout_boundary(stub, "decode")
+
+    assert list(stub._bench_grid) == [next_point]
+    assert stub._bench_phase == _BenchPhase.DONE
+    assert stub._bench_stop_reason == "timeout"
+
+
+def test_benchmark_done_coordinates_cleanup_and_deactivates_before_publish():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_phase = _BenchPhase.DONE
+    calls = MagicMock()
+    stub._bench_start_timing = MagicMock()
+    stub._bench_build_grid = MagicMock()
+    stub._bench_clear_prefix_cache = MagicMock()
+    stub._bench_synchronizer = MagicMock()
+    stub._bench_finish_timing = MagicMock()
+    stub._bench_deactivate = MagicMock()
+    stub._bench_write_results = MagicMock()
+    calls.attach_mock(stub._bench_clear_prefix_cache, "clear")
+    calls.attach_mock(stub._bench_synchronizer.synchronize_cleanup, "sync_cleanup")
+    calls.attach_mock(stub._bench_finish_timing, "finish")
+    calls.attach_mock(stub._bench_deactivate, "deactivate")
+    calls.attach_mock(stub._bench_write_results, "write")
+
+    InstrumentedScheduler._bench_step(stub)
+
+    assert calls.mock_calls == [
+        call.clear(),
+        call.sync_cleanup(),
+        call.finish(),
+        call.deactivate(),
+        call.write(),
+    ]
+
+
 def test_benchmark_output_marks_timeout_result_partial_and_usable(tmp_path):
     point = BenchmarkPoint(point_type="decode", benchmark_id=1, batch_size=1)
     fpm = {"counter_id": 1, "dp_rank": 0, "wall_time": 0.25}
@@ -2225,6 +2405,18 @@ def test_benchmark_output_marks_timeout_result_partial_and_usable(tmp_path):
         "completed_points": 1,
         "skipped_points": 0,
     }
+
+    stub._bench_expected_points = 3
+    stub._bench_skipped_points = [
+        SkippedBenchmarkPoint(
+            point=BenchmarkPoint(point_type="decode", benchmark_id=2),
+            reason="shape mismatch",
+        )
+    ]
+    InstrumentedScheduler._bench_write_results(stub)
+    output_with_skip = json.loads(output_path.read_text())
+    assert output_with_skip["status"] == "partial"
+    assert output_with_skip["usable"] is False
 
 
 def test_benchmark_output_marks_requested_empty_phase_invalid(tmp_path):

@@ -403,7 +403,8 @@ class DynamoVllmArgGroup(ArgGroup):
             help=(
                 "Soft limit in seconds for self-benchmarking (default: 900). "
                 "After the limit, the current measured iteration finishes, "
-                "partial results are returned, and engine startup continues."
+                "partial results are returned, and engine startup continues. "
+                "A bounded cleanup grace still fails closed if no result is written."
             ),
         )
 

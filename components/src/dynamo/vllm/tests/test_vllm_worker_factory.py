@@ -170,8 +170,72 @@ async def test_wait_and_load_benchmark_warns_then_waits_for_partial(
     )
 
     assert merged["status"] == "partial"
-    assert "waiting for the current profiling iteration" in caplog.text
+    assert "for the current profiling iteration" in caplog.text
     assert "Engine startup will continue" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_wait_and_load_benchmark_bounds_post_timeout_grace(
+    monkeypatch, tmp_path, caplog
+):
+    output_path = tmp_path / "benchmark.json"
+    monotonic_times = iter([0.0, 2.0, 3.0])
+
+    async def no_result(_delay):
+        return None
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS", 1
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._time.monotonic",
+        lambda: next(monotonic_times, 3.0),
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory.asyncio.sleep", no_result)
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(TimeoutError, match="cleanup grace"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
+
+    assert "waiting up to 1s" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    ["partial_valid", "partial_skipped", "complete_invalid", "complete_unusable"],
+)
+async def test_wait_and_load_benchmark_rejects_inconsistent_status(
+    monkeypatch, tmp_path, mutation
+):
+    output_path = tmp_path / "benchmark.json"
+    if mutation in {"complete_invalid", "complete_unusable"}:
+        payload = _single_rank_benchmark_payload()
+        if mutation == "complete_invalid":
+            payload["valid"] = False
+        else:
+            payload["usable"] = False
+    else:
+        payload = _single_rank_benchmark_payload(status="partial", expected_points=3)
+        if mutation == "partial_valid":
+            payload["valid"] = True
+        else:
+            payload["coverage"]["skipped_points"] = 1
+            payload["skipped_points"] = [{"reason": "shape mismatch"}]
+    output_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (0, 1)
+    )
+
+    with pytest.raises(RuntimeError, match="incomplete results"):
+        await _wait_and_load_benchmark(
+            {"output_path": str(output_path), "timeout": 1}, Mock()
+        )
 
 
 @pytest.mark.asyncio
