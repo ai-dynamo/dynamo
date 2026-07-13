@@ -51,7 +51,9 @@ require the opening tag to be present in the model output.
 |---|---|---|---|---|
 | `kimi_k25` | Kimi K2.5 / Kimi K2.6 format-compatible thinking models | Dynamo-only | Yes | `<think>...</think>` with force-reasoning |
 | `kimi` | Kimi K2 Instruct / Thinking with Unicode delimiters | Dynamo-only | No | `◁think▷...◁/think▷` |
-| `minimax_append_think` | MiniMax M2 / M2.1 | Dynamo-only | No | Implicit opening `<think>` prepended |
+| `minimax_m2` | MiniMax M2 / M2.5 / M2.7 | vLLM: `minimax_m2` | Yes | `<think>...</think>` with force-reasoning |
+| `minimax_m3` | MiniMax M3 | vLLM: `minimax_m3` | No | `<mm:think>...</mm:think>`; recovers a prompt-prefilled opener |
+| `minimax_append_think` | MiniMax M2 / M2.1 | Dynamo-only | No | Deprecated. Legacy pass-through with an implicit `<think>` opener; use `minimax_m2` for MiniMax M2 tool-calling deployments |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseek-v4` | No | `<think>...</think>`. Aliases: `deepseek-v4`, `deepseekv4` |
 | `deepseek_r1` | DeepSeek R1, DeepSeek V3.1, DeepSeek V3.2 | | Yes | Pass explicitly for V3.1/V3.2 (no alias) |
 | `qwen3` | Qwen3.5, QwQ-32B, Qwen3-Think, Qwen3-Coder | | No | `<think>...</think>` |
@@ -76,7 +78,15 @@ Some models need both parsers configured together. Common pairings include:
 - `moonshotai/Kimi-K2.5*` / Kimi K2.6 format-compatible outputs: `--dyn-tool-call-parser kimi_k2 --dyn-reasoning-parser kimi_k25`
 - `google/gemma-4-*` thinking models: `--dyn-tool-call-parser gemma4 --dyn-reasoning-parser gemma4 --custom-jinja-template examples/chat_templates/gemma4_tool.jinja`
 - `Qwen/Qwen3.5*`: `--dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3`
-- MiniMax M2.1 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_append_think`
+- MiniMax M2 style outputs: `--dyn-tool-call-parser minimax_m2 --dyn-reasoning-parser minimax_m2`
+- MiniMax M3 style outputs: `--dyn-tool-call-parser minimax_m3 --dyn-reasoning-parser minimax_m3`
+
+<Warning>
+`minimax_append_think` is deprecated for MiniMax M2 tool-calling deployments.
+Use `--dyn-reasoning-parser minimax_m2` with `--dyn-tool-call-parser minimax_m2`
+so Dynamo can separate reasoning and pass MiniMax XML tool calls to the tool
+parser.
+</Warning>
 
 ## Tool Calling Interplay
 
