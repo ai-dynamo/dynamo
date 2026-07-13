@@ -188,28 +188,6 @@ jobs:
           languages: python
           api_key: ${{ secrets.DD_API_KEY }}
           site: us3.datadoghq.com
-      - name: Export git metadata for Datadog Test Optimization
-        # ddtrace runs pytest from the container workspace (/workspace), which ships
-        # without a .git, so it can't auto-detect commit metadata and logs a flood of
-        # "fatal: not a git repository" warnings. The runner checkout at
-        # $GITHUB_WORKSPACE has .git, so read metadata there and hand it to ddtrace
-        # via DD_GIT_* env vars for every downstream pytest step.
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          {
-            echo "DD_GIT_REPOSITORY_URL=${{ github.server_url }}/${{ github.repository }}.git"
-            echo "DD_GIT_BRANCH=${{ github.head_ref || github.ref_name }}"
-            echo "DD_GIT_COMMIT_SHA=$(git rev-parse HEAD)"
-            echo "DD_GIT_COMMIT_MESSAGE=$(git log -1 --pretty=%s)"
-            echo "DD_GIT_COMMIT_AUTHOR_NAME=$(git log -1 --pretty=%an)"
-            echo "DD_GIT_COMMIT_AUTHOR_EMAIL=$(git log -1 --pretty=%ae)"
-            echo "DD_GIT_COMMIT_AUTHOR_DATE=$(git log -1 --pretty=%aI)"
-            echo "DD_GIT_COMMIT_COMMITTER_NAME=$(git log -1 --pretty=%cn)"
-            echo "DD_GIT_COMMIT_COMMITTER_EMAIL=$(git log -1 --pretty=%ce)"
-            echo "DD_GIT_COMMIT_COMMITTER_DATE=$(git log -1 --pretty=%cI)"
-          } >> "$GITHUB_ENV"
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
