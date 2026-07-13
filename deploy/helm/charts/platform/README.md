@@ -79,6 +79,8 @@ rejects custom `webhook.namespaceSelector` values.
 
 ## Requirements
 
+Kubernetes: `>=1.33.0-0`
+
 | Repository | Name | Version |
 |------------|------|---------|
 | file://components/operator | dynamo-operator | 1.3.0 |
