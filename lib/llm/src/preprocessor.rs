@@ -444,11 +444,22 @@ impl OpenAIPreprocessor {
                 .ok()
                 .is_some_and(|kind| kind.as_str().is_some_and(|kind| kind != "text"))
         });
-        if !is_guided_tool_choice && !is_structured_response {
+        if !is_guided_tool_choice
+            && !(is_structured_response
+                && Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser))
+        {
             return false;
         }
 
         Self::sglang_effective_reasoning_enabled(reasoning_parser, request.chat_template_args())
+    }
+
+    fn structured_response_supports_sglang_reasoning_gate(reasoning_parser: Option<&str>) -> bool {
+        // GPT-OSS/Harmony must skip SGLang's `require_reasoning + json_schema`
+        // path for structured output until upstream fixes malformed Harmony:
+        // https://github.com/sgl-project/sglang/issues/31019
+        // Tool calling still uses `require_reasoning`.
+        !matches!(reasoning_parser, Some("gpt_oss"))
     }
 
     fn has_structured_response_format(request: &NvCreateChatCompletionRequest) -> bool {
@@ -2064,8 +2075,12 @@ impl OpenAIPreprocessor {
             && (Self::skips_guided_json_when_prompt_injected(reasoning_parser)
                 || (is_structured_response
                     && Self::skips_structured_response_when_prompt_injected(reasoning_parser)));
-        let bypass_reasoning_for_bare_guided_json =
-            inspect_force_reasoning_guided_output || inspect_prompt_injected_guided_output;
+        let inspect_gpt_oss_structured_response = is_structured_response
+            && !uses_tool_call_structural_tag
+            && matches!(reasoning_parser, Some("gpt_oss"));
+        let bypass_reasoning_for_bare_guided_json = inspect_force_reasoning_guided_output
+            || inspect_prompt_injected_guided_output
+            || inspect_gpt_oss_structured_response;
         // Preserve the legacy bypass for force-reasoning parsers not yet opted in.
         let skip_reasoning_for_guided_json = is_guided_output
             && !uses_tool_call_structural_tag
@@ -4187,6 +4202,18 @@ mod tests {
             &structured_request(false),
             Some("qwen3")
         ));
+        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+            &structured_request(true),
+            Some("gpt_oss")
+        ));
+        assert!(!OpenAIPreprocessor::guided_output_requires_reasoning(
+            &structured_request(false),
+            Some("gpt_oss")
+        ));
+        assert!(OpenAIPreprocessor::guided_output_requires_reasoning(
+            &request(serde_json::json!("required"), None),
+            Some("gpt_oss")
+        ));
     }
 
     /// Verifies SGLang's effective reasoning mode for each parser family.
@@ -4253,6 +4280,17 @@ mod tests {
                 "minimax_m3",
                 serde_json::json!({"thinking_mode": "disabled"}),
                 false,
+            ),
+            ("gpt_oss", serde_json::json!({}), true),
+            (
+                "gpt_oss",
+                serde_json::json!({"enable_thinking": true}),
+                true,
+            ),
+            (
+                "gpt_oss",
+                serde_json::json!({"enable_thinking": false}),
+                true,
             ),
             ("deepseek_r1", serde_json::json!({}), true),
             ("minimax_append_think", serde_json::json!({}), false),

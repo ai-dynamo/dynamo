@@ -1863,6 +1863,85 @@ async fn response_format_qwen3_no_thinking_json_stays_content() {
     assert_eq!(content, json);
 }
 
+/// Gemma4 structured output without visible reasoning markers should remain
+/// assistant content even when the reasoning parser is configured.
+#[tokio::test]
+async fn response_format_gemma4_bare_json_stays_content() {
+    let json = r#"{"country":"France","capital":"Paris"}"#;
+    let preprocessor = build_preprocessor(Some("gemma4"), None);
+    let request = streaming_json_schema_request(true);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
+    );
+    assert_eq!(content, json);
+}
+
+/// GPT-OSS/Harmony guided structured output may be emitted as bare JSON from
+/// token 0. The reasoning parser should preserve that JSON as assistant
+/// content instead of dropping it while waiting for Harmony channel markers.
+#[tokio::test]
+async fn response_format_gpt_oss_bare_json_stays_content() {
+    let json = r#"{"country":"France","capital":"Paris"}"#;
+    let preprocessor = build_preprocessor(Some("gpt_oss"), None);
+    let request = streaming_json_schema_request(true);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "response_format JSON must not be reasoning_content, got: {reasoning:?}"
+    );
+    assert_eq!(content, json);
+}
+
+/// If GPT-OSS emits native Harmony reasoning before the structured payload,
+/// shape detection must fall back to the parser path and preserve channels.
+#[tokio::test]
+async fn response_format_gpt_oss_reasoning_then_json_preserves_channels() {
+    let json = r#"{"country":"France","capital":"Paris"}"#;
+    let stream_text = format!(
+        "<|channel|>analysis<|message|>Need answer as JSON.<|end|><|start|>assistant<|channel|>final<|message|>{json}"
+    );
+    let preprocessor = build_preprocessor(Some("gpt_oss"), None);
+    let request = streaming_json_schema_request(true);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(&stream_text), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert_eq!(reasoning, "Need answer as JSON.");
+    assert_eq!(content, json);
+}
+
 /// DeepSeek V4 + required + `prompt_injected_reasoning=true` + bare JSON.
 ///
 /// This is the production failure shape from DeepSeek V4 Pro: the V4 formatter
