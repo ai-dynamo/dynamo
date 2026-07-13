@@ -57,6 +57,9 @@ print_launch_banner "Launching SGLang Native-gRPC Disaggregated Serving (2 GPUs)
 
 python3 -m dynamo.frontend &
 
+OTEL_SERVICE_NAME=dynamo-worker-prefill \
+DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
+SGLANG_DISAGGREGATION_BOOTSTRAP_HOST="$SGLANG_BOOTSTRAP_HOST" \
 CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
     "$SGLANG_PYTHON" -m sglang.launch_server \
     --model-path "$MODEL" \
@@ -66,9 +69,12 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
     --disaggregation-mode prefill \
     --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
+    --enable-sidecar \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
+OTEL_SERVICE_NAME=dynamo-worker-decode \
+DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
 CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     "$SGLANG_PYTHON" -m sglang.launch_server \
     --model-path "$MODEL" \
@@ -78,18 +84,8 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     --disaggregation-mode decode \
     --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
+    --enable-sidecar \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
-
-OTEL_SERVICE_NAME=dynamo-worker-prefill \
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
-    dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_PREFILL_GRPC_PORT}" \
-    --bootstrap-host "$SGLANG_BOOTSTRAP_HOST" &
-
-OTEL_SERVICE_NAME=dynamo-worker-decode \
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
-    dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_DECODE_GRPC_PORT}" &
 
 wait_any_exit
