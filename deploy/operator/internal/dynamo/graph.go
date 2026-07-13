@@ -1822,6 +1822,15 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		}
 		base.Name = sidecarName
 		baseEnv := base.Env
+		// A frontend sidecar shares its pod's readiness with the colocated
+		// worker. Gate its `/ready` probe on the local model being routable so
+		// GAIE/EPP only sees the worker pod Ready once it can actually serve —
+		// rather than Ready while /v1/models is empty and requests 404. Added to
+		// the defaults so a user-provided env of the same name still wins.
+		baseEnv = append(baseEnv, corev1.EnvVar{
+			Name:  commonconsts.FrontendReadinessModeEnvVar,
+			Value: commonconsts.FrontendReadinessModeLocalWorker,
+		})
 		user := podSpec.Containers[i].DeepCopy()
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
