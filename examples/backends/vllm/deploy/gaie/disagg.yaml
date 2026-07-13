@@ -109,8 +109,9 @@ spec:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
           imagePullPolicy: IfNotPresent
-          # Request resources so the EPP pod is Burstable rather than BestEffort
-          # QoS for the post merge test. This is use case specific.
+          # Make EPP schedule away from disk-starved nodes and mitigate its
+          # eviction under node DiskPressure: the ephemeral-storage request keeps
+          # it out of the kubelet's first-to-evict bucket. CI-stability specific.
           resources:
             requests:
               cpu: "100m"
