@@ -38,9 +38,10 @@ class DynamoPortRange(IntEnum):
     These bases are intentionally spaced far enough apart to leave headroom
     for the allocator's 500-port random start offset plus sequential retries,
     so concurrent host-network test containers can allocate independently
-    without colliding across serve, router, NIXL, and FPM workloads.
+    without colliding across frontend, serve, router, NIXL, and FPM workloads.
     """
 
+    FRONTEND = 22500
     SERVE = 24000
     NIXL = 25500
     ROUTER = 27000
