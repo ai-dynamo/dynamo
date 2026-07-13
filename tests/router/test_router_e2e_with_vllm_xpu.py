@@ -107,18 +107,20 @@ class XPUVLLMProcess(ManagedEngineProcessMixin):
         self._request = request
         self._request_plane = request_plane
 
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda: deallocate_ports(allocated_ports))
+
         self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
+        allocated_ports.extend(self._system_ports)
+
         self._kv_event_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
-        self._nixl_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
-        self._fpm_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
-        request.addfinalizer(
-            lambda: deallocate_ports(
-                self._system_ports
-                + self._kv_event_ports
-                + self._nixl_ports
-                + self._fpm_ports
-            )
-        )
+        allocated_ports.extend(self._kv_event_ports)
+
+        self._nixl_ports = allocate_ports(num_workers, DynamoPortRange.NIXL.value)
+        allocated_ports.extend(self._nixl_ports)
+
+        self._fpm_ports = allocate_ports(num_workers, DynamoPortRange.FPM.value)
+        allocated_ports.extend(self._fpm_ports)
 
         if vllm_args is None:
             vllm_args = {}
