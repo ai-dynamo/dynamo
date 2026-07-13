@@ -113,6 +113,11 @@ on:
         required: false
         type: string
         default: 'true'
+      dd_itr_enabled:
+        description: 'Datadog Test Impact Analysis / ITR (DD_CIVISIBILITY_ITR_ENABLED). Defaults to "false": dynamo tests run product code in subprocesses, so per-test in-process coverage collects nothing (coverage.py "No data was collected" warnings) and TIA has no signal. Set "true" only for workflows deliberately trialing TIA.'
+        required: false
+        type: string
+        default: 'false'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -151,6 +156,7 @@ jobs:
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_ENV: ${{ inputs.dd_env }}
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+        DD_CIVISIBILITY_ITR_ENABLED: ${{ inputs.dd_itr_enabled }}
     permissions:
       contents: read
     services:
