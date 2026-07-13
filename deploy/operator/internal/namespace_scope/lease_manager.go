@@ -172,8 +172,6 @@ func (lm *LeaseManager) createOrUpdateLease(ctx context.Context) error {
 	now := metav1.NewMicroTime(time.Now())
 	leaseDurationSeconds := int32(lm.leaseDuration.Seconds())
 
-	// RenewTime is set by the first renewal. The brief handoff window is acceptable
-	// because namespace-restricted mode is supported only for development and testing.
 	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      LeaseName,
@@ -183,6 +181,7 @@ func (lm *LeaseManager) createOrUpdateLease(ctx context.Context) error {
 			HolderIdentity:       &lm.holderIdentity,
 			LeaseDurationSeconds: &leaseDurationSeconds,
 			AcquireTime:          &now,
+			RenewTime:            &now,
 		},
 	}
 
