@@ -21,7 +21,7 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use std::sync::{Arc, OnceLock};
 use tmq::{
-    AsZmqSocket, Context, Multipart, SocketBuilder,
+    AsZmqSocket, Context, Message, Multipart, SocketBuilder,
     publish::{Publish, publish},
     subscribe::{Subscribe, subscribe},
 };
@@ -67,8 +67,16 @@ where
         .set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
 }
 
-fn multipart_message(multipart: Multipart) -> Vec<Vec<u8>> {
-    multipart.into_iter().map(|frame| frame.to_vec()).collect()
+/// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
+///
+/// `Bytes::from_owner` obtains the message data pointer only after moving this
+/// owner into stable storage, so this also supports libzmq's inline messages.
+struct ZmqMessageOwner(Message);
+
+impl AsRef<[u8]> for ZmqMessageOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 /// ZMQ PUB transport for publishing events.
@@ -280,8 +288,8 @@ impl ZmqSubTransport {
                     break;
                 };
 
-                let frames = match result {
-                    Ok(frames) => multipart_message(frames),
+                let mut frames = match result {
+                    Ok(frames) => frames,
                     Err(error) => {
                         tracing::error!(error = %error, "ZMQ receive error in socket pump");
                         break;
@@ -304,8 +312,7 @@ impl ZmqSubTransport {
                     );
                     continue;
                 }
-                let publisher_id =
-                    u64::from_be_bytes(publisher_id_bytes.as_slice().try_into().unwrap());
+                let publisher_id = u64::from_be_bytes(publisher_id_bytes[..].try_into().unwrap());
 
                 let sequence_bytes = &frames[2];
                 if sequence_bytes.len() != 8 {
@@ -315,7 +322,7 @@ impl ZmqSubTransport {
                     );
                     continue;
                 }
-                let sequence = u64::from_be_bytes(sequence_bytes.as_slice().try_into().unwrap());
+                let sequence = u64::from_be_bytes(sequence_bytes[..].try_into().unwrap());
 
                 tracing::trace!(
                     publisher_id = publisher_id,
@@ -323,7 +330,10 @@ impl ZmqSubTransport {
                     "Socket pump received ZMQ message"
                 );
 
-                let frame_bytes = Bytes::from(frames[3].clone());
+                let Some(frame_message) = frames.pop_back() else {
+                    continue;
+                };
+                let frame_bytes = Bytes::from_owner(ZmqMessageOwner(frame_message));
                 match Frame::decode(frame_bytes) {
                     Ok(frame) => {
                         let _ = broadcast_tx.send(frame.payload);
@@ -372,6 +382,47 @@ mod tests {
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use tokio::time::{Duration, timeout};
+
+    async fn send_raw(publisher: &ZmqPubTransport, frames: Vec<Vec<u8>>) {
+        publisher
+            .socket
+            .lock()
+            .await
+            .send(Multipart::from(frames))
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn test_zmq_message_owner_survives_clones_slices_and_thread_transfer() {
+        let small = b"inline zmq message";
+        let small_bytes = Bytes::from_owner(ZmqMessageOwner(Message::from(&small[..])));
+        let small_clone = small_bytes.clone();
+        drop(small_bytes);
+
+        let small_slice = small_clone.slice(7..10);
+        drop(small_clone);
+        assert_eq!(small_slice, Bytes::from_static(b"zmq"));
+
+        let large = vec![0x5a; 64 * 1024];
+        let large_message = Message::from(large);
+        let large_ptr = large_message.as_ptr();
+        let large_bytes = Bytes::from_owner(ZmqMessageOwner(large_message));
+        assert_eq!(large_bytes.as_ptr(), large_ptr);
+
+        let large_clone = large_bytes.clone();
+        drop(large_bytes);
+        let returned = std::thread::spawn(move || {
+            assert_eq!(large_clone.len(), 64 * 1024);
+            assert!(large_clone.iter().all(|byte| *byte == 0x5a));
+            large_clone.slice(1024..2048)
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(returned.len(), 1024);
+        assert!(returned.iter().all(|byte| *byte == 0x5a));
+    }
 
     #[tokio::test]
     async fn test_zmq_pubsub_basic() {
@@ -456,5 +507,126 @@ mod tests {
             assert_eq!(decoded.sequence, i);
             assert_eq!(decoded.topic, topic);
         }
+    }
+
+    #[tokio::test]
+    async fn test_zmq_socket_pump_continues_after_malformed_messages() {
+        let endpoint = format!("inproc://dynamo-zmq-malformed-{}", std::process::id());
+        let topic = "malformed-test";
+
+        let (publisher, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        let subscriber = ZmqSubTransport::connect(&endpoint, topic).await.unwrap();
+        let mut stream = subscriber.subscribe(topic).await.unwrap();
+
+        let codec = MsgpackCodec;
+        let anchor = EventEnvelope {
+            publisher_id: 12345,
+            sequence: 0,
+            published_at: 1700000000000,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"anchor"),
+        };
+        let anchor_bytes = codec.encode_envelope(&anchor).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let received_anchor = loop {
+            publisher
+                .publish(topic, anchor_bytes.clone())
+                .await
+                .unwrap();
+            if let Ok(Some(Ok(bytes))) = timeout(Duration::from_millis(25), stream.next()).await {
+                break bytes;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timeout waiting for subscriber readiness anchor"
+            );
+        };
+        assert_eq!(
+            codec.decode_envelope(&received_anchor).unwrap().payload,
+            anchor.payload
+        );
+
+        let topic_frame = topic.as_bytes().to_vec();
+        let publisher_frame = 12345_u64.to_be_bytes().to_vec();
+        let sequence_frame = 1_u64.to_be_bytes().to_vec();
+        let empty_frame = Frame::new(Bytes::new()).encode().to_vec();
+
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame.clone(),
+                publisher_frame.clone(),
+                sequence_frame.clone(),
+            ],
+        )
+        .await;
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame.clone(),
+                publisher_frame.clone(),
+                sequence_frame.clone(),
+                empty_frame.clone(),
+                b"extra".to_vec(),
+            ],
+        )
+        .await;
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame.clone(),
+                vec![0; 7],
+                sequence_frame.clone(),
+                empty_frame.clone(),
+            ],
+        )
+        .await;
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame.clone(),
+                publisher_frame.clone(),
+                vec![0; 7],
+                empty_frame,
+            ],
+        )
+        .await;
+        send_raw(
+            &publisher,
+            vec![
+                topic_frame,
+                publisher_frame,
+                sequence_frame,
+                vec![99, 0, 0, 0, 0],
+            ],
+        )
+        .await;
+
+        let sentinel = EventEnvelope {
+            publisher_id: 12345,
+            sequence: 2,
+            published_at: 1700000000000,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"sentinel"),
+        };
+        publisher
+            .publish(topic, codec.encode_envelope(&sentinel).unwrap())
+            .await
+            .unwrap();
+
+        let decoded = timeout(Duration::from_secs(2), async {
+            loop {
+                let received = stream.next().await.unwrap().unwrap();
+                let decoded = codec.decode_envelope(&received).unwrap();
+                if decoded.sequence == sentinel.sequence {
+                    break decoded;
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for valid message after malformed messages");
+        assert_eq!(decoded.publisher_id, sentinel.publisher_id);
+        assert_eq!(decoded.sequence, sentinel.sequence);
+        assert_eq!(decoded.payload, sentinel.payload);
     }
 }
