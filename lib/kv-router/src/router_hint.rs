@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocols::{ExternalSequenceBlockHash, WorkerWithDpRank};
 
-/// Extra-args key for router-generated backend hints.
+/// Key for router-generated backend hints inside KV transfer params.
 pub const ROUTER_HINT_EXTRA_ARGS_KEY: &str = "router_hint";
 
 /// Worker runtime_data key. Boolean true means the worker can consume router_hint extra args.
@@ -23,6 +23,8 @@ pub struct RouterHint {
     /// Root-aligned source-side KV block hashes. `block_hashes[i]`
     /// corresponds to request block `i`; the target decides which suffix to fetch.
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
+    /// Router's view of the selected target's locally cached contiguous prefix.
+    pub target_cached_prefix_blocks: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

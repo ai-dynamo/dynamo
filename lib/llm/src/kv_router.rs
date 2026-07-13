@@ -111,6 +111,26 @@ fn cache_hit_for_worker(
     }
 }
 
+fn target_cached_prefix_blocks_from_tiered_matches(
+    tiered_matches: &indexer::TieredMatchDetails,
+    target: WorkerWithDpRank,
+) -> u32 {
+    let device_blocks = tiered_matches
+        .device
+        .overlap_scores
+        .scores
+        .get(&target)
+        .copied()
+        .unwrap_or(0) as usize;
+    let secondary_extension_blocks = tiered_matches
+        .lower_tier
+        .get(&StorageTier::HostPinned)
+        .and_then(|details| details.hits.get(&target))
+        .copied()
+        .unwrap_or(0);
+    u32::try_from(device_blocks + secondary_extension_blocks).unwrap_or(u32::MAX)
+}
+
 // [gluo TODO] shouldn't need to be public
 // this should be discovered from the component
 
@@ -408,6 +428,7 @@ where
     fn router_hint_for_selection(
         &self,
         target: WorkerWithDpRank,
+        target_cached_prefix_blocks: u32,
         candidates: Option<&RouterHintRootCandidates>,
     ) -> Option<RouterHint> {
         if !self.kv_router_config.router_hints {
@@ -442,6 +463,7 @@ where
         Some(RouterHint {
             source_control_endpoint,
             block_hashes,
+            target_cached_prefix_blocks,
         })
     }
 
@@ -703,8 +725,13 @@ where
             .lower_tier
             .get(&StorageTier::HostPinned)
             .and_then(|details| details.router_hint_root_candidates.as_ref());
-        let router_hint =
-            self.router_hint_for_selection(response.best_worker, router_hint_root_candidates);
+        let target_cached_prefix_blocks =
+            target_cached_prefix_blocks_from_tiered_matches(&tiered_matches, response.best_worker);
+        let router_hint = self.router_hint_for_selection(
+            response.best_worker,
+            target_cached_prefix_blocks,
+            router_hint_root_candidates,
+        );
 
         let total_elapsed = start.elapsed();
         let routing_hashes = routing_block_hashes.map(RoutingDecisionHashes::from_local_hashes);
