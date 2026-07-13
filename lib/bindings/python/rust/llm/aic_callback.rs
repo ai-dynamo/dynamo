@@ -108,6 +108,7 @@ fn build_rust_engine(
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
+    systems_path: Option<&str>,
 ) -> PyResult<Arc<AicEngine>> {
     // Speculative (MTP) decoding: forward the mocker's nextn / accept-rates to
     // the engine build, mirroring the Python AicSession path. Dense models pass
@@ -153,7 +154,7 @@ fn build_rust_engine(
     // paid once per unique config (speculative config included).
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<AicEngine>>>> = OnceLock::new();
     let key = format!(
-        "{backend_name}|{system}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
+        "{backend_name}|{system}|{systems_path:?}|{backend_version:?}|{model_path}|{tp_size}|{moe_tp_size:?}|{moe_ep_size:?}|{attention_dp_size:?}|{gemm_dtype:?}|{moe_dtype:?}|{fmha_dtype:?}|{kv_cache_dtype:?}|{comm_dtype:?}|{nextn}|{nextn_accept_rates:?}"
     );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(existing) = cache.lock().unwrap().get(&key) {
@@ -162,9 +163,10 @@ fn build_rust_engine(
     // Reuse aiconfigurator's own systems-path resolution: this sets
     // AICONFIGURATOR_SYSTEMS_PATH in the process env, which build_aic_engine
     // reads for the Rust-side perf-DB load.
-    if let Err(e) = py
-        .import("aiconfigurator.sdk.rust_engine_step")
-        .and_then(|m| m.call_method0("_configure_default_data_roots"))
+    if systems_path.is_none()
+        && let Err(e) = py
+            .import("aiconfigurator.sdk.rust_engine_step")
+            .and_then(|m| m.call_method0("_configure_default_data_roots"))
     {
         tracing::warn!("AIC: could not configure data roots ({e}); relying on build-time default");
     }
@@ -186,7 +188,7 @@ fn build_rust_engine(
         nextn,                     // speculative (MTP) tokens; 0 for dense
         nextn_accept_rates,        // per-position accept rates
         None,                      // kv_block_size
-        None,                      // systems_path (resolved via env above / build-time default)
+        systems_path,              // systems_path (explicit override or env/default fallback)
     )
     .map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -220,6 +222,7 @@ pub(super) fn create_aic_callback(
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
+    systems_path: Option<&str>,
 ) -> PyResult<Arc<dyn AicCallback>> {
     #[cfg(feature = "aic-forward-pass")]
     {
@@ -240,6 +243,7 @@ pub(super) fn create_aic_callback(
             comm_dtype,
             nextn,
             nextn_accept_rates,
+            systems_path,
         )?;
         Ok(Arc::new(RustAicCallback { engine }))
     }
@@ -270,6 +274,7 @@ pub(super) fn create_aic_prefill_load_estimator(
     comm_dtype: Option<&str>,
     nextn: Option<usize>,
     nextn_accept_rates: Option<&str>,
+    systems_path: Option<&str>,
 ) -> PyResult<Arc<dyn PrefillLoadEstimator>> {
     #[cfg(feature = "aic-forward-pass")]
     {
@@ -290,6 +295,7 @@ pub(super) fn create_aic_prefill_load_estimator(
             comm_dtype,
             nextn,
             nextn_accept_rates,
+            systems_path,
         )?;
         Ok(Arc::new(RustAicCallback { engine }))
     }
@@ -321,6 +327,7 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     fmha_dtype: Option<&str>,
     kv_cache_dtype: Option<&str>,
     comm_dtype: Option<&str>,
+    systems_path: Option<&str>,
 ) -> PyResult<usize> {
     let module = py.import("dynamo._internal.aic")?;
     let kwargs = PyDict::new(py);
@@ -342,6 +349,7 @@ pub(super) fn estimate_aic_num_gpu_blocks(
     kwargs.set_item("fmha_dtype", fmha_dtype)?;
     kwargs.set_item("kv_cache_dtype", kv_cache_dtype)?;
     kwargs.set_item("comm_dtype", comm_dtype)?;
+    kwargs.set_item("systems_path", systems_path)?;
     let blocks = module.call_method("estimate_num_gpu_blocks", (), Some(&kwargs))?;
     blocks.extract()
 }

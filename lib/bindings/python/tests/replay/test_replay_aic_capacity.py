@@ -41,6 +41,7 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
             {
                 "aic_backend": "vllm",
                 "aic_system": "h200_sxm",
+                "aic_systems_path": "/tmp/aic-systems",
                 "aic_model_path": "/models/mock",
                 "aic_tp_size": 4,
                 "block_size": 64,
@@ -55,6 +56,7 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
         {
             "backend_name": "vllm",
             "system": "h200_sxm",
+            "systems_path": "/tmp/aic-systems",
             "model_path": "/models/mock",
             "tp_size": 4,
             "block_size": 64,
@@ -66,6 +68,11 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
             "moe_tp_size": None,
             "moe_ep_size": None,
             "attention_dp_size": None,
+            "gemm_dtype": None,
+            "moe_dtype": None,
+            "fmha_dtype": None,
+            "kv_cache_dtype": None,
+            "comm_dtype": None,
         }
     ]
 

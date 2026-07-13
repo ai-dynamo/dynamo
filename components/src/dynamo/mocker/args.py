@@ -346,6 +346,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="AIC system name (e.g., 'h200_sxm'). Used with --aic-perf-model.",
     )
     parser.add_argument(
+        "--aic-systems-path",
+        type=str,
+        default=None,
+        help="Local AIC systems/performance-database root. Used with --aic-perf-model.",
+    )
+    parser.add_argument(
         "--aic-backend",
         type=str,
         default=None,

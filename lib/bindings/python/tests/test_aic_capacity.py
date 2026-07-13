@@ -57,6 +57,7 @@ def test_estimate_num_gpu_blocks_maps_vllm_to_total_fraction(monkeypatch):
         tp_size=1,
         block_size=10,
         max_num_batched_tokens=128,
+        systems_path="/tmp/aic-systems",
         gpu_memory_utilization=0.8,
     )
 
@@ -68,6 +69,7 @@ def test_estimate_num_gpu_blocks_maps_vllm_to_total_fraction(monkeypatch):
     assert kw["scheduler_block_size"] == 10
     assert kw["max_num_tokens"] == 128
     assert kw["tp_size"] == 1
+    assert kw["systems_path"] == "/tmp/aic-systems"
 
 
 def test_estimate_num_gpu_blocks_maps_sglang_to_static_fraction(monkeypatch):

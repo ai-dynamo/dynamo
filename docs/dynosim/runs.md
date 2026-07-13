@@ -270,6 +270,7 @@ The dedicated DynoSim CLI exposes:
 - `--model-name` (selects an exact model profile from the policy YAML)
 - `--aic-backend`
 - `--aic-system`
+- `--aic-systems-path`
 - `--aic-backend-version`
 - `--aic-tp-size`
 - `--aic-model-path`
@@ -333,6 +334,24 @@ DynoSim has two independent AIC surfaces:
 Both surfaces accept MoE parallelism fields. For Kimi-style TP-only MoE configs, keep them aligned by
 setting `aic_moe_tp_size` to the same value as `aic_tp_size`, with `aic_moe_ep_size=1` and
 `aic_attention_dp_size=1`.
+
+Use `--aic-systems-path` to load AIC system specifications and performance data from a local
+systems root. The flag overrides `aic_systems_path` in `--extra-engine-args`,
+`--prefill-engine-args`, and `--decode-engine-args`. When router-side AIC prompt-load modeling is
+enabled, the same path configures that estimator. The flag does not enable either AIC surface by
+itself; keep the remaining engine timing fields in engine JSON and the router timing fields in the
+top-level `--aic-*` options.
+
+```bash
+python -m dynamo.replay /path/to/mooncake_trace.jsonl \
+    --aic-systems-path /path/to/aiconfigurator/systems \
+    --extra-engine-args '{
+      "aic_backend": "vllm",
+      "aic_system": "h200_sxm",
+      "aic_model_path": "nvidia/Llama-3.1-8B-Instruct-FP8",
+      "aic_tp_size": 1
+    }'
+```
 
 Offline disaggregated simulation uses staged engine args instead of `--extra-engine-args`:
 

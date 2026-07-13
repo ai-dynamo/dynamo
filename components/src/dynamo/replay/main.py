@@ -130,6 +130,7 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     per_rank_blocks = estimate_num_gpu_blocks(
         backend_name=aic_backend,
         system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
+        systems_path=raw.get("aic_systems_path"),
         model_path=aic_model_path,
         tp_size=cast(int, tp_size if tp_size is not None else 1),
         block_size=_resolve_block_size_for_capacity(raw),
@@ -197,13 +198,19 @@ def _resolve_kv_bytes_per_token(raw: dict) -> None:
         raw["kv_bytes_per_token"] = kv_bytes_per_token
 
 
-def _load_engine_args(raw_args: str | None):
+def _load_engine_args(
+    raw_args: str | None,
+    *,
+    aic_systems_path: str | None = None,
+):
     if raw_args is None:
         return None
 
     raw = json.loads(raw_args)
     if not isinstance(raw, dict):
         raise ValueError("engine-args must be a JSON object")
+    if aic_systems_path is not None:
+        raw["aic_systems_path"] = aic_systems_path
     worker_type = raw.pop("worker_type", None)
     if worker_type is not None:
         if "is_prefill" in raw or "is_decode" in raw:
@@ -238,6 +245,7 @@ def _load_aic_perf_config(args: argparse.Namespace):
     values = {
         "aic_backend": args.aic_backend,
         "aic_system": args.aic_system,
+        "aic_systems_path": args.aic_systems_path,
         "aic_model_path": args.aic_model_path,
         "aic_backend_version": args.aic_backend_version,
         "aic_tp_size": args.aic_tp_size,
@@ -255,7 +263,11 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_nextn": args.aic_nextn,
         "aic_nextn_accept_rates": args.aic_nextn_accept_rates,
     }
-    if not any(value is not None for value in values.values()):
+    if not any(
+        value is not None
+        for name, value in values.items()
+        if name != "aic_systems_path"
+    ):
         return None
 
     missing = [
@@ -270,6 +282,7 @@ def _load_aic_perf_config(args: argparse.Namespace):
     return AicPerfConfig(
         aic_backend=values["aic_backend"],
         aic_system=values["aic_system"],
+        aic_systems_path=values["aic_systems_path"],
         aic_model_path=values["aic_model_path"],
         aic_tp_size=values["aic_tp_size"] or 1,
         aic_backend_version=values["aic_backend_version"],
@@ -716,6 +729,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--aic-backend")
     parser.add_argument("--aic-system")
+    parser.add_argument(
+        "--aic-systems-path",
+        help=(
+            "AIC systems/performance-database root; overrides "
+            "aic_systems_path in worker engine JSON and configures the "
+            "router-side AIC prefill-load estimator"
+        ),
+    )
     parser.add_argument("--aic-backend-version")
     parser.add_argument("--aic-tp-size", type=int)
     parser.add_argument("--aic-model-path")
@@ -926,9 +947,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "goodput SLA (--sla-ttft-ms/--sla-itl-ms/--sla-e2e-ms) currently requires --planner-config"
         )
 
-    extra_engine_args = _load_engine_args(args.extra_engine_args)
-    prefill_engine_args = _load_engine_args(args.prefill_engine_args)
-    decode_engine_args = _load_engine_args(args.decode_engine_args)
+    extra_engine_args = _load_engine_args(
+        args.extra_engine_args,
+        aic_systems_path=args.aic_systems_path,
+    )
+    prefill_engine_args = _load_engine_args(
+        args.prefill_engine_args,
+        aic_systems_path=args.aic_systems_path,
+    )
+    decode_engine_args = _load_engine_args(
+        args.decode_engine_args,
+        aic_systems_path=args.aic_systems_path,
+    )
     router_config = _load_router_config(
         args.router_config,
         args.router_policy_config,

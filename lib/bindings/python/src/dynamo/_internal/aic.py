@@ -408,6 +408,7 @@ def estimate_num_gpu_blocks(
     tp_size: int,
     block_size: int,
     max_num_batched_tokens: int,
+    systems_path: str | None = None,
     gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
     mem_fraction_static: float | None = None,
     free_gpu_memory_fraction: float | None = None,
@@ -505,5 +506,6 @@ def estimate_num_gpu_blocks(
             fmha_quant_mode=_resolve_quant_mode_name("fmha", fmha_dtype),
             kvcache_quant_mode=_resolve_quant_mode_name("kvcache", kv_cache_dtype),
             comm_quant_mode=_resolve_quant_mode_name("comm", comm_dtype),
+            systems_path=systems_path,
         )
     )

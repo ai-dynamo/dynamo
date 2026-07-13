@@ -9,6 +9,7 @@
 
 use std::cmp;
 use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use aiconfigurator_core::{
@@ -49,6 +50,7 @@ pub struct AicEngineConfig {
     pub model_name: String,
     pub model_arch: Option<String>,
     pub system_name: String,
+    pub systems_path: Option<String>,
     pub backend: String,
     pub backend_version: Option<String>,
     pub tp_size: u32,
@@ -73,7 +75,7 @@ impl AicEngineConfig {
             schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
             model_name: self.model_name,
             system_name: self.system_name,
-            systems_path: None,
+            systems_path: self.systems_path.map(PathBuf::from),
             backend: parse_backend_kind(&self.backend)?,
             backend_version: self.backend_version,
             kv_block_size: self.kv_block_size,
@@ -1048,7 +1050,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
             .aic_system
             .clone()
             .unwrap_or_else(|| DEFAULT_AIC_SYSTEM.to_string()),
-        systems_path: None,
+        systems_path: args.aic_systems_path.clone().map(PathBuf::from),
         backend: parse_backend_kind(backend)?,
         backend_version: args.aic_backend_version.clone(),
         kv_block_size: Some(to_u32(args.block_size, "block_size")?),
@@ -1540,6 +1542,7 @@ mod tests {
             model_name: "model".to_string(),
             model_arch: Some("arch".to_string()),
             system_name: "h200_sxm".to_string(),
+            systems_path: Some("/tmp/aic-systems".to_string()),
             backend: "vllm".to_string(),
             backend_version: None,
             tp_size: 1,
@@ -1554,7 +1557,12 @@ mod tests {
             kv_block_size: None,
             extra: extra.clone(),
         };
-        assert_eq!(config.into_aic_config().unwrap().extra, extra);
+        let converted = config.into_aic_config().unwrap();
+        assert_eq!(converted.extra, extra);
+        assert_eq!(
+            converted.systems_path.as_deref(),
+            Some(std::path::Path::new("/tmp/aic-systems"))
+        );
     }
 
     #[test]
@@ -1569,6 +1577,7 @@ mod tests {
             model_name: "model".to_string(),
             model_arch: Some("arch".to_string()),
             system_name: "h200_sxm".to_string(),
+            systems_path: None,
             backend: "vllm".to_string(),
             backend_version: None,
             tp_size: 1,

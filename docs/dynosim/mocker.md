@@ -101,6 +101,7 @@ python -m dynamo.mocker \
 | `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
 | `--aic-perf-model` | False | Use AIC SDK for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and DynoSim run paths do not use AIC. Requires `aiconfigurator` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
 | `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
+| `--aic-systems-path` | None | Local AIC systems/performance-database root. Used for latency and KV-capacity prediction with `--aic-perf-model` |
 | `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
 | `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
 | `--aic-moe-tp-size` | None | MoE tensor parallel size for AIC latency prediction. Required by some MoE models |

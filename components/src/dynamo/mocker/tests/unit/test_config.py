@@ -59,6 +59,7 @@ def make_args(**overrides):
         "trtllm_capacity_scheduler_policy": None,
         "aic_perf_model": False,
         "aic_system": None,
+        "aic_systems_path": None,
         "aic_backend": None,
         "aic_backend_version": None,
         "aic_tp_size": None,
@@ -398,6 +399,44 @@ def test_mocker_cli_accepts_mtp_configuration():
     assert args.aic_mtp_seed == 99
 
 
+def test_mocker_cli_propagates_aic_systems_path():
+    args = parse_args(
+        [
+            "--aic-perf-model",
+            "--aic-systems-path",
+            "/tmp/aic-systems",
+            "--model-path",
+            "/models/mock",
+            "--num-gpu-blocks-override",
+            "128",
+        ]
+    )
+
+    engine_args = CONFIG.build_mocker_engine_args(args)
+
+    assert engine_args.aic_systems_path == "/tmp/aic-systems"
+
+
+def test_mocker_cli_aic_systems_path_overrides_extra_engine_args(tmp_path):
+    config_path = tmp_path / "engine.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "num_gpu_blocks": 128,
+                "aic_systems_path": "/embedded",
+            }
+        )
+    )
+    args = make_args(
+        extra_engine_args=config_path,
+        aic_systems_path="/explicit",
+    )
+
+    engine_args = CONFIG.load_mocker_engine_args(args)
+
+    assert engine_args.aic_systems_path == "/explicit"
+
+
 def test_mocker_cli_accepts_max_model_len():
     args = parse_args(["--max-model-len", "32768"])
 
@@ -581,6 +620,7 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
             aic_perf_model=True,
             model_path="/models/mock",
             aic_system="h200_sxm",
+            aic_systems_path="/tmp/aic-systems",
             aic_tp_size=4,
             max_num_batched_tokens=4096,
             gpu_memory_utilization=0.8,
@@ -589,12 +629,14 @@ def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
     )
 
     assert engine_args.num_gpu_blocks == 46000
+    assert engine_args.aic_systems_path == "/tmp/aic-systems"
     assert engine_args.gpu_memory_utilization == 0.8
     assert engine_args.mem_fraction_static == 0.7
     assert calls == [
         {
             "backend_name": "vllm",
             "system": "h200_sxm",
+            "systems_path": "/tmp/aic-systems",
             "model_path": "/models/mock",
             "tp_size": 4,
             "block_size": 64,
@@ -642,6 +684,7 @@ def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
         max_num_batched_tokens=0,
         aic_backend="sglang",
         aic_system=None,
+        aic_systems_path=None,
         aic_backend_version=None,
         aic_tp_size=0,
         aic_model_path="/models/mock",
