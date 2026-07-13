@@ -19,6 +19,7 @@ use dynamo_llm::local_model::runtime_config::{
     StructuralTagScope,
 };
 use dynamo_llm::model_type::{ModelInput, ModelType};
+use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher};
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
@@ -183,6 +184,10 @@ pub struct WorkerConfig {
     /// roles -- setting it on `Decode` or `Encode` is rejected at
     /// `Worker::run` validation time with `BackendError::InvalidArgument`.
     pub route_to_encoder: bool,
+    /// Optional frontend media decoding and fetch policy advertised on the
+    /// model deployment card.
+    pub media_decoder: Option<MediaDecoder>,
+    pub media_fetcher: Option<MediaFetcher>,
 }
 
 impl WorkerConfig {
@@ -220,6 +225,8 @@ impl Default for WorkerConfig {
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
+            media_decoder: None,
+            media_fetcher: None,
         }
     }
 }
@@ -1650,6 +1657,8 @@ async fn build_local_model(
         .model_name(served_name)
         .kv_cache_block_size(llm.kv_cache_block_size)
         .custom_template_path(config.custom_jinja_template.clone())
+        .media_decoder(config.media_decoder.clone())
+        .media_fetcher(config.media_fetcher.clone())
         .runtime_config(rt_cfg);
 
     // Resolve model_name to a local path. Empty string or a raw media engine
@@ -1778,6 +1787,10 @@ mod tests {
         );
         assert_eq!(
             engine_control_policy("update_weights_from_disk"),
+            EngineControlPolicy::Direct
+        );
+        assert_eq!(
+            engine_control_policy("clear_kv_blocks"),
             EngineControlPolicy::Direct
         );
         assert_eq!(
@@ -1965,6 +1978,26 @@ mod tests {
         build_local_model(&config, &engine_config, true)
             .await
             .expect("name-only build must not fetch");
+    }
+
+    #[tokio::test]
+    async fn build_local_model_carries_media_configuration() {
+        let config = WorkerConfig {
+            media_decoder: Some(MediaDecoder::default()),
+            media_fetcher: Some(MediaFetcher::default()),
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "media-config-test".to_string(),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config, true)
+            .await
+            .expect("name-only model with media config must build");
+
+        assert!(local_model.card().media_decoder.is_some());
+        assert!(local_model.card().media_fetcher.is_some());
     }
 
     #[test]

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::worker_query::WorkerQueryClient;
+use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::Indexer;
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -12,6 +13,7 @@ use dynamo_runtime::{
     component::Component, discovery::EventTransportKind, prelude::*,
     transports::event_plane::EventSubscriber,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Start a simplified background task for event consumption using the event plane.
 ///
@@ -27,9 +29,11 @@ async fn start_kv_router_background_event_plane(
     component: Component,
     indexer: Indexer,
     transport_kind: EventTransportKind,
+    workers_with_configs: RuntimeConfigWatch,
+    model: String,
+    worker_type: &'static str,
+    cancellation_token: CancellationToken,
 ) -> Result<()> {
-    let cancellation_token = component.drt().primary_token();
-
     // Subscribe to KV events BEFORE spawning the discovery/recovery loop.
     // This ensures no events are lost between the initial dump fetch and the
     // subscription becoming active — the tree state at fetch time is guaranteed
@@ -45,7 +49,15 @@ async fn start_kv_router_background_event_plane(
 
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
     // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer).await?;
+    let worker_query_client = WorkerQueryClient::spawn(
+        component.clone(),
+        indexer,
+        workers_with_configs,
+        model,
+        worker_type,
+        cancellation_token.child_token(),
+    )
+    .await?;
     let kv_event_subject = format!(
         "namespace.{}.component.{}.{}",
         component.namespace().name(),
@@ -116,6 +128,10 @@ pub async fn start_subscriber(
     component: Component,
     kv_router_config: &KvRouterConfig,
     indexer: Indexer,
+    workers_with_configs: RuntimeConfigWatch,
+    model: String,
+    worker_type: &'static str,
+    cancellation_token: CancellationToken,
 ) -> Result<()> {
     let transport_kind = component.drt().default_event_transport_kind();
 
@@ -140,6 +156,7 @@ pub async fn start_subscriber(
             consumer_id,
             indexer,
             kv_router_config,
+            cancellation_token,
         )
         .await
     } else {
@@ -156,6 +173,15 @@ pub async fn start_subscriber(
             tracing::info!("Using NATS Core subscription (local_indexer mode)");
         }
 
-        start_kv_router_background_event_plane(component, indexer, transport_kind).await
+        start_kv_router_background_event_plane(
+            component,
+            indexer,
+            transport_kind,
+            workers_with_configs,
+            model,
+            worker_type,
+            cancellation_token,
+        )
+        .await
     }
 }
