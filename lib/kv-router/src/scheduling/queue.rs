@@ -3,10 +3,11 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crossbeam_queue::SegQueue;
 use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -83,10 +84,7 @@ enum AdmissionCommand {
     Dispatched {
         request_id: String,
     },
-    Cleanup {
-        request_id: String,
-        outcome: RequestOutcome,
-    },
+    Cleanup,
     Finished {
         request_id: String,
         outcome: RequestOutcome,
@@ -102,31 +100,39 @@ struct TrackedAdmission {
 
 #[derive(Default)]
 struct AdmissionCleanup {
-    dirty: Mutex<HashMap<String, RequestOutcome>>,
+    dirty: SegQueue<(String, RequestOutcome)>,
     pending: AtomicBool,
 }
 
 impl AdmissionCleanup {
-    fn enqueue(&self, request_id: String, outcome: RequestOutcome) {
-        self.dirty.lock().unwrap().insert(request_id, outcome);
-        self.pending.store(true, AtomicOrdering::Release);
+    fn enqueue(&self, request_id: String, outcome: RequestOutcome) -> bool {
+        self.dirty.push((request_id, outcome));
+        !self.pending.swap(true, AtomicOrdering::AcqRel)
     }
 
-    fn drain(&self) -> HashMap<String, RequestOutcome> {
-        if !self.pending.load(AtomicOrdering::Acquire)
-            || !self.pending.swap(false, AtomicOrdering::AcqRel)
-        {
-            return HashMap::new();
+    fn drain(&self) -> Vec<(String, RequestOutcome)> {
+        if !self.pending.load(AtomicOrdering::Acquire) {
+            return Vec::new();
         }
-        std::mem::take(&mut *self.dirty.lock().unwrap())
+
+        let mut dirty = Vec::new();
+        loop {
+            while let Some(cleanup) = self.dirty.pop() {
+                dirty.push(cleanup);
+            }
+            self.pending.store(false, AtomicOrdering::Release);
+            if self.dirty.is_empty() {
+                return dirty;
+            }
+            self.pending.store(true, AtomicOrdering::Release);
+        }
     }
 }
 
 /// Single-owner cleanup lease for one scheduler-tracked request.
 ///
 /// Ownership moves from worker selection into the response stream. Dropping
-/// either phase reports one terminal outcome to the actor, falling back to the
-/// coalesced dirty set only when the actor channel is full.
+/// either phase queues one terminal outcome and coalesces the actor wakeup.
 #[must_use = "dropping the lease reports the request outcome to the scheduler actor"]
 pub struct AdmissionLease {
     cleanup: Arc<AdmissionCleanup>,
@@ -160,22 +166,8 @@ impl Drop for AdmissionLease {
         let Some(request_id) = self.request_id.take() else {
             return;
         };
-        let command = AdmissionCommand::Cleanup {
-            request_id,
-            outcome: self.outcome,
-        };
-        match self.actor_tx.try_send(command) {
-            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-            Err(mpsc::error::TrySendError::Full(command)) => {
-                let AdmissionCommand::Cleanup {
-                    request_id,
-                    outcome,
-                } = command
-                else {
-                    unreachable!("lease cleanup only sends terminal outcomes")
-                };
-                self.cleanup.enqueue(request_id, outcome);
-            }
+        if self.cleanup.enqueue(request_id, self.outcome) {
+            let _ = self.actor_tx.try_send(AdmissionCommand::Cleanup);
         }
     }
 }
@@ -677,15 +669,21 @@ impl<
 > SchedulerQueueActor<P, C, Sel, RF>
 {
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
+        let mut commands_since_cleanup = 0usize;
         while let Some(command) = rx.recv().await {
+            commands_since_cleanup += 1;
+            let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
+            if drain_cleanup {
+                commands_since_cleanup = 0;
+            }
             match command {
                 AdmissionCommand::Enqueue {
                     request,
                     block_hashes,
                     ack_tx,
                 } => {
-                    let made_ready =
-                        self.handle_enqueue(request, block_hashes) | self.drain_cleanup();
+                    let made_ready = self.handle_enqueue(request, block_hashes)
+                        | (drain_cleanup && self.drain_cleanup());
                     if made_ready {
                         self.handle_update(None).await;
                     }
@@ -693,28 +691,26 @@ impl<
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
                     self.handle_update(worker).await;
-                    if self.drain_cleanup() {
+                    if drain_cleanup && self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
                 }
                 AdmissionCommand::Reconcile { force, ack_tx } => {
                     self.handle_reconcile(force).await;
-                    if self.drain_cleanup() {
+                    if drain_cleanup && self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
                 }
                 AdmissionCommand::Dispatched { request_id } => {
-                    if self.handle_dispatched(&request_id) | self.drain_cleanup() {
+                    if self.handle_dispatched(&request_id) | (drain_cleanup && self.drain_cleanup())
+                    {
                         self.handle_update(None).await;
                     }
                 }
-                AdmissionCommand::Cleanup {
-                    request_id,
-                    outcome,
-                } => {
-                    if self.handle_cleanup(&request_id, outcome) | self.drain_cleanup() {
+                AdmissionCommand::Cleanup => {
+                    if self.drain_cleanup() {
                         self.handle_update(None).await;
                     }
                 }
@@ -722,7 +718,9 @@ impl<
                     request_id,
                     outcome,
                 } => {
-                    if self.handle_finished(&request_id, outcome) | self.drain_cleanup() {
+                    if self.handle_finished(&request_id, outcome)
+                        | (drain_cleanup && self.drain_cleanup())
+                    {
                         self.handle_update(None).await;
                     }
                 }
@@ -974,38 +972,6 @@ impl<
         tracked.dispatched = true;
         let actions = self.admission.dispatched(tracked.ticket, worker);
         self.apply_admission_actions(actions)
-    }
-
-    fn handle_cleanup(&mut self, request_id: &str, outcome: RequestOutcome) -> bool {
-        let Some(tracked) = self.tracked_admissions.get(request_id).copied() else {
-            let owned_request_id = request_id.to_owned();
-            let rollback_booking = self.slots.request_worker(&owned_request_id).is_some();
-            if rollback_booking
-                && let Err(error) = self.slots.free(&owned_request_id, Instant::now())
-            {
-                tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
-            }
-
-            let mut removed_pending = false;
-            for class_index in 0..self.profile.classes().len() {
-                let removed = self.pending.take_if_in_class(class_index, |queued| {
-                    queued.request.mode.tracked_request_id() == Some(request_id)
-                });
-                removed_pending |= !removed.is_empty();
-                for entry in removed {
-                    self.subtract_pending_counters(class_index, entry.snapshot());
-                }
-            }
-            return rollback_booking || removed_pending;
-        };
-
-        let owned_request_id = request_id.to_owned();
-        let rollback_booking =
-            tracked.worker.is_some() && self.slots.request_worker(&owned_request_id).is_some();
-        if rollback_booking && let Err(error) = self.slots.free(&owned_request_id, Instant::now()) {
-            tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
-        }
-        rollback_booking | self.handle_finished(request_id, outcome)
     }
 
     fn drain_cleanup(&mut self) -> bool {
@@ -2541,7 +2507,7 @@ policy_classes:
     }
 
     #[test]
-    fn lease_drop_uses_actor_channel_then_overflow_cleanup() {
+    fn lease_drop_coalesces_actor_wakes_and_preserves_cleanup() {
         let cleanup = Arc::new(AdmissionCleanup::default());
         let (actor_tx, mut actor_rx) = mpsc::channel(1);
         let lease = |request_id: &str| AdmissionLease {
@@ -2552,22 +2518,23 @@ policy_classes:
         };
 
         drop(lease("fast-path"));
-        assert!(matches!(
-            actor_rx.try_recv(),
-            Ok(AdmissionCommand::Cleanup { request_id, .. }) if request_id == "fast-path"
-        ));
-        assert!(cleanup.drain().is_empty());
+        assert!(matches!(actor_rx.try_recv(), Ok(AdmissionCommand::Cleanup)));
+        assert_eq!(
+            cleanup.drain(),
+            [("fast-path".to_owned(), RequestOutcome::Aborted)]
+        );
 
-        actor_tx
-            .try_send(AdmissionCommand::Dispatched {
-                request_id: "occupied".to_owned(),
-            })
-            .unwrap();
-        drop(lease("overflow"));
-        assert!(matches!(
-            cleanup.drain().get("overflow"),
-            Some(RequestOutcome::Aborted)
-        ));
+        drop(lease("first"));
+        drop(lease("coalesced"));
+        assert!(matches!(actor_rx.try_recv(), Ok(AdmissionCommand::Cleanup)));
+        assert!(actor_rx.try_recv().is_err());
+        assert_eq!(
+            cleanup.drain(),
+            [
+                ("first".to_owned(), RequestOutcome::Aborted),
+                ("coalesced".to_owned(), RequestOutcome::Aborted),
+            ]
+        );
     }
 
     #[tokio::test]
