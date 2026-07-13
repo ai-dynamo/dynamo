@@ -2072,12 +2072,12 @@ impl OpenAIPreprocessor {
             && (Self::skips_guided_json_when_prompt_injected(reasoning_parser)
                 || (is_structured_response
                     && Self::skips_structured_response_when_prompt_injected(reasoning_parser)));
-        let inspect_gpt_oss_structured_response = is_structured_response
+        let inspect_unsupported_structured_response_reasoning_gate = is_structured_response
             && !uses_tool_call_structural_tag
-            && matches!(reasoning_parser, Some("gpt_oss"));
+            && !Self::structured_response_supports_sglang_reasoning_gate(reasoning_parser);
         let bypass_reasoning_for_bare_guided_json = inspect_force_reasoning_guided_output
             || inspect_prompt_injected_guided_output
-            || inspect_gpt_oss_structured_response;
+            || inspect_unsupported_structured_response_reasoning_gate;
         // Preserve the legacy bypass for force-reasoning parsers not yet opted in.
         let skip_reasoning_for_guided_json = is_guided_output
             && !uses_tool_call_structural_tag
