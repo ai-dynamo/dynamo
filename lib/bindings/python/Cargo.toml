@@ -113,3 +113,8 @@ dynamo-llm = { path = "../../llm", default-features = false }
 inherits = "release"
 debug = true
 strip = false
+
+[patch.crates-io]
+# Backport ai-dynamo/modelexpress#467 to v0.3.0 until an upstream release includes it.
+modelexpress-client = { git = "https://github.com/doublewordai/modelexpress", rev = "46e4633a33a9a9183bda97ee5bb3411dd4992d7c" }
+modelexpress-common = { git = "https://github.com/doublewordai/modelexpress", rev = "46e4633a33a9a9183bda97ee5bb3411dd4992d7c" }

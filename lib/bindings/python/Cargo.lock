@@ -1388,7 +1388,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -4789,8 +4789,7 @@ dependencies = [
 [[package]]
 name = "modelexpress-client"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7de62490b58d9862482a2cf223c3aeceaadd01d46ac996d99b4b6a75af204d21"
+source = "git+https://github.com/rushilbhat/modelexpress?rev=46e4633a33a9a9183bda97ee5bb3411dd4992d7c#46e4633a33a9a9183bda97ee5bb3411dd4992d7c"
 dependencies = [
  "anyhow",
  "clap",
@@ -4811,20 +4810,22 @@ dependencies = [
 [[package]]
 name = "modelexpress-common"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44ec153f868d45d5d48129dd2f1e24755e93f74d6f9f423094a3b784fa6a88cc"
+source = "git+https://github.com/rushilbhat/modelexpress?rev=46e4633a33a9a9183bda97ee5bb3411dd4992d7c#46e4633a33a9a9183bda97ee5bb3411dd4992d7c"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "clap",
  "config",
+ "futures",
  "hf-hub 0.4.3",
  "jiff",
  "prost 0.13.5",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tonic 0.13.1",
@@ -6145,7 +6146,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "once_cell",
@@ -6165,7 +6166,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -6186,7 +6187,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -6199,7 +6200,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -9378,7 +9379,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
