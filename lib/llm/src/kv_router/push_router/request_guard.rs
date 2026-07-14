@@ -87,6 +87,12 @@ impl RequestCleanup {
             lease.mark_completed(context_tokens);
         }
     }
+
+    fn mark_dispatched(&mut self) {
+        if let Some(lease) = self.admission_lease.as_mut() {
+            lease.mark_dispatched();
+        }
+    }
 }
 
 impl Drop for RequestCleanup {
@@ -376,6 +382,9 @@ impl RequestGuard {
 
     pub(super) async fn mark_dispatched(&mut self) {
         if self.cleanup.request_progress.is_some() {
+            // Backend dispatch already succeeded. Record that fact synchronously so
+            // lease cleanup can preserve event order if it overtakes the actor command.
+            self.cleanup.mark_dispatched();
             self.cleanup
                 .chooser
                 .mark_dispatched(&self.cleanup.context_id)

@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
 use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
@@ -64,7 +64,11 @@ struct QueuedRequest {
 struct RequestAdmission {
     ticket: AdmissionTicket,
     progress: RequestProgressUpdater,
+    generation: Option<LifecycleGeneration>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LifecycleGeneration(u64);
 
 #[allow(clippy::large_enum_variant)]
 enum AdmissionCommand {
@@ -72,6 +76,12 @@ enum AdmissionCommand {
         request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
         ack_tx: oneshot::Sender<()>,
+    },
+    EnqueueLeased {
+        request: SchedulingRequest,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+        lease: Box<AdmissionLease>,
+        ack_tx: oneshot::Sender<Box<AdmissionLease>>,
     },
     Update {
         worker: Option<WorkerWithDpRank>,
@@ -85,10 +95,6 @@ enum AdmissionCommand {
         request_id: String,
     },
     Cleanup,
-    Finished {
-        request_id: String,
-        outcome: RequestOutcome,
-    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -96,21 +102,30 @@ struct TrackedAdmission {
     ticket: AdmissionTicket,
     worker: Option<WorkerWithDpRank>,
     dispatched: bool,
+    generation: Option<LifecycleGeneration>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AdmissionCleanupEntry {
+    generation: LifecycleGeneration,
+    request_id: String,
+    outcome: RequestOutcome,
+    dispatched: bool,
 }
 
 #[derive(Default)]
 struct AdmissionCleanup {
-    dirty: SegQueue<(String, RequestOutcome)>,
+    dirty: SegQueue<AdmissionCleanupEntry>,
     pending: AtomicBool,
 }
 
 impl AdmissionCleanup {
-    fn enqueue(&self, request_id: String, outcome: RequestOutcome) -> bool {
-        self.dirty.push((request_id, outcome));
+    fn enqueue(&self, cleanup: AdmissionCleanupEntry) -> bool {
+        self.dirty.push(cleanup);
         !self.pending.swap(true, AtomicOrdering::AcqRel)
     }
 
-    fn drain(&self) -> Vec<(String, RequestOutcome)> {
+    fn drain(&self) -> Vec<AdmissionCleanupEntry> {
         if !self.pending.load(AtomicOrdering::Acquire) {
             return Vec::new();
         }
@@ -137,16 +152,22 @@ impl AdmissionCleanup {
 pub struct AdmissionLease {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
+    generation: LifecycleGeneration,
     request_id: Option<String>,
     outcome: RequestOutcome,
+    dispatched: bool,
+    armed: bool,
 }
 
 impl std::fmt::Debug for AdmissionLease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AdmissionLease")
+            .field("generation", &self.generation)
             .field("request_id", &self.request_id)
             .field("outcome", &self.outcome)
+            .field("dispatched", &self.dispatched)
+            .field("armed", &self.armed)
             .finish_non_exhaustive()
     }
 }
@@ -160,17 +181,33 @@ impl AdmissionLease {
         self.outcome = RequestOutcome::Aborted;
     }
 
+    pub fn mark_dispatched(&mut self) {
+        self.dispatched = true;
+    }
+
     pub fn disarm(&mut self) {
         self.request_id = None;
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
     }
 }
 
 impl Drop for AdmissionLease {
     fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
         let Some(request_id) = self.request_id.take() else {
             return;
         };
-        if self.cleanup.enqueue(request_id, self.outcome) {
+        if self.cleanup.enqueue(AdmissionCleanupEntry {
+            generation: self.generation,
+            request_id,
+            outcome: self.outcome,
+            dispatched: self.dispatched,
+        }) {
             let _ = self.actor_tx.try_send(AdmissionCommand::Cleanup);
         }
     }
@@ -216,6 +253,7 @@ pub struct SchedulerQueue<
 > {
     admission_tx: mpsc::Sender<AdmissionCommand>,
     cleanup: Arc<AdmissionCleanup>,
+    next_lifecycle_generation: AtomicU64,
     /// Number of requests currently parked in the pending queue.
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_count: Arc<AtomicUsize>,
@@ -409,6 +447,7 @@ impl<
         Ok(Self {
             admission_tx,
             cleanup,
+            next_lifecycle_generation: AtomicU64::new(0),
             pending_count,
             pending_isl_tokens,
             class_counters,
@@ -545,6 +584,70 @@ impl<
         }
     }
 
+    pub(crate) async fn enqueue_with_block_hashes_and_lease(
+        &self,
+        mut request: SchedulingRequest,
+        block_hashes: Option<Vec<LocalBlockHash>>,
+        lease: Option<Box<AdmissionLease>>,
+    ) -> Option<Box<AdmissionLease>> {
+        let Some(lease) = lease else {
+            self.enqueue_with_block_hashes(request, block_hashes).await;
+            return None;
+        };
+        let eligibility = request.eligibility();
+
+        if let Err(error) = eligibility.validate_pinned_worker_allowed() {
+            request.respond(Err(error));
+            return None;
+        }
+
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let command = AdmissionCommand::EnqueueLeased {
+            request,
+            block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
+            lease,
+            ack_tx,
+        };
+
+        if let Err(error) = self.admission_tx.send(command).await {
+            let AdmissionCommand::EnqueueLeased { mut request, .. } = error.0 else {
+                return None;
+            };
+            request.respond(Err(KvSchedulerError::SubscriberShutdown));
+            return None;
+        }
+
+        match ack_rx.await {
+            Ok(lease) => Some(lease),
+            Err(_) => {
+                tracing::warn!("scheduler queue actor dropped enqueue acknowledgement");
+                None
+            }
+        }
+    }
+
+    pub(crate) fn cancellation_guard(
+        &self,
+        request_id: Option<&str>,
+    ) -> Option<Box<AdmissionLease>> {
+        if !self.queueing_enabled {
+            return None;
+        }
+        let request_id = request_id?.to_owned();
+        Some(Box::new(AdmissionLease {
+            cleanup: Arc::clone(&self.cleanup),
+            actor_tx: self.admission_tx.clone(),
+            generation: LifecycleGeneration(
+                self.next_lifecycle_generation
+                    .fetch_add(1, AtomicOrdering::Relaxed),
+            ),
+            request_id: Some(request_id),
+            outcome: RequestOutcome::Aborted,
+            dispatched: false,
+            armed: false,
+        }))
+    }
+
     /// Called on prefill_complete/free. Drains pending requests while workers have capacity.
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
@@ -580,32 +683,6 @@ impl<
             .admission_tx
             .send(AdmissionCommand::Dispatched {
                 request_id: request_id.to_owned(),
-            })
-            .await;
-    }
-
-    pub(crate) fn cancellation_guard(&self, request_id: Option<&str>) -> Option<AdmissionLease> {
-        if !self.queueing_enabled {
-            return None;
-        }
-        let request_id = request_id?.to_owned();
-        Some(AdmissionLease {
-            cleanup: Arc::clone(&self.cleanup),
-            actor_tx: self.admission_tx.clone(),
-            request_id: Some(request_id),
-            outcome: RequestOutcome::Aborted,
-        })
-    }
-
-    pub(crate) async fn finish(&self, request_id: &str, outcome: RequestOutcome) {
-        if !self.admission_enabled {
-            return;
-        }
-        let _ = self
-            .admission_tx
-            .send(AdmissionCommand::Finished {
-                request_id: request_id.to_owned(),
-                outcome,
             })
             .await;
     }
@@ -694,12 +771,36 @@ impl<
                     block_hashes,
                     ack_tx,
                 } => {
-                    let made_ready = self.handle_enqueue(request, block_hashes)
-                        | (drain_cleanup && self.drain_cleanup());
+                    let (enqueue_ready, _) = self.handle_enqueue(request, block_hashes, None);
+                    let made_ready = enqueue_ready | (drain_cleanup && self.drain_cleanup());
                     if made_ready {
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
+                }
+                AdmissionCommand::EnqueueLeased {
+                    request,
+                    block_hashes,
+                    mut lease,
+                    ack_tx,
+                } => {
+                    let generation = lease.generation;
+                    debug_assert_eq!(
+                        lease.request_id.as_deref(),
+                        request.mode.tracked_request_id()
+                    );
+                    let (enqueue_ready, owns_lifecycle) =
+                        self.handle_enqueue(request, block_hashes, Some(generation));
+                    if owns_lifecycle {
+                        lease.arm();
+                    } else {
+                        lease.disarm();
+                    }
+                    let made_ready = enqueue_ready | (drain_cleanup && self.drain_cleanup());
+                    if made_ready {
+                        self.handle_update(None).await;
+                    }
+                    let _ = ack_tx.send(lease);
                 }
                 AdmissionCommand::Update { worker, ack_tx } => {
                     self.handle_update(worker).await;
@@ -723,16 +824,6 @@ impl<
                 }
                 AdmissionCommand::Cleanup => {
                     if self.drain_cleanup() {
-                        self.handle_update(None).await;
-                    }
-                }
-                AdmissionCommand::Finished {
-                    request_id,
-                    outcome,
-                } => {
-                    if self.handle_finished(&request_id, outcome)
-                        | (drain_cleanup && self.drain_cleanup())
-                    {
                         self.handle_update(None).await;
                     }
                 }
@@ -765,7 +856,8 @@ impl<
         &mut self,
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
-    ) -> bool {
+        lifecycle_generation: Option<LifecycleGeneration>,
+    ) -> (bool, bool) {
         let decay_now = Instant::now();
         // Synthetic and explicit selections avoid cache work. Family classification
         // samples overlap once and reuses it if the request enters queue storage.
@@ -789,7 +881,7 @@ impl<
             request.respond(Err(KvSchedulerError::BookingFailed(format!(
                 "request {request_id} already has an active admission"
             ))));
-            return false;
+            return (false, false);
         }
 
         let mut admission = if request.mode.admission_request_id().is_some()
@@ -831,7 +923,14 @@ impl<
                     worker_eligibility,
                 )
                 .map(|(ticket, progress, decision)| {
-                    (RequestAdmission { ticket, progress }, decision)
+                    (
+                        RequestAdmission {
+                            ticket,
+                            progress,
+                            generation: lifecycle_generation,
+                        },
+                        decision,
+                    )
                 })
         } else {
             None
@@ -843,7 +942,7 @@ impl<
                 AdmissionDecision::Ready(placement) => {
                     if let Err(error) = apply_admission_placement(&mut request, *placement) {
                         request.respond(Err(error));
-                        return self.abort_admission(request_admission.ticket);
+                        return (self.abort_admission(request_admission.ticket), false);
                     }
                     if matches!(placement, WorkerPlacement::Exact(_)) {
                         // Classification stays in the family selected above; queue cost and
@@ -925,7 +1024,7 @@ impl<
                 .is_some_and(|admission| self.abort_admission(admission.ticket));
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
-            return made_ready;
+            return (made_ready, false);
         }
         if let Some((request_id, ticket)) = tracked_admission {
             self.tracked_admissions.insert(
@@ -934,6 +1033,7 @@ impl<
                     ticket,
                     worker: None,
                     dispatched: false,
+                    generation: lifecycle_generation,
                 },
             );
         }
@@ -941,7 +1041,7 @@ impl<
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.add_class_counters(class_index, snapshot);
-        false
+        (false, true)
     }
 
     fn should_queue(
@@ -995,10 +1095,18 @@ impl<
         let mut made_ready = false;
         let mut ready_by_class: HashMap<usize, FxHashSet<_>> = HashMap::new();
         let mut unmanaged_request_ids = HashSet::new();
-        for (request_id, outcome) in dirty {
-            let tracked = self.tracked_admissions.get(&request_id).copied();
+        for cleanup in dirty {
+            let request_id = cleanup.request_id.as_str();
+            let tracked = self.tracked_admissions.get(request_id).copied();
+            if tracked.is_some_and(|tracked| tracked.generation != Some(cleanup.generation)) {
+                continue;
+            }
+            if cleanup.dispatched {
+                made_ready |= self.handle_dispatched(request_id);
+            }
+
             if tracked.is_none_or(|tracked| tracked.worker.is_some()) {
-                let owned_request_id = request_id.clone();
+                let owned_request_id = request_id.to_owned();
                 if self.slots.request_worker(&owned_request_id).is_some() {
                     if let Err(error) = self.slots.free(&owned_request_id, Instant::now()) {
                         tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
@@ -1008,15 +1116,15 @@ impl<
             }
 
             let Some(tracked) = tracked else {
-                unmanaged_request_ids.insert(request_id);
+                unmanaged_request_ids.insert(request_id.to_owned());
                 continue;
             };
             if tracked.worker.is_some() {
-                made_ready |= self.handle_finished(&request_id, outcome);
+                made_ready |= self.handle_finished(request_id, cleanup.outcome);
                 continue;
             }
 
-            self.tracked_admissions.remove(&request_id);
+            self.tracked_admissions.remove(request_id);
             if let Some(entry) = self
                 .pending
                 .remove_deferred(tracked.ticket.class_index, tracked.ticket.id)
@@ -1028,7 +1136,7 @@ impl<
                     .or_default()
                     .insert(tracked.ticket.id);
             }
-            made_ready |= self.finish_admission(tracked.ticket, outcome);
+            made_ready |= self.finish_admission(tracked.ticket, cleanup.outcome);
         }
 
         // One heap rebuild per affected class keeps cancellation storms O(classes * queue),
@@ -1090,6 +1198,10 @@ impl<
             }
         }
         self.finish_admission(tracked.ticket, outcome)
+    }
+
+    fn clear_admission(&mut self, request_id: &str) -> Option<TrackedAdmission> {
+        self.tracked_admissions.remove(request_id)
     }
 
     fn finish_admission(&mut self, ticket: AdmissionTicket, outcome: RequestOutcome) -> bool {
@@ -1165,7 +1277,7 @@ impl<
                     let mut queued = entry.into_payload();
                     if let Some(admission) = queued.admission {
                         if let Some(request_id) = queued.request.mode.tracked_request_id() {
-                            self.tracked_admissions.remove(request_id);
+                            self.clear_admission(request_id);
                         }
                         actions.extend(self.admission.aborted(admission.ticket));
                     }
@@ -1324,7 +1436,7 @@ impl<
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(request, admit_now, admission);
+            let _ = self.admit_one(request, admit_now, admission);
         }
     }
 
@@ -1335,7 +1447,7 @@ impl<
         mut request: SchedulingRequest,
         decay_now: Instant,
         admission: Option<RequestAdmission>,
-    ) -> bool {
+    ) -> (bool, bool) {
         let admission_key = admission.as_ref().map(|_| {
             request
                 .mode
@@ -1373,11 +1485,14 @@ impl<
                 tracing::warn!("scheduling failed: {e}");
                 request.respond(Err(e));
                 if let Some(request_id) = admission_key.as_deref() {
-                    self.tracked_admissions.remove(request_id);
+                    self.clear_admission(request_id);
                 }
-                return admission
-                    .as_ref()
-                    .is_some_and(|admission| self.abort_admission(admission.ticket));
+                return (
+                    admission
+                        .as_ref()
+                        .is_some_and(|admission| self.abort_admission(admission.ticket)),
+                    false,
+                );
             }
         };
 
@@ -1398,7 +1513,7 @@ impl<
                 admission.is_none(),
                 "query-only selection bypasses admission"
             );
-            return false;
+            return (false, false);
         }
 
         let request_id = request
@@ -1426,25 +1541,28 @@ impl<
         if let Some(admission) = admission {
             if delivered {
                 let request_id = admission_key.expect("admitted request has a lifecycle key");
-                self.tracked_admissions
-                    .entry(request_id)
-                    .and_modify(|tracked| {
-                        debug_assert_eq!(tracked.ticket, admission.ticket);
-                        tracked.worker = Some(selection.worker);
-                    })
-                    .or_insert(TrackedAdmission {
-                        ticket: admission.ticket,
-                        worker: Some(selection.worker),
-                        dispatched: false,
-                    });
+                if let Some(tracked) = self.tracked_admissions.get_mut(&request_id) {
+                    debug_assert_eq!(tracked.ticket, admission.ticket);
+                    tracked.worker = Some(selection.worker);
+                } else {
+                    self.tracked_admissions.insert(
+                        request_id,
+                        TrackedAdmission {
+                            ticket: admission.ticket,
+                            worker: Some(selection.worker),
+                            dispatched: false,
+                            generation: admission.generation,
+                        },
+                    );
+                }
             } else {
                 if let Some(request_id) = admission_key.as_deref() {
-                    self.tracked_admissions.remove(request_id);
+                    self.clear_admission(request_id);
                 }
-                return self.abort_admission(admission.ticket);
+                return (self.abort_admission(admission.ticket), false);
             }
         }
-        false
+        (false, delivered)
     }
 
     /// Completes the tracked-admission ownership handoff.
@@ -2204,6 +2322,21 @@ mod tests {
         (request, response)
     }
 
+    async fn enqueue_with_lease(
+        queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>,
+        request: SchedulingRequest,
+    ) -> Box<AdmissionLease> {
+        let request_id = request
+            .mode
+            .admission_request_id()
+            .expect("admission test request must be tracked");
+        let lease = queue.cancellation_guard(Some(request_id)).unwrap();
+        queue
+            .enqueue_with_block_hashes_and_lease(request, None, Some(lease))
+            .await
+            .expect("actor must return the accepted admission lease")
+    }
+
     #[derive(Default)]
     struct GateState {
         deferred: Option<AdmissionId>,
@@ -2361,7 +2494,7 @@ policy_classes:
         request.policy_class = Some("agents".to_owned());
         request.session_id = Some("session-a".to_owned());
 
-        queue.enqueue(request).await;
+        let mut lease = enqueue_with_lease(&queue, request).await;
         assert_eq!(queue.pending_count(), 1);
         {
             let state = state.lock().unwrap();
@@ -2386,19 +2519,18 @@ policy_classes:
             80
         );
         assert_eq!(queue.pending_count(), 0);
+        lease.mark_dispatched();
         queue.dispatched("deferred").await;
         queue.dispatched("deferred").await;
-        queue
-            .finish("deferred", RequestOutcome::Completed { context_tokens: 81 })
-            .await;
+        lease.mark_completed(81);
+        drop(lease);
         queue.update().await;
         {
             let state = state.lock().unwrap();
             assert_eq!(state.dispatched, vec![WorkerWithDpRank::new(0, 0)]);
             assert_eq!(state.completed_context_tokens, vec![81]);
         }
-
-        slots.free(&"deferred".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test]
@@ -2411,8 +2543,7 @@ policy_classes:
         request.policy_class = Some("agents".to_owned());
         request.session_id = Some("session-a".to_owned());
 
-        let cancellation = queue.cancellation_guard(Some("cancelled")).unwrap();
-        queue.enqueue(request).await;
+        let cancellation = enqueue_with_lease(&queue, request).await;
         drop(response);
         drop(cancellation);
         queue.update().await;
@@ -2454,6 +2585,46 @@ policy_classes:
         }
     }
 
+    struct OrderedLifecycleGate(Arc<StdMutex<Vec<&'static str>>>);
+
+    impl PolicyClassAdmissionStrategy for OrderedLifecycleGate {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Ready(WorkerPlacement::Any)
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            let event = match event {
+                AdmissionEvent::Dispatched { .. } => "dispatched",
+                AdmissionEvent::Completed { .. } => "completed",
+                AdmissionEvent::Aborted { .. } => "aborted",
+                AdmissionEvent::Reconcile => return Vec::new(),
+            };
+            self.0.lock().unwrap().push(event);
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_cleanup_preserves_dispatch_before_terminal_event() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let (queue, slots) =
+            make_queue_with_admission_strategy(Box::new(OrderedLifecycleGate(Arc::clone(&events))));
+        let (mut request, response) = make_admission_request("ordered-cleanup", 64);
+        request.policy_class = Some("agents".to_owned());
+        let mut lease = enqueue_with_lease(&queue, request).await;
+        response.await.unwrap().unwrap();
+
+        // Simulate cancellation after backend dispatch succeeds but before the
+        // bounded actor command records it.
+        lease.mark_dispatched();
+        lease.mark_completed(96);
+        drop(lease);
+        queue.update().await;
+
+        assert_eq!(*events.lock().unwrap(), ["dispatched", "completed"]);
+        slots.assert_completely_drained(decay_now());
+    }
+
     #[tokio::test]
     async fn cancellation_after_response_send_rolls_back_booking() {
         let state = Arc::new(StdMutex::new(GateState::default()));
@@ -2462,11 +2633,7 @@ policy_classes:
         }));
         let (mut request, response) = make_admission_request("cancelled-after-handoff", 64);
         request.policy_class = Some("agents".to_owned());
-        let cancellation = queue
-            .cancellation_guard(Some("cancelled-after-handoff"))
-            .unwrap();
-
-        queue.enqueue(request).await;
+        let cancellation = enqueue_with_lease(&queue, request).await;
         assert_eq!(
             slots
                 .active_request_counts()
@@ -2497,11 +2664,7 @@ policy_classes:
         }));
         let (mut request, response) = make_admission_request("completed-after-terminal", 64);
         request.policy_class = Some("agents".to_owned());
-        let mut lease = queue
-            .cancellation_guard(Some("completed-after-terminal"))
-            .unwrap();
-
-        queue.enqueue(request).await;
+        let mut lease = enqueue_with_lease(&queue, request).await;
         response.await.unwrap().unwrap();
         drop(queue);
         lease.mark_completed(96);
@@ -2522,29 +2685,47 @@ policy_classes:
     fn lease_drop_coalesces_actor_wakes_and_preserves_cleanup() {
         let cleanup = Arc::new(AdmissionCleanup::default());
         let (actor_tx, mut actor_rx) = mpsc::channel(1);
-        let lease = |request_id: &str| AdmissionLease {
+        let lease = |generation: u64, request_id: &str| AdmissionLease {
             cleanup: Arc::clone(&cleanup),
             actor_tx: actor_tx.clone(),
+            generation: LifecycleGeneration(generation),
             request_id: Some(request_id.to_owned()),
             outcome: RequestOutcome::Aborted,
+            dispatched: false,
+            armed: true,
         };
 
-        drop(lease("fast-path"));
+        drop(lease(1, "fast-path"));
         assert!(matches!(actor_rx.try_recv(), Ok(AdmissionCommand::Cleanup)));
         assert_eq!(
             cleanup.drain(),
-            [("fast-path".to_owned(), RequestOutcome::Aborted)]
+            [AdmissionCleanupEntry {
+                generation: LifecycleGeneration(1),
+                request_id: "fast-path".to_owned(),
+                outcome: RequestOutcome::Aborted,
+                dispatched: false,
+            }]
         );
 
-        drop(lease("first"));
-        drop(lease("coalesced"));
+        drop(lease(2, "first"));
+        drop(lease(3, "coalesced"));
         assert!(matches!(actor_rx.try_recv(), Ok(AdmissionCommand::Cleanup)));
         assert!(actor_rx.try_recv().is_err());
         assert_eq!(
             cleanup.drain(),
             [
-                ("first".to_owned(), RequestOutcome::Aborted),
-                ("coalesced".to_owned(), RequestOutcome::Aborted),
+                AdmissionCleanupEntry {
+                    generation: LifecycleGeneration(2),
+                    request_id: "first".to_owned(),
+                    outcome: RequestOutcome::Aborted,
+                    dispatched: false,
+                },
+                AdmissionCleanupEntry {
+                    generation: LifecycleGeneration(3),
+                    request_id: "coalesced".to_owned(),
+                    outcome: RequestOutcome::Aborted,
+                    dispatched: false,
+                },
             ]
         );
     }
@@ -2556,8 +2737,11 @@ policy_classes:
         let mut lease = AdmissionLease {
             cleanup: Arc::clone(&cleanup),
             actor_tx,
+            generation: LifecycleGeneration(1),
             request_id: Some("late-error".to_owned()),
             outcome: RequestOutcome::Aborted,
+            dispatched: false,
+            armed: true,
         };
 
         lease.mark_completed(96);
@@ -2566,7 +2750,12 @@ policy_classes:
 
         assert_eq!(
             cleanup.drain(),
-            [("late-error".to_owned(), RequestOutcome::Aborted)]
+            [AdmissionCleanupEntry {
+                generation: LifecycleGeneration(1),
+                request_id: "late-error".to_owned(),
+                outcome: RequestOutcome::Aborted,
+                dispatched: false,
+            }]
         );
     }
 
@@ -2578,7 +2767,7 @@ policy_classes:
         }));
         let (mut first, first_response) = make_admission_request("duplicate", 64);
         first.policy_class = Some("agents".to_owned());
-        queue.enqueue(first).await;
+        let first_lease = enqueue_with_lease(&queue, first).await;
         first_response.await.unwrap().unwrap();
 
         let (mut duplicate, duplicate_response) = make_admission_request("duplicate", 64);
@@ -2598,7 +2787,7 @@ policy_classes:
         );
         assert!(state.lock().unwrap().aborted.is_empty());
 
-        queue.finish("duplicate", RequestOutcome::Aborted).await;
+        drop(first_lease);
         queue.update().await;
         assert_eq!(state.lock().unwrap().aborted, vec![AdmissionId::new(0)]);
         slots.free(&"duplicate".to_owned(), decay_now()).unwrap();
@@ -2654,11 +2843,6 @@ policy_classes:
             assert!(selected.request_progress.is_none());
         }
 
-        queue.dispatched("bypassed").await;
-        queue
-            .finish("bypassed", RequestOutcome::Completed { context_tokens: 64 })
-            .await;
-        queue.update().await;
         assert_eq!(events.load(Ordering::Relaxed), 0);
         slots.free(&"bypassed".to_owned(), decay_now()).unwrap();
 
@@ -2677,9 +2861,7 @@ policy_classes:
         }));
         let (mut request, response) = make_admission_request("bypassed-handoff", 64);
         request.policy_class = Some("agents".to_owned());
-        let cancellation = queue.cancellation_guard(Some("bypassed-handoff")).unwrap();
-
-        queue.enqueue(request).await;
+        let cancellation = enqueue_with_lease(&queue, request).await;
         assert_eq!(
             slots
                 .active_request_counts()
@@ -2739,32 +2921,25 @@ policy_classes:
             make_queue_with_admission_strategy(Box::<FinishReleaseGate>::default());
         let (mut first, first_response) = make_admission_request("first-admitted", 64);
         first.policy_class = Some("agents".to_owned());
-        queue.enqueue(first).await;
+        let mut first_lease = enqueue_with_lease(&queue, first).await;
         first_response.await.unwrap().unwrap();
 
         let (mut second, second_response) = make_admission_request("second-deferred", 64);
         second.policy_class = Some("agents".to_owned());
-        queue.enqueue(second).await;
+        let second_lease = enqueue_with_lease(&queue, second).await;
         assert_eq!(queue.pending_count(), 1);
 
-        slots
-            .free(&"first-admitted".to_owned(), decay_now())
-            .unwrap();
-        queue
-            .finish(
-                "first-admitted",
-                RequestOutcome::Completed { context_tokens: 64 },
-            )
-            .await;
+        first_lease.mark_completed(64);
+        drop(first_lease);
         tokio::time::timeout(Duration::from_secs(1), second_response)
             .await
             .expect("finish action did not drain the queue")
             .unwrap()
             .unwrap();
         assert_eq!(queue.pending_count(), 0);
-        slots
-            .free(&"second-deferred".to_owned(), decay_now())
-            .unwrap();
+        drop(second_lease);
+        queue.update().await;
+        slots.assert_completely_drained(decay_now());
     }
 
     #[derive(Default)]
@@ -2883,7 +3058,7 @@ policy_classes:
             .overlap
             .effective_cached_tokens
             .insert(WorkerWithDpRank::new(1, 0), 64);
-        queue.enqueue(request).await;
+        let lease = enqueue_with_lease(&queue, request).await;
 
         assert_eq!(queue.class_queue_stats(0).unwrap().pending_cached_tokens, 0);
         slots
@@ -2891,9 +3066,9 @@ policy_classes:
             .unwrap();
         queue.update().await;
         assert_eq!(response.await.unwrap().unwrap().best_worker, worker);
-        queue.finish("family-exact", RequestOutcome::Aborted).await;
+        drop(lease);
         queue.update().await;
-        slots.free(&"family-exact".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test]
@@ -2917,7 +3092,7 @@ policy_classes:
             .overlap
             .effective_cached_tokens
             .insert(WorkerWithDpRank::new(1, 0), 64);
-        queue.enqueue(request).await;
+        let lease = enqueue_with_lease(&queue, request).await;
         assert_eq!(
             queue.class_queue_stats(1).unwrap().pending_cached_tokens,
             64
@@ -2931,9 +3106,9 @@ policy_classes:
             .unwrap();
         queue.update().await;
         assert_eq!(response.await.unwrap().unwrap().best_worker, worker);
-        queue.finish("exact-cost", RequestOutcome::Aborted).await;
+        drop(lease);
         queue.update().await;
-        slots.free(&"exact-cost".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test]
@@ -2954,8 +3129,7 @@ policy_classes:
         ] {
             let (mut cancelled, cancelled_response) = make_admission_request(request_id, 64);
             cancelled.policy_class = Some("agents".to_owned());
-            let cancellation = queue.cancellation_guard(Some(request_id)).unwrap();
-            queue.enqueue(cancelled).await;
+            let cancellation = enqueue_with_lease(&queue, cancelled).await;
             drop(cancelled_response);
             drop(cancellation);
         }
@@ -3000,8 +3174,7 @@ policy_classes:
 
         let (mut cancelled, cancelled_response) = make_admission_request("reused", 64);
         cancelled.policy_class = Some("agents".to_owned());
-        let cancellation = queue.cancellation_guard(Some("reused")).unwrap();
-        queue.enqueue(cancelled).await;
+        let cancellation = enqueue_with_lease(&queue, cancelled).await;
         drop(cancelled_response);
         drop(cancellation);
         queue.update().await;
@@ -3009,7 +3182,7 @@ policy_classes:
 
         let (mut replacement, replacement_response) = make_admission_request("reused", 64);
         replacement.policy_class = Some("agents".to_owned());
-        queue.enqueue(replacement).await;
+        let mut replacement_lease = enqueue_with_lease(&queue, replacement).await;
         assert_eq!(queue.pending_count(), 1);
         assert_eq!(state.lock().unwrap().aborted, vec![AdmissionId::new(0)]);
 
@@ -3018,12 +3191,11 @@ policy_classes:
         let selected = replacement_response.await.unwrap().unwrap();
         assert!(selected.request_progress.is_some());
 
-        queue
-            .finish("reused", RequestOutcome::Completed { context_tokens: 64 })
-            .await;
+        replacement_lease.mark_completed(64);
+        drop(replacement_lease);
         queue.update().await;
         assert_eq!(state.lock().unwrap().completed_context_tokens, vec![64]);
-        slots.free(&"reused".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test]
@@ -3035,18 +3207,16 @@ policy_classes:
         let (mut request, response) = make_admission_request("backend-abort", 64);
         request.policy_class = Some("agents".to_owned());
 
-        queue.enqueue(request).await;
+        let lease = enqueue_with_lease(&queue, request).await;
         queue.reconcile().await;
         response.await.unwrap().unwrap();
-        queue.finish("backend-abort", RequestOutcome::Aborted).await;
+        drop(lease);
         queue.update().await;
 
         let state = state.lock().unwrap();
         assert!(state.dispatched.is_empty());
         assert_eq!(state.aborted, vec![AdmissionId::new(0)]);
-        slots
-            .free(&"backend-abort".to_owned(), decay_now())
-            .unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3082,9 +3252,12 @@ policy_classes:
         queue.enqueue(first).await;
         first_rx.await.unwrap().unwrap();
 
-        let lease = queue.cancellation_guard(Some("legacy-cancelled")).unwrap();
         let (cancelled, cancelled_rx) = make_request("legacy-cancelled", isl);
-        queue.enqueue(cancelled).await;
+        let lease = queue.cancellation_guard(Some("legacy-cancelled")).unwrap();
+        let lease = queue
+            .enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease))
+            .await
+            .unwrap();
         assert_eq!(queue.pending_count(), 1);
 
         drop(cancelled_rx);
@@ -4200,6 +4373,59 @@ policy_classes:
                 .unwrap();
             slots.free(&request_id.to_string(), decay_now()).unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn cancelled_enqueue_wait_keeps_cleanup_behind_command() {
+        let block_size = 16u32;
+        let isl = 64usize;
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) =
+            make_queue_with_blocking_refresher(1, block_size, isl, Some(0.0), refresher.clone(), 1);
+
+        let (active, active_rx) = make_request("active", isl);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (queued, queued_rx) = make_request("queued", isl);
+        queue
+            .enqueue_with_block_hashes(queued, Some(vec![LocalBlockHash(42)]))
+            .await;
+        slots.free(&"active".to_owned(), decay_now()).unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.update().await })
+        };
+        refresher.wait_for_calls(1).await;
+
+        let (cancelled, cancelled_rx) = make_request("cancelled", isl);
+        let lease = queue.cancellation_guard(Some("cancelled")).unwrap();
+        let enqueue = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move {
+                queue
+                    .enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(queue.admission_tx.capacity(), 0);
+        drop(cancelled_rx);
+        enqueue.abort();
+        assert!(enqueue.await.unwrap_err().is_cancelled());
+
+        // Cancellation drops the acknowledgement receiver, but the lease remains
+        // inside the accepted command until the actor establishes request ownership.
+        refresher.release_one();
+        update.await.unwrap();
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 0);
+
+        queued_rx.await.unwrap().unwrap();
+        slots.free(&"queued".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

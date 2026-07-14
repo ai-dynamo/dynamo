@@ -19,8 +19,8 @@ use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::queue_admission::PolicyClassAdmissionStrategies;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, RequestOutcome, ScheduleMode,
-    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -281,7 +281,7 @@ where
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let mut cancellation_guard = self
+        let cancellation_guard = self
             .queue
             .cancellation_guard(request.mode.admission_request_id());
         let track_prefill_tokens = request
@@ -328,8 +328,9 @@ where
             resp_tx: Some(resp_tx),
         };
 
-        self.queue
-            .enqueue_with_block_hashes(request, block_hashes)
+        let mut cancellation_guard = self
+            .queue
+            .enqueue_with_block_hashes_and_lease(request, block_hashes, cancellation_guard)
             .await;
 
         let mut response = resp_rx
@@ -337,7 +338,7 @@ where
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
         match &mut response {
             Ok(response) if response.request_progress.is_some() => {
-                response.admission_lease = cancellation_guard.take();
+                response.admission_lease = cancellation_guard.take().map(|lease| *lease);
             }
             Ok(_) | Err(_) => {
                 if let Some(guard) = cancellation_guard.as_mut() {
@@ -506,7 +507,7 @@ where
         Ok(())
     }
 
-    /// Legacy slot cleanup. Admission-managed requests should use [`Self::finish`].
+    /// Legacy slot cleanup. Admission-managed requests use their `AdmissionLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
@@ -520,23 +521,6 @@ where
 
     pub async fn mark_dispatched(&self, request_id: &str) {
         self.queue.dispatched(request_id).await;
-    }
-
-    /// Release request state and report its terminal admission outcome.
-    pub async fn finish(
-        &self,
-        request_id: &str,
-        outcome: RequestOutcome,
-    ) -> Result<(), SequenceError> {
-        let request_id = request_id.to_string();
-        let worker = self.slots.request_worker(&request_id);
-        let result = self.slots.free(&request_id, Instant::now());
-        self.queue.finish(&request_id, outcome).await;
-        match worker {
-            Some(worker) => self.queue.update_worker(worker).await,
-            None => self.queue.update().await,
-        }
-        result
     }
 
     pub fn pending_count(&self) -> usize {
@@ -1470,7 +1454,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finish_aborts_admission_once() {
+    async fn admission_lease_aborts_once() {
         let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
@@ -1489,7 +1473,7 @@ mod tests {
         );
         let cancel_token = CancellationToken::new();
         let scheduler = LocalScheduler::new_with_policy_profile_and_admission_strategies(
-            slots,
+            Arc::clone(&slots),
             cfg_rx,
             PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
             64,
@@ -1512,18 +1496,16 @@ mod tests {
             .await
             .unwrap();
         assert!(response.admission_lease.is_some());
-        response.admission_lease.as_mut().unwrap().disarm();
-
-        scheduler
-            .finish("req-1", RequestOutcome::Aborted)
-            .await
-            .unwrap();
-        scheduler
-            .finish("req-1", RequestOutcome::Aborted)
-            .await
-            .unwrap();
-
+        drop(response.admission_lease.take());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while aborted.load(Ordering::Relaxed) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("admission lease did not report abort");
         assert_eq!(aborted.load(Ordering::Relaxed), 1);
+        slots.assert_completely_drained(Instant::now());
         cancel_token.cancel();
     }
 

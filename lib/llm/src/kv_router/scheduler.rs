@@ -382,16 +382,6 @@ where
         self.inner.mark_dispatched(request_id).await;
     }
 
-    pub async fn finish(
-        &self,
-        request_id: &str,
-        outcome: RequestOutcome,
-    ) -> Result<(), SequenceError> {
-        self.inner.finish(request_id, outcome).await?;
-        self.update_queue_metrics();
-        Ok(())
-    }
-
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }

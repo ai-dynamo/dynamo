@@ -15,9 +15,9 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestOutcome,
-        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
-        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestProgressUpdater,
+        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+        overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
@@ -904,18 +904,9 @@ where
         self.scheduler.mark_dispatched(request_id).await;
     }
 
-    /// Legacy slot cleanup. Admission-managed requests should use [`Self::finish`].
+    /// Legacy slot cleanup. Admission-managed requests use their `AdmissionLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
-    }
-
-    /// Release request state and report its terminal admission outcome.
-    pub async fn finish(
-        &self,
-        request_id: &str,
-        outcome: RequestOutcome,
-    ) -> Result<(), SequenceError> {
-        self.scheduler.finish(request_id, outcome).await
     }
 
     /// Number of requests currently parked in the scheduler queue.
