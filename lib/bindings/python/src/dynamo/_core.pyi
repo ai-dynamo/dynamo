@@ -46,6 +46,10 @@ def run_select_service(args: List[str]) -> None:
     """Run the Dynamo selection service with the given arguments."""
     ...
 
+def run_sglang_sidecar(args: List[str]) -> None:
+    """Run the SGLang gRPC sidecar with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
