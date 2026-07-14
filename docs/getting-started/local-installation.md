@@ -152,19 +152,21 @@ for the correct configuration.
 **vLLM**
 
 ```bash
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
-  --kv-events-config '{"enable_kv_cache_events": false}'
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
 ```
 
 ### KV Events Configuration
 
-For dependency-free local development, disable KV event publishing (avoids NATS):
+For dependency-free local development, leave KV event publishing disabled:
 
-- **vLLM:** Add `--kv-events-config '{"enable_kv_cache_events": false}'`
+- **vLLM:** No flag needed (KV events disabled by default)
 - **SGLang:** No flag needed (KV events disabled by default)
 - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-KV events are disabled by default for all backends. For vLLM and SGLang, add backend-specific `--kv-events-config` only when you want KV event publishing enabled. For TensorRT-LLM, enable event publishing with `--publish-events-and-metrics`.
+For event-driven KV routing, vLLM and SGLang require a backend-specific `--kv-events-config` on
+workers that perform prefill. TensorRT-LLM requires `--publish-events-and-metrics`. See the
+[Router Guide](../components/router/router-guide.md#quick-start) for the complete frontend and worker
+configuration.
 
 ## Test Your Deployment
 

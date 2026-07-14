@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # vLLM Kubernetes Deployment Configurations
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying vLLM inference graphs using the **DynamoGraphDeployment** resource.
@@ -98,6 +103,26 @@ extraPodSpec:
 - `--enable-multimodal`: Enable multimodal (vision) support
 - `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
 - `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`)
+- `--stream-interval 20`: Recommended starting point to reduce host-side engine and Dynamo bridge
+  overhead under load. Lower values provide finer-grained streaming updates. See the
+  [vLLM recommended stream interval](https://github.com/ai-dynamo/dynamo/blob/main/docs/backends/vllm/vllm-reference-guide.md#recommended-stream-interval).
+
+### KV-Routed DGD Requirements
+
+An event-driven vLLM `DynamoGraphDeployment` requires configuration on both sides:
+
+1. Set `DYN_ROUTER_MODE=kv` on the Frontend service.
+2. Pass `--kv-events-config` to each worker that performs prefill. In aggregated serving, add it to
+   every aggregated worker. In disaggregated serving, add it to prefill workers only.
+
+   ```text
+   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+   ```
+
+Do not pass `--kv-events-config` to decode-only workers. For approximate routing without worker KV
+events, omit `--kv-events-config` and set `DYN_ROUTER_USE_KV_EVENTS=false` on the Frontend service.
+See [`agg_router.yaml`](./agg_router.yaml) and [`disagg_router.yaml`](./disagg_router.yaml) for complete
+manifests.
 
 ## Prerequisites
 

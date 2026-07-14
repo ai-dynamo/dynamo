@@ -150,7 +150,8 @@ When `--router-kv-overlap-score-credit` is set to 0, no KV indexer is created an
 
 Backend KV event publishing is independent of the frontend's `--no-router-kv-events` flag. The frontend flag controls whether the router consumes events; backend flags control whether workers publish them. If the router is not consuming events, workers that still publish will waste resources but cause no harm.
 
-- **vLLM**: Pass `--kv-events-config '{"enable_kv_cache_events": false}'` to disable, or `'{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'` to enable.
+- **vLLM**: Omit `--kv-events-config` to keep publishing disabled. To enable it, pass
+  `--kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557"}'`.
 - **SGLang**: Pass `--kv-events-config` with a JSON config to enable, or omit it to keep publishing disabled.
 - **TRT-LLM**: Pass `--publish-events-and-metrics` to enable, or omit it to keep publishing disabled.
 

@@ -151,19 +151,18 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 **vLLM**
 
 ```bash
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
-  --kv-events-config '{"enable_kv_cache_events": false}'
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
 ```
 
 ### KV Events 配置
 
-对于无需依赖项的本地开发，请禁用 KV event 发布（避免使用 NATS）：
+对于无需依赖项的本地开发，请保持 KV event 发布为禁用状态：
 
-- **vLLM：** 添加 `--kv-events-config '{"enable_kv_cache_events": false}'`
+- **vLLM：** 无需 flag（默认禁用 KV events）
 - **SGLang：** 无需标志（默认禁用 KV events）
 - **TensorRT-LLM：** 无需标志（默认禁用 KV events）
 
-所有后端默认都禁用 KV events。对于 vLLM 和 SGLang，仅当你想启用 KV event 发布时，才添加后端专用的 `--kv-events-config`。对于 TensorRT-LLM，请使用 `--publish-events-and-metrics` 启用事件发布。
+对于事件驱动的 KV routing，vLLM 和 SGLang 要求在执行 prefill 的 worker 上设置 backend 专用的 `--kv-events-config`。TensorRT-LLM 要求设置 `--publish-events-and-metrics`。有关完整的 frontend 和 worker 配置，请参阅 [Router Guide](../../../../../docs/components/router/router-guide.md#quick-start)。
 
 ## 测试你的部署
 

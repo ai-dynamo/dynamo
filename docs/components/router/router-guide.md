@@ -16,18 +16,29 @@ The router can be deployed using [Python / CLI](#python--cli-deployment), [Kuber
 
 ### Python / CLI Deployment
 
-To launch the Dynamo frontend with the KV Router:
+Event-driven KV routing requires both of these steps:
 
-```bash
-python -m dynamo.frontend --router-mode kv --http-port 8000
-```
+1. Start the Dynamo frontend with the KV router enabled:
 
-This command:
-- Launches the Dynamo frontend service with KV routing enabled
-- Exposes the service on port 8000 (configurable)
-- Automatically handles all backend workers registered to the Dynamo endpoint
+   ```bash
+   python -m dynamo.frontend --router-mode kv --http-port 8000
+   ```
 
-Backend workers register themselves using the `register_model` API. For accurate prefix-cache state, workers must also publish KV cache events with the backend-specific event flags; otherwise the router can run in approximate mode with `--no-router-kv-events`.
+2. Start each backend worker that performs prefill with KV event publication enabled. For an
+   aggregated vLLM worker:
+
+   ```bash
+   python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+   ```
+
+In a disaggregated vLLM deployment, pass `--kv-events-config` to prefill workers, not decode-only
+workers. SGLang also uses a backend-specific `--kv-events-config`. TensorRT-LLM uses
+`--publish-events-and-metrics`. For approximate routing without worker events, omit the backend
+event flag and start the frontend with `--no-router-kv-events`.
+
+For vLLM host-side tuning, see
+[Recommended Stream Interval](../../backends/vllm/vllm-reference-guide.md#recommended-stream-interval).
 
 #### CLI Arguments
 
@@ -53,7 +64,8 @@ For detailed configuration options and tuning parameters, see [Configuration and
 
 ### Kubernetes Deployment
 
-To enable the KV Router in Kubernetes, add the `DYN_ROUTER_MODE` environment variable to your frontend service:
+An event-driven vLLM `DynamoGraphDeployment` requires both `DYN_ROUTER_MODE=kv` on the Frontend
+service and `--kv-events-config` on each aggregated worker or disaggregated prefill worker:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -67,13 +79,31 @@ spec:
       replicas: 1
       envs:
         - name: DYN_ROUTER_MODE
-          value: kv  # Enable KV Smart Router
+          value: kv
+    VllmDecodeWorker:
+      componentType: worker
+      replicas: 2
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
 
 **Key Points:**
-- Set `DYN_ROUTER_MODE=kv` on the **Frontend** service only
-- Configure worker-side KV event publishing when you want event-driven prefix-cache state
-- Use `--no-router-kv-events` for approximate cache-state prediction when workers are not publishing events
+
+- Set `DYN_ROUTER_MODE=kv` on the **Frontend** service only.
+- Pass `--kv-events-config` to vLLM workers that perform prefill. In aggregated serving, those are
+  the aggregated workers. In disaggregated serving, those are the prefill workers only.
+- For approximate cache-state prediction, omit `--kv-events-config` and set
+  `DYN_ROUTER_USE_KV_EVENTS=false` on the Frontend service.
 
 #### Environment Variables
 

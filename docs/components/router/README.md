@@ -9,11 +9,36 @@ The Dynamo KV Router intelligently routes requests by evaluating their computati
 
 ## Quick Start
 
-To launch the Dynamo frontend with the KV Router:
+Event-driven KV routing requires configuration on both the frontend and every worker that performs
+prefill:
 
-```bash
-python -m dynamo.frontend --router-mode kv --http-port 8000
-```
+1. Start the frontend with the KV router enabled:
+
+   ```bash
+   python -m dynamo.frontend --router-mode kv --http-port 8000
+   ```
+
+2. Enable KV event publication on the backend workers. For vLLM, pass
+   `--kv-events-config` to each aggregated worker or disaggregated prefill worker:
+
+   ```bash
+   python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+   ```
+
+Do not pass `--kv-events-config` to vLLM decode-only workers. For SGLang, pass its
+backend-specific `--kv-events-config`; for TensorRT-LLM, pass `--publish-events-and-metrics`. See
+[Router Operations](router-operations.md#additional-notes) for all backend settings.
+
+> [!TIP]
+> For vLLM workers, start with `--stream-interval 20` to reduce host-side engine and bridge
+> overhead under load. This setting is recommended for host efficiency; it is not required for KV
+> routing. See [Recommended Stream Interval](../../backends/vllm/vllm-reference-guide.md#recommended-stream-interval)
+> for the streaming-granularity tradeoff.
+
+For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service and add the backend event flag to
+the workers that perform prefill. For approximate routing without worker events, omit the backend
+event flag and set `--no-router-kv-events` or `DYN_ROUTER_USE_KV_EVENTS=false` on the frontend.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -27,16 +52,11 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 | `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
 
 > [!IMPORTANT]
-> `--router-mode kv` (or `DYN_ROUTER_MODE=kv`) enables KV routing on the
-> frontend, but it does not enable KV event publishing on backend workers. With
-> the default `--router-kv-events` setting, missing publishers leave the router
-> in event-driven mode without real cache state; the router does not
-> automatically switch to approximate prediction. Configure the backend-specific
-> publishing flags in [Router Operations](router-operations.md#additional-notes).
+> With the default `--router-kv-events` setting, missing publishers leave the router in
+> event-driven mode without real cache state; the router does not automatically switch to
+> approximate prediction. Configure the backend-specific publishing flags as shown above.
 > If workers will not publish events, use `--no-router-kv-events` for approximate
 > cache prediction or `--load-aware` for load-only routing.
-
-For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service.
 
 ### Standalone Router
 

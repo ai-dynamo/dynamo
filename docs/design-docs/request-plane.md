@@ -29,7 +29,12 @@ Dynamo has **two independent communication planes**:
 - **Request plane** (**`DYN_REQUEST_PLANE`**): how **RPC requests** flow between components (frontend → router → worker), via `tcp`, or `nats`.
 - **KV event plane** (**`DYN_EVENT_PLANE`**): how **KV cache events** (and optional router replica sync) are distributed for KV-aware routing, via `nats` or `zmq`.
 
-**Note:** If you are using `tcp` request plane with KV events enabled on the router (the default router-side setting), the configured event plane is initialized independently. NATS-based event transport uses `NATS_SERVER` (default `nats://localhost:4222`), while ZMQ avoids external NATS infrastructure. SGLang requires explicit `--kv-events-config` and TRT-LLM requires `--publish-events-and-metrics` to publish events. For vLLM, KV events are currently auto-configured when prefix caching is active (deprecated — use `--kv-events-config` explicitly to prepare for a future release where all backends will default to off). To disable the router's KV event listener, use `--no-router-kv-events` on the frontend.
+**Note:** If you are using the `tcp` request plane with KV events enabled on the router (the
+default router-side setting), the configured event plane is initialized independently. NATS-based
+event transport uses `NATS_SERVER` (default `nats://localhost:4222`), while ZMQ avoids external NATS
+infrastructure. vLLM and SGLang require an explicit `--kv-events-config` on workers that perform
+prefill, and TensorRT-LLM requires `--publish-events-and-metrics`. To disable the router's KV event
+listener, use `--no-router-kv-events` on the frontend.
 
 Because they are independent, you can mix them.
 
