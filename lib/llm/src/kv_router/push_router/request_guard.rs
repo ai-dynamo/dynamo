@@ -273,6 +273,9 @@ impl RequestGuard {
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
         let request_metrics =
             RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        if scheduler_tracked {
+            request_metrics.requests_started_total.inc();
+        }
 
         Self {
             cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked),

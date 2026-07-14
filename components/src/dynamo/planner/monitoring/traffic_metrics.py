@@ -282,21 +282,46 @@ class PrometheusAPIClient:
     def get_avg_request_count(self, interval: str, model_name: str):
         if self.metrics_source == "router":
             try:
-                router_req_total = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
                 ns = self.dynamo_namespace.replace("-", "_")
                 ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
-                query = f"sum(increase({router_req_total}{{{ns_filter}}}[{interval}]))"
-                result = self.prom.custom_query(query=query)
-                if not result:
+                router_requests_started = (
+                    f"{prometheus_names.name_prefix.COMPONENT}_"
+                    f"{prometheus_names.router.REQUESTS_STARTED_TOTAL}"
+                )
+                started_query = (
+                    f"sum(increase({router_requests_started}"
+                    f"{{{ns_filter}}}[{interval}]))"
+                )
+                started_result = self.prom.custom_query(query=started_query)
+                if started_result:
+                    started_count = float(started_result[0]["value"][1])
+                    if not math.isnan(started_count):
+                        return started_count
+
+                router_requests_total = (
+                    f"{prometheus_names.name_prefix.COMPONENT}_"
+                    f"{prometheus_names.router.REQUESTS_TOTAL}"
+                )
+                logger.warning(
+                    "No Prometheus metric data available for %s; falling back to "
+                    "completed request count from %s, which may underestimate demand",
+                    router_requests_started,
+                    router_requests_total,
+                )
+                completed_query = (
+                    f"sum(increase({router_requests_total}{{{ns_filter}}}[{interval}]))"
+                )
+                completed_result = self.prom.custom_query(query=completed_query)
+                if not completed_result:
                     logger.warning(
-                        f"No prometheus metric data available for "
-                        f"{router_req_total}, use 0 instead"
+                        "No Prometheus metric data available for %s; using 0",
+                        router_requests_total,
                     )
                     return 0
-                value = float(result[0]["value"][1])
-                return 0 if math.isnan(value) else value
+                completed_count = float(completed_result[0]["value"][1])
+                return 0 if math.isnan(completed_count) else completed_count
             except Exception as e:
-                logger.error(f"Error getting avg request count: {e}")
+                logger.error("Error getting avg request count: %s", e)
                 return 0
         # This function follows a different query pattern than the other metrics:
         # use frontend-started requests so throughput planning sees offered load,

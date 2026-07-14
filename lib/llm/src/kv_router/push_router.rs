@@ -708,6 +708,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_started_counter_records_admission_before_dispatch() {
+        let (router, runtime) = router(None).await;
+        let metrics = RouterRequestMetrics::get().unwrap();
+        let started_before = metrics.requests_started_total.get();
+        let completed_before = metrics.requests_total.get();
+
+        let admitted_request = Context::new(request());
+        let (mut selection, _) = router
+            .select_with_affinity(&admitted_request, RequestPhase::Aggregated, false)
+            .await
+            .unwrap();
+        let mut guard = router
+            .track_selection(&admitted_request, &mut selection, false)
+            .await
+            .unwrap();
+
+        assert_eq!(metrics.requests_started_total.get(), started_before + 1);
+        assert_eq!(metrics.requests_total.get(), completed_before);
+
+        // Admission remains counted even when the request aborts before dispatch.
+        guard.abort().await;
+        drop(guard);
+        assert_eq!(metrics.requests_started_total.get(), started_before + 1);
+        assert_eq!(metrics.requests_total.get(), completed_before);
+
+        let query_request = Context::new(request());
+        let (mut query_selection, _) = router
+            .select_with_affinity(&query_request, RequestPhase::Aggregated, true)
+            .await
+            .unwrap();
+        let mut query_guard = router
+            .track_selection(&query_request, &mut query_selection, true)
+            .await
+            .unwrap();
+
+        assert_eq!(metrics.requests_started_total.get(), started_before + 1);
+        query_guard.abort().await;
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn session_affinity_post_selection_cancellation_preserves_binding() {
         let (router, runtime) = router(Some(Duration::from_secs(10))).await;
         let affinity = router.affinity.as_ref().unwrap();

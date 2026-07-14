@@ -629,6 +629,7 @@ impl RoutingOverheadMetrics {
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
 /// independently.
 pub struct RouterRequestMetrics {
+    pub requests_started_total: prometheus::IntCounter,
     pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
@@ -662,6 +663,13 @@ impl RouterRequestMetrics {
                 let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
 
                 let metrics = component.metrics();
+                let requests_started_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
+                        "Total number of requests admitted by the router scheduler",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_requests_started_total");
                 let requests_total = metrics
                     .create_intcounter(
                         &router_metric(frontend_service::REQUESTS_TOTAL),
@@ -734,6 +742,7 @@ impl RouterRequestMetrics {
                     )
                     .expect("failed to create router_shared_cache_beyond_blocks");
                 Arc::new(Self {
+                    requests_started_total,
                     requests_total,
                     time_to_first_token_seconds,
                     inter_token_latency_seconds,
