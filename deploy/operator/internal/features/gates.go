@@ -28,90 +28,90 @@ type Name string
 const (
 	// GMSSnapshot enables the temporary GMS + Snapshot integration.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @galletas1712
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: false
 	// Default since: N/A
 	GMSSnapshot Name = "gmsSnapshot"
 
 	// Checkpoint enables checkpoint creation and restore.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @galletas1712
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: false
 	// Default since: N/A
 	Checkpoint Name = "checkpoint"
 
 	// Grove enables Grove-backed workload orchestration.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @julienmancuso
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: false
 	// Default since: N/A
 	Grove Name = "grove"
 
 	// LWS enables LeaderWorkerSet-backed workload orchestration.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @julienmancuso
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: false
 	// Default since: N/A
 	LWS Name = "lws"
 
 	// KaiScheduler enables Kai Scheduler integration.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @julienmancuso
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: false
 	// Default since: N/A
 	KaiScheduler Name = "kaiScheduler"
 
 	// VolcanoScheduler enables Volcano scheduling for Grove workloads.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @xianlubird
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: false
 	// Default since: N/A
 	VolcanoScheduler Name = "volcanoScheduler"
 
 	// DRA enables Dynamic Resource Allocation using resource.k8s.io/v1.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @julienmancuso
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: false
 	// Default since: N/A
 	DRA Name = "dra"
 
 	// Istio records resolved Istio DestinationRule API availability.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @atchernych
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: false
 	// Default since: N/A
 	Istio Name = "istio"
 
 	// GPUDiscovery enables automatic GPU hardware discovery.
 	//
-	// Owner: N/A
-	// Experimental: N/A
-	// Beta: N/A
-	// GA: N/A
+	// Owner: @tmonty12
+	// Experimental since: N/A
+	// Beta since: N/A
+	// GA since: N/A
 	// Default: true
 	// Default since: N/A
 	GPUDiscovery Name = "gpuDiscovery"
