@@ -364,9 +364,6 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            # DYN-2263 skip was stale collateral from PR #6704's bulk post-merge
-            # skip (systemic infra failure, not agg-router). The same agg_router.sh
-            # recipe runs green for sglang (kv_events) and trtllm (aggregated_router).
             pytest.mark.timeout(600),
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
@@ -384,8 +381,6 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            # DYN-2264 skip was stale collateral from PR #6704's bulk post-merge
-            # skip (systemic infra failure, not agg-router-approx).
             pytest.mark.timeout(600),
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
