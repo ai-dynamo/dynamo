@@ -25,6 +25,7 @@ pytestmark = [
     pytest.mark.asyncio,
     pytest.mark.unit,
     pytest.mark.trtllm,
+    pytest.mark.core,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
 ]
@@ -131,3 +132,37 @@ async def test_forwards_routing_cache_salt():
     )
 
     assert captured["cache_salt"] == "tenant-a"
+
+
+async def test_visible_stop_tokens_use_dynamo_stopping():
+    captured: dict = {}
+
+    def fake_generate_async(**kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    sampling_params = SimpleNamespace(
+        max_tokens=None,
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[200, 300],
+    )
+    engine = _make_engine(fake_generate_async)
+    engine._override_sampling_params = lambda _default, _request: sampling_params
+
+    await _drain(
+        engine,
+        _FakeContext(),
+        {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {
+                "max_tokens": 4,
+                "stop_token_ids_hidden": [100, 200],
+                "stop_token_ids_visible": [200],
+            },
+        },
+    )
+
+    assert captured["sampling_params"] is sampling_params
+    assert sampling_params.ignore_eos is True
+    assert set(sampling_params.stop_token_ids) == {100, 300}
