@@ -1,12 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
 use pythonize::{depythonize, pythonize};
 use tokio_stream::StreamExt;
 
 use dynamo_llm::entrypoint::PrefillRoutedEngine;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::protocols::common::timing::RequestTracker;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
 
@@ -33,7 +36,11 @@ impl RoutedEngine {
         preprocessed: PyObject,
         context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let request: PreprocessedRequest = depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
+        let mut request: PreprocessedRequest =
+            depythonize(preprocessed.bind(py)).map_err(to_pyerr)?;
+        if request.tracker.is_none() {
+            request.tracker = Some(Arc::new(RequestTracker::new()));
+        }
         let request_context = if let Some(parent_context) = context.as_ref() {
             let parent_metadata = parent_context.metadata_snapshot();
             let parent_context = parent_context.inner();
