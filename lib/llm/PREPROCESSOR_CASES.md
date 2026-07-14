@@ -154,7 +154,9 @@ if you know the answer, fill it in.
 | `pythonic` (tool) | NO | — | — | — | Python list literal. |
 | `mistral` (tool + reasoning) | **YES** for reasoning | disabled unless `reasoning_effort` is present and not `none` | — | — | `[TOOL_CALLS]` tool text; `[THINK]...[/THINK]` reasoning. |
 | `phi4` (tool) | NO | — | — | — | `functools[...]` plain text. |
-| `minimax_m2` (tool) / `minimax_append_think` (reasoning) | NO | — | — | OFF on `tool_choice=required/named` (universal, PRE.4) | XML markers, plain text. |
+| `minimax_m2` (tool + reasoning) | NO | `thinking=false` / `enable_thinking=false` | — | — | Force reasoning with `<think>...</think>`; dynamically distinguishes bare guided JSON from reasoning followed by an XML tool payload. |
+| `minimax_m3` (tool + reasoning) | YES | `thinking_mode=disabled` | — | — | Prompt-prefilled `<mm:think>...</mm:think>` reasoning with MiniMax namespace-token XML tool calls. |
+| `minimax_append_think` (reasoning) | NO | — | — | OFF on `tool_choice=required/named` (universal, PRE.4) | Deprecated legacy MiniMax pass-through; does not populate `reasoning_content`. Use `minimax_m2` for MiniMax M2 tool-calling deployments. |
 | `glm47` (tool) | NO | — | — | — | Plain XML. |
 | `jamba` (tool) | NO | — | — | — | `<tool_calls>` plain text wrapper. |
 | `qwen` (reasoning, basic `<think>`) | NO | — | — | — | Plain `<think>...</think>`. |
