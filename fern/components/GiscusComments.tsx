@@ -26,24 +26,33 @@
  *     `css:`) so it survives the shared NVIDIA global theme at publish, per
  *     the constraint documented in RecipeStyles.tsx.
  *
- * REQUIRED CONFIG (placeholders below -- fill in once, repo-wide):
- *   Run the configurator at https://giscus.app with repo `ai-dynamo/dynamo`
- *   and copy the generated `data-repo-id` and `data-category-id` into the two
- *   constants below. GitHub Discussions must be enabled (it is) and the giscus
- *   GitHub App installed on the repo. `data-mapping="pathname"` means each DEP
- *   page auto-creates/binds its own Discussion the first time someone comments,
- *   so no per-page config is needed. See docs/proposals/README.md.
+ * CONFIG (repo-wide, populated below):
+ *   data-repo-id / data-category-id are the GitHub node IDs for
+ *   `ai-dynamo/dynamo` and its "Ideas" Discussions category, resolved from the
+ *   GraphQL API (see the constants below). GitHub Discussions is enabled on the
+ *   repo. `data-mapping="pathname"` means each DEP page auto-creates/binds its
+ *   own Discussion the first time someone comments, so no per-page config is
+ *   needed. See docs/proposals/README.md.
+ *
+ *   REMAINING FOLLOW-UP (org-admin action, cannot be done from this repo): the
+ *   giscus GitHub App (https://github.com/apps/giscus) must be installed on
+ *   `ai-dynamo/dynamo` with write access to Discussions before the widget can
+ *   accept comments. Until then the box renders but posting returns an error.
  *
  * VERIFY IN FIRST PREVIEW: confirm the widget renders inline at the bottom of
  * the page (not hoisted). If a future Fern/React upgrade hoists `async` scripts
  * with `src`, drop the `async` attribute so the tag stays in document order.
  */
 
-// Placeholders. Replace with the real values from https://giscus.app.
+// Resolved 2026-07-14 from the GitHub GraphQL API for ai-dynamo/dynamo:
+//   repository.id                          -> data-repo-id
+//   discussionCategories "Ideas".id        -> data-category-id
+// Re-fetch with:
+//   gh api graphql -f query='query{repository(owner:"ai-dynamo",name:"dynamo"){id discussionCategories(first:30){nodes{id name}}}}'
 const GISCUS_REPO = "ai-dynamo/dynamo";
-const GISCUS_REPO_ID = "R_REPLACE_WITH_REPO_ID";
+const GISCUS_REPO_ID = "R_kgDOOCjvsg";
 const GISCUS_CATEGORY = "Ideas";
-const GISCUS_CATEGORY_ID = "DIC_REPLACE_WITH_CATEGORY_ID";
+const GISCUS_CATEGORY_ID = "DIC_kwDOOCjvss4Cuvrp";
 
 const GISCUS_CSS = `
 .dep-giscus {
