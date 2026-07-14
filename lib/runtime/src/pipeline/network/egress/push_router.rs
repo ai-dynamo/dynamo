@@ -3,6 +3,9 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
+use crate::pipeline::network::egress::route_span::{
+    get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
+};
 use crate::{
     component::{
         Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
@@ -1331,22 +1334,53 @@ where
     {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
+        let route_trace_context = get_route_trace_context(&request);
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
             tracing::Span::none()
         } else {
             tracing::info_span!(
+                target: "request_span",
                 "router.route_request",
+                otel.kind = "client",
                 request_id = %request_id,
-                worker_id = instance_id,
+                worker_id = tracing::field::Empty,
                 router_mode = ?self.router_mode,
+                "request.attempt" = tracing::field::Empty,
+                "request.outcome" = tracing::field::Empty,
+                "migration.is_retry" = tracing::field::Empty,
+                "migration.reason" = tracing::field::Empty,
+                "migration.from_worker_id" = tracing::field::Empty,
+                "migration.tokens_completed" = tracing::field::Empty,
+                "cancellation.signal" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
             )
         };
+        if let Err(error) = self.check_workers_available(instance_id, &request_id) {
+            record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
+        }
 
-        self.check_workers_available(instance_id, &request_id)?;
-
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, fallback)?;
-        let metadata = prepare(&mut request, instance_id)?;
+        let (instance_id, address, transport_kind, instance) = match self
+            .resolve_transport(instance_id, fallback)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+        let metadata = match prepare(&mut request, instance_id) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
@@ -1357,9 +1391,9 @@ where
         let stream = self
             .addressed
             .generate(request)
-            .instrument(route_span)
+            .instrument(route_span.clone())
             .await;
-        let stream = self.wrap_with_fault_detection(stream, instance_id)?;
+        let stream = self.wrap_with_fault_detection(stream, instance_id, route_span)?;
         Ok((metadata, stream))
     }
 
@@ -1411,6 +1445,12 @@ where
     /// and dispatch, fall back to one other instance from `free_ids` (same
     /// filter as pre-selection) and return the updated id so the caller can
     /// `report_instance_down` the right worker on later failures.
+    ///
+    /// Failures are typed so `error_type_from_chain` (route spans) and the
+    /// HTTP error mapping classify the worker-disappeared path instead of
+    /// reporting `unknown`: a vanished instance is `CannotConnect` (migratable,
+    /// same as the `direct()` pre-dispatch check), while "no instances left"
+    /// is `Unavailable` (HTTP 503, not retryable in-process).
     fn resolve_transport(
         &self,
         instance_id: u64,
@@ -1440,11 +1480,15 @@ where
         let allowed_fallback = match fallback {
             TransportFallback::Allow => None,
             TransportFallback::Deny => {
-                return Err(anyhow::anyhow!(
-                    "Instance {} not found for endpoint {}",
-                    instance_id,
-                    self.client.endpoint.id()
-                ));
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!(
+                        "Instance {} not found for endpoint {}",
+                        instance_id,
+                        self.client.endpoint.id()
+                    ))
+                    .build()
+                    .into());
             }
             TransportFallback::Within(allowed) => Some(allowed),
         };
@@ -1461,19 +1505,28 @@ where
                     "Instance disappeared during routing, reselecting"
                 );
                 let (addr, kind, inst) = lookup(id).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Fallback instance {} also not found for endpoint {}",
-                        id,
-                        self.client.endpoint.id()
+                    anyhow::Error::new(
+                        DynamoError::builder()
+                            .error_type(ErrorType::CannotConnect)
+                            .message(format!(
+                                "Fallback instance {} also not found for endpoint {}",
+                                id,
+                                self.client.endpoint.id()
+                            ))
+                            .build(),
                     )
                 })?;
                 Ok((id, addr, kind, inst))
             }
-            None => Err(anyhow::anyhow!(
-                "Instance {} not found and no other instances available for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            )),
+            None => Err(DynamoError::builder()
+                .error_type(ErrorType::Unavailable)
+                .message(format!(
+                    "Instance {} not found and no other instances available for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into()),
         }
     }
 
@@ -1485,10 +1538,12 @@ where
         &self,
         stream: anyhow::Result<ManyOut<U>>,
         instance_id: u64,
+        route_span: tracing::Span,
     ) -> anyhow::Result<ManyOut<U>> {
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
+                record_route_error(&route_span, err.as_ref());
                 if self.fault_detection_enabled {
                     if is_inhibited(err.as_ref()) {
                         tracing::debug!(
@@ -1513,7 +1568,7 @@ where
         };
 
         if !self.fault_detection_enabled {
-            return Ok(stream);
+            return Ok(wrap_route_span(stream, route_span));
         }
 
         let engine_ctx = stream.context();
@@ -1566,7 +1621,10 @@ where
                 Box::pin(stream)
             };
 
-        Ok(ResponseStream::new(stream, engine_ctx))
+        Ok(wrap_route_span(
+            ResponseStream::new(stream, engine_ctx),
+            route_span,
+        ))
     }
 }
 
@@ -1608,16 +1666,41 @@ where
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = input.context().id().to_string();
+        let route_trace_context = get_route_trace_context(&input);
         let route_span = tracing::info_span!(
+            target: "request_span",
             "router.route_request_bidirectional",
+            otel.kind = "client",
             request_id = %request_id,
-            worker_id = instance_id,
+            worker_id = tracing::field::Empty,
             router_mode = ?self.router_mode,
+            "request.attempt" = tracing::field::Empty,
+            "request.outcome" = tracing::field::Empty,
+            "migration.is_retry" = tracing::field::Empty,
+            "migration.reason" = tracing::field::Empty,
+            "migration.from_worker_id" = tracing::field::Empty,
+            "migration.tokens_completed" = tracing::field::Empty,
+            "cancellation.signal" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
         );
-
-        self.check_workers_available(instance_id, &request_id)?;
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, TransportFallback::Allow)?;
+        if let Err(error) = self.check_workers_available(instance_id, &request_id) {
+            record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
+        }
+        let (instance_id, address, transport_kind, instance) = match self
+            .resolve_transport(instance_id, TransportFallback::Allow)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1627,9 +1710,9 @@ where
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate_bidirectional(instance, address, input)
-            .instrument(route_span)
+            .instrument(route_span.clone())
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
+        self.wrap_with_fault_detection(stream, instance_id, route_span)
     }
 }
 
@@ -1744,6 +1827,7 @@ mod tests {
         pipeline::{
             RequestStream, ResponseStream,
             context::{Context, Controller},
+            network::egress::route_span,
         },
     };
     use serde::{Deserialize, Serialize};
@@ -2671,11 +2755,13 @@ mod tests {
             "constrained dispatch should fall back within the allowed worker set"
         );
         let disallowed = HashSet::new();
-        assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
-                .is_err(),
-            "constrained dispatch must not fall back outside the allowed worker set"
+        let error = router
+            .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
+            .expect_err("constrained dispatch must not fall back outside the allowed worker set");
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::Unavailable,
+            "no-instances-left failure must be typed Unavailable, got: {error}"
         );
         let error = router
             .resolve_transport(stale_id, TransportFallback::Deny)
@@ -2683,6 +2769,11 @@ mod tests {
         assert!(
             error.to_string().contains("not found"),
             "exact dispatch must reject the missing selected worker"
+        );
+        assert_eq!(
+            route_span::error_type_from_chain(error.as_ref()),
+            ErrorType::CannotConnect,
+            "vanished-instance failure must be typed CannotConnect, got: {error}"
         );
 
         rt.shutdown();

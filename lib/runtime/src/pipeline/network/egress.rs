@@ -4,6 +4,7 @@
 pub mod addressed_router;
 pub mod nats_client;
 pub mod push_router;
+pub mod route_span;
 
 // Unified request plane interface and implementations
 pub mod tcp_client;
