@@ -445,9 +445,9 @@ where
 
             let (source, block_hashes) = candidates.best_source(|worker| {
                 worker != target
-                    && configs.get(&worker.worker_id).is_some_and(|config| {
-                        config.router_hint_source_control_endpoint().is_some()
-                    })
+                    && configs
+                        .get(&worker.worker_id)
+                        .is_some_and(|config| config.supports_router_hints())
             })?;
             let source_control_endpoint = configs
                 .get(&source.worker_id)?
