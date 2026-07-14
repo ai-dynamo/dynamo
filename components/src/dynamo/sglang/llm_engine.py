@@ -122,10 +122,7 @@ def _get_runtime_data(
     return runtime_data or None
 
 
-def _priority_kwargs(
-    engine: Any, server_args: Any, request: GenerateRequest
-) -> dict[str, Any]:
-    priority = (request.get("routing") or {}).get("priority")
+def _priority_kwargs(engine: Any, server_args: Any, priority: Any) -> dict[str, Any]:
     if priority is None:
         return {}
     normalized = int(priority)
@@ -390,7 +387,11 @@ class SglangLLMEngine(LLMEngine):
         engine_request = EngineGenerateRequest.from_request(request)
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        priority_kwargs = _priority_kwargs(self.engine, self.server_args, request)
+        priority = (request.get("routing") or {}).get("priority")
+        priority_kwargs = {}
+        if priority is not None:
+            priority_kwargs = _priority_kwargs(self.engine, self.server_args, priority)
+
         # Prefill discards engine output (it only yields bootstrap info) —
         # asking SGLang to compute logprobs there would be wasted work,
         # especially with prompt_logprobs which forces a full prompt pass.

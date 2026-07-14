@@ -8,9 +8,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Optional
-
-from sglang.srt.sampling.sampling_params import SamplingParams
 
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.utils.structural_tag import serialize_structural_tag
@@ -38,9 +37,6 @@ _INTERNAL_SAMPLING_FIELDS = frozenset(
         "is_normalized",
     }
 )
-_SGLANG_SAMPLING_FIELDS = (
-    frozenset(SamplingParams.__struct_fields__) - _INTERNAL_SAMPLING_FIELDS
-)
 _SAMPLING_ALIASES = {
     "max_tokens": "max_new_tokens",
     "min_tokens": "min_new_tokens",
@@ -52,6 +48,25 @@ _IGNORABLE_STRUCTURED_DEFAULTS = {
     "disable_additional_properties": False,
     "whitespace_pattern": None,
 }
+
+
+@lru_cache(maxsize=1)
+def _sglang_sampling_fields() -> frozenset[str]:
+    """Return public SGLang sampling fields without importing SGLang eagerly.
+
+    Dynamo's SGLang modules must remain importable in collection and tooling
+    environments that do not install the engine runtime. Resolve the pinned
+    SGLang ``SamplingParams`` type only when an engine-native request actually
+    needs field validation, and use msgspec's public introspection API rather
+    than the type's private ``__struct_fields__`` attribute.
+    """
+    import msgspec
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    return (
+        frozenset(field.name for field in msgspec.structs.fields(SamplingParams))
+        - _INTERNAL_SAMPLING_FIELDS
+    )
 
 
 @dataclass(frozen=True)
@@ -107,6 +122,7 @@ def _build_sampling_params(sglang_tito: dict[str, Any]) -> dict[str, Any]:
     raw_params = _raw_sampling_params(sglang_tito)
     sampling_params: dict[str, Any] = {}
     sources: dict[str, str] = {}
+    supported_fields = _sglang_sampling_fields()
 
     for source_name, value in raw_params.items():
         if source_name in _LOGPROB_FIELDS:
@@ -123,7 +139,7 @@ def _build_sampling_params(sglang_tito: dict[str, Any]) -> dict[str, Any]:
             continue
 
         target_name = _SAMPLING_ALIASES.get(source_name, source_name)
-        if target_name not in _SGLANG_SAMPLING_FIELDS:
+        if target_name not in supported_fields:
             raise ValueError(
                 f"unsupported sampling parameter for this SGLang: {source_name}"
             )

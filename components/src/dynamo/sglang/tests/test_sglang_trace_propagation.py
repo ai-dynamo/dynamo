@@ -68,8 +68,11 @@ def _make_engine(async_generate, enable_trace: bool) -> SglangLLMEngine:
     return engine
 
 
-async def _drain(engine: SglangLLMEngine, ctx: _FakeContext) -> None:
-    async for _ in engine.generate({"token_ids": [1, 2, 3]}, ctx):
+async def _drain(
+    engine: SglangLLMEngine, ctx: _FakeContext, request: dict | None = None
+) -> None:
+    request = request or {"token_ids": [1, 2, 3]}
+    async for _ in engine.generate(request, ctx):
         pass
 
 
@@ -108,3 +111,25 @@ async def test_gates_off_when_enable_trace_false():
 
     # kwarg omitted (engine_trace_kwargs returns {} when enabled=False).
     assert "external_trace_header" not in captured
+
+
+async def test_forwards_routing_priority_when_present():
+    captured: dict = {}
+
+    async def fake_async_generate(**kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    engine = _make_engine(fake_async_generate, enable_trace=False)
+    engine.server_args = SimpleNamespace(schedule_low_priority_values_first=False)
+
+    await _drain(
+        engine,
+        _FakeContext(),
+        {
+            "token_ids": [1, 2, 3],
+            "routing": {"priority": 7},
+        },
+    )
+
+    assert captured["priority"] == 7
