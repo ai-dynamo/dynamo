@@ -80,17 +80,11 @@ pytestmark = [
 ]
 
 
-# Tight benchmark sweeps keep wall time short. Three ISL samples provide a
-# middle, cache-hit-capable prefill that fits batch>1 in the fixed E2E KV
-# budget; two samples cover the remaining prefill/decode axes and both
-# ctx=block_size and ctx=max-model-len decode cases.
-_BENCH_GRANULARITY = "2"
-_PREFILL_BENCH_GRANULARITY = "3"
 _BENCH_WARMUP_ITERATIONS = "2"
 
 # Match the cancellation tests' worker config. max-model-len is a bit
 # tighter here so the benchmark sweep finishes quickly.
-_MAX_MODEL_LEN = "8192"
+_MAX_MODEL_LEN = "512"
 _GPU_MEMORY_UTILIZATION = "0.45"
 
 
@@ -101,6 +95,7 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
         output_path.exists()
     ), f"benchmark JSON missing at {output_path} -- worker never wrote it"
     data = json.loads(output_path.read_text())
+    assert data.get("schema_version") == 2
 
     actual_mode = data.get("config", {}).get("mode")
     assert actual_mode == expected_mode, (
@@ -118,6 +113,10 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
         len(results) > 0
     ), f"benchmark JSON has no result points (mode={expected_mode})"
 
+    assert [r["point"]["benchmark_id"] for r in results] == list(
+        range(1, len(results) + 1)
+    )
+
     for r in results:
         point = r["point"]
         fpms = r.get("fpms") or []
@@ -127,6 +126,7 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
             f"or the empty-frame schedule branch)"
         )
         for fpm_index, fpm in enumerate(fpms):
+            assert fpm.get("counter_id") == point["benchmark_id"]
             wall_time = fpm.get("wall_time", 0.0)
             assert wall_time > 0, (
                 f"point {point} FPM has non-positive wall_time={wall_time}; "
@@ -142,13 +142,18 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
                 )
                 if fpm_index == 0:
                     batch_size = point.get("batch_size", 1)
-                    kv_reads_per_request = point.get("kv_read_tokens", 0)
                     assert scheduled.get("num_prefill_requests") == batch_size, (
                         f"point {point} measured the wrong prefill batch size: "
                         f"scheduled_requests={scheduled}"
                     )
-                    assert scheduled.get("sum_prefill_kv_tokens") == (
-                        batch_size * kv_reads_per_request
+                    assert scheduled.get("sum_prefill_tokens") == point.get(
+                        "total_prefill_tokens"
+                    ), (
+                        f"point {point} measured the wrong prefill token total: "
+                        f"scheduled_requests={scheduled}"
+                    )
+                    assert scheduled.get("sum_prefill_kv_tokens") == point.get(
+                        "total_kv_read_tokens", 0
                     ), (
                         f"point {point} measured the wrong initial KV reads: "
                         f"scheduled_requests={scheduled}"
@@ -161,17 +166,25 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
                 )
                 if fpm_index == 0:
                     batch_size = point.get("batch_size", 1)
-                    context_length = point["context_length"]
                     assert scheduled.get("num_decode_requests") == batch_size, (
                         f"point {point} measured the wrong decode batch size: "
                         f"scheduled_requests={scheduled}"
                     )
-                    assert scheduled.get("sum_decode_kv_tokens") == (
-                        batch_size * context_length
+                    assert scheduled.get("sum_decode_kv_tokens") == point.get(
+                        "total_kv_read_tokens"
                     ), (
                         f"point {point} measured the wrong decode context: "
                         f"scheduled_requests={scheduled}"
                     )
+
+    merged_path = output_path.with_name(
+        f"{output_path.stem}_merged{output_path.suffix}"
+    )
+    assert merged_path.exists(), f"merged benchmark JSON missing at {merged_path}"
+    merged = json.loads(merged_path.read_text())
+    assert merged.get("run_id") == data.get("run_id")
+    assert len(merged.get("iteration_groups", [])) == len(results)
+    assert merged.get("dp", {}).get("ranks") == [0]
     return data
 
 
@@ -226,23 +239,18 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             "dynamo.vllm",
             "--model",
             FAULT_TOLERANCE_MODEL_NAME,
-            "--enforce-eager",
+            "--compilation-config",
+            '{"cudagraph_capture_sizes":[1,2,4,8]}',
+            "--max-num-seqs",
+            "16",
+            "--max-num-batched-tokens",
+            "128",
             *gpu_mem_args,
             "--max-model-len",
             _MAX_MODEL_LEN,
             # Benchmark flags
             "--benchmark-mode",
             bench_mode,
-            "--benchmark-prefill-granularity",
-            _PREFILL_BENCH_GRANULARITY,
-            "--benchmark-prefill-kv-read-granularity",
-            _BENCH_GRANULARITY,
-            "--benchmark-prefill-batch-granularity",
-            _BENCH_GRANULARITY,
-            "--benchmark-decode-length-granularity",
-            _BENCH_GRANULARITY,
-            "--benchmark-decode-batch-granularity",
-            _BENCH_GRANULARITY,
             "--benchmark-warmup-iterations",
             _BENCH_WARMUP_ITERATIONS,
             "--benchmark-output-path",
@@ -434,7 +442,7 @@ def test_self_benchmark_agg_serves_after_bench(
                 "prefill" in point_types and "decode" in point_types
             ), f"agg benchmark missing point types: got {point_types}"
             prefill_kv_reads = sorted(
-                r["point"].get("kv_read_tokens", 0)
+                r["point"].get("total_kv_read_tokens", 0)
                 for r in data["results"]
                 if r["point"]["point_type"] == "prefill"
             )
@@ -446,7 +454,7 @@ def test_self_benchmark_agg_serves_after_bench(
                 r["point"]["batch_size"]
                 for r in data["results"]
                 if r["point"]["point_type"] == "prefill"
-                and r["point"].get("kv_read_tokens", 0) > 0
+                and r["point"].get("total_kv_read_tokens", 0) > 0
             )
             assert any(b > 1 for b in prefill_hit_batches), (
                 "agg prefill sweep did not exercise batch>1 after KV reads: "
@@ -461,6 +469,34 @@ def test_self_benchmark_agg_serves_after_bench(
                 f"agg decode sweep only ran batch=1, prompt-padding "
                 f"regression would slip through. batch_sizes={decode_batches}"
             )
+            assert {8, 9}.issubset(decode_batches)
+            assert max(decode_batches) == data["limits"]["feasible_max_batch_size"]
+            decode_boundary = {
+                r["point"]["batch_size"]: r["point"]
+                for r in data["results"]
+                if r["point"]["point_type"] == "decode"
+                and r["point"]["batch_size"] in {8, 9}
+            }
+            assert decode_boundary[8]["expected_cudagraph_mode"] == "FULL"
+            assert decode_boundary[8]["expected_capture_size"] == 8
+            assert decode_boundary[9]["expected_cudagraph_mode"] == "NONE"
+
+            prefill_tokens = {
+                r["point"]["total_prefill_tokens"]
+                for r in data["results"]
+                if r["point"]["point_type"] == "prefill"
+            }
+            assert {8, 9}.issubset(prefill_tokens)
+            assert any(tokens > 8 for tokens in prefill_tokens)
+            prefill_boundary = {
+                r["point"]["total_prefill_tokens"]: r["point"]
+                for r in data["results"]
+                if r["point"]["point_type"] == "prefill"
+                and r["point"]["total_prefill_tokens"] in {8, 9}
+            }
+            assert prefill_boundary[8]["expected_cudagraph_mode"] == "PIECEWISE"
+            assert prefill_boundary[8]["expected_capture_size"] == 8
+            assert prefill_boundary[9]["expected_cudagraph_mode"] == "NONE"
 
             # Now exercise normal serving end-to-end.
             _send_chat_completion(frontend.http_port)
@@ -531,7 +567,7 @@ def test_self_benchmark_disagg_serves_after_bench(
                     "prefill" in p_types
                 ), f"prefill benchmark missing prefill points: {p_types}"
                 prefill_kv_reads = sorted(
-                    r["point"].get("kv_read_tokens", 0) for r in p_data["results"]
+                    r["point"].get("total_kv_read_tokens", 0) for r in p_data["results"]
                 )
                 assert any(kv_reads > 0 for kv_reads in prefill_kv_reads), (
                     "disaggregated prefill sweep did not exercise a prefix-cache "
@@ -540,7 +576,7 @@ def test_self_benchmark_disagg_serves_after_bench(
                 prefill_hit_batches = sorted(
                     r["point"]["batch_size"]
                     for r in p_data["results"]
-                    if r["point"].get("kv_read_tokens", 0) > 0
+                    if r["point"].get("total_kv_read_tokens", 0) > 0
                 )
                 assert any(b > 1 for b in prefill_hit_batches), (
                     "disaggregated prefill sweep did not exercise batch>1 after "

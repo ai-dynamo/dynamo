@@ -224,7 +224,8 @@ func NamespaceAllowed(config *configv1alpha1.OperatorConfiguration, runtimeConfi
 		return namespace == config.Namespace.Restricted
 	}
 
-	// Cluster-wide mode: check if namespace is excluded
+	// Namespace exclusion filters new events, not requests already in the reconcile queue.
+	// This best-effort isolation is acceptable for the development-and-testing-only mode.
 	if runtimeConfig.ExcludedNamespaces != nil && runtimeConfig.ExcludedNamespaces.Contains(namespace) {
 		log.FromContext(context.Background()).V(1).Info("Skipping resource - namespace is excluded",
 			"namespace", namespace,

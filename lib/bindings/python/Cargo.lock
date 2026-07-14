@@ -2396,6 +2396,7 @@ dependencies = [
  "futures",
  "once_cell",
  "opentelemetry",
+ "opentelemetry_sdk",
  "parking_lot",
  "pyo3",
  "pyo3-async-runtimes",
