@@ -19,7 +19,12 @@ from typing import Any, List, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+from transformers import (
+    AutoConfig,
+    AutoProcessor,
+    AutoTokenizer,
+    Qwen2_5_VLForConditionalGeneration,
+)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.utils.torch_utils import set_default_torch_dtype
@@ -31,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_graph_buckets() -> tuple[int, ...]:
-    raw = os.environ.get("DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS", "1,2,4,8")
+    raw = os.environ.get("DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS", "1,2,4,8,16,32,64")
     try:
         buckets = tuple(int(value) for value in raw.split(",") if value.strip())
     except ValueError as exc:
@@ -47,7 +52,7 @@ def _parse_graph_buckets() -> tuple[int, ...]:
 
 
 def _parse_graph_image_sizes() -> tuple[tuple[int, int], ...]:
-    raw = os.environ.get("DYN_QWEN2_VL_GRAPH_IMAGE_SIZES", "299x299,500x500")
+    raw = os.environ.get("DYN_QWEN2_VL_GRAPH_IMAGE_SIZES", "500x500")
     sizes: list[tuple[int, int]] = []
     try:
         for value in raw.split(","):
@@ -62,6 +67,30 @@ def _parse_graph_image_sizes() -> tuple[tuple[int, int], ...]:
             "DYN_QWEN2_VL_GRAPH_IMAGE_SIZES must contain positive dimensions"
         )
     return tuple(sizes)
+
+
+def _parse_positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {raw!r}")
+    return value
+
+
+def _decoder_hidden_size(config: Any) -> int:
+    text_config = getattr(config, "text_config", None)
+    value = getattr(text_config, "hidden_size", None)
+    if value is None:
+        value = getattr(config, "hidden_size", None)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError(
+            "Qwen2VLVisionEncoder could not determine the decoder hidden size "
+            f"from {type(config).__name__}"
+        )
+    return value
 
 
 _GRAPH_BATCH_BUCKETS = _parse_graph_buckets()
@@ -180,6 +209,7 @@ class _StaticQwen2VLVisionForward(torch.nn.Module):
         grid_key: tuple[int, int, int],
         batch_size: int,
         device: torch.device,
+        output_hidden_size: int,
     ) -> None:
         super().__init__()
         # Transformers models expose dynamically-generated module attributes whose
@@ -215,6 +245,7 @@ class _StaticQwen2VLVisionForward(torch.nn.Module):
         cu_seqlens_cpu = torch.nn.functional.pad(cu_seqlens_cpu, (1, 0), value=0)
         self.sequence_length = sequence_length
         self.merge_unit = merge_unit
+        self.output_hidden_size = output_hidden_size
         self.fullatt_block_indexes = frozenset(dynamic_visual.fullatt_block_indexes)
         self.register_buffer("window_index", window_index, persistent=False)
         self.register_buffer("reverse_indices", reverse_indices, persistent=False)
@@ -261,7 +292,7 @@ class _StaticQwen2VLVisionForward(torch.nn.Module):
                 max_seqlen=max_seqlen,
             )
         hidden_states = self.visual.merger(hidden_states)
-        return hidden_states[self.reverse_indices]
+        return hidden_states[self.reverse_indices][:, : self.output_hidden_size]
 
 
 def _forward_vllm_vision_attention(
@@ -318,13 +349,12 @@ def _forward_vllm_vision_attention(
 class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
     """Real Qwen2.5-VL ViT/projector behind Dynamo's custom encoder contract."""
 
-    preprocess_concurrency = 4
+    preprocess_concurrency = _parse_positive_int_env(
+        "DYN_QWEN2_VL_PREPROCESS_CONCURRENCY", 64
+    )
     buckets = None if _DISABLE_CUDA_GRAPHS else _GRAPH_BATCH_BUCKETS
-    max_batch_cost = int(
-        os.environ.get(
-            "DYN_QWEN2_VL_MAX_BATCH_COST",
-            str(_GRAPH_BATCH_BUCKETS[-1]),
-        )
+    max_batch_cost = _parse_positive_int_env(
+        "DYN_QWEN2_VL_MAX_BATCH_COST", _GRAPH_BATCH_BUCKETS[-1]
     )
 
     def __init__(self) -> None:
@@ -336,6 +366,8 @@ class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
         self._graphs: dict[tuple[tuple[int, int, int], int], _CapturedVisionGraph] = {}
         self._graph_pool: Any | None = None
         self._graph_grid_keys: frozenset[tuple[int, int, int]] = frozenset()
+        self._encoder_model_id: str | None = None
+        self._output_hidden_size: int | None = None
         self.tokenizer: Any = None
 
     def build(self, model_id: str) -> None:
@@ -347,6 +379,8 @@ class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
         self._graphs = {}
         self._graph_pool = None
         self._graph_grid_keys = frozenset()
+        self._encoder_model_id = None
+        self._output_hidden_size = None
         self.tokenizer = None
         try:
             self._build(model_id)
@@ -358,25 +392,55 @@ class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         cache_size = int(os.environ.get("DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE", "0"))
         self._configure_preprocess_cache(cache_size)
-        processor = AutoProcessor.from_pretrained(model_id)
+        encoder_model_id = os.environ.get("DYN_QWEN2_VL_ENCODER_MODEL", model_id)
+        decoder_config = AutoConfig.from_pretrained(model_id)
+        decoder_hidden_size = _decoder_hidden_size(decoder_config)
+        processor = AutoProcessor.from_pretrained(encoder_model_id)
         self._processor = processor
-        self.tokenizer = processor.tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self._encoder_model_id = encoder_model_id
 
         logger.info(
-            "[Qwen2VLVisionEncoder] loading %s vision tower on %s "
-            "(preprocess_cache_size=%d)",
+            "[Qwen2VLVisionEncoder] loading encoder=%s for decoder=%s on %s "
+            "(preprocess_cache_size=%d preprocess_concurrency=%d)",
+            encoder_model_id,
             model_id,
             self._device,
             cache_size,
+            self.preprocess_concurrency,
         )
         full_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            model_id,
+            encoder_model_id,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             attn_implementation="eager",
         )
         self._visual = full_model.model.visual.eval().to(self._device)
         self._validate_visual_architecture(self._visual)
+        native_hidden_size = int(self._visual.config.out_hidden_size)
+        output_hidden_size = _parse_positive_int_env(
+            "DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE", native_hidden_size
+        )
+        if output_hidden_size > native_hidden_size:
+            raise ValueError(
+                "DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE cannot exceed the vision "
+                f"projector width {native_hidden_size}; got {output_hidden_size}"
+            )
+        if output_hidden_size != decoder_hidden_size:
+            raise ValueError(
+                "Qwen2VLVisionEncoder output width must match the served decoder "
+                f"hidden size; output={output_hidden_size}, decoder={decoder_hidden_size}"
+            )
+        self._output_hidden_size = output_hidden_size
+        if output_hidden_size != native_hidden_size:
+            logger.warning(
+                "PERFORMANCE-ONLY Qwen2.5 adapter enabled: truncating the native "
+                "vision output from %d to %d columns for decoder %s. This is not "
+                "a trained projection and has no quality or model-parity claim.",
+                native_hidden_size,
+                output_hidden_size,
+                model_id,
+            )
         self._install_vllm_attention(self._visual)
 
         # Detach the retained module before dropping the full checkpoint. This
@@ -440,6 +504,12 @@ class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
                 "Qwen2VLVisionEncoder.forward_batch() called before build()"
             )
         return visual
+
+    def _require_output_hidden_size(self) -> int:
+        output_hidden_size = self._output_hidden_size
+        if output_hidden_size is None:
+            raise RuntimeError("Qwen2VLVisionEncoder output width is not configured")
+        return output_hidden_size
 
     def preprocess(self, raw: str) -> Preprocessed[Qwen2VLImageInputs]:
         """Fetch/decode one image and run the CPU Qwen2.5-VL image processor."""
@@ -534,7 +604,11 @@ class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
                     pin_memory=True,
                 )
                 forward = _StaticQwen2VLVisionForward(
-                    visual, grid_key, bucket, self._device
+                    visual,
+                    grid_key,
+                    bucket,
+                    self._device,
+                    self._require_output_hidden_size(),
                 ).eval()
 
                 warmup_stream = torch.cuda.Stream(device=self._device)
@@ -640,6 +714,7 @@ class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
             # Transformers 5.x wraps the merged vision tokens in
             # BaseModelOutputWithPooling; 4.x returns the tensor directly.
             image_embeds = getattr(image_embeds, "pooler_output", image_embeds)
+            image_embeds = image_embeds[:, : self._require_output_hidden_size()]
         if events:
             events[2].record()
         # One batched D2H copy avoids a synchronization and allocation per image.
@@ -773,6 +848,8 @@ class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
         self._graphs = {}
         self._graph_pool = None
         self._graph_grid_keys = frozenset()
+        self._encoder_model_id = None
+        self._output_hidden_size = None
         self.tokenizer = None
         gc.collect()
         if torch.cuda.is_available():

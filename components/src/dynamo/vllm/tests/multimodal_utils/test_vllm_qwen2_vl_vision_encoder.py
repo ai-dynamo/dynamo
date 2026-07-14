@@ -17,8 +17,10 @@ from dynamo.vllm.multimodal_utils.vision_encoder_backend import Preprocessed
 from examples.custom_encoder.qwen2_vl_vision_encoder import (
     Qwen2VLImageInputs,
     Qwen2VLVisionEncoder,
+    _decoder_hidden_size,
     _parse_graph_buckets,
     _parse_graph_image_sizes,
+    _parse_positive_int_env,
     _VllmQwen2_5VisionAttention,
 )
 
@@ -100,6 +102,7 @@ def test_forward_batch_packs_and_splits_variable_resolution_inputs() -> None:
     encoder = Qwen2VLVisionEncoder()
     encoder._device = torch.device("cpu")
     encoder._visual = _FakeVisual()
+    encoder._output_hidden_size = 4
 
     outputs = encoder.forward_batch([_item((1, 4, 4)), _item((1, 8, 8))])
 
@@ -151,7 +154,7 @@ def test_vllm_attention_receives_packed_sequence_boundaries() -> None:
     ("items", "target_bucket", "message"),
     [
         ([], None, "at least one"),
-        ([_item((1, 4, 4))] * 9, None, "max_batch_cost"),
+        ([_item((1, 4, 4))] * 65, None, "max_batch_cost"),
         ([_item((1, 4, 4))], 8, "target_bucket"),
     ],
 )
@@ -161,6 +164,7 @@ def test_forward_batch_rejects_invalid_dispatches(
     encoder = Qwen2VLVisionEncoder()
     encoder._device = torch.device("cpu")
     encoder._visual = _FakeVisual()
+    encoder._output_hidden_size = 4
 
     with pytest.raises(ValueError, match=message):
         encoder.forward_batch(items, target_bucket=target_bucket)
@@ -275,6 +279,35 @@ def test_graph_bucket_configuration_rejects_invalid_values(
 def test_graph_bucket_configuration(monkeypatch) -> None:
     monkeypatch.setenv("DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS", "1,4,8")
     assert _parse_graph_buckets() == (1, 4, 8)
+
+
+def test_positive_integer_configuration(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_PREPROCESS_CONCURRENCY", "64")
+    assert _parse_positive_int_env("DYN_QWEN2_VL_PREPROCESS_CONCURRENCY", 1) == 64
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "many"])
+def test_positive_integer_configuration_rejects_invalid_values(
+    monkeypatch, value: str
+) -> None:
+    monkeypatch.setenv("DYN_QWEN2_VL_MAX_BATCH_COST", value)
+    with pytest.raises(ValueError, match="DYN_QWEN2_VL_MAX_BATCH_COST"):
+        _parse_positive_int_env("DYN_QWEN2_VL_MAX_BATCH_COST", 64)
+
+
+def test_decoder_hidden_size_supports_text_and_text_only_configs() -> None:
+    assert (
+        _decoder_hidden_size(
+            SimpleNamespace(text_config=SimpleNamespace(hidden_size=1536))
+        )
+        == 1536
+    )
+    assert _decoder_hidden_size(SimpleNamespace(hidden_size=2048)) == 2048
+
+
+def test_decoder_hidden_size_rejects_missing_width() -> None:
+    with pytest.raises(ValueError, match="decoder hidden size"):
+        _decoder_hidden_size(SimpleNamespace())
 
 
 @pytest.mark.parametrize("value", ["", "500", "0x500", "axb"])

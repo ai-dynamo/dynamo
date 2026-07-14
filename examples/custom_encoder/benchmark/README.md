@@ -66,6 +66,33 @@ custom-encoder queue wait, so every unique image executes the ViT.
 Native HF vision output and the static graph adapter are checked directly for
 numerical parity before the sweep.
 
+## Qwen2.5-1.5B performance-only concurrency sweep
+
+The separate concurrency recipe serves `Qwen/Qwen2.5-1.5B-Instruct` as the
+decoder while still computing the complete vision tower from
+`Qwen/Qwen2.5-VL-3B-Instruct`. Because their hidden widths differ, it truncates
+the native 2048-wide vision output to its first 1536 columns. This is deliberately
+a performance-only adapter: it is not a trained projection and has no output
+quality or model-parity claim.
+
+It runs only `dynamo-custom-encoder` at closed-loop client concurrency 8, 16,
+and 32. Each cell gets a disjoint 1,000-image pool, exact ISL 515 and OSL 70,
+and uses preprocessing concurrency 64, maximum batch cost 64, graph buckets
+`1,2,4,8,16,32,64`, and only the 500×500 graph shape. Since every request has
+one cost-1 image, concurrency at most 32 cannot select bucket 64 even though the
+server captures it.
+
+```bash
+OUTPUT_DIR=/dynamo-tmp/logs/$(date +%m-%d)/qwen2-vl-1.5b-custom-concurrency \
+    examples/custom_encoder/benchmark/run_concurrency_sweep.sh
+```
+
+The script generates and audits 3,000 unique JPEGs, runs CUDA-graph checks, a
+smoke request, and the three measured cells, then requires
+`BENCHMARK_AUDIT=PASS cells=3`. It writes the complete Markdown, CSV, JSON,
+commands, workload manifest, graph-verification log, and sweep log below the
+chosen output directory.
+
 ## Custom encoder ablation
 
 After the fixed nine-cell comparison, run the separate 18-cell ablation using

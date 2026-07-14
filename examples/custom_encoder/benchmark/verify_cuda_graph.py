@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 import torch
 from PIL import Image
@@ -18,7 +19,14 @@ from examples.custom_encoder.qwen2_vl_vision_encoder import (
 )
 
 
-def verify(model: str, replay_iterations: int) -> None:
+def verify(
+    model: str,
+    encoder_model: str,
+    output_hidden_size: int,
+    replay_iterations: int,
+) -> None:
+    os.environ["DYN_QWEN2_VL_ENCODER_MODEL"] = encoder_model
+    os.environ["DYN_QWEN2_VL_OUTPUT_HIDDEN_SIZE"] = str(output_hidden_size)
     encoder = Qwen2VLVisionEncoder()
     encoder.build(model)
     try:
@@ -48,7 +56,11 @@ def verify(model: str, replay_iterations: int) -> None:
             for bucket in buckets:
                 padded_items = [item] + [padding_item] * (bucket - 1)
                 adapter = _StaticQwen2VLVisionForward(
-                    encoder._visual, grid, bucket, encoder._device
+                    encoder._visual,
+                    grid,
+                    bucket,
+                    encoder._device,
+                    encoder._require_output_hidden_size(),
                 ).eval()
                 with torch.inference_mode():
                     adapter_output = adapter(
@@ -64,7 +76,11 @@ def verify(model: str, replay_iterations: int) -> None:
                 )
                 print(f"adapter_parity_ok grid={grid} bucket={bucket}")
 
-                for real_count in range(1, bucket + 1):
+                # Exercise padding at the bottom, middle, and top of every rung.
+                # Checking every count through bucket 64 would repeat thousands
+                # of full 32-block ViT forwards without increasing graph coverage.
+                real_counts = sorted({1, max(1, bucket // 2), bucket})
+                for real_count in real_counts:
                     items = [item] * real_count
                     eager = encoder._forward_eager(items)
                     # The graph always executes its static bucket shape. Compare
@@ -123,6 +139,12 @@ def verify(model: str, replay_iterations: int) -> None:
             f"iterations={replay_iterations} reserved_bytes={reserved_after} "
             f"pinned_staging_bytes={pinned_staging_bytes}"
         )
+        if output_hidden_size != 2048:
+            print(
+                "parity_scope=performance-only "
+                f"native_vision_width=2048 truncated_output_width={output_hidden_size} "
+                "quality_or_model_parity_claim=false"
+            )
 
     finally:
         encoder.close()
@@ -132,9 +154,16 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
+    parser.add_argument("--encoder-model", default="Qwen/Qwen2.5-VL-3B-Instruct")
+    parser.add_argument("--output-hidden-size", type=int, default=2048)
     parser.add_argument("--replay-iterations", type=int, default=20)
     args = parser.parse_args()
-    verify(args.model, args.replay_iterations)
+    verify(
+        args.model,
+        args.encoder_model,
+        args.output_hidden_size,
+        args.replay_iterations,
+    )
 
 
 if __name__ == "__main__":

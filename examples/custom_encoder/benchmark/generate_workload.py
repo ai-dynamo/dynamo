@@ -68,7 +68,26 @@ def _calculate_native_isl(processor: Any, prompt: str, image: Image.Image) -> in
 
 def _calculate_custom_isl(processor: Any, prompt: str, image: Image.Image) -> int:
     """Count the custom Jinja text plus the image embeddings it expands to."""
-    rendered = processor.apply_chat_template(
+    return _calculate_custom_isl_components(
+        processor.tokenizer,
+        processor.image_processor,
+        prompt,
+        image,
+        apply_chat_template=processor.apply_chat_template,
+    )
+
+
+def _calculate_custom_isl_components(
+    tokenizer: Any,
+    image_processor: Any,
+    prompt: str,
+    image: Image.Image,
+    *,
+    apply_chat_template: Callable[..., str] | None = None,
+) -> int:
+    """Count a custom prompt with independently selected text and vision models."""
+    render = apply_chat_template or tokenizer.apply_chat_template
+    rendered = render(
         [
             {
                 "role": "user",
@@ -82,14 +101,14 @@ def _calculate_custom_isl(processor: Any, prompt: str, image: Image.Image) -> in
         tokenize=False,
         add_generation_prompt=True,
     )
-    text_ids = processor.tokenizer(rendered, add_special_tokens=False).input_ids
-    image_token_id = processor.tokenizer.convert_tokens_to_ids(CUSTOM_IMAGE_TOKEN)
+    text_ids = tokenizer(rendered, add_special_tokens=False).input_ids
+    image_token_id = tokenizer.convert_tokens_to_ids(CUSTOM_IMAGE_TOKEN)
     if text_ids.count(image_token_id) != 1:
         raise RuntimeError("custom template must emit exactly one image token")
 
-    image_inputs = processor.image_processor(images=[image], return_tensors="pt")
+    image_inputs = image_processor(images=[image], return_tensors="pt")
     image_grid_thw = image_inputs["image_grid_thw"][0]
-    merge_size = int(processor.image_processor.merge_size)
+    merge_size = int(image_processor.merge_size)
     image_tokens = int(image_grid_thw.prod().item()) // merge_size**2
     return len(text_ids) - 1 + image_tokens
 
