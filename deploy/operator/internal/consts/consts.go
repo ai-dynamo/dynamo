@@ -41,6 +41,7 @@ const (
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
+        KubeAnnotationEnableDisaggregatedSet = "nvidia.com/enable-disaggregatedset"
 
 	// KubeAnnotationGroveUpdateStrategy temporarily exposes the Grove
 	// PodCliqueSet update strategy while the long-term DGD API is settled.

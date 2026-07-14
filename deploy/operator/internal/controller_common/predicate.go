@@ -48,6 +48,12 @@ func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "leaderworkerset.x-k8s.io", nil)
 }
 
+// DetectDisaggregatedSetAvailability checks if the DisaggregatedSet API is available.
+func DetectDisaggregatedSetAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+        version := "v1"
+        return detectAPIGroupAvailability(ctx, mgr, "disaggregatedset.x-k8s.io", &version)
+}
+
 // DetectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered
 func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "scheduling.volcano.sh", nil)
