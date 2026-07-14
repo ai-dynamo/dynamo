@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::single::ActiveSequences;
+use super::unified_prompt_tracker::UnifiedPromptTracker;
 use crate::protocols::{DpRank, WorkerId, WorkerWithDpRank};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,12 +88,15 @@ pub(super) struct WorkerSlot {
 }
 
 impl WorkerSlot {
-    fn new(worker: WorkerWithDpRank, block_size: usize, expiry_enabled: bool) -> Self {
-        let sequences = if expiry_enabled {
-            ActiveSequences::new(block_size)
-        } else {
-            ActiveSequences::new_without_expiry(block_size)
-        };
+    fn new(
+        worker: WorkerWithDpRank,
+        block_size: usize,
+        expiry_enabled: bool,
+        prompts: Arc<UnifiedPromptTracker>,
+    ) -> Self {
+        let expiry_duration = expiry_enabled.then_some(std::time::Duration::from_secs(300));
+        let sequences =
+            ActiveSequences::new_for_worker(block_size, worker, prompts, expiry_duration);
         Self {
             worker,
             sequences: RwLock::new(sequences),
@@ -104,24 +109,25 @@ pub(super) struct WorkerTable {
     pub(super) index: FxHashMap<WorkerWithDpRank, usize>,
     worker_ranges: HashMap<WorkerId, WorkerDpRange>,
     expiry_enabled: bool,
+    prompts: Arc<UnifiedPromptTracker>,
 }
 
 impl WorkerTable {
+    #[cfg(test)]
     pub(super) fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
-        Self::new_with_expiry(block_size, dp_range, true)
+        Self::new_with_prompts(
+            block_size,
+            dp_range,
+            true,
+            Arc::new(UnifiedPromptTracker::default()),
+        )
     }
 
-    pub(super) fn new_without_expiry(
-        block_size: usize,
-        dp_range: &HashMap<u64, (u32, u32)>,
-    ) -> Self {
-        Self::new_with_expiry(block_size, dp_range, false)
-    }
-
-    fn new_with_expiry(
+    pub(super) fn new_with_prompts(
         block_size: usize,
         dp_range: &HashMap<u64, (u32, u32)>,
         expiry_enabled: bool,
+        prompts: Arc<UnifiedPromptTracker>,
     ) -> Self {
         let worker_ranges: HashMap<WorkerId, WorkerDpRange> = dp_range
             .iter()
@@ -137,7 +143,12 @@ impl WorkerTable {
         let mut index = FxHashMap::default();
         for worker in workers_from_ranges(worker_ranges.values().copied()) {
             let idx = slots.len();
-            slots.push(WorkerSlot::new(worker, block_size, expiry_enabled));
+            slots.push(WorkerSlot::new(
+                worker,
+                block_size,
+                expiry_enabled,
+                prompts.clone(),
+            ));
             index.insert(worker, idx);
         }
         Self {
@@ -145,6 +156,7 @@ impl WorkerTable {
             index,
             worker_ranges,
             expiry_enabled,
+            prompts,
         }
     }
 
@@ -246,7 +258,12 @@ impl WorkerTable {
         for worker in target_workers {
             let slot = old.remove(&worker).unwrap_or_else(|| {
                 added.push(worker);
-                WorkerSlot::new(worker, block_size, self.expiry_enabled)
+                WorkerSlot::new(
+                    worker,
+                    block_size,
+                    self.expiry_enabled,
+                    self.prompts.clone(),
+                )
             });
             self.slots.push(slot);
         }
@@ -274,9 +291,14 @@ impl WorkerTable {
                 added.push(worker);
             }
             let idx = self.slots.len();
-            let slot = old
-                .remove(&worker)
-                .unwrap_or_else(|| WorkerSlot::new(worker, block_size, self.expiry_enabled));
+            let slot = old.remove(&worker).unwrap_or_else(|| {
+                WorkerSlot::new(
+                    worker,
+                    block_size,
+                    self.expiry_enabled,
+                    self.prompts.clone(),
+                )
+            });
             self.slots.push(slot);
             self.index.insert(worker, idx);
         }
@@ -306,8 +328,12 @@ impl WorkerTable {
         }
 
         let idx = self.slots.len();
-        self.slots
-            .push(WorkerSlot::new(worker, block_size, self.expiry_enabled));
+        self.slots.push(WorkerSlot::new(
+            worker,
+            block_size,
+            self.expiry_enabled,
+            self.prompts.clone(),
+        ));
         self.index.insert(worker, idx);
         WorkerTopologyChange {
             added: vec![worker],
@@ -480,7 +506,8 @@ mod tests {
                 }),
                 Instant::now(),
             );
-            assert_eq!(outcome.membership_delta.stores[0].path, vec![1, 2, 3]);
+            assert!(outcome.expired_request_ids.is_empty());
+            assert_eq!(seq.active_blocks(), 3);
         }
 
         let change = table

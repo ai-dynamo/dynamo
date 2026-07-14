@@ -25,8 +25,9 @@ use tokio_util::sync::CancellationToken;
 use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
-use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
+use super::single::{ActiveSequences, RequestId};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
+use super::unified_prompt_tracker::UnifiedPromptTracker;
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
@@ -250,13 +251,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = if options.expiry_enabled {
-            WorkerTable::new(block_size, &dp_range)
-        } else {
-            WorkerTable::new_without_expiry(block_size, &dp_range)
-        };
+        let prompts = Arc::new(UnifiedPromptTracker::default());
+        let workers = WorkerTable::new_with_prompts(
+            block_size,
+            &dp_range,
+            options.expiry_enabled,
+            prompts.clone(),
+        );
         let initial_workers: Vec<_> = workers.workers().collect();
-        let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
+        let prompt_registry = PromptRegistry::new(initial_workers.iter().copied(), prompts);
         let publisher = Arc::new(publisher);
         for worker in &initial_workers {
             publisher.observe_worker_registered(worker, worker_type);
@@ -785,11 +788,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let outcome = seq.force_expiry();
             if !outcome.expired_request_ids.is_empty() {
                 let load = seq.worker_load_snapshot();
-                self.prompt_registry.apply_membership_delta_and_load(
-                    slot.worker,
-                    outcome.membership_delta,
-                    load,
-                );
+                self.prompt_registry
+                    .replace_worker_load_state(slot.worker, load);
                 removed_request_count += outcome.expired_request_ids.len();
                 self.request_index
                     .remove_requests(outcome.expired_request_ids.iter());
@@ -908,11 +908,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 decay_now,
             );
             let load = seq.worker_load_snapshot();
-            self.prompt_registry.apply_membership_delta_and_load(
-                worker,
-                outcome.membership_delta,
-                load,
-            );
+            self.prompt_registry.replace_worker_load_state(worker, load);
             break (outcome.expired_request_ids, load);
         };
 
@@ -957,7 +953,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker: WorkerWithDpRank,
         request_id: &RequestId,
         decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
         let load = {
@@ -968,10 +964,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             };
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
-            let delta = mutate_fn(&mut seq, request_id, decay_now);
+            mutate_fn(&mut seq, request_id, decay_now);
             let load = seq.worker_load_snapshot();
-            self.prompt_registry
-                .apply_membership_delta_and_load(worker, delta, load);
+            self.prompt_registry.replace_worker_load_state(worker, load);
             load
         };
 
@@ -1014,7 +1009,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         request_id: &RequestId,
         decay_now: Instant,
         event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
         let worker = self.request_index.worker_for(request_id).ok_or_else(|| {

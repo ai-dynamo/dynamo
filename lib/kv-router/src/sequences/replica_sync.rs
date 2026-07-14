@@ -196,11 +196,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     );
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(
-                            event_worker,
-                            outcome.membership_delta,
-                            load,
-                        );
+                        .replace_worker_load_state(event_worker, load);
                     (outcome.expired_request_ids, load)
                 };
                 drop(table);
@@ -220,10 +216,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let load = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
-                    let delta = seq.free(&request_id, decay_now);
+                    seq.free(&request_id, decay_now);
                     let load = seq.worker_load_snapshot();
-                    self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
+                    self.prompt_registry.replace_worker_load_state(worker, load);
                     load
                 };
                 drop(table);

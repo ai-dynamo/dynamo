@@ -20,6 +20,7 @@
 
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -30,9 +31,11 @@ use rustc_hash::FxHashSet;
 use super::block_tracker::{BlockTracker, RequestBlockChain};
 use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
-use crate::protocols::PrefillLoadHint;
+use super::unified_prompt_tracker::UnifiedPromptTracker;
+use crate::protocols::{PrefillLoadHint, WorkerWithDpRank};
 
 /// Duration after which stale requests may be expired (5 minutes).
+#[cfg(test)]
 const EXPIRY_DURATION: Duration = Duration::from_secs(300);
 
 /// How often we *check* for stale requests (30 seconds). This is not
@@ -49,58 +52,8 @@ pub(super) struct RequestState {
     expected_output_tokens: Option<u32>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct PromptMembershipStore {
-    pub path: Vec<SequenceHash>,
-    pub new_suffix_start: usize,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct PromptMembershipRemove {
-    pub path: Vec<SequenceHash>,
-    pub remove_from: usize,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct PromptMembershipDelta {
-    pub stores: Vec<PromptMembershipStore>,
-    pub removes: Vec<PromptMembershipRemove>,
-}
-
-impl PromptMembershipDelta {
-    fn extend(&mut self, other: Self) {
-        self.stores.extend(other.stores);
-        self.removes.extend(other.removes);
-    }
-
-    fn push_store(&mut self, path: Vec<SequenceHash>, new_suffix_start: usize) {
-        assert!(
-            new_suffix_start < path.len(),
-            "prompt store suffix must start inside a non-empty path"
-        );
-        self.stores.push(PromptMembershipStore {
-            path,
-            new_suffix_start,
-        });
-    }
-
-    fn push_remove(&mut self, released: Option<super::block_tracker::ReleasedPromptPath>) {
-        if let Some(released) = released {
-            assert!(
-                released.remove_from < released.path.len(),
-                "prompt removal must remove a non-empty suffix"
-            );
-            self.removes.push(PromptMembershipRemove {
-                path: released.path,
-                remove_from: released.remove_from,
-            });
-        }
-    }
-}
-
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct SequenceMutationOutcome {
-    pub membership_delta: PromptMembershipDelta,
     pub expired_request_ids: HashSet<RequestId>,
 }
 
@@ -116,21 +69,38 @@ pub struct ActiveSequences {
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
+    #[cfg(test)]
     pub(super) fn new(block_size: usize) -> Self {
         Self::new_with_expiry(block_size, Some(EXPIRY_DURATION))
     }
 
+    #[cfg(test)]
     pub(super) fn new_without_expiry(block_size: usize) -> Self {
         Self::new_with_expiry(block_size, None)
     }
 
+    #[cfg(test)]
     fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
+        Self::new_for_worker(
+            block_size,
+            WorkerWithDpRank::new(0, 0),
+            Arc::new(UnifiedPromptTracker::default()),
+            expiry_duration,
+        )
+    }
+
+    pub(super) fn new_for_worker(
+        block_size: usize,
+        worker: WorkerWithDpRank,
+        prompts: Arc<UnifiedPromptTracker>,
+        expiry_duration: Option<Duration>,
+    ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
 
         Self {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
-            blocks: BlockTracker::default(),
+            blocks: BlockTracker::new(worker, prompts),
             last_expiry_check_time: Instant::now(),
             expiry_duration,
         }
@@ -180,22 +150,11 @@ impl ActiveSequences {
             return SequenceMutationOutcome::default();
         }
 
-        let mut outcome = self.force_expiry();
+        let outcome = self.force_expiry();
         let started_at = Instant::now();
 
         let prompt_hashes = token_sequence.unwrap_or_default();
-        let (blocks, first_new_prompt_idx) = self.blocks.acquire_prompt(&prompt_hashes);
-
-        if let Some(first_new_prompt_idx) = first_new_prompt_idx {
-            debug_assert!(
-                prompt_hashes[first_new_prompt_idx..]
-                    .iter()
-                    .all(|hash| self.blocks.contains_block(hash))
-            );
-            outcome
-                .membership_delta
-                .push_store(prompt_hashes, first_new_prompt_idx);
-        }
+        let blocks = self.blocks.acquire_prompt(&prompt_hashes);
 
         let prefill = if track_prefill_tokens {
             prefill_load_hint.and_then(|hint| {
@@ -235,25 +194,19 @@ impl ActiveSequences {
     ///
     /// This implicitly calls [`Self::mark_prefill_completed`] first, so callers do not need
     /// to invoke both when the request is finishing.
-    pub(super) fn free(
-        &mut self,
-        request_id: &RequestId,
-        decay_now: Instant,
-    ) -> PromptMembershipDelta {
+    pub(super) fn free(&mut self, request_id: &RequestId, decay_now: Instant) {
         let _ = self.prefill.remove(request_id, decay_now);
 
         let Some(request_state) = self.requests.remove(request_id) else {
             tracing::warn!("Trying to free non-existent request {request_id}");
-            return PromptMembershipDelta::default();
+            return;
         };
 
         let blocks = request_state.blocks;
         let _ = request_state.expected_output_tokens;
-        let mut membership_delta = PromptMembershipDelta::default();
-        membership_delta.push_remove(self.blocks.release(blocks));
+        self.blocks.release(blocks);
 
         self.validate_state();
-        membership_delta
     }
 
     /// Add an output block with a random hash and optional fractional decay weight.
@@ -305,14 +258,13 @@ impl ActiveSequences {
             .map(|(request_id, _)| request_id.clone())
             .collect();
 
-        let mut outcome = SequenceMutationOutcome {
+        let outcome = SequenceMutationOutcome {
             expired_request_ids,
-            ..Default::default()
         };
 
         for request_id in &outcome.expired_request_ids {
             tracing::warn!("Expiring stale request: {}", request_id);
-            outcome.membership_delta.extend(self.free(request_id, now));
+            self.free(request_id, now);
         }
 
         self.validate_state();
@@ -383,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_membership_delta_only_reports_first_add_and_last_remove() {
+    fn test_unified_prompt_ownership_survives_shared_prefix_release() {
         let mut seq_manager = ActiveSequences::new(4);
         let decay_now = Instant::now();
 
@@ -395,16 +347,6 @@ mod tests {
             tracking_hint(8),
             decay_now,
         );
-        assert_eq!(
-            first.membership_delta,
-            PromptMembershipDelta {
-                stores: vec![PromptMembershipStore {
-                    path: vec![1, 2],
-                    new_suffix_start: 0,
-                }],
-                removes: Vec::new(),
-            }
-        );
         assert!(first.expired_request_ids.is_empty());
 
         let second = seq_manager.add_request_with_prefill_tracking(
@@ -415,30 +357,14 @@ mod tests {
             tracking_hint(12),
             decay_now,
         );
-        assert_eq!(
-            second.membership_delta,
-            PromptMembershipDelta {
-                stores: vec![PromptMembershipStore {
-                    path: vec![1, 2, 3],
-                    new_suffix_start: 2,
-                }],
-                removes: Vec::new(),
-            }
-        );
+        assert!(second.expired_request_ids.is_empty());
+        assert_eq!(seq_manager.active_blocks(), 3);
 
-        let first_free = seq_manager.free(&"r1".to_string(), decay_now);
-        assert!(first_free.removes.is_empty());
-        assert!(first_free.stores.is_empty());
+        seq_manager.free(&"r1".to_string(), decay_now);
+        assert_eq!(seq_manager.active_blocks(), 3);
 
-        let second_free = seq_manager.free(&"r2".to_string(), decay_now);
-        assert!(second_free.stores.is_empty());
-        assert_eq!(
-            second_free.removes,
-            vec![PromptMembershipRemove {
-                path: vec![1, 2, 3],
-                remove_from: 0,
-            }]
-        );
+        seq_manager.free(&"r2".to_string(), decay_now);
+        assert_eq!(seq_manager.active_blocks(), 0);
     }
 
     #[test]
@@ -454,13 +380,7 @@ mod tests {
             tracking_hint(12),
             decay_now,
         );
-        assert_eq!(
-            outcome.membership_delta.stores,
-            vec![PromptMembershipStore {
-                path: vec![1, 2, 3],
-                new_suffix_start: 0,
-            }]
-        );
+        assert!(outcome.expired_request_ids.is_empty());
         assert_eq!(
             seq_manager.active_block_hashes(),
             [1, 2, 3].into_iter().collect()
@@ -481,14 +401,8 @@ mod tests {
             [1, 2, 3, output_hash].into_iter().collect()
         );
 
-        let free_delta = seq_manager.free(&"r1".to_string(), decay_now);
-        assert_eq!(
-            free_delta.removes,
-            vec![PromptMembershipRemove {
-                path: vec![1, 2, 3],
-                remove_from: 0,
-            }]
-        );
+        seq_manager.free(&"r1".to_string(), decay_now);
+        assert!(seq_manager.active_block_hashes().is_empty());
     }
 
     #[test]
