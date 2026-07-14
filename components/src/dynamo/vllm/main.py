@@ -64,6 +64,7 @@ from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
+from .snapshot_backend import select_dynamo_gms_snapshot_backend
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -561,6 +562,8 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    if os.getenv("DYN_SNAPSHOT_CONTROL_DIR"):
+        select_dynamo_gms_snapshot_backend(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
