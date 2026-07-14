@@ -29,7 +29,7 @@ const (
 	// GMSSnapshot enables the temporary GMS + Snapshot integration.
 	//
 	// Owner: @galletas1712
-	// Experimental since: N/A
+	// Experimental since: v1.2.0
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
@@ -38,7 +38,7 @@ const (
 	// Checkpoint enables checkpoint creation and restore.
 	//
 	// Owner: @galletas1712
-	// Experimental since: N/A
+	// Experimental since: v1.0.0
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
@@ -47,7 +47,7 @@ const (
 	// Grove enables Grove-backed workload orchestration.
 	//
 	// Owner: @julienmancuso
-	// Experimental since: N/A
+	// Experimental since: v0.4.0
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
@@ -56,7 +56,7 @@ const (
 	// LWS enables LeaderWorkerSet-backed workload orchestration.
 	//
 	// Owner: @julienmancuso
-	// Experimental since: N/A
+	// Experimental since: v0.3.0
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
@@ -65,7 +65,7 @@ const (
 	// KaiScheduler enables Kai Scheduler integration.
 	//
 	// Owner: @julienmancuso
-	// Experimental since: N/A
+	// Experimental since: v0.5.0
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
@@ -74,7 +74,7 @@ const (
 	// VolcanoScheduler enables Volcano scheduling for Grove workloads.
 	//
 	// Owner: @xianlubird
-	// Experimental since: N/A
+	// Experimental since: v1.4.0
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
@@ -83,7 +83,7 @@ const (
 	// DRA enables Dynamic Resource Allocation using resource.k8s.io/v1.
 	//
 	// Owner: @julienmancuso
-	// Experimental since: N/A
+	// Experimental since: v1.2.0
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
@@ -94,17 +94,17 @@ const (
 	// Owner: @atchernych
 	// Experimental since: N/A
 	// Beta since: N/A
-	// GA since: N/A
+	// GA since: v1.2.0
 	// Default: false
 	Istio Name = "istio"
 
 	// GPUDiscovery enables automatic GPU hardware discovery.
 	//
-	// Owner: @tmonty12
+	// Owner: @hhzhang16
 	// Experimental since: N/A
 	// Beta since: N/A
-	// GA since: N/A
-	// Default: true, since N/A
+	// GA since: v1.0.0
+	// Default: true, since v1.0.0
 	GPUDiscovery Name = "gpuDiscovery"
 )
 
