@@ -453,6 +453,34 @@ jobs:
       image_tag_suffix: '-nightly'
     secrets: inherit
 
+  vllm-kvbm-h100-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: kvbm
+      test_type: KVBM Test
+      # 80 GiB H100 (aws-dev-02): KVBM consolidator/determinism scenarios need MLA
+      # + H100; mirrors the post-merge vllm-kvbm-tests lane on the nightly cadence.
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      container_workspace: /workspace
+      kvbm_mla_backend: FLASH_ATTN_MLA
+      enable_coverage: true
+      run_cpu_only_tests: false
+      run_gpu_tests: true
+      run_sanity_check: false
+      gpu_test_markers: nightly and h100 and kvbm and gpu_1 and (kvbm_consolidator or kvbm_determinism)
+      gpu_test_timeout_minutes: 120
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
@@ -631,6 +659,7 @@ jobs:
       - sglang-test
       - sglang-multi-gpu-test
       - sglang-h100-test
+      - vllm-kvbm-h100-test
       - trtllm-test
       - trtllm-multi-gpu-test
       - dynamo-pipeline
@@ -657,7 +686,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, vllm-kvbm-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     if: always()
     permissions:
       contents: read
@@ -883,7 +912,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, vllm-kvbm-h100-test, trtllm-test, trtllm-multi-gpu-test, rust-tests]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

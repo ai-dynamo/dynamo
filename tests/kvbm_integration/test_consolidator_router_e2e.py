@@ -49,6 +49,7 @@ pytestmark = [
     pytest.mark.gpu_1,
     pytest.mark.h100,
     pytest.mark.post_merge,
+    pytest.mark.nightly,  # also runs on the nightly vllm-kvbm-h100 lane
     pytest.mark.skipif(not (HAS_VLLM or HAS_TRTLLM), reason="requires vllm or trtllm"),
 ]
 
