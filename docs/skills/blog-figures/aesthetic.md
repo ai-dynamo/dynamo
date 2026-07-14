@@ -1,6 +1,6 @@
 # Dynamo Dark Aesthetic Reference
 
-Self-contained reference for palette, typography, semantic color, D2 classes, and diagram anti-patterns. Mirrors [`design_tokens.yaml`](../flash-indexer/tools/design_tokens.yaml) and [`theme.d2`](../flash-indexer/tools/theme.d2) verbatim so this file can be read without leaving the skill.
+Self-contained reference for palette, typography, semantic color, D2 classes, and diagram anti-patterns. Mirrors [`design_tokens.yaml`](../../digest/flash-indexer/tools/design_tokens.yaml) and [`theme.d2`](../../digest/flash-indexer/tools/theme.d2) verbatim so this file can be read without leaving the skill.
 
 When tokens drift in the canonical source, update this file too.
 
@@ -80,7 +80,16 @@ In order: `#4a7500`, `#0a4a80`, `#9a7800`, `#005a40`, `#555555`, `#3a1050`, `#7a
 
 ## Typography
 
-**One family — Dynamo Dark.** Two typefaces, straight from `design_tokens.yaml`: the body sans and the aligned mono. Never a third.
+**One family — Dynamo Dark.** The sans (`Helvetica Neue, Helvetica, Arial, sans-serif`; display titles lead with Helvetica Neue Light, every other role is the token `Arial, Helvetica, sans-serif`) plus the aligned mono. Never a third. The title has two treatments — display and compact — differing only by figure scale.
+
+**Display / hero title** (hero and section-anchor figures):
+
+| Role | Family | Size (px) | Weight | Case | Color |
+|---|---|---|---|---|---|
+| Title | `Helvetica Neue, Helvetica, Arial, sans-serif` | 42 / 36 | 300 | title case | `#ffffff` |
+| Subtitle | `Helvetica Neue, Helvetica, Arial, sans-serif` | 22 / 17 | 300 | sentence case | `#767676` |
+
+**Compact / chart title** (dense dashboards, heatmaps, inline charts) plus the shared roles:
 
 | Role | Family | Size (px) | Weight | Transform | Letter-Spacing |
 |---|---|---|---|---|---|
@@ -90,9 +99,7 @@ In order: `#4a7500`, `#0a4a80`, `#9a7800`, `#005a40`, `#555555`, `#3a1050`, `#7a
 | Annotation | `Arial, Helvetica, sans-serif` | 10 | 400 | none | 0 |
 | Code / ticks / numbers | `'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace` | 10-13 | 400 | none | 0 |
 
-The title is 18 px at inline / body scale. For a full-width hero figure, scale the title up to 24–42 px but keep weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`, and the sans stack — size is the only lever. A hero may carry a one-line subtitle beneath the title in `text.muted` (`#767676`) at 12–14 px, weight 400, sentence case: the title carries the takeaway, the subtitle carries the qualifier (config, units, model).
-
-Use the same treatment for every figure — dense dashboards and heatmaps (compact exemplars: [docs/digest/flash-indexer/images/](../flash-indexer/images/)) and full-width heroes (exemplar: [docs/digest/dynosim/](../dynosim/)) alike. Never switch fonts or weights between figures in a blog.
+Helvetica Neue and Arial are the same visual sans: the display title uses the light weight in title case, dense charts use the bold uppercase compact title, and body labels / mono ticks / palette are identical everywhere. Exemplars: compact charts at [docs/digest/flash-indexer/images/](../../digest/flash-indexer/images/); full-width hero at [docs/digest/dynosim/](../../digest/dynosim/).
 
 ## Borders and Spacing
 
@@ -177,7 +184,7 @@ Reference: the replay edge in `gen_fig_2_architecture.py` (NV green, solid becau
 
 ## D2 Class Catalog
 
-The classes from [`theme.d2`](../flash-indexer/tools/theme.d2). Pick the class that matches the role; do not invent inline styles.
+The classes from [`theme.d2`](../../digest/flash-indexer/tools/theme.d2). Pick the class that matches the role; do not invent inline styles.
 
 ### Hardware (outlined, muted accent)
 
@@ -276,10 +283,10 @@ Each entry: **stupid version → corrected version**.
 ### Typography
 
 - **Mixed font families inside one figure.** → Two typefaces maximum: the body sans + the aligned mono from the Dynamo Dark tokens (see typography section). Never a third.
-- **A second type family.** → One family, blog-wide. Do not introduce Helvetica Neue, Geist, a display serif, or any font outside the token stack.
+- **A third type family.** → One family, blog-wide: the Helvetica/Arial sans + Roboto Mono. Do not introduce a display serif, Geist, or any font outside that set.
 - **Comic Sans, Impact, or any decorative font.** → Only the two canonical typefaces.
-- **Title that hedges or asks a question.** ("Performance Overview", "How Fast Is It?") → Title is the takeaway in declarative ALL-CAPS form ("Concurrent Indexer Wins by 40x").
-- **Sentence-case or light-weight titles.** → Titles are ALL-CAPS, weight 700, `letter-spacing: 0.08em`. The takeaway can extend into a muted subtitle, but the title itself always carries the token treatment.
+- **Title that hedges or asks a question.** ("Performance Overview", "How Fast Is It?") → Title is the takeaway in declarative form ("Concurrent Indexer Wins by 40x" as a compact ALL-CAPS chart title; "KV routing lifts the throughput frontier" as a Helvetica-set hero title).
+- **Wrong title treatment for the scale.** → A hero uses the Helvetica-set light title in title case; a dense chart uses the Arial 700 ALL-CAPS compact title. Don't uppercase a hero, and don't light-weight a compact chart title.
 
 ### Visual Effects
 
@@ -302,10 +309,10 @@ Each entry: **stupid version → corrected version**.
 When in doubt, open one of these exemplars — all render in the one Dynamo Dark family:
 
 **Compact charts and diagrams** (dense, inline / body scale):
-- [docs/digest/flash-indexer/images/](../flash-indexer/images/) — six figures across all four implemented pathways.
-- [docs/digest/agentic-inference/two-gates.svg](../agentic-inference/two-gates.svg) — exemplar hand-crafted SVG.
-- [docs/digest/agentic-inference/protocol-stack.svg](../agentic-inference/protocol-stack.svg) — exemplar layered SVG with custom dividers.
+- [docs/digest/flash-indexer/images/](../../digest/flash-indexer/images/) — six figures across all four implemented pathways.
+- [docs/digest/agentic-inference/two-gates.svg](../../digest/agentic-inference/two-gates.svg) — exemplar hand-crafted SVG.
+- [docs/digest/agentic-inference/protocol-stack.svg](../../digest/agentic-inference/protocol-stack.svg) — exemplar layered SVG with custom dividers.
 
 **Display-scale / hero:**
-- [docs/digest/dynosim/dynosim-hero.png](../dynosim/dynosim-hero.png) — hero figure at full page width.
-- [docs/digest/dynosim/dynosim-pareto-frontier.md](../dynosim/dynosim-pareto-frontier.md) — Pareto-frontier write-up (cost / latency comparison pattern).
+- [docs/digest/dynosim/dynosim-hero.png](../../digest/dynosim/dynosim-hero.png) — hero figure at full page width.
+- [docs/digest/dynosim/dynosim-pareto-frontier.md](../../digest/dynosim/dynosim-pareto-frontier.md) — Pareto-frontier write-up (cost / latency comparison pattern).

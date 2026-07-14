@@ -19,7 +19,7 @@ The single most common way to make a chart look amateurish is to let Plotly auto
 
 ### Canonical Snippet
 
-The pattern from [`gen_throughput.py`](../flash-indexer/tools/gen_throughput.py) for log-scale ticks with SI suffix formatting:
+The pattern from [`gen_throughput.py`](../../digest/flash-indexer/tools/gen_throughput.py) for log-scale ticks with SI suffix formatting:
 
 ```python
 fig.update_layout(
@@ -75,7 +75,7 @@ If the auto-picked ticks happen to be round, you may keep them — but check exp
 
 When you have ≤ 5 series, label each line or bar at its end with the series name (and ideally its terminal value). Legends only when you genuinely have 6+ series.
 
-The corpus pattern from [`gen_throughput.py`](../flash-indexer/tools/gen_throughput.py) uses `peak_annotations` to place the peak value next to each line at the same x-coordinate, with the series name in a small label below.
+The corpus pattern from [`gen_throughput.py`](../../digest/flash-indexer/tools/gen_throughput.py) uses `peak_annotations` to place the peak value next to each line at the same x-coordinate, with the series name in a small label below.
 
 ```python
 peak_annotations.append(
@@ -300,18 +300,18 @@ When the title carries the takeaway, the **subtitle carries the qualifier** — 
 
 **Typography spec:**
 
-| Role | Family | Size | Weight | Transform | Color |
+| Role | Family | Size | Weight | Case | Color |
 |---|---|---|---|---|---|
-| Title | `Arial, Helvetica, sans-serif` | 24–42 (hero) | 700 | uppercase | `text.primary` |
-| Subtitle | `Arial, Helvetica, sans-serif` | 14–18 | 400 | sentence case | `text.muted` |
+| Title | `Helvetica Neue, Helvetica, Arial, sans-serif` | 42 (hero) / 36 (body) | 300 | title case | `text.primary` |
+| Subtitle | `Helvetica Neue, Helvetica, Arial, sans-serif` | 22 (hero) / 17 (body) | 300 | sentence case | `text.muted` |
 
-The title uses the canonical token treatment (weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`) scaled up for a hero; the subtitle drops to a muted, sentence-case qualifier. Use the token sans stack `"Arial, Helvetica, sans-serif"` so the figure renders identically everywhere.
+This is the **display / hero** title treatment: the Helvetica set, light weight, title case — the generous headline voice (distinct from the compact Arial 700 ALL-CAPS chart title in Rule 10). Lead the family stack with Helvetica Neue and set `weight=300`; on systems without Helvetica Neue it falls back through Helvetica to Arial, the same visual sans.
 
 **Vertical spacing.** Subtitle top sits **~5 px below the title's bottom edge**. Earlier guidance said 15-20 px below the baseline; in practice that read as a gap, not a stack. Plotly's title bbox is taller than the raw font size (weight-300 with internal padding adds ~8px below the rendered descender), so 5 px below the rendered bottom is what reads as "one block, two lines" on dark backgrounds.
 
-**Title and subtitle casing.** The title is ALL-CAPS (the token `transform: uppercase`), carrying the takeaway in as few words as possible ("KV-AWARE ROUTING LIFTS THE THROUGHPUT FRONTIER"). Keep it short — uppercase runs long fast.
+**Title and subtitle casing.** The hero title is **title case** (a short labeled headline like "DynoSim: Simulating the Pareto Frontier") or **sentence case** (a full-sentence verdict like "KV-aware routing lifts the throughput frontier") — never uppercase, which is the compact chart title's treatment.
 
-The subtitle is sentence case, in muted text. Proper nouns (DynoSim, Planner, KVBM, Router, NVIDIA) stay capitalized in every position. The subtitle carries the qualifier the uppercase title cannot: config, units, model, or the numeric result.
+The subtitle is sentence case, in muted text. Proper nouns (DynoSim, Planner, KVBM, Router, NVIDIA) stay capitalized in every position. The subtitle carries the qualifier the title leaves out: config, units, model, or the numeric result.
 
 **Horizontal alignment.** Subtitle's left edge sits at the figure's `x=0.02` mark, matching the title's `x=0.02`. This is the **alignment trap**:
 
@@ -341,12 +341,12 @@ So the subtitle annotation gets `x=-0.049, xref="paper"` to line up under the ti
 
 ```
 title_top_px      = (1 - title_y_container) * figure_height
-title_bottom_px   = title_top_px + (title_font_size * 0.80)   # empirical bbox, weight 700
+title_bottom_px   = title_top_px + (title_font_size * 0.80)   # empirical bbox, weight 300
 subtitle_top_px   = title_bottom_px + 5
 paper_y           = 1 + (margin_t - subtitle_top_px) / plot_height
 ```
 
-The `* 0.80` constant comes from measuring the rendered Arial title at 42 px; the visible bbox is shorter than the line-height of 42 * 1.2 = 50px because Plotly anchors `yanchor="top"` near the cap-height line rather than the EM-box top. Tune empirically per figure and font weight: render at 2x, measure the gap, adjust.
+The `* 0.80` constant comes from measuring the rendered Helvetica Neue Light title at 42 px; the visible bbox is shorter than the line-height of 42 * 1.2 = 50px because Plotly anchors `yanchor="top"` near the cap-height line rather than the EM-box top. Tune empirically per figure and font weight: render at 2x, measure the gap, adjust.
 
 Worked example (`height=620`, `margin_t=130`, plot height = 420, title at container `y=0.96`, title font 42):
 
@@ -385,14 +385,14 @@ The subtitle is the qualifier, not a paraphrase of the title. Aim for **8-12 wor
 
 ### Subtitles in Hand-Crafted SVG Figures
 
-For SVG-pathway figures, the typography rules are identical (Arial sans subtitle, 14–18 px, weight 400, `text.muted`, 8-12 words), but the positioning math differs because SVG uses pixel coords directly and `<text>` defaults to a baseline-anchored render.
+For SVG-pathway figures, the typography rules are identical (Helvetica-set subtitle, 17–22 px, weight 300, `text.muted`, 8-12 words), but the positioning math differs because SVG uses pixel coords directly and `<text>` defaults to a baseline-anchored render.
 
 ```python
 text(
     0.02 * W, 92,          # x=0.02 of figure width; y=92 px from top
     "Engine cores, Router, Planner — one simulated clock, one harness.",
-    family="Arial, Helvetica, sans-serif",
-    size=18, weight="400", color=TEXT_MUTED, anchor="start",
+    family="Helvetica Neue, Helvetica, Arial, sans-serif",
+    size=18, weight="300", color=TEXT_MUTED, anchor="start",
 )
 ```
 
@@ -447,7 +447,7 @@ Each entry: **stupid version → corrected version**.
 
 ## Reference
 
-The canonical example file is [`gen_throughput.py`](../flash-indexer/tools/gen_throughput.py). It demonstrates:
+The canonical example file is [`gen_throughput.py`](../../digest/flash-indexer/tools/gen_throughput.py). It demonstrates:
 
 - Log-scale axes with SI tick formatting
 - Direct labeling at peak values

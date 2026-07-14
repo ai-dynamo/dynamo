@@ -123,8 +123,12 @@ jobs:
           echo "Syncing content pages to docs-website branch..."
           rm -rf docs-checkout/fern/pages-dev
           mkdir -p docs-checkout/fern/pages-dev
+          # 'skills' holds internal Claude/agent skills (docs/skills/), not
+          # user-facing docs — excluded from the published Fern build entirely
+          # (never re-synced, unlike digest).
           rsync -a \
             --exclude='digest' \
+            --exclude='skills' \
             --exclude='index.yml' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
@@ -437,8 +441,10 @@ jobs:
           # to the release and callout conversion runs exactly once.
           rm -rf "docs-checkout/fern/pages-$TAG"
           mkdir -p "docs-checkout/fern/pages-$TAG"
+          # 'skills' (docs/skills/) is internal tooling, never published.
           rsync -a \
             --exclude='digest' \
+            --exclude='skills' \
             --exclude='index.yml' \
             source-checkout/docs/ "docs-checkout/fern/pages-$TAG/"
 
@@ -554,7 +560,7 @@ jobs:
           # Conversion may change file contents but not the inventory. Verify
           # the snapshot contains exactly the tag's non-Digest documentation.
           diff -u \
-            <(cd source-checkout/docs && find . -type f ! -path './digest/*' ! -name 'index.yml' -print | sort) \
+            <(cd source-checkout/docs && find . -type f ! -path './digest/*' ! -path './skills/*' ! -name 'index.yml' -print | sort) \
             <(cd "docs-checkout/fern/pages-$TAG" && find . -type f -print | sort)
 
           # Versioned pages are part of this release and must resolve. Digest
