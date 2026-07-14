@@ -15,6 +15,8 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 
 ARG MODELEXPRESS_VERSION
 
+USER root
+
 WORKDIR /workspace
 
 # Install NATS and ETCD
@@ -25,7 +27,11 @@ ENV PATH=/usr/local/bin/etcd:$PATH
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
+    && if id -u dynamo > /dev/null 2>&1; then \
+        usermod -s /bin/bash -g 0 dynamo; \
+    else \
+        useradd -m -s /bin/bash -g 0 dynamo; \
+    fi \
     && [ `id -u dynamo` -eq 1000 ] \
     && mkdir -p /home/dynamo/.cache /opt/dynamo \
     # Non-recursive chown - only the directories themselves, not contents
