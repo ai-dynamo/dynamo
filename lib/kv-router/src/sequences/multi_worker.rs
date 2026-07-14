@@ -876,6 +876,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         } = req;
 
         let mut attempted_lazy_registration = false;
+        let mut released_stale_booking = false;
 
         let (expired_request_ids, load) = loop {
             let table = self.workers.read();
@@ -890,8 +891,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             };
             if let Err(existing_worker) =
                 self.request_index
-                    .try_insert_request(request_id.clone(), worker, lora_name)
+                    .try_insert_request(request_id.clone(), worker, lora_name.clone())
             {
+                // DIS-2405: a same-id re-dispatch to a DIFFERENT worker is a
+                // migration failover. Release the stale booking on the old
+                // (failed) worker and retry once so the new worker can be booked,
+                // instead of failing stream recreation with DuplicateRequest.
+                if existing_worker != worker && !released_stale_booking {
+                    drop(table);
+                    released_stale_booking = true;
+                    let _ = self.free(&request_id, decay_now);
+                    continue;
+                }
                 return Err(SequenceError::DuplicateRequest {
                     request_id,
                     worker: existing_worker,
@@ -1445,6 +1456,47 @@ mod tests {
             Some(0)
         );
         assert_eq!(active_request_count(&sequences, worker), 1);
+    }
+
+    // DIS-2405: a migration re-dispatch of the same request-id to a DIFFERENT
+    // worker must release the stale booking on the old (failed) worker and
+    // re-book to the new one, instead of failing with DuplicateRequest — which
+    // broke stream recreation on failover.
+    #[tokio::test]
+    async fn same_id_redispatch_to_new_worker_releases_stale_booking() {
+        let sequences = make_multi_sequences(); // workers 1 and 2
+        let decay_now = Instant::now();
+        let old_worker = WorkerWithDpRank::new(1, 0);
+        let new_worker = WorkerWithDpRank::new(2, 0);
+
+        let req = |worker| SequenceRequest {
+            request_id: "req-1".to_string(),
+            token_sequence: Some(vec![1, 2, 3]),
+            track_prefill_tokens: false,
+            expected_output_tokens: None,
+            prefill_load_hint: None,
+            worker,
+            lora_name: None,
+        };
+
+        sequences.add_request(req(old_worker), decay_now).unwrap();
+        assert_eq!(active_request_count(&sequences, old_worker), 1);
+
+        // Migration failover: same request-id re-dispatched to a new worker.
+        sequences
+            .add_request(req(new_worker), decay_now)
+            .expect("same-id re-dispatch to a new worker must succeed");
+
+        assert_eq!(
+            active_request_count(&sequences, old_worker),
+            0,
+            "stale booking on the old worker must be released"
+        );
+        assert_eq!(
+            active_request_count(&sequences, new_worker),
+            1,
+            "request must be re-booked to the new worker"
+        );
     }
 
     #[test]
