@@ -176,7 +176,7 @@ with sync_playwright() as p:
     browser.close()
 ```
 
-Six lines of work. Wrap it in a `gen_*.py` script next to the HTML, drop the call into `tools/build.sh`.
+Six lines of work. Wrap it in a `gen_*.py` script next to the HTML, drop the call into `tools/build.sh`. Runnable reference: [`examples/gen_fig_cards.py`](examples/gen_fig_cards.py) renders [`examples/fig-cards.html`](examples/fig-cards.html).
 
 **Notes:**
 
@@ -255,10 +255,10 @@ Add one line per HTML→PNG figure:
 
 ```bash
 echo "==> Figure N (cards)..."
-python3 gen_fig_n_cards.py
+python3 gen_fig_cards.py
 ```
 
-Where `gen_fig_n_cards.py` contains the Playwright snippet above.
+Where `gen_fig_cards.py` contains the Playwright snippet above — see the runnable [`examples/gen_fig_cards.py`](examples/gen_fig_cards.py).
 
 ## Self-Check (HTML→PNG-Specific)
 

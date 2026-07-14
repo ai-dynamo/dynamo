@@ -163,7 +163,7 @@ Rules: one punch line per figure, never two. Set in `text.muted` so it doesn't f
 
 When the takeaway is "metric A minus metric B equals improvement X", draw a **bracket spanning the two values** with the delta label centered on the bracket. A bracket is unambiguously a comparison; a floating "saved 140 ms" label is not.
 
-**Horizontal bracket** (delta between two chips along the x-axis): the two-chip + green-bracket pattern in `gen_fig_5_decision_cascade.py` is the reference.
+**Horizontal bracket** (delta between two chips along the x-axis): the two-chip + green-bracket pattern in [`gen_fig_5_decision_cascade.py`](examples/gen_fig_5_decision_cascade.py) is the reference.
 
 **Vertical bracket** (delta between two series at the same x): draw three connected line segments — top foot, spine, bottom foot — feet pointing toward the data points. Use a single `go.Scatter` trace with four vertices so it renders as one polyline. The label sits to the side of the spine.
 
@@ -205,7 +205,7 @@ When phase tags, callouts, or kicker labels need to sit *above* the data, extend
 
 Rule of thumb: for every annotation type that sits above the data, add ~20 units of y-range padding above its top edge. Same on the bottom for below-data annotations (feedback loops, captions, footnotes).
 
-Worked example from `gen_fig_6_tuning_loop.py`: boxes top out at y=106, phase tags sit at y=141, label texts extend ~10 more units, so `yaxis.range[1] = 165` (160 minimum + 5 buffer).
+Worked example in [`gen_fig_6_tuning_loop.py`](examples/gen_fig_6_tuning_loop.py): boxes top out below the phase tags, the tags sit ~8 units above the box top, and `yaxis.range[1]` is padded past the tag text so nothing clips.
 
 ### Caption-to-Thing Centering
 
