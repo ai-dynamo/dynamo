@@ -4,6 +4,7 @@
 name: Build On Demand
 
 permissions:
+  actions: read
   contents: read
 
 on:
