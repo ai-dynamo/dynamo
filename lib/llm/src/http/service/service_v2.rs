@@ -1482,11 +1482,11 @@ mod tests {
     fn readiness_extension(context: FrontendRouteContext) -> FrontendRouteSet {
         let route_docs = vec![RouteDoc::new(
             axum::http::Method::GET,
-            "/test/system-extension",
+            "/test/frontend-route",
         )];
         let route = axum::Router::new()
             .route(
-                "/test/system-extension",
+                "/test/frontend-route",
                 axum::routing::get(readiness_extension_handler),
             )
             .with_state(context.state_clone());
@@ -1504,11 +1504,11 @@ mod tests {
     }
 
     fn first_test_extension(context: FrontendRouteContext) -> FrontendRouteSet {
-        test_status_extension(context, "/test/system-extension/one")
+        test_status_extension(context, "/test/frontend-route/one")
     }
 
     fn second_test_extension(context: FrontendRouteContext) -> FrontendRouteSet {
-        test_status_extension(context, "/test/system-extension/two")
+        test_status_extension(context, "/test/frontend-route/two")
     }
 
     fn duplicate_health_extension(context: FrontendRouteContext) -> FrontendRouteSet {
@@ -1516,17 +1516,17 @@ mod tests {
     }
 
     fn duplicate_test_extension(context: FrontendRouteContext) -> FrontendRouteSet {
-        test_status_extension(context, "/test/system-extension/duplicate")
+        test_status_extension(context, "/test/frontend-route/duplicate")
     }
 
     fn draining_extension(context: FrontendRouteContext) -> FrontendRouteSet {
         let route_docs = vec![RouteDoc::new(
             axum::http::Method::GET,
-            "/test/system-extension/draining",
+            "/test/frontend-route/draining",
         )];
         let route = axum::Router::new()
             .route(
-                "/test/system-extension/draining",
+                "/test/frontend-route/draining",
                 axum::routing::get(draining_extension_handler),
             )
             .with_state(context.state_clone());
@@ -1588,7 +1588,7 @@ mod tests {
             service
                 .route_docs()
                 .iter()
-                .any(|doc| doc.to_string() == "GET /test/system-extension")
+                .any(|doc| doc.to_string() == "GET /test/frontend-route")
         );
 
         let running_service = service.clone();
@@ -1602,7 +1602,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         assert_eq!(
-            get_status(port, "/test/system-extension").await,
+            get_status(port, "/test/frontend-route").await,
             reqwest::StatusCode::SERVICE_UNAVAILABLE
         );
 
@@ -1613,7 +1613,7 @@ mod tests {
             .save_model_card("instance-pending", card)
             .unwrap();
         assert_eq!(
-            get_status(port, "/test/system-extension").await,
+            get_status(port, "/test/frontend-route").await,
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
             "card-only model registration must not make the extension report ready"
         );
@@ -1623,7 +1623,7 @@ mod tests {
             .add_chat_completions_model("ready-llama", "abc", make_chat_engine())
             .unwrap();
         assert_eq!(
-            get_status(port, "/test/system-extension").await,
+            get_status(port, "/test/frontend-route").await,
             reqwest::StatusCode::OK
         );
 
@@ -1635,7 +1635,7 @@ mod tests {
             .text()
             .await
             .expect("openapi body failed");
-        assert!(openapi.contains("/test/system-extension"));
+        assert!(openapi.contains("/test/frontend-route"));
 
         cancel_token.cancel();
         handle.abort();
@@ -1654,8 +1654,8 @@ mod tests {
             .map(ToString::to_string)
             .collect::<Vec<_>>();
 
-        assert!(route_doc_strings.contains(&"GET /test/system-extension/one".to_string()));
-        assert!(route_doc_strings.contains(&"GET /test/system-extension/two".to_string()));
+        assert!(route_doc_strings.contains(&"GET /test/frontend-route/one".to_string()));
+        assert!(route_doc_strings.contains(&"GET /test/frontend-route/two".to_string()));
     }
 
     #[test]
@@ -1679,7 +1679,7 @@ mod tests {
         );
 
         assert!(
-            error.contains("duplicate HTTP route registered: GET /test/system-extension/duplicate"),
+            error.contains("duplicate HTTP route registered: GET /test/frontend-route/duplicate"),
             "unexpected error: {error}"
         );
     }
@@ -1710,7 +1710,7 @@ mod tests {
         wait_for_service_stage(&state, ServiceStage::Draining).await;
 
         assert_eq!(
-            get_status(port, "/test/system-extension/draining").await,
+            get_status(port, "/test/frontend-route/draining").await,
             reqwest::StatusCode::ACCEPTED
         );
 

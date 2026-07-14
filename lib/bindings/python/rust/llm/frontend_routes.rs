@@ -21,7 +21,7 @@ use pyo3::{
 use pythonize::depythonize;
 use serde_json::{Value, json};
 
-/// A trusted Python-provided system route hosted by the Dynamo HTTP frontend.
+/// A trusted Python-provided frontend route hosted by the Dynamo HTTP frontend.
 ///
 /// Handlers are synchronous and return JSON-serializable values. Returning
 /// `(status_code, body)` overrides the default 200 status code.
@@ -66,7 +66,7 @@ impl PyFrontendRoute {
     }
 }
 
-/// Read-only live frontend state exposed to Python system route handlers.
+/// Read-only live frontend state exposed to Python frontend route handlers.
 #[pyclass(name = "FrontendRouteContext")]
 #[derive(Clone)]
 pub(crate) struct PyFrontendRouteContext {
@@ -182,13 +182,28 @@ async fn call_python_frontend_route(
     handler: PyObject,
     context: RsFrontendRouteContext,
 ) -> Response {
-    match Python::with_gil(|py| call_python_frontend_route_inner(py, handler, context)) {
-        Ok((status, body)) => (status, Json(body)).into_response(),
-        Err(err) => {
-            tracing::error!(error = %err, "Python system route extension failed");
+    // Run the synchronous Python handler on a blocking thread so a slow
+    // extension cannot pin a tokio worker and reduce request concurrency.
+    let outcome = tokio::task::spawn_blocking(move || {
+        Python::with_gil(|py| call_python_frontend_route_inner(py, handler, context))
+    })
+    .await;
+
+    match outcome {
+        Ok(Ok((status, body))) => (status, Json(body)).into_response(),
+        Ok(Err(err)) => {
+            tracing::error!(error = %err, "Python frontend route extension failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "system route extension failed"})),
+                Json(json!({"error": "frontend route extension failed"})),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "Python frontend route extension task panicked");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "frontend route extension failed"})),
             )
                 .into_response()
         }

@@ -12,7 +12,7 @@ use super::RouteDoc;
 use super::service_v2::State;
 use crate::discovery::ModelManager;
 
-/// Live frontend context available to system route extensions.
+/// Live frontend context available to frontend route extensions.
 ///
 /// The wrapper keeps the extension API focused on system-route needs. Additional
 /// accessors can be added here as the extension surface matures.
@@ -53,7 +53,7 @@ impl FrontendRouteContext {
     }
 }
 
-/// Routes and route documentation returned by a system route extension.
+/// Routes and route documentation returned by a frontend route extension.
 pub struct FrontendRouteSet {
     route_docs: Vec<RouteDoc>,
     router: Router,
@@ -79,7 +79,7 @@ impl From<(Vec<RouteDoc>, Router)> for FrontendRouteSet {
     }
 }
 
-/// Callback used to attach additional system routes during HTTP service build.
+/// Callback used to attach additional frontend routes during HTTP service build.
 ///
 /// Extensions receive live frontend context used by built-in system handlers,
 /// so custom routes can answer from current model manager and discovery state

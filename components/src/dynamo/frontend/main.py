@@ -92,6 +92,11 @@ def setup_sglang_engine_factory(
 
 
 def _frontend_route_extension_entry_points():
+    """Return the entry points registered under the frontend-route group.
+
+    Handles both the ``EntryPoints.select`` API (Python >= 3.10) and the older
+    mapping-style ``entry_points().get`` fallback.
+    """
     entry_points = importlib.metadata.entry_points()
     if hasattr(entry_points, "select"):
         return list(entry_points.select(group=FRONTEND_ROUTE_ENTRYPOINT_GROUP))
@@ -101,6 +106,11 @@ def _frontend_route_extension_entry_points():
 def _normalize_frontend_routes(
     extension_name: str, provided: Any
 ) -> list[FrontendRoute]:
+    """Coerce a provider's return value into a list of ``FrontendRoute``.
+
+    Accepts a single ``FrontendRoute`` or any iterable of them, and raises
+    ``TypeError`` if the provider returns anything else.
+    """
     if provided is None:
         return []
     if isinstance(provided, FrontendRoute):
@@ -127,9 +137,14 @@ def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendR
     if not extension_names:
         return []
 
+    # Deduplicate names (repeated --frontend-route-extension, or a flag that
+    # overlaps DYN_FRONTEND_ROUTE_EXTENSIONS) so a provider is loaded and its
+    # routes appended only once, preserving first-seen order.
+    unique_names = list(dict.fromkeys(extension_names))
+
     entry_points = _frontend_route_extension_entry_points()
     routes: list[FrontendRoute] = []
-    for extension_name in extension_names:
+    for extension_name in unique_names:
         matches = [ep for ep in entry_points if ep.name == extension_name]
         if not matches:
             available = ", ".join(sorted(ep.name for ep in entry_points)) or "<none>"
@@ -359,13 +374,17 @@ async def async_main():
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
-    frontend_route_extensions = load_frontend_route_extensions(
-        config.frontend_route_extensions
-    )
-    if frontend_route_extensions and (config.interactive or config.kserve_grpc_server):
+    # Validate mode compatibility before loading extensions, so an incompatible
+    # mode fails fast without importing/executing third-party provider code.
+    if config.frontend_route_extensions and (
+        config.interactive or config.kserve_grpc_server
+    ):
         raise ValueError(
             "frontend route extensions are only supported by HTTP frontend mode"
         )
+    frontend_route_extensions = load_frontend_route_extensions(
+        config.frontend_route_extensions
+    )
 
     try:
         if config.interactive:
