@@ -49,6 +49,7 @@ type NSRestoreSetupTimings struct {
 	RootfsDiffAdviceDuration      time.Duration                          `json:"rootfsDiffSequentialAdviceDuration"`
 	RootfsDiffSizeBytes           int64                                  `json:"rootfsDiffSizeBytes"`
 	RootfsDiffTarBlockingFactor   int                                    `json:"rootfsDiffTarBlockingFactor"`
+	RootfsDiffTarRecordSizeBytes  int64                                  `json:"rootfsDiffTarRecordSizeBytes"`
 	RootfsDiffTarSequentialAdvice bool                                   `json:"rootfsDiffTarSequentialAdvice"`
 	RootfsDiffExtractDuration     time.Duration                          `json:"rootfsDiffExtractDuration"`
 	RootfsDiffChildRusage         snapshotruntime.ChildRusageStats       `json:"rootfsDiffChildRusage"`
@@ -163,6 +164,7 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 			"rootfs_diff_sequential_advice_duration": setupTimings.RootfsDiffAdviceDuration.String(),
 			"rootfs_diff_size_bytes":                 setupTimings.RootfsDiffSizeBytes,
 			"rootfs_diff_tar_blocking_factor":        setupTimings.RootfsDiffTarBlockingFactor,
+			"rootfs_diff_tar_record_size_bytes":      setupTimings.RootfsDiffTarRecordSizeBytes,
 			"rootfs_diff_tar_sequential_advice":      setupTimings.RootfsDiffTarSequentialAdvice,
 			"rootfs_diff_extract_duration":           setupTimings.RootfsDiffExtractDuration.String(),
 			"rootfs_diff_child_rusage":               setupTimings.RootfsDiffChildRusage,
@@ -267,6 +269,7 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 	timings.nsrestoreSetupTimings.RootfsDiffAdviceDuration = rootfsStats.SequentialAdviceDuration
 	timings.nsrestoreSetupTimings.RootfsDiffSizeBytes = rootfsStats.SizeBytes
 	timings.nsrestoreSetupTimings.RootfsDiffTarBlockingFactor = rootfsStats.TarBlockingFactor
+	timings.nsrestoreSetupTimings.RootfsDiffTarRecordSizeBytes = rootfsStats.TarRecordSizeBytes
 	timings.nsrestoreSetupTimings.RootfsDiffTarSequentialAdvice = rootfsStats.TarSequentialAdvice
 	timings.nsrestoreSetupTimings.RootfsDiffExtractDuration = rootfsStats.ExtractDuration
 	timings.nsrestoreSetupTimings.RootfsDiffChildRusage = rootfsStats.ChildRusage

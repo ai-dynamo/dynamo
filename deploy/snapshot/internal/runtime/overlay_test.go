@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr/testr"
@@ -79,6 +80,8 @@ func TestBuildExclusions(t *testing.T) {
 }
 
 func TestApplyRootfsDiffWithStatsRunsHooksOutsideMeasuredTar(t *testing.T) {
+	t.Setenv(rootfsTarBlockingFactorEnv, "")
+	t.Setenv(rootfsTarSequentialAdviceEnv, "")
 	checkpointDir := t.TempDir()
 	targetRoot := t.TempDir()
 	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
@@ -121,6 +124,8 @@ func TestApplyRootfsDiffWithStatsRunsHooksOutsideMeasuredTar(t *testing.T) {
 }
 
 func TestApplyRootfsDiffUsesParentOpenedArchive(t *testing.T) {
+	t.Setenv(rootfsTarBlockingFactorEnv, "")
+	t.Setenv(rootfsTarSequentialAdviceEnv, "")
 	checkpointDir := t.TempDir()
 	targetRoot := t.TempDir()
 	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
@@ -165,6 +170,9 @@ func TestApplyRootfsDiffOneMiBRecordWithSequentialAdvice(t *testing.T) {
 	if stats.TarBlockingFactor != 2048 {
 		t.Errorf("TarBlockingFactor = %d, want 2048", stats.TarBlockingFactor)
 	}
+	if stats.TarRecordSizeBytes != 1024*1024 {
+		t.Errorf("TarRecordSizeBytes = %d, want %d", stats.TarRecordSizeBytes, 1024*1024)
+	}
 	if !stats.TarSequentialAdvice {
 		t.Error("TarSequentialAdvice = false, want true")
 	}
@@ -178,6 +186,8 @@ func TestApplyRootfsDiffOneMiBRecordWithSequentialAdvice(t *testing.T) {
 }
 
 func TestApplyRootfsDiffPreservesExistingFile(t *testing.T) {
+	t.Setenv(rootfsTarBlockingFactorEnv, "")
+	t.Setenv(rootfsTarSequentialAdviceEnv, "")
 	checkpointDir := t.TempDir()
 	targetRoot := t.TempDir()
 	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
@@ -199,9 +209,17 @@ func TestApplyRootfsDiffPreservesExistingFile(t *testing.T) {
 }
 
 func TestRootfsTarExperimentOptions(t *testing.T) {
-	t.Run("defaults disabled", func(t *testing.T) {
-		if got, err := rootfsTarBlockingFactor(); err != nil || got != 0 {
-			t.Fatalf("rootfsTarBlockingFactor() = %d, %v; want 0, nil", got, err)
+	t.Run("defaults use effective GNU tar values", func(t *testing.T) {
+		t.Setenv(rootfsTarBlockingFactorEnv, "")
+		t.Setenv(rootfsTarSequentialAdviceEnv, "")
+		if got, overridden, err := rootfsTarBlockingFactor(); err != nil || got != gnuTarDefaultBlockingFactor || overridden {
+			t.Fatalf(
+				"rootfsTarBlockingFactor() = %d, %t, %v; want %d, false, nil",
+				got,
+				overridden,
+				err,
+				gnuTarDefaultBlockingFactor,
+			)
 		}
 		if got, err := rootfsTarSequentialAdvice(); err != nil || got {
 			t.Fatalf("rootfsTarSequentialAdvice() = %t, %v; want false, nil", got, err)
@@ -211,17 +229,37 @@ func TestRootfsTarExperimentOptions(t *testing.T) {
 	t.Run("independent controls", func(t *testing.T) {
 		t.Setenv(rootfsTarBlockingFactorEnv, "2048")
 		t.Setenv(rootfsTarSequentialAdviceEnv, "false")
-		if got, err := rootfsTarBlockingFactor(); err != nil || got != 2048 {
-			t.Fatalf("rootfsTarBlockingFactor() = %d, %v; want 2048, nil", got, err)
+		if got, overridden, err := rootfsTarBlockingFactor(); err != nil || got != 2048 || !overridden {
+			t.Fatalf("rootfsTarBlockingFactor() = %d, %t, %v; want 2048, true, nil", got, overridden, err)
 		}
 		if got, err := rootfsTarSequentialAdvice(); err != nil || got {
 			t.Fatalf("rootfsTarSequentialAdvice() = %t, %v; want false, nil", got, err)
 		}
 	})
 
+	t.Run("maximum accepted", func(t *testing.T) {
+		t.Setenv(rootfsTarBlockingFactorEnv, "2048")
+		if got, overridden, err := rootfsTarBlockingFactor(); err != nil || got != rootfsTarMaxBlockingFactor || !overridden {
+			t.Fatalf(
+				"rootfsTarBlockingFactor() = %d, %t, %v; want %d, true, nil",
+				got,
+				overridden,
+				err,
+				rootfsTarMaxBlockingFactor,
+			)
+		}
+	})
+
+	t.Run("above maximum rejected", func(t *testing.T) {
+		t.Setenv(rootfsTarBlockingFactorEnv, "2049")
+		if _, _, err := rootfsTarBlockingFactor(); err == nil {
+			t.Fatal("rootfsTarBlockingFactor() succeeded above the maximum")
+		}
+	})
+
 	t.Run("invalid values fail closed", func(t *testing.T) {
 		t.Setenv(rootfsTarBlockingFactorEnv, "0")
-		if _, err := rootfsTarBlockingFactor(); err == nil {
+		if _, _, err := rootfsTarBlockingFactor(); err == nil {
 			t.Fatal("rootfsTarBlockingFactor() succeeded with zero")
 		}
 		t.Setenv(rootfsTarSequentialAdviceEnv, "sometimes")
@@ -229,6 +267,28 @@ func TestRootfsTarExperimentOptions(t *testing.T) {
 			t.Fatal("rootfsTarSequentialAdvice() succeeded with invalid boolean")
 		}
 	})
+}
+
+func TestApplyRootfsDiffRejectsOversizedRecordBeforeExtraction(t *testing.T) {
+	t.Setenv(rootfsTarBlockingFactorEnv, "2049")
+	t.Setenv(rootfsTarSequentialAdviceEnv, "")
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
+	writeTestTar(t, archivePath, "result", "archive")
+
+	_, err := ApplyRootfsDiffWithStats(checkpointDir, targetRoot, testr.New(t))
+	if err == nil {
+		t.Fatal("ApplyRootfsDiffWithStats succeeded above the maximum blocking factor")
+	}
+	if !strings.Contains(err.Error(), "1 through 2048") || !strings.Contains(err.Error(), "1048576 bytes") {
+		t.Fatalf("validation error does not describe the allowed range: %v", err)
+	}
+	if entries, err := os.ReadDir(targetRoot); err != nil {
+		t.Fatalf("read target root: %v", err)
+	} else if len(entries) != 0 {
+		t.Fatalf("target root modified before validation: %v", entries)
+	}
 }
 
 func writeTestTar(t *testing.T, archivePath, name, content string) {
@@ -421,6 +481,8 @@ func TestApplyDeletedFilesWithStats(t *testing.T) {
 }
 
 func TestApplyRootfsDiffWithStatsMissingArchive(t *testing.T) {
+	t.Setenv(rootfsTarBlockingFactorEnv, "")
+	t.Setenv(rootfsTarSequentialAdviceEnv, "")
 	stats, err := ApplyRootfsDiffWithStats(t.TempDir(), t.TempDir(), testr.New(t))
 	if err != nil {
 		t.Fatalf("ApplyRootfsDiffWithStats: %v", err)
@@ -434,6 +496,8 @@ func TestApplyRootfsDiffWithStatsMissingArchive(t *testing.T) {
 }
 
 func TestApplyRootfsDiffWithStats(t *testing.T) {
+	t.Setenv(rootfsTarBlockingFactorEnv, "")
+	t.Setenv(rootfsTarSequentialAdviceEnv, "")
 	checkpointDir := t.TempDir()
 	targetRoot := t.TempDir()
 	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
@@ -470,6 +534,15 @@ func TestApplyRootfsDiffWithStats(t *testing.T) {
 	}
 	if stats.SizeBytes != archiveInfo.Size() {
 		t.Errorf("SizeBytes = %d, want %d", stats.SizeBytes, archiveInfo.Size())
+	}
+	if stats.TarBlockingFactor != gnuTarDefaultBlockingFactor {
+		t.Errorf("TarBlockingFactor = %d, want effective default %d", stats.TarBlockingFactor, gnuTarDefaultBlockingFactor)
+	}
+	if stats.TarRecordSizeBytes != 10_240 {
+		t.Errorf("TarRecordSizeBytes = %d, want effective default 10240", stats.TarRecordSizeBytes)
+	}
+	if stats.TarSequentialAdvice {
+		t.Error("TarSequentialAdvice = true, want false")
 	}
 	if stats.StatDuration <= 0 || stats.ExtractDuration <= 0 {
 		t.Errorf("expected positive phase durations, got %+v", stats)

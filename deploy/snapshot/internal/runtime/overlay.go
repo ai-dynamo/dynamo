@@ -18,10 +18,16 @@ import (
 )
 
 const (
-	rootfsDiffFilename           = "rootfs-diff.tar"
-	deletedFilesFilename         = "deleted-files.json"
-	rootfsTarBlockingFactorEnv   = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_TAR_BLOCKING_FACTOR"
-	rootfsTarSequentialAdviceEnv = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_TAR_SEQUENTIAL_ADVICE"
+	rootfsDiffFilename                 = "rootfs-diff.tar"
+	deletedFilesFilename               = "deleted-files.json"
+	rootfsTarBlockingFactorEnv         = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_TAR_BLOCKING_FACTOR"
+	rootfsTarSequentialAdviceEnv       = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_TAR_SEQUENTIAL_ADVICE"
+	tarBlockSizeBytes            int64 = 512
+	gnuTarDefaultBlockingFactor        = 20
+	// Keep experimental records at or below the validated 1 MiB size and prevent
+	// configuration typos from causing GNU tar to allocate unexpectedly large records.
+	rootfsTarMaxBlockingFactor  = 2048
+	rootfsTarMaxRecordSizeBytes = int64(rootfsTarMaxBlockingFactor) * tarBlockSizeBytes
 )
 
 // RootfsDiffApplyStats contains low-overhead restore measurements.
@@ -31,6 +37,7 @@ type RootfsDiffApplyStats struct {
 	ArchiveOpenDuration      time.Duration
 	SequentialAdviceDuration time.Duration
 	TarBlockingFactor        int
+	TarRecordSizeBytes       int64
 	TarSequentialAdvice      bool
 	ExtractDuration          time.Duration
 	ChildRusage              ChildRusageStats
@@ -213,7 +220,7 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 		stats.SizeBytes = info.Size()
 	}
 
-	blockingFactor, err := rootfsTarBlockingFactor()
+	blockingFactor, blockingFactorOverridden, err := rootfsTarBlockingFactor()
 	if err != nil {
 		return stats, err
 	}
@@ -222,6 +229,7 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 		return stats, err
 	}
 	stats.TarBlockingFactor = blockingFactor
+	stats.TarRecordSizeBytes = int64(blockingFactor) * tarBlockSizeBytes
 	stats.TarSequentialAdvice = sequentialAdvice
 
 	openStart := time.Now()
@@ -245,7 +253,7 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
 	tarArgs := []string{"--skip-old-files"}
-	if blockingFactor > 0 {
+	if blockingFactorOverridden {
 		tarArgs = append(tarArgs, "--blocking-factor="+strconv.Itoa(blockingFactor))
 	}
 	tarArgs = append(tarArgs, "-C", targetRoot, "-xf", "-")
@@ -254,7 +262,8 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 		"size_bytes", stats.SizeBytes,
 		"parent_opened_archive", true,
 		"tar_blocking_factor", blockingFactor,
-		"tar_record_size_bytes", blockingFactor*512,
+		"tar_record_size_bytes", stats.TarRecordSizeBytes,
+		"tar_blocking_factor_overridden", blockingFactorOverridden,
 		"tar_sequential_advice", sequentialAdvice,
 		"archive_open_duration", stats.ArchiveOpenDuration,
 		"sequential_advice_duration", stats.SequentialAdviceDuration,
@@ -311,16 +320,22 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 	return stats, nil
 }
 
-func rootfsTarBlockingFactor() (int, error) {
+func rootfsTarBlockingFactor() (int, bool, error) {
 	value := strings.TrimSpace(os.Getenv(rootfsTarBlockingFactorEnv))
 	if value == "" {
-		return 0, nil
+		return gnuTarDefaultBlockingFactor, false, nil
 	}
-	blockingFactor, err := strconv.Atoi(value)
-	if err != nil || blockingFactor <= 0 {
-		return 0, fmt.Errorf("%s must be a positive integer, got %q", rootfsTarBlockingFactorEnv, value)
+	blockingFactor, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || blockingFactor <= 0 || blockingFactor > rootfsTarMaxBlockingFactor {
+		return 0, false, fmt.Errorf(
+			"%s must be an integer from 1 through %d (record size at most %d bytes), got %q",
+			rootfsTarBlockingFactorEnv,
+			rootfsTarMaxBlockingFactor,
+			rootfsTarMaxRecordSizeBytes,
+			value,
+		)
 	}
-	return blockingFactor, nil
+	return int(blockingFactor), true, nil
 }
 
 func rootfsTarSequentialAdvice() (bool, error) {

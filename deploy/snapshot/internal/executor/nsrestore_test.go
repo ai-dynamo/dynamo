@@ -10,23 +10,25 @@ import (
 
 func TestNSRestoreSetupTimingsFinalize(t *testing.T) {
 	timings := NSRestoreSetupTimings{
-		ManifestReadDuration:        1 * time.Millisecond,
-		InetRemapDuration:           2 * time.Millisecond,
-		BuildRestoreOptsDuration:    3 * time.Millisecond,
-		RootfsDiffStatDuration:      4 * time.Millisecond,
-		RootfsDiffExtractDuration:   5 * time.Millisecond,
-		RootfsReleaseMarkerDuration: 11 * time.Millisecond,
-		DeletedFilesReadDuration:    6 * time.Millisecond,
-		DeletedFilesParseDuration:   7 * time.Millisecond,
-		DeletedFilesRemoveDuration:  8 * time.Millisecond,
-		DevShmUnmountDuration:       9 * time.Millisecond,
-		ProcSysRemountReadWrite:     10 * time.Millisecond,
+		ManifestReadDuration:          1 * time.Millisecond,
+		InetRemapDuration:             2 * time.Millisecond,
+		BuildRestoreOptsDuration:      3 * time.Millisecond,
+		RootfsDiffStatDuration:        4 * time.Millisecond,
+		RootfsDiffArchiveOpenDuration: 12 * time.Millisecond,
+		RootfsDiffAdviceDuration:      13 * time.Millisecond,
+		RootfsDiffExtractDuration:     5 * time.Millisecond,
+		RootfsReleaseMarkerDuration:   11 * time.Millisecond,
+		DeletedFilesReadDuration:      6 * time.Millisecond,
+		DeletedFilesParseDuration:     7 * time.Millisecond,
+		DeletedFilesRemoveDuration:    8 * time.Millisecond,
+		DevShmUnmountDuration:         9 * time.Millisecond,
+		ProcSysRemountReadWrite:       10 * time.Millisecond,
 	}
-	const total = 71 * time.Millisecond
+	const total = 100 * time.Millisecond
 
 	timings.finalize(total)
 
-	const wantSum = 66 * time.Millisecond
+	const wantSum = 91 * time.Millisecond
 	if timings.SetupSubphasesDuration != wantSum {
 		t.Errorf("SetupSubphasesDuration = %s, want %s", timings.SetupSubphasesDuration, wantSum)
 	}
