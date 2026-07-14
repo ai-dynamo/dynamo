@@ -173,6 +173,8 @@ impl NvCreateChatCompletionRequest {
             }
         }
         if let Some(effort) = reasoning_effort {
+            args.entry("enable_thinking".to_string())
+                .or_insert_with(|| serde_json::Value::Bool(effort.as_str() != Some("none")));
             args.insert("reasoning_effort".to_string(), effort);
         }
 
@@ -1194,6 +1196,51 @@ mod tests {
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
         assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_reasoning_effort_controls_enable_thinking() {
+        for (effort, expected) in [("none", false), ("low", true), ("high", true)] {
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "zai-org/GLM-5.2",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": effort
+            }))
+            .expect("request should deserialize");
+
+            request
+                .normalize_reasoning_template_args()
+                .expect("reasoning effort should normalize");
+
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert_eq!(args.get("enable_thinking"), Some(&json!(expected)));
+            assert_eq!(args.get("reasoning_effort"), Some(&json!(effort)));
+        }
+    }
+
+    #[test]
+    fn test_explicit_enable_thinking_overrides_reasoning_effort() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "zai-org/GLM-5.2",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "none",
+            "chat_template_args": {"enable_thinking": true}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("reasoning effort should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
     }
 
     #[test]
