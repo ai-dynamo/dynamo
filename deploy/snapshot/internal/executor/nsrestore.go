@@ -45,7 +45,11 @@ type NSRestoreSetupTimings struct {
 	InetRemapDuration             time.Duration                          `json:"inetRemapDuration"`
 	BuildRestoreOptsDuration      time.Duration                          `json:"buildRestoreOptsDuration"`
 	RootfsDiffStatDuration        time.Duration                          `json:"rootfsDiffStatDuration"`
+	RootfsDiffArchiveOpenDuration time.Duration                          `json:"rootfsDiffArchiveOpenDuration"`
+	RootfsDiffAdviceDuration      time.Duration                          `json:"rootfsDiffSequentialAdviceDuration"`
 	RootfsDiffSizeBytes           int64                                  `json:"rootfsDiffSizeBytes"`
+	RootfsDiffTarBlockingFactor   int                                    `json:"rootfsDiffTarBlockingFactor"`
+	RootfsDiffTarSequentialAdvice bool                                   `json:"rootfsDiffTarSequentialAdvice"`
 	RootfsDiffExtractDuration     time.Duration                          `json:"rootfsDiffExtractDuration"`
 	RootfsDiffChildRusage         snapshotruntime.ChildRusageStats       `json:"rootfsDiffChildRusage"`
 	RootfsDiffCgroupBefore        snapshotruntime.CgroupResourceSnapshot `json:"rootfsDiffCgroupBefore"`
@@ -73,6 +77,8 @@ func (t *NSRestoreSetupTimings) finalize(total time.Duration) {
 		t.InetRemapDuration +
 		t.BuildRestoreOptsDuration +
 		t.RootfsDiffStatDuration +
+		t.RootfsDiffArchiveOpenDuration +
+		t.RootfsDiffAdviceDuration +
 		t.RootfsDiffExtractDuration +
 		t.RootfsReleaseMarkerDuration +
 		t.DeletedFilesReadDuration +
@@ -146,33 +152,37 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 	}
 	log.Info("nsrestore setup timing breakdown",
 		"nsrestore_setup", map[string]any{
-			"duration":                       result.NSRestoreSetupDuration.String(),
-			"subphases_duration":             setupTimings.SetupSubphasesDuration.String(),
-			"unaccounted_duration":           setupTimings.SetupUnaccountedDuration.String(),
-			"manifest_read_duration":         setupTimings.ManifestReadDuration.String(),
-			"inet_remap_duration":            setupTimings.InetRemapDuration.String(),
-			"build_restore_opts_duration":    setupTimings.BuildRestoreOptsDuration.String(),
-			"rootfs_diff_stat_duration":      setupTimings.RootfsDiffStatDuration.String(),
-			"rootfs_diff_size_bytes":         setupTimings.RootfsDiffSizeBytes,
-			"rootfs_diff_extract_duration":   setupTimings.RootfsDiffExtractDuration.String(),
-			"rootfs_diff_child_rusage":       setupTimings.RootfsDiffChildRusage,
-			"rootfs_diff_cgroup_before":      setupTimings.RootfsDiffCgroupBefore,
-			"rootfs_diff_cgroup_after":       setupTimings.RootfsDiffCgroupAfter,
-			"rootfs_diff_cgroup_delta":       setupTimings.RootfsDiffCgroupDelta,
-			"rootfs_diff_cgroup_read_errors": setupTimings.RootfsDiffCgroupReadErrors,
-			"rootfs_release_marker_duration": setupTimings.RootfsReleaseMarkerDuration.String(),
-			"deleted_files_read_duration":    setupTimings.DeletedFilesReadDuration.String(),
-			"deleted_files_parse_duration":   setupTimings.DeletedFilesParseDuration.String(),
-			"deleted_files_remove_duration":  setupTimings.DeletedFilesRemoveDuration.String(),
-			"deleted_files_duration":         setupTimings.DeletedFilesDuration.String(),
-			"deleted_files_size_bytes":       setupTimings.DeletedFilesSizeBytes,
-			"deleted_files_entries":          setupTimings.DeletedFilesEntries,
-			"deleted_files_removed":          setupTimings.DeletedFilesRemoved,
-			"deleted_files_skipped":          setupTimings.DeletedFilesSkipped,
-			"dev_shm_unmount_duration":       setupTimings.DevShmUnmountDuration.String(),
-			"proc_sys_remount_rw_duration":   setupTimings.ProcSysRemountReadWrite.String(),
-			"proc_sys_remount_ro_duration":   setupTimings.ProcSysRemountReadOnlyOutside.String(),
-			"proc_sys_remount_ro_scope":      "outside_setup",
+			"duration":                               result.NSRestoreSetupDuration.String(),
+			"subphases_duration":                     setupTimings.SetupSubphasesDuration.String(),
+			"unaccounted_duration":                   setupTimings.SetupUnaccountedDuration.String(),
+			"manifest_read_duration":                 setupTimings.ManifestReadDuration.String(),
+			"inet_remap_duration":                    setupTimings.InetRemapDuration.String(),
+			"build_restore_opts_duration":            setupTimings.BuildRestoreOptsDuration.String(),
+			"rootfs_diff_stat_duration":              setupTimings.RootfsDiffStatDuration.String(),
+			"rootfs_diff_archive_open_duration":      setupTimings.RootfsDiffArchiveOpenDuration.String(),
+			"rootfs_diff_sequential_advice_duration": setupTimings.RootfsDiffAdviceDuration.String(),
+			"rootfs_diff_size_bytes":                 setupTimings.RootfsDiffSizeBytes,
+			"rootfs_diff_tar_blocking_factor":        setupTimings.RootfsDiffTarBlockingFactor,
+			"rootfs_diff_tar_sequential_advice":      setupTimings.RootfsDiffTarSequentialAdvice,
+			"rootfs_diff_extract_duration":           setupTimings.RootfsDiffExtractDuration.String(),
+			"rootfs_diff_child_rusage":               setupTimings.RootfsDiffChildRusage,
+			"rootfs_diff_cgroup_before":              setupTimings.RootfsDiffCgroupBefore,
+			"rootfs_diff_cgroup_after":               setupTimings.RootfsDiffCgroupAfter,
+			"rootfs_diff_cgroup_delta":               setupTimings.RootfsDiffCgroupDelta,
+			"rootfs_diff_cgroup_read_errors":         setupTimings.RootfsDiffCgroupReadErrors,
+			"rootfs_release_marker_duration":         setupTimings.RootfsReleaseMarkerDuration.String(),
+			"deleted_files_read_duration":            setupTimings.DeletedFilesReadDuration.String(),
+			"deleted_files_parse_duration":           setupTimings.DeletedFilesParseDuration.String(),
+			"deleted_files_remove_duration":          setupTimings.DeletedFilesRemoveDuration.String(),
+			"deleted_files_duration":                 setupTimings.DeletedFilesDuration.String(),
+			"deleted_files_size_bytes":               setupTimings.DeletedFilesSizeBytes,
+			"deleted_files_entries":                  setupTimings.DeletedFilesEntries,
+			"deleted_files_removed":                  setupTimings.DeletedFilesRemoved,
+			"deleted_files_skipped":                  setupTimings.DeletedFilesSkipped,
+			"dev_shm_unmount_duration":               setupTimings.DevShmUnmountDuration.String(),
+			"proc_sys_remount_rw_duration":           setupTimings.ProcSysRemountReadWrite.String(),
+			"proc_sys_remount_ro_duration":           setupTimings.ProcSysRemountReadOnlyOutside.String(),
+			"proc_sys_remount_ro_scope":              "outside_setup",
 		},
 	)
 	log.Info("nsrestore timing summary",
@@ -253,7 +263,11 @@ func executeRestore(ctx context.Context, criuOpts *criurpc.CriuOpts, m *types.Ch
 		afterRootfsExtract,
 	)
 	timings.nsrestoreSetupTimings.RootfsDiffStatDuration = rootfsStats.StatDuration
+	timings.nsrestoreSetupTimings.RootfsDiffArchiveOpenDuration = rootfsStats.ArchiveOpenDuration
+	timings.nsrestoreSetupTimings.RootfsDiffAdviceDuration = rootfsStats.SequentialAdviceDuration
 	timings.nsrestoreSetupTimings.RootfsDiffSizeBytes = rootfsStats.SizeBytes
+	timings.nsrestoreSetupTimings.RootfsDiffTarBlockingFactor = rootfsStats.TarBlockingFactor
+	timings.nsrestoreSetupTimings.RootfsDiffTarSequentialAdvice = rootfsStats.TarSequentialAdvice
 	timings.nsrestoreSetupTimings.RootfsDiffExtractDuration = rootfsStats.ExtractDuration
 	timings.nsrestoreSetupTimings.RootfsDiffChildRusage = rootfsStats.ChildRusage
 	timings.nsrestoreSetupTimings.RootfsDiffCgroupBefore = rootfsStats.CgroupBefore

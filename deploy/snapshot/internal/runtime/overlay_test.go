@@ -120,6 +120,143 @@ func TestApplyRootfsDiffWithStatsRunsHooksOutsideMeasuredTar(t *testing.T) {
 	}
 }
 
+func TestApplyRootfsDiffUsesParentOpenedArchive(t *testing.T) {
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
+	writeTestTar(t, archivePath, "cache/result", "restored")
+
+	stats, err := ApplyRootfsDiffWithStatsHooks(
+		checkpointDir,
+		targetRoot,
+		testr.New(t),
+		func() error {
+			return os.Rename(archivePath, archivePath+".moved")
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("ApplyRootfsDiffWithStatsHooks: %v", err)
+	}
+	if stats.ArchiveOpenDuration <= 0 {
+		t.Errorf("expected positive archive open duration, got %+v", stats)
+	}
+	data, err := os.ReadFile(filepath.Join(targetRoot, "cache", "result"))
+	if err != nil {
+		t.Fatalf("read extracted file: %v", err)
+	}
+	if string(data) != "restored" {
+		t.Errorf("extracted content = %q, want restored", data)
+	}
+}
+
+func TestApplyRootfsDiffOneMiBRecordWithSequentialAdvice(t *testing.T) {
+	t.Setenv(rootfsTarBlockingFactorEnv, "2048")
+	t.Setenv(rootfsTarSequentialAdviceEnv, "true")
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
+	writeTestTar(t, archivePath, "cache/result", "restored")
+
+	stats, err := ApplyRootfsDiffWithStats(checkpointDir, targetRoot, testr.New(t))
+	if err != nil {
+		t.Fatalf("ApplyRootfsDiffWithStats: %v", err)
+	}
+	if stats.TarBlockingFactor != 2048 {
+		t.Errorf("TarBlockingFactor = %d, want 2048", stats.TarBlockingFactor)
+	}
+	if !stats.TarSequentialAdvice {
+		t.Error("TarSequentialAdvice = false, want true")
+	}
+	data, err := os.ReadFile(filepath.Join(targetRoot, "cache", "result"))
+	if err != nil {
+		t.Fatalf("read extracted file: %v", err)
+	}
+	if string(data) != "restored" {
+		t.Errorf("extracted content = %q, want restored", data)
+	}
+}
+
+func TestApplyRootfsDiffPreservesExistingFile(t *testing.T) {
+	checkpointDir := t.TempDir()
+	targetRoot := t.TempDir()
+	archivePath := filepath.Join(checkpointDir, rootfsDiffFilename)
+	writeTestTar(t, archivePath, "result", "archive")
+	if err := os.WriteFile(filepath.Join(targetRoot, "result"), []byte("existing"), 0o644); err != nil {
+		t.Fatalf("write existing target: %v", err)
+	}
+
+	if _, err := ApplyRootfsDiffWithStats(checkpointDir, targetRoot, testr.New(t)); err != nil {
+		t.Fatalf("ApplyRootfsDiffWithStats: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(targetRoot, "result"))
+	if err != nil {
+		t.Fatalf("read existing target: %v", err)
+	}
+	if string(data) != "existing" {
+		t.Errorf("target content = %q, want existing", data)
+	}
+}
+
+func TestRootfsTarExperimentOptions(t *testing.T) {
+	t.Run("defaults disabled", func(t *testing.T) {
+		if got, err := rootfsTarBlockingFactor(); err != nil || got != 0 {
+			t.Fatalf("rootfsTarBlockingFactor() = %d, %v; want 0, nil", got, err)
+		}
+		if got, err := rootfsTarSequentialAdvice(); err != nil || got {
+			t.Fatalf("rootfsTarSequentialAdvice() = %t, %v; want false, nil", got, err)
+		}
+	})
+
+	t.Run("independent controls", func(t *testing.T) {
+		t.Setenv(rootfsTarBlockingFactorEnv, "2048")
+		t.Setenv(rootfsTarSequentialAdviceEnv, "false")
+		if got, err := rootfsTarBlockingFactor(); err != nil || got != 2048 {
+			t.Fatalf("rootfsTarBlockingFactor() = %d, %v; want 2048, nil", got, err)
+		}
+		if got, err := rootfsTarSequentialAdvice(); err != nil || got {
+			t.Fatalf("rootfsTarSequentialAdvice() = %t, %v; want false, nil", got, err)
+		}
+	})
+
+	t.Run("invalid values fail closed", func(t *testing.T) {
+		t.Setenv(rootfsTarBlockingFactorEnv, "0")
+		if _, err := rootfsTarBlockingFactor(); err == nil {
+			t.Fatal("rootfsTarBlockingFactor() succeeded with zero")
+		}
+		t.Setenv(rootfsTarSequentialAdviceEnv, "sometimes")
+		if _, err := rootfsTarSequentialAdvice(); err == nil {
+			t.Fatal("rootfsTarSequentialAdvice() succeeded with invalid boolean")
+		}
+	})
+}
+
+func writeTestTar(t *testing.T, archivePath, name, content string) {
+	t.Helper()
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatalf("create archive: %v", err)
+	}
+	t.Cleanup(func() { archive.Close() })
+	tarWriter := tar.NewWriter(archive)
+	if err := tarWriter.WriteHeader(&tar.Header{
+		Name: name,
+		Mode: 0o644,
+		Size: int64(len(content)),
+	}); err != nil {
+		t.Fatalf("write tar header: %v", err)
+	}
+	if _, err := tarWriter.Write([]byte(content)); err != nil {
+		t.Fatalf("write tar content: %v", err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatalf("close archive: %v", err)
+	}
+}
+
 func TestFindWhiteoutFiles(t *testing.T) {
 	tests := []struct {
 		name  string

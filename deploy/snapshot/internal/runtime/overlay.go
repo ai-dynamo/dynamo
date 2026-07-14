@@ -12,25 +12,32 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 )
 
 const (
-	rootfsDiffFilename   = "rootfs-diff.tar"
-	deletedFilesFilename = "deleted-files.json"
+	rootfsDiffFilename           = "rootfs-diff.tar"
+	deletedFilesFilename         = "deleted-files.json"
+	rootfsTarBlockingFactorEnv   = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_TAR_BLOCKING_FACTOR"
+	rootfsTarSequentialAdviceEnv = "DYN_SNAPSHOT_EXPERIMENT_ROOTFS_TAR_SEQUENTIAL_ADVICE"
 )
 
 // RootfsDiffApplyStats contains low-overhead restore measurements.
 type RootfsDiffApplyStats struct {
-	SizeBytes        int64
-	StatDuration     time.Duration
-	ExtractDuration  time.Duration
-	ChildRusage      ChildRusageStats
-	CgroupBefore     CgroupResourceSnapshot
-	CgroupAfter      CgroupResourceSnapshot
-	CgroupDelta      CgroupResourceDelta
-	CgroupReadErrors []string
+	SizeBytes                int64
+	StatDuration             time.Duration
+	ArchiveOpenDuration      time.Duration
+	SequentialAdviceDuration time.Duration
+	TarBlockingFactor        int
+	TarSequentialAdvice      bool
+	ExtractDuration          time.Duration
+	ChildRusage              ChildRusageStats
+	CgroupBefore             CgroupResourceSnapshot
+	CgroupAfter              CgroupResourceSnapshot
+	CgroupDelta              CgroupResourceDelta
+	CgroupReadErrors         []string
 }
 
 // ChildRusageStats contains wait4 resource usage for the tar extraction child.
@@ -206,11 +213,54 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 		stats.SizeBytes = info.Size()
 	}
 
+	blockingFactor, err := rootfsTarBlockingFactor()
+	if err != nil {
+		return stats, err
+	}
+	sequentialAdvice, err := rootfsTarSequentialAdvice()
+	if err != nil {
+		return stats, err
+	}
+	stats.TarBlockingFactor = blockingFactor
+	stats.TarSequentialAdvice = sequentialAdvice
+
+	openStart := time.Now()
+	archive, err := os.Open(rootfsDiffPath)
+	stats.ArchiveOpenDuration = time.Since(openStart)
+	if err != nil {
+		return stats, fmt.Errorf("open rootfs diff: %w", err)
+	}
+	defer archive.Close()
+
+	if sequentialAdvice {
+		adviceStart := time.Now()
+		err = unix.Fadvise(int(archive.Fd()), 0, 0, unix.FADV_SEQUENTIAL)
+		stats.SequentialAdviceDuration = time.Since(adviceStart)
+		if err != nil {
+			return stats, fmt.Errorf("advise sequential rootfs diff access: %w", err)
+		}
+	}
+
 	// --skip-old-files: silently skip files that already exist in the restore target.
 	// The rootfs diff only contains overlay upperdir changes (runtime-generated files
 	// like triton caches, tmp files) — base image files should not be overwritten.
-	log.Info("Applying rootfs diff", "target", targetRoot, "size_bytes", stats.SizeBytes)
-	cmd := exec.Command("tar", "--skip-old-files", "-C", targetRoot, "-xf", rootfsDiffPath)
+	tarArgs := []string{"--skip-old-files"}
+	if blockingFactor > 0 {
+		tarArgs = append(tarArgs, "--blocking-factor="+strconv.Itoa(blockingFactor))
+	}
+	tarArgs = append(tarArgs, "-C", targetRoot, "-xf", "-")
+	log.Info("Applying rootfs diff",
+		"target", targetRoot,
+		"size_bytes", stats.SizeBytes,
+		"parent_opened_archive", true,
+		"tar_blocking_factor", blockingFactor,
+		"tar_record_size_bytes", blockingFactor*512,
+		"tar_sequential_advice", sequentialAdvice,
+		"archive_open_duration", stats.ArchiveOpenDuration,
+		"sequential_advice_duration", stats.SequentialAdviceDuration,
+	)
+	cmd := exec.Command("tar", tarArgs...)
+	cmd.Stdin = archive
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cgroupBefore, beforeErr := readCgroupResourceSnapshot()
@@ -259,6 +309,30 @@ func applyRootfsDiffWithStats(checkpointPath, targetRoot string, log logr.Logger
 		return stats, fmt.Errorf("after rootfs extract: %w", afterExtractErr)
 	}
 	return stats, nil
+}
+
+func rootfsTarBlockingFactor() (int, error) {
+	value := strings.TrimSpace(os.Getenv(rootfsTarBlockingFactorEnv))
+	if value == "" {
+		return 0, nil
+	}
+	blockingFactor, err := strconv.Atoi(value)
+	if err != nil || blockingFactor <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer, got %q", rootfsTarBlockingFactorEnv, value)
+	}
+	return blockingFactor, nil
+}
+
+func rootfsTarSequentialAdvice() (bool, error) {
+	value := strings.TrimSpace(os.Getenv(rootfsTarSequentialAdviceEnv))
+	if value == "" {
+		return false, nil
+	}
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean, got %q", rootfsTarSequentialAdviceEnv, value)
+	}
+	return enabled, nil
 }
 
 func childRusageStats(usage *syscall.Rusage) ChildRusageStats {
