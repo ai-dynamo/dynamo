@@ -344,7 +344,15 @@ def benchmark_decode(
         stderr=subprocess.PIPE,
         text=True,
     )
-    aiperf_process.communicate()
+    stdout, stderr = aiperf_process.communicate()
+    if aiperf_process.returncode != 0:
+        logger.error(
+            "AIPerf warm-up failed with error code: %s", aiperf_process.returncode
+        )
+        logger.error("stdout: %s", stdout)
+        logger.error("stderr: %s", stderr)
+        return None
+
     # then send out the real requests, hopefully, this will skip all prefill computation
     aiperf_cmd = get_decode_aiperf_cmd(
         isl,

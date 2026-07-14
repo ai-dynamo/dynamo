@@ -82,3 +82,29 @@ def test_benchmark_decode_logs_stdout_and_stderr(caplog):
     assert result is None
     assert "stdout: request rejected" in caplog.text
     assert "stderr: profile failed" in caplog.text
+
+
+def test_benchmark_decode_stops_when_warmup_fails(caplog):
+    warmup_process = _failed_process("warmup rejected", "warmup failed")
+
+    with (
+        patch(
+            "dynamo.profiler.utils.aiperf.subprocess.Popen",
+            return_value=warmup_process,
+        ) as mock_popen,
+        caplog.at_level(logging.ERROR, logger="dynamo.profiler.utils.aiperf"),
+    ):
+        result = benchmark_decode(
+            100,
+            10,
+            1,
+            "artifacts",
+            "test-model",
+            "test-tokenizer",
+        )
+
+    assert result is None
+    mock_popen.assert_called_once()
+    assert "AIPerf warm-up failed with error code: 1" in caplog.text
+    assert "stdout: warmup rejected" in caplog.text
+    assert "stderr: warmup failed" in caplog.text
