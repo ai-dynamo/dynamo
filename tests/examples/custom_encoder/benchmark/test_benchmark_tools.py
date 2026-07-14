@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import torch
 
+from examples.custom_encoder.benchmark.generate_workload import _calculate_custom_isl
 from examples.custom_encoder.benchmark.run_ablation import VARIANTS
 from examples.custom_encoder.benchmark.summarize_ablation import (
     _load_rows as _load_ablation_rows,
@@ -23,6 +26,36 @@ pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 RUNTIMES = ("vllm-serve", "dynamo-native", "dynamo-custom-encoder")
 RATES = (16, 24, 32)
+
+
+def test_custom_isl_expands_the_single_image_placeholder() -> None:
+    class FakeTokenizer:
+        def __call__(self, _rendered: str, *, add_special_tokens: bool) -> object:
+            assert not add_special_tokens
+            return SimpleNamespace(input_ids=[1, 99, 2])
+
+        @staticmethod
+        def convert_tokens_to_ids(token: str) -> int:
+            assert token == "<|image_pad|>"
+            return 99
+
+    class FakeImageProcessor:
+        merge_size = 2
+
+        def __call__(self, **_kwargs: object) -> dict[str, torch.Tensor]:
+            return {"image_grid_thw": torch.tensor([[1, 4, 4]])}
+
+    class FakeProcessor:
+        tokenizer = FakeTokenizer()
+        image_processor = FakeImageProcessor()
+
+        @staticmethod
+        def apply_chat_template(*_args: object, **_kwargs: object) -> str:
+            return "rendered"
+
+    # Three rendered tokens, with one placeholder replaced by four merged
+    # image tokens: 3 - 1 + (1 * 4 * 4 / 2**2) == 6.
+    assert _calculate_custom_isl(FakeProcessor(), "prompt", object()) == 6
 
 
 def _latency(value: float) -> dict[str, float | str]:

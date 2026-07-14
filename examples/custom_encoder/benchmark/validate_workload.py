@@ -12,7 +12,7 @@ import statistics
 from pathlib import Path
 from typing import Any
 
-from generate_workload import CUSTOM_TEMPLATE_TOKEN_DELTA, _calculate_native_isl
+from generate_workload import _calculate_custom_isl, _calculate_native_isl
 from PIL import Image
 from transformers import AutoProcessor
 
@@ -98,10 +98,7 @@ def validate_workload(root: Path) -> dict[str, Any]:
         with Image.open(native_images[0]) as encoded:
             image = encoded.convert("RGB")
         native_isl = _calculate_native_isl(processor, native[0]["text"], image)
-        custom_isl = (
-            _calculate_native_isl(processor, custom[0]["text"], image)
-            - CUSTOM_TEMPLATE_TOKEN_DELTA
-        )
+        custom_isl = _calculate_custom_isl(processor, custom[0]["text"], image)
         if native_isl != target_isl or custom_isl != target_isl:
             raise AssertionError(
                 f"ISL calibration failed at QPS {rate}: "

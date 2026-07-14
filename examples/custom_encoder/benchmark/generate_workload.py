@@ -11,7 +11,7 @@ import json
 import statistics
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image
 from transformers import AutoProcessor
@@ -31,7 +31,10 @@ RATES = (16, 24, 32)
 REQUESTS_PER_RATE = 1000
 TARGET_ISL = 515
 BASE_PROMPT = "Classify the image and briefly explain the label."
-CUSTOM_TEMPLATE_TOKEN_DELTA = 2
+CUSTOM_IMAGE_TOKEN = "<|image_pad|>"
+CUSTOM_CHAT_TEMPLATE = (
+    REPO_ROOT / "examples/custom_encoder/templates/qwen_vl.jinja"
+).read_text(encoding="utf-8")
 
 
 def _sha256(path: Path) -> str:
@@ -63,33 +66,53 @@ def _calculate_native_isl(processor: Any, prompt: str, image: Image.Image) -> in
     return len(inputs.input_ids[0])
 
 
+def _calculate_custom_isl(processor: Any, prompt: str, image: Image.Image) -> int:
+    """Count the custom Jinja text plus the image embeddings it expands to."""
+    rendered = processor.apply_chat_template(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+        chat_template=CUSTOM_CHAT_TEMPLATE,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    text_ids = processor.tokenizer(rendered, add_special_tokens=False).input_ids
+    image_token_id = processor.tokenizer.convert_tokens_to_ids(CUSTOM_IMAGE_TOKEN)
+    if text_ids.count(image_token_id) != 1:
+        raise RuntimeError("custom template must emit exactly one image token")
+
+    image_inputs = processor.image_processor(images=[image], return_tensors="pt")
+    image_grid_thw = image_inputs["image_grid_thw"][0]
+    merge_size = int(processor.image_processor.merge_size)
+    image_tokens = int(image_grid_thw.prod().item()) // merge_size**2
+    return len(text_ids) - 1 + image_tokens
+
+
 def _calibrate_prompt(
     processor: Any,
     image: Image.Image,
     target_isl: int,
-    template_token_delta: int,
+    calculate_isl: Callable[[Any, str, Image.Image], int],
 ) -> tuple[str, int]:
     """Find an identical filler prompt whose rendered ISL is exact."""
-    base_isl = (
-        _calculate_native_isl(processor, BASE_PROMPT, image) - template_token_delta
-    )
-    one_repeat_isl = (
-        _calculate_native_isl(processor, BASE_PROMPT + " benchmark", image)
-        - template_token_delta
-    )
+    base_isl = calculate_isl(processor, BASE_PROMPT, image)
+    one_repeat_isl = calculate_isl(processor, BASE_PROMPT + " benchmark", image)
     step = one_repeat_isl - base_isl
     if step <= 0:
         raise RuntimeError("benchmark filler did not increase token count")
     estimated_repeats = max(0, (target_isl - base_isl) // step)
     for repeat_count in range(max(0, estimated_repeats - 2), estimated_repeats + 4):
         prompt = BASE_PROMPT + " benchmark" * repeat_count
-        isl = _calculate_native_isl(processor, prompt, image) - template_token_delta
+        isl = calculate_isl(processor, prompt, image)
         if isl == target_isl:
             return prompt, isl
-    raise RuntimeError(
-        f"could not calibrate target ISL {target_isl} with token delta "
-        f"{template_token_delta}"
-    )
+    raise RuntimeError(f"could not calibrate target ISL {target_isl}")
 
 
 def generate_workload(
@@ -138,13 +161,16 @@ def generate_workload(
             with Image.open(records[0]["path"]) as encoded:
                 calibration_image = encoded.convert("RGB")
             native_prompt, native_isl = _calibrate_prompt(
-                processor, calibration_image, target_isl, template_token_delta=0
+                processor,
+                calibration_image,
+                target_isl,
+                calculate_isl=_calculate_native_isl,
             )
             custom_prompt, custom_isl = _calibrate_prompt(
                 processor,
                 calibration_image,
                 target_isl,
-                template_token_delta=CUSTOM_TEMPLATE_TOKEN_DELTA,
+                calculate_isl=_calculate_custom_isl,
             )
             if native_isl != target_isl or custom_isl != target_isl:
                 raise AssertionError(
@@ -182,7 +208,10 @@ def generate_workload(
         "requests_per_rate": requests_per_rate,
         "seed": seed,
         "target_isl": target_isl,
-        "custom_template_token_delta": CUSTOM_TEMPLATE_TOKEN_DELTA,
+        "custom_isl_calibration": (
+            "custom Jinja text tokens minus one image placeholder plus "
+            "processor-derived merged image tokens"
+        ),
         "decoded_image": {"mode": "RGB", "width": 500, "height": 500},
         "encoding": {
             "format": "JPEG",
