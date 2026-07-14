@@ -154,6 +154,16 @@ impl Model {
         self.worker_sets.len()
     }
 
+    /// Snapshot all WorkerSets. Used by cross-role lifecycle coordination
+    /// where storage keys include role/surface suffixes but deployment
+    /// matching is based on `WorkerSet::namespace()`.
+    pub(crate) fn worker_sets(&self) -> Vec<Arc<WorkerSet>> {
+        self.worker_sets
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     /// Check if this model has any decode engine (chat or completions) across any WorkerSet.
     pub fn has_decode_engine(&self) -> bool {
         self.worker_sets

@@ -34,4 +34,7 @@ HAS_CUDA = False
 if HAS_TORCH:
     import torch
 
-    HAS_CUDA = torch.cuda.is_available()
+    try:
+        HAS_CUDA = torch.cuda.is_available()
+    except Exception:
+        HAS_CUDA = False

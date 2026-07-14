@@ -125,6 +125,21 @@ Lifecycle and runtime:
 - `DynamoException` error chain wrapping
 - Finish reason normalization (handled by the Rust layer)
 - Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
+- vLLM KV block clearing in aggregated, prefill, and decode modes through
+  `POST /engine/control/clear_kv_blocks` on the worker's system port. Send
+  `{}` as the JSON body. A successful reset clears both the prefix cache
+  and connector cache and returns
+  `{"status":"success","message":"KV cache cleared"}`. A rejected reset
+  returns HTTP 200 with
+  `{"status":"error","message":"KV cache reset failed"}`. An unavailable
+  engine returns `{"status":"error","message":"Engine is not running"}`;
+  exceptions return the same error shape with the exception text as the
+  message.
+  The direct control does not pause generation, drain work, or preempt
+  active requests. If blocks remain in use, wait for those requests to
+  finish and retry. The control is available even when prefix caching is
+  not explicitly enabled because the connector cache may still need a
+  reset.
 
 Observability:
 - Health-check canary via `health_check_payload()` (plus
@@ -147,11 +162,10 @@ Observability:
 
 Request handling:
 - Guided decoding — wired per-engine on the request side with
-  engine-specific coverage. vLLM (`StructuredOutputsParams`) and
-  TRT-LLM (`GuidedDecodingParams`) cover JSON schema / regex / grammar
-  / choice; SGLang (`_get_guided_decoding_params`) covers JSON schema
-  only — regex / grammar / choice are silently dropped today (see the
-  SGLang-specific gaps in the package README)
+  JSON schema, regex, grammar, and choice coverage. vLLM uses
+  `StructuredOutputsParams`, TRT-LLM uses `GuidedDecodingParams`, and
+  SGLang maps the constraints to `json_schema`, `regex`, and `ebnf`;
+  SGLang translates choices to an escaped regex alternation
 - Structural tag generation via `WorkerConfig.structural_tag_{mode,
   scope, schema}` and `serialize_structural_tag`
 - Custom Jinja chat templates via
@@ -941,11 +955,10 @@ Observability:
 Request handling:
 - Guided decoding — request shape carries
   `SamplingOptions::guided_decoding` (`GuidedDecodingOptions`);
-  engine-side coverage on the existing Python-bridged engines is:
-  vLLM and TRT-LLM forward JSON schema / regex / grammar / choice;
-  SGLang forwards JSON schema only (regex / grammar / choice are
-  silently dropped today). A new Rust engine should forward whichever
-  variants its backend supports
+  vLLM, SGLang, and TRT-LLM forward JSON schema, regex, grammar, and
+  choice. SGLang translates grammar to `ebnf` and choices to an escaped
+  regex alternation. A new Rust engine should forward whichever variants
+  its backend supports
 - Structural tag generation — `WorkerConfig::structural_tag_{mode,
   scope, schema}` (typed enums)
 - Custom Jinja chat templates — `WorkerConfig::custom_jinja_template`

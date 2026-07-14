@@ -1,0 +1,69 @@
+name: codeowners
+
+# Keeps CODEOWNERS in sync with the declarative source (.github/codeowners/areas.yaml)
+# and gates PRs that would leave a path unowned. Ownership STRUCTURE only -- team
+# membership (who is on each team) is managed separately.
+
+on:
+  pull_request:
+    paths:
+      - "**"
+  push:
+    branches: [main]
+    paths:
+      - "**"
+
+# This workflow runs scripts sourced from the PR diff; keep the token
+# read-only and out of the persisted git config (zizmor: artipacked,
+# excessive-permissions).
+permissions:
+  contents: read
+
+jobs:
+  codeowners:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml pytest
+
+      # Unit tests for the canonical matcher + min-cost cover. These are the
+      # only piece the gates below trust -- if they fail, nothing else means
+      # anything.
+      - name: Unit tests (matcher + minimal_cover)
+        run: |
+          python -m pytest .github/codeowners/test_codeowners.py -v \
+            -p no:cacheprovider \
+            --override-ini="addopts=" \
+            --override-ini="filterwarnings="
+
+      # Coverage gate: fail if any tracked file falls through to the catch-all.
+      # New directories must be covered by an area glob or a classify rule.
+      # Uses the same shared matcher the generator below routes by, so the gate
+      # and the artifact cannot disagree.
+      - name: Validate 100% coverage (strict)
+        run: |
+          python .github/codeowners/build_codeowners.py \
+            --areas .github/codeowners/areas.yaml \
+            --repo . \
+            --strict
+
+      # Regenerate, then fail if the committed CODEOWNERS or CONTRIBUTORS.md
+      # drifted from what the sources produce (i.e. someone hand-edited an
+      # output, or changed areas.yaml / external_contributors.yaml without
+      # regenerating).
+      - name: Regenerate and check for drift
+        run: |
+          python .github/codeowners/emit_codeowners.py \
+            --areas .github/codeowners/areas.yaml \
+            --repo . \
+            --out CODEOWNERS \
+            --external .github/codeowners/external_contributors.yaml \
+            --contributors-out CONTRIBUTORS.md
+          git diff --exit-code CODEOWNERS CONTRIBUTORS.md \
+            || { echo "::error::CODEOWNERS/CONTRIBUTORS.md are out of date. Regenerate from areas.yaml + external_contributors.yaml and commit."; exit 1; }

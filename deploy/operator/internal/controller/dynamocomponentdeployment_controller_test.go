@@ -2578,6 +2578,8 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
+			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
@@ -2887,6 +2889,8 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Assert the ComponentReconcileResult
+			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
@@ -2976,6 +2980,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 		serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 			ComponentKind:     v1beta1.ComponentKindDeployment,
 			ComponentNames:    []string{"test-component"},
+			RuntimeNamespace:  "default",
 			Replicas:          1,
 			UpdatedReplicas:   1,
 			ReadyReplicas:     ptr.To(int32(0)),

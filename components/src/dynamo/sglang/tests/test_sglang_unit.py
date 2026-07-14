@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import json
 import logging
 import os
 import re
@@ -23,6 +24,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
+    require_reasoning_kwargs,
     start_profile_compat,
 )
 from dynamo.sglang.args import (
@@ -86,6 +88,58 @@ def _make_sglang_config(**overrides):
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
+
+
+@pytest.mark.parametrize(
+    ("guided_decoding", "expected"),
+    [
+        (
+            {"json": {"type": "object", "required": ["city"]}},
+            {"json_schema": json.dumps({"type": "object", "required": ["city"]})},
+        ),
+        (
+            {"json": '{"type":"object","required":["city"]}'},
+            {"json_schema": '{"type":"object","required":["city"]}'},
+        ),
+        ({"regex": r"[A-Z]{3}-\d{4}"}, {"regex": r"[A-Z]{3}-\d{4}"}),
+        (
+            {"grammar": 'root ::= "yes" | "no"'},
+            {"ebnf": 'root ::= "yes" | "no"'},
+        ),
+        ({"choice": ["yes", "no"]}, {"regex": "(yes|no)"}),
+    ],
+    ids=["json-object", "json-string", "regex", "grammar", "choice"],
+)
+def test_unified_guided_decoding_maps_sglang_constraints(guided_decoding, expected):
+    assert (
+        sglang_llm_engine.SglangLLMEngine._get_guided_decoding_params(guided_decoding)
+        == expected
+    )
+
+
+def test_unified_guided_decoding_escapes_choice_regex_metacharacters():
+    params = sglang_llm_engine.SglangLLMEngine._get_guided_decoding_params(
+        {"choice": ["a+b", "answer (A)", "[done]?"]}
+    )
+
+    assert params == {"regex": r"(a\+b|answer\ \(A\)|\[done\]\?)"}
+    for choice in ("a+b", "answer (A)", "[done]?"):
+        assert re.fullmatch(params["regex"], choice)
+
+
+def test_unified_guided_decoding_ignores_empty_choice():
+    assert (
+        sglang_llm_engine.SglangLLMEngine._get_guided_decoding_params({"choice": []})
+        == {}
+    )
+
+
+def test_unified_guided_decoding_preserves_structural_tag():
+    structural_tag = {"begin": "<tool>", "schema": {"type": "object"}}
+
+    assert sglang_llm_engine.SglangLLMEngine._get_guided_decoding_params(
+        {"structural_tag": structural_tag}
+    ) == {"structural_tag": json.dumps(structural_tag)}
 
 
 def test_compat_restores_sglang_top_level_exports():
@@ -251,6 +305,54 @@ def test_compat_keeps_async_generate_kwargs_for_variadic_engines():
     kwargs = {"return_routed_experts": True}
 
     assert filter_supported_async_generate_kwargs(VariadicEngine(), kwargs) == kwargs
+
+
+@pytest.mark.parametrize(
+    ("request_data", "expected"),
+    [
+        ({"require_reasoning": True}, {"require_reasoning": True}),
+        ({"require_reasoning": False}, {"require_reasoning": False}),
+        ({}, {"require_reasoning": False}),
+    ],
+)
+def test_require_reasoning_kwarg_preserves_request_intent(request_data, expected):
+    """The internal reasoning intent reaches SGLang, including explicit false."""
+
+    class ReasoningEngine:
+        async def async_generate(self, require_reasoning=False):
+            return None
+
+    assert require_reasoning_kwargs(ReasoningEngine(), request_data) == expected
+
+
+def test_require_reasoning_kwarg_warns_once_when_dropped(caplog):
+    """A dropped true reasoning requirement is visible without log spam."""
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": True}) == {}
+
+    assert caplog.text.count("Dropping require_reasoning=true") == 1
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+
+
+def test_require_reasoning_kwarg_silently_drops_false(caplog):
+    """A dropped false value preserves the quiet compatibility fallback."""
+
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            return None
+
+    sglang_compat._warn_require_reasoning_unsupported.cache_clear()
+    with caplog.at_level(logging.WARNING):
+        assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": False}) == {}
+
+    assert "Dropping require_reasoning=true" not in caplog.text
 
 
 def test_routed_experts_kwarg_omitted_when_flag_off():
@@ -426,6 +528,24 @@ async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_
     )
 
 
+@pytest.mark.asyncio
+async def test_multiple_served_model_names_register_primary_and_aliases(
+    mock_sglang_cli,
+):
+    """SGLang packed served names split into primary + Dynamo aliases."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--served-model-name",
+        "primary,alias-one alias-two",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.served_model_name == "primary"
+    assert config.dynamo_args.served_model_aliases == ["alias-one", "alias-two"]
+
+
 # --- Tool Call Parser Validation Tests ---
 
 
@@ -469,6 +589,24 @@ async def test_tool_call_parser_both_flags_error(mock_sglang_cli):
 
     with pytest.raises(SystemExit):
         await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+async def test_reasoning_parser_both_flags_are_allowed(mock_sglang_cli):
+    """Native gating and Dynamo response parsing may use separate reasoners."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--dyn-reasoning-parser",
+        "qwen3",
+        "--reasoning-parser",
+        "qwen3",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.dynamo_args.dyn_reasoning_parser == "qwen3"
+    assert config.server_args.reasoning_parser == "qwen3"
 
 
 @pytest.mark.asyncio

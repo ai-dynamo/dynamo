@@ -10,6 +10,7 @@ from dynamo._internal.aic import (
     _NEXTN_ACCEPT_RATES_LEN,
     DEFAULT_FREE_GPU_MEMORY_FRACTION,
     DEFAULT_MEM_FRACTION_STATIC,
+    AicMemoryEstimatorUnavailableError,
     _normalize_aic_quant_mode,
     _pad_nextn_accept_rates,
     _resolve_quant_mode,
@@ -169,14 +170,18 @@ def test_estimate_num_gpu_blocks_rejects_unsupported_backend():
         )
 
 
-def test_estimate_num_gpu_blocks_errors_clearly_when_aic_missing(monkeypatch):
-    # Estimation is opt-in; if it is reached without aiconfigurator installed,
-    # fail loudly with an actionable message (not a raw ModuleNotFoundError, and
-    # not a silent fallback to the default block count).
-    import sys
+def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
+    # The low-level helper reports a typed, actionable error so mocker can apply
+    # its fallback without masking unrelated estimator failures.
+    def missing_memory(module_name):
+        raise ModuleNotFoundError(name=module_name)
 
-    monkeypatch.setitem(sys.modules, "aiconfigurator.sdk", None)
-    with pytest.raises(RuntimeError, match="aiconfigurator is required"):
+    monkeypatch.setattr("dynamo._internal.aic.importlib.import_module", missing_memory)
+
+    with pytest.raises(
+        AicMemoryEstimatorUnavailableError,
+        match=r"aiconfigurator\.sdk\.memory is required",
+    ):
         estimate_num_gpu_blocks(
             backend_name="vllm",
             system="h200_sxm",
@@ -185,6 +190,29 @@ def test_estimate_num_gpu_blocks_errors_clearly_when_aic_missing(monkeypatch):
             block_size=10,
             max_num_batched_tokens=128,
         )
+
+
+def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch):
+    missing_dependency = ModuleNotFoundError(name="aiconfigurator_core")
+
+    def broken_memory_module(_module_name):
+        raise missing_dependency
+
+    monkeypatch.setattr(
+        "dynamo._internal.aic.importlib.import_module", broken_memory_module
+    )
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        estimate_num_gpu_blocks(
+            backend_name="vllm",
+            system="h200_sxm",
+            model_path="some/model",
+            tp_size=1,
+            block_size=10,
+            max_num_batched_tokens=128,
+        )
+
+    assert exc_info.value is missing_dependency
 
 
 def test_trtllm_version_resolution():
