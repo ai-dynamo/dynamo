@@ -1029,6 +1029,15 @@ ResponseT = TypeVar("ResponseT")
 class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
+
+    **Subclass contract for LoRA support**: Subclasses that support LoRA must
+    define the following attributes:
+    - `_served_model_name` (str): The model name served by this worker
+    - `engine_args.model` (str): The base model path/name
+    - `_lora_enabled()` (method): Returns bool indicating if LoRA is enabled
+
+    These are required by `_resolve_lora_request()` and other LoRA methods.
+    See VllmWorkerHandler and OmniHandler for reference implementations.
     """
 
     _benchmark_results: Optional[dict] = None
@@ -1962,6 +1971,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Return a LoRARequest for loaded adapters, or None for base model names.
 
         Raises ValueError for unknown non-base names when LoRA is enabled.
+
+        **Contract for subclasses**: This method requires the following attributes
+        to be defined by subclasses:
+        - `self._served_model_name` (str): The model name served by this worker
+        - `self.engine_args.model` (str): The base model path/name from engine args
+        - `self._lora_enabled()` (method): Returns bool indicating if LoRA is enabled
+
+        Subclasses that forget to define these will get AttributeError at runtime
+        when this method is called. See VllmWorkerHandler (llm_engine.py) and
+        OmniHandler (omni_handler.py) for implementation examples.
         """
         return self._lora_state.resolve_request(
             model_name,
