@@ -165,45 +165,49 @@ func fromEnvironment() Gates {
 
 // New detects cluster capabilities and resolves them with operator configuration.
 func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
-	available := detect(ctx, mgr, config)
 	gates := fromEnvironment()
 	gates.Checkpoint = config.Checkpoint.Enabled
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
 
 	var err error
-	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled, available.grove,
+	if gates.Grove, err = resolve(config.Orchestrators.Grove.Enabled, detectAPIGroup(ctx, mgr, "grove.io", ""),
 		"Grove is explicitly enabled in config but the Grove API group was not detected in the cluster"); err != nil {
 		return Gates{}, err
 	}
 
-	if ptr.Deref(config.Orchestrators.LWS.Enabled, available.lws && available.volcano) {
-		if !available.lws {
+	lwsAvailable := detectAPIGroup(ctx, mgr, "leaderworkerset.x-k8s.io", "")
+	volcanoAvailable := detectAPIGroup(ctx, mgr, "scheduling.volcano.sh", "")
+	if ptr.Deref(config.Orchestrators.LWS.Enabled, lwsAvailable && volcanoAvailable) {
+		if !lwsAvailable {
 			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
 		}
-		if !available.volcano {
+		if !volcanoAvailable {
 			return Gates{}, fmt.Errorf("LWS is explicitly enabled in config but the Volcano API group was not detected in the cluster")
 		}
 		gates.LWS = true
 	}
 
 	if ptr.Deref(config.Orchestrators.VolcanoScheduler.Enabled, false) {
-		if !available.volcano {
+		if !volcanoAvailable {
 			return Gates{}, fmt.Errorf("Volcano scheduler integration is explicitly enabled in config but the Volcano API group was not detected in the cluster")
 		}
 		gates.VolcanoScheduler = true
 	}
 
-	if gates.KaiScheduler, err = resolve(config.Orchestrators.KaiScheduler.Enabled, available.kaiScheduler,
+	if gates.KaiScheduler, err = resolve(config.Orchestrators.KaiScheduler.Enabled, detectAPIGroup(ctx, mgr, "scheduling.run.ai", ""),
 		"Kai-scheduler is explicitly enabled in config but the scheduling.run.ai API group was not detected in the cluster"); err != nil {
 		return Gates{}, err
 	}
-	if gates.DRA, err = resolve(config.DRA.Enabled, available.dra,
+	if gates.DRA, err = resolve(config.DRA.Enabled,
+		detectAPIGroup(ctx, mgr, resourcev1.SchemeGroupVersion.Group, resourcev1.SchemeGroupVersion.Version),
 		"DRA is explicitly enabled in config but the resource.k8s.io/v1 API was not detected in the cluster (requires Kubernetes 1.34+)"); err != nil {
 		return Gates{}, err
 	}
-	if gates.Istio, err = resolve(config.ServiceMesh.Enabled, available.istio,
-		"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
-		return Gates{}, err
+	if ptr.Deref(config.ServiceMesh.Enabled, true) {
+		if gates.Istio, err = resolve(config.ServiceMesh.Enabled, DetectIstioDestinationRuleAvailability(ctx, mgr.GetConfig()),
+			"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
+			return Gates{}, err
+		}
 	}
 
 	log.FromContext(ctx).Info("Resolved operator feature gates",
@@ -215,30 +219,6 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		"istio", gates.Istio,
 	)
 	return gates, nil
-}
-
-type availability struct {
-	grove        bool
-	lws          bool
-	volcano      bool
-	kaiScheduler bool
-	dra          bool
-	istio        bool
-}
-
-func detect(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) availability {
-	resourceVersion := resourcev1.SchemeGroupVersion.Version
-	available := availability{
-		grove:        detectAPIGroup(ctx, mgr, "grove.io", ""),
-		lws:          detectAPIGroup(ctx, mgr, "leaderworkerset.x-k8s.io", ""),
-		volcano:      detectAPIGroup(ctx, mgr, "scheduling.volcano.sh", ""),
-		kaiScheduler: detectAPIGroup(ctx, mgr, "scheduling.run.ai", ""),
-		dra:          detectAPIGroup(ctx, mgr, resourcev1.SchemeGroupVersion.Group, resourceVersion),
-	}
-	if ptr.Deref(config.ServiceMesh.Enabled, true) {
-		available.istio = DetectIstioDestinationRuleAvailability(ctx, mgr.GetConfig())
-	}
-	return available
 }
 
 // DetectInferencePoolAvailability checks whether the Gateway API Inference Extension is registered.
