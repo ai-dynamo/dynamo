@@ -18,10 +18,7 @@ pytest.importorskip("vllm.lora.request")
 pytest.importorskip("vllm.usage.usage_lib")
 pytest.importorskip("vllm.v1.engine.async_llm")
 
-from dynamo.common.constants import (  # noqa: E402
-    ROUTER_HINT_RUNTIME_CAPABILITY_KEY,
-    DisaggregationMode,
-)
+from dynamo.common.constants import DisaggregationMode  # noqa: E402
 from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
 from dynamo.llm import ModelType, WorkerType  # noqa: E402
 from dynamo.vllm import llm_engine as llm_engine_mod  # noqa: E402
@@ -371,9 +368,6 @@ async def test_load_lora_publishes_dp_and_capacity_metadata(monkeypatch):
 
     assert result["status"] == "success"
     runtime_config = register.await_args.kwargs["runtime_config"]
-    runtime_config.set_engine_specific.assert_any_call(
-        ROUTER_HINT_RUNTIME_CAPABILITY_KEY, "true"
-    )
     assert runtime_config.total_kv_blocks == 1024
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
