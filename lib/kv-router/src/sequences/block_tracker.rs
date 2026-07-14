@@ -26,6 +26,10 @@ impl BlockNodeMetadata {
             .checked_add(1)
             .expect("block ownership count overflowed");
     }
+
+    fn edge_weight(self, edge_len: usize) -> f64 {
+        edge_len as f64 * self.fraction.unwrap_or(1.0)
+    }
 }
 
 /// The compressed prompt tail plus request-local output hashes.
@@ -60,15 +64,24 @@ pub(super) struct ReleasedPromptPath {
 #[derive(Debug, Default)]
 pub(super) struct BlockTracker {
     arena: CompressedPathArena<BlockNodeMetadata>,
+    prompt_total: f64,
     // Output hashes remain outside the prompt topology. They are unique per
     // request, but retaining the map preserves active-hash diagnostics and
     // fractional load accounting.
     output_blocks: FxHashMap<SequenceHash, f64>,
+    output_total: f64,
 }
 
 impl BlockTracker {
     /// Acquire a request terminal and return the first block that became newly
     /// present for this worker.
+    ///
+    /// Each [`SequenceHash`] must identify one prefix ancestry and depth. This
+    /// tracker trusts callers to preserve that lineage and does not validate
+    /// the hash recurrence in production. It also assumes distinct live
+    /// lineages have distinct hashes; collision detection and recovery are out
+    /// of scope. That collision scope is local to one worker and DP-rank
+    /// tracker because each owns an independent [`BlockTracker`].
     pub(super) fn acquire_prompt(
         &mut self,
         sequence: &[SequenceHash],
@@ -81,6 +94,7 @@ impl BlockTracker {
             let tail = self
                 .arena
                 .insert_root(sequence.to_vec(), BlockNodeMetadata::terminal());
+            self.prompt_total += sequence.len() as f64;
             return (RequestBlockChain::new(Some(tail), sequence.len()), Some(0));
         };
 
@@ -124,6 +138,7 @@ impl BlockTracker {
                     sequence[split_depth..].to_vec(),
                     BlockNodeMetadata::terminal(),
                 );
+                self.prompt_total += (sequence.len() - split_depth) as f64;
                 return (
                     RequestBlockChain::new(Some(tail), sequence.len()),
                     Some(split_depth),
@@ -147,6 +162,7 @@ impl BlockTracker {
                 sequence[path_pos..].to_vec(),
                 BlockNodeMetadata::terminal(),
             );
+            self.prompt_total += (sequence.len() - path_pos) as f64;
             return (
                 RequestBlockChain::new(Some(tail), sequence.len()),
                 Some(path_pos),
@@ -156,6 +172,7 @@ impl BlockTracker {
 
     /// Append a unique output block without adding it to the prompt trie.
     pub(super) fn append_output(&mut self, chain: &mut RequestBlockChain, hash: SequenceHash) {
+        #[cfg(any(test, debug_assertions))]
         debug_assert!(
             !self.contains_block(&hash),
             "random output hash unexpectedly collided with a live block"
@@ -164,6 +181,7 @@ impl BlockTracker {
             self.output_blocks.insert(hash, 1.0).is_none(),
             "output block hash unexpectedly became live twice"
         );
+        self.output_total += 1.0;
         chain.output_hashes.push(hash);
     }
 
@@ -171,15 +189,34 @@ impl BlockTracker {
     /// that became absent from the worker.
     pub(super) fn release(&mut self, chain: RequestBlockChain) -> Option<ReleasedPromptPath> {
         for hash in chain.output_hashes {
-            self.output_blocks
+            let weight = self
+                .output_blocks
                 .remove(&hash)
                 .expect("request output hash is missing from active bookkeeping");
+            self.output_total -= weight;
+        }
+        if self.output_blocks.is_empty() {
+            self.output_total = 0.0;
         }
 
         let Some(tail) = chain.prompt_tail else {
             assert_eq!(chain.prompt_depth, 0, "empty prompt retained a depth");
             return None;
         };
+
+        let terminal = &mut self.arena.nodes[tail].metadata.terminal_owners;
+        *terminal = terminal
+            .checked_sub(1)
+            .expect("request terminal ownership underflowed");
+
+        let tail_remains_live = {
+            let tail_node = &self.arena.nodes[tail];
+            tail_node.metadata.terminal_owners != 0 || !tail_node.children.is_empty()
+        };
+        if tail_remains_live {
+            self.recompress_from(tail);
+            return None;
+        }
 
         let path_ids = self.arena.path_from_root(tail);
         let mut path = Vec::with_capacity(chain.prompt_depth);
@@ -192,11 +229,6 @@ impl BlockTracker {
             "request terminal depth differs from its compressed path"
         );
 
-        let terminal = &mut self.arena.nodes[tail].metadata.terminal_owners;
-        *terminal = terminal
-            .checked_sub(1)
-            .expect("request terminal ownership underflowed");
-
         let mut removed_hashes = 0;
         let mut current = Some(tail);
         let mut retained = None;
@@ -207,17 +239,22 @@ impl BlockTracker {
                 break;
             }
             let parent = node.parent;
-            removed_hashes += self.arena.remove_leaf(node_id).edge.len();
+            let removed = self.arena.remove_leaf(node_id);
+            let edge_len = removed.edge.len();
+            removed_hashes += edge_len;
+            self.prompt_total -= removed.metadata.edge_weight(edge_len);
             current = parent;
+        }
+
+        if self.arena.nodes.is_empty() {
+            self.prompt_total = 0.0;
         }
 
         if let Some(node_id) = retained {
             self.recompress_from(node_id);
         }
 
-        if removed_hashes == 0 {
-            return None;
-        }
+        debug_assert!(removed_hashes > 0, "dead prompt tail removed no hashes");
         let remove_from = chain
             .prompt_depth
             .checked_sub(removed_hashes)
@@ -232,35 +269,39 @@ impl BlockTracker {
         fraction: f64,
     ) {
         for hash in &chain.output_hashes {
-            *self
+            let weight = self
                 .output_blocks
                 .get_mut(hash)
-                .expect("request output hash is missing from active bookkeeping") = fraction;
+                .expect("request output hash is missing from active bookkeeping");
+            let old_weight = std::mem::replace(weight, fraction);
+            self.output_total += fraction - old_weight;
         }
 
         let mut current = chain.prompt_tail;
         while let Some(node_id) = current {
-            let node = &self.arena.nodes[node_id];
-            let incoming = node.metadata.terminal_owners as usize + node.children.len();
+            let (parent, incoming, edge_len, old_fraction) = {
+                let node = &self.arena.nodes[node_id];
+                (
+                    node.parent,
+                    node.metadata.terminal_owners as usize + node.children.len(),
+                    node.edge.len(),
+                    node.metadata.fraction.unwrap_or(1.0),
+                )
+            };
             if incoming != 1 {
                 break;
             }
-            current = node.parent;
+            self.prompt_total += edge_len as f64 * (fraction - old_fraction);
             self.arena.nodes[node_id].metadata.fraction = Some(fraction);
+            current = parent;
         }
     }
 
     pub(super) fn active_blocks(&self) -> usize {
-        let prompt_blocks = self
-            .arena
-            .nodes
-            .values()
-            .map(|node| node.edge.len() as f64 * node.metadata.fraction.unwrap_or(1.0))
-            .sum::<f64>();
-        let output_blocks = self.output_blocks.values().sum::<f64>();
-        (prompt_blocks + output_blocks).round() as usize
+        (self.prompt_total + self.output_total).round() as usize
     }
 
+    #[cfg(any(test, debug_assertions))]
     pub(super) fn contains_block(&self, hash: &SequenceHash) -> bool {
         self.output_blocks.contains_key(hash)
             || self
@@ -339,6 +380,35 @@ impl BlockTracker {
             expected_outputs,
             self.output_blocks.keys().copied().collect(),
             "output bookkeeping differs from request ownership"
+        );
+
+        let expected_prompt_total = self
+            .arena
+            .nodes
+            .values()
+            .map(|node| node.metadata.edge_weight(node.edge.len()))
+            .sum::<f64>();
+        let expected_output_total = self.output_blocks.values().sum::<f64>();
+        for (label, actual, expected) in [
+            ("prompt", self.prompt_total, expected_prompt_total),
+            ("output", self.output_total, expected_output_total),
+        ] {
+            let scale = actual.abs().max(expected.abs()).max(1.0);
+            assert!(
+                (actual - expected).abs() <= 1e-9 * scale,
+                "{label} running total differs from reconstructed weight: {actual} != {expected}"
+            );
+        }
+        if self.arena.nodes.is_empty() {
+            assert_eq!(self.prompt_total, 0.0, "drained prompt total is not zero");
+        }
+        if self.output_blocks.is_empty() {
+            assert_eq!(self.output_total, 0.0, "drained output total is not zero");
+        }
+        assert_eq!(
+            self.active_blocks(),
+            (expected_prompt_total + expected_output_total).round() as usize,
+            "constant-time active block count differs from reconstructed weight"
         );
     }
 
@@ -496,6 +566,87 @@ mod tests {
         assert_eq!(tracker.release(longer), released(&[1, 2, 3], 2));
         assert_eq!(tracker.active_blocks(), 2);
         assert_eq!(tracker.release(shared), released(&[1, 2], 0));
+    }
+
+    #[test]
+    fn fraction_mismatch_prevents_recompression() {
+        let mut tracker = BlockTracker::default();
+        let (longer, _) = tracker.acquire_prompt(&[1, 2, 3, 4]);
+        let longer_tail = longer.prompt_tail.unwrap();
+        let (shorter, _) = tracker.acquire_prompt(&[1, 2]);
+
+        tracker.set_unique_suffix_fractional(&longer, 0.5);
+        assert_eq!(tracker.prompt_total, 3.0);
+        assert_eq!(tracker.active_blocks(), 3);
+
+        assert_eq!(tracker.release(shorter), None);
+        assert_eq!(tracker.arena.nodes.len(), 2);
+        assert!(tracker.arena.nodes.contains_key(longer_tail));
+        assert_eq!(tracker.prompt_total, 3.0);
+        tracker.assert_consistent([&longer]);
+
+        assert_eq!(tracker.release(longer), released(&[1, 2, 3, 4], 0));
+        assert_eq!(tracker.prompt_total, 0.0);
+        assert_eq!(tracker.active_blocks(), 0);
+    }
+
+    #[test]
+    fn equal_fractional_edges_recompress_and_preserve_child_handle() {
+        let mut tracker = BlockTracker::default();
+        let (longer, _) = tracker.acquire_prompt(&[1, 2, 3, 4]);
+        let longer_tail = longer.prompt_tail.unwrap();
+        tracker.set_unique_suffix_fractional(&longer, 0.5);
+        let (shorter, _) = tracker.acquire_prompt(&[1, 2]);
+
+        assert_eq!(tracker.arena.nodes.len(), 2);
+        assert_eq!(tracker.prompt_total, 2.0);
+        assert_eq!(tracker.release(shorter), None);
+        assert_eq!(tracker.arena.nodes.len(), 1);
+        assert!(tracker.arena.nodes.contains_key(longer_tail));
+        assert_eq!(tracker.prompt_total, 2.0);
+        tracker.assert_consistent([&longer]);
+
+        assert_eq!(tracker.release(longer), released(&[1, 2, 3, 4], 0));
+        assert_eq!(tracker.prompt_total, 0.0);
+    }
+
+    #[test]
+    fn running_totals_follow_prompt_output_and_fraction_lifecycle() {
+        let mut tracker = BlockTracker::default();
+        let (mut left, _) = tracker.acquire_prompt(&[1, 2, 3]);
+        let (right, _) = tracker.acquire_prompt(&[1, 2, 4]);
+        let (duplicate_left, duplicate_new) = tracker.acquire_prompt(&[1, 2, 3]);
+
+        assert_eq!(duplicate_new, None);
+        assert_eq!(tracker.prompt_total, 4.0);
+        assert_eq!(tracker.output_total, 0.0);
+        assert_eq!(tracker.release(duplicate_left), None);
+        assert_eq!(tracker.prompt_total, 4.0);
+        tracker.append_output(&mut left, 42);
+        assert_eq!(tracker.output_total, 1.0);
+        assert_eq!(tracker.active_blocks(), 5);
+
+        tracker.set_unique_suffix_fractional(&left, 0.5);
+        assert_eq!(tracker.prompt_total, 3.5);
+        assert_eq!(tracker.output_total, 0.5);
+        assert_eq!(tracker.active_blocks(), 4);
+
+        tracker.set_unique_suffix_fractional(&left, 0.25);
+        assert_eq!(tracker.prompt_total, 3.25);
+        assert_eq!(tracker.output_total, 0.25);
+        assert_eq!(tracker.active_blocks(), 4);
+        tracker.assert_consistent([&left, &right]);
+
+        assert_eq!(tracker.release(left), released(&[1, 2, 3], 2));
+        assert_eq!(tracker.prompt_total, 3.0);
+        assert_eq!(tracker.output_total, 0.0);
+        assert_eq!(tracker.active_blocks(), 3);
+        tracker.assert_consistent([&right]);
+
+        assert_eq!(tracker.release(right), released(&[1, 2, 4], 0));
+        assert_eq!(tracker.prompt_total, 0.0);
+        assert_eq!(tracker.output_total, 0.0);
+        assert_eq!(tracker.active_blocks(), 0);
     }
 
     #[test]

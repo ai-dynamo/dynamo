@@ -26,8 +26,6 @@ pub(super) struct CompressedPathNode<M> {
 pub(super) struct CompressedPathArena<M> {
     pub(super) nodes: SlotMap<CompressedNodeId, CompressedPathNode<M>>,
     pub(super) roots: FxHashMap<SequenceHash, CompressedNodeId>,
-    pub(super) splits: u64,
-    pub(super) merges: u64,
 }
 
 impl<M> Default for CompressedPathArena<M> {
@@ -35,8 +33,6 @@ impl<M> Default for CompressedPathArena<M> {
         Self {
             nodes: SlotMap::with_key(),
             roots: FxHashMap::default(),
-            splits: 0,
-            merges: 0,
         }
     }
 }
@@ -116,7 +112,6 @@ impl<M> CompressedPathArena<M> {
             metadata: prefix_metadata,
         });
         self.nodes[node_id].parent = Some(prefix_id);
-        self.splits = self.splits.saturating_add(1);
 
         if let Some(parent_id) = old_parent {
             let replaced = self.nodes[parent_id].children.insert(old_first, prefix_id);
@@ -195,7 +190,6 @@ impl<M> CompressedPathArena<M> {
         merged_edge.append(&mut child.edge);
         child.edge = merged_edge;
         child.parent = parent_parent;
-        self.merges = self.merges.saturating_add(1);
 
         if let Some(grandparent_id) = parent_parent {
             let replaced = self.nodes[grandparent_id]
