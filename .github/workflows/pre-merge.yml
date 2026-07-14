@@ -165,6 +165,10 @@ jobs:
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt
+    - name: Install cargo-nextest
+      # Install from crates.io (same channel as the repo's other cargo tools) to avoid
+      # an extra download host; nextest emits JUnit natively (see .config/nextest.toml).
+      run: cargo nextest --version 2>/dev/null || cargo install cargo-nextest@0.9.137 --locked
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
@@ -182,18 +186,41 @@ jobs:
       run: cargo doc --no-deps && cargo test --locked --doc
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
-      # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      # Tests only (doc tests run above). --profile ci emits JUnit for Datadog;
+      # --config-file points sub-workspaces at the root config; --no-tests=pass
+      # tolerates matrix dirs with no Rust tests.
+      run: cargo nextest run --locked --profile ci --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2 -- --nocapture
+      # ci-aux profile so this run's JUnit doesn't overwrite the unit-test one.
+      run: cargo nextest run --locked --profile ci-aux --config-file ${{ github.workspace }}/.config/nextest.toml --no-tests=pass -p dynamo-bench --test mooncake_trace --features mocker-kvbm-offload g2
     - name: Run vLLM Rust backend tests
       # The `vllm_rs` feature is off by default (pulls vLLM engine-core git
       # deps), so cover it explicitly here.
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked -p dynamo-vllm-rs-backend --features vllm_rs -- --nocapture
+    - name: Run benches and examples
+      working-directory: ${{ matrix.dir }}
+      # nextest skips benches/examples; run them here to keep `--all-targets` coverage.
+      run: cargo test --locked --benches --examples
+    - name: Install datadog-ci
+      if: always()
+      continue-on-error: true
+      uses: DataDog/install-datadog-ci-github-action@501e9d922bf506902d2ecc2c830b0f4471760396  # v1.0.6
+      with:
+        version: v5.18.0
+    - name: Upload Rust test results to Datadog
+      if: always()
+      continue-on-error: true
+      env:
+        DD_API_KEY: ${{ secrets.DD_API_KEY }}
+        DD_SITE: us3.datadoghq.com
+        DD_SERVICE: dynamo-rust
+        DD_ENV: ci
+        DD_TAGS: language:rust,suite:pre-merge
+      run: datadog-ci junit upload --auto-discovery ${{ matrix.dir }}/target/nextest
 
   rust-clippy:
     needs: changed-files

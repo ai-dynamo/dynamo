@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# cargo-nextest configuration.
+# Docs: https://nexte.st/docs/configuration/
+
+# CI profile: emit JUnit for Datadog (written to <target-dir>/nextest/ci/junit.xml).
+[profile.ci]
+# Terminate tests that hang under nextest's per-process model (warn 60s, kill 120s).
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# test_span_events spawns a cargo-test subprocess (legitimately slow, not a hang);
+# give it headroom above the default cap.
+[[profile.ci.overrides]]
+filter = "test(test_span_events)"
+slow-timeout = { period = "120s", terminate-after = 3 }
+
+# Second profile for jobs that run nextest twice, so the second run's JUnit
+# doesn't clobber the first (separate <target>/nextest/<profile>/junit.xml).
+[profile.ci-aux]
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.ci-aux.junit]
+path = "junit.xml"

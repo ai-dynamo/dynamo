@@ -145,16 +145,42 @@ jobs:
           SCCACHE_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
           SCCACHE_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
         shell: bash
+        # ci/ci-aux profiles keep the two nextest runs' JUnit reports separate
+        # (see .config/nextest.toml; auto-discovered from the root workspace).
         run: |
           /workspace/container/use-sccache.sh install
           eval $(/workspace/container/use-sccache.sh setup-env)
           rustup component add rustfmt clippy
           cargo fmt -- --check
           cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
-          cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          cargo nextest run --locked --profile ci --no-tests=pass --features=block-manager,media-ffmpeg,testing-nixl,integration
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
-          cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
+          cargo nextest run --locked --profile ci-aux --no-tests=pass -p kvbm-physical --features testing-kvbm --test-threads=4
+          # nextest skips benches/examples; run them to keep `--all-targets` coverage.
+          cargo test --locked --benches --examples --features=block-manager,media-ffmpeg,testing-nixl,integration
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
+      - name: Install datadog-ci
+        if: always()
+        continue-on-error: true
+        uses: DataDog/install-datadog-ci-github-action@501e9d922bf506902d2ecc2c830b0f4471760396  # v1.0.6
+        with:
+          version: v5.18.0
+      - name: Upload Rust test results to Datadog
+        if: always()
+        continue-on-error: true
+        env:
+          DD_API_KEY: ${{ secrets.DD_API_KEY }}
+          DD_SITE: us3.datadoghq.com
+          DD_SERVICE: dynamo-rust
+          DD_ENV: ci
+          DD_TAGS: language:rust,suite:rust-gpu
+        # nextest's store dir can land under CARGO_TARGET_DIR or the workspace target
+        # depending on how the target dir resolves; find the reports under both rather
+        # than guessing a single path.
+        run: |
+          reports=$(find "${CARGO_TARGET_DIR:-target}/nextest" "$GITHUB_WORKSPACE/target/nextest" -name junit.xml 2>/dev/null | sort -u)
+          echo "JUnit reports found: ${reports:-<none>}"
+          [ -n "$reports" ] && datadog-ci junit upload $reports || echo "No JUnit reports to upload."
 
   mypy:
     needs: image

@@ -106,6 +106,7 @@ core:
   - 'container/deps/*'
   - 'container/compliance/**'
   - '.cargo/config.toml'
+  - '.config/nextest.toml'
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
@@ -242,6 +243,7 @@ rust:
   - '**/Cargo.toml'
   - '**/Cargo.lock'
   - 'deny.toml'
+  - '.config/nextest.toml'
 
 benchmarks:
   - 'benchmarks/**'

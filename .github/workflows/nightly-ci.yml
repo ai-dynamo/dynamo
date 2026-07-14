@@ -585,23 +585,46 @@ jobs:
       run: rustup component add llvm-tools-preview
     - name: Install cargo-llvm-cov
       run: cargo-llvm-cov --version 2>/dev/null || cargo install cargo-llvm-cov --locked
+    - name: Install cargo-nextest
+      # Install from crates.io (same channel as the repo's other cargo tools) to avoid
+      # an extra download host.
+      run: cargo nextest --version 2>/dev/null || cargo install cargo-nextest@0.9.137 --locked
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --no-run
     - name: Run Unit Tests with Coverage
       working-directory: ${{ matrix.dir }}
-      # NOTE: --all-targets doesn't run doc tests.
-      # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
-      # so we can generate multiple formats without re-running the tests.
+      # nextest under llvm-cov: collects coverage and emits JUnit for Datadog.
+      # NEXTEST_PROFILE avoids clashing with llvm-cov's own --profile (build profile).
+      env:
+        NEXTEST_PROFILE: ci
       run: |
-        cargo llvm-cov --locked --all-targets --no-report
+        cargo llvm-cov --no-report --locked nextest --no-tests=pass --config-file ${{ github.workspace }}/.config/nextest.toml
+        # nextest skips benches/examples; cover them too (accumulates) for --all-targets parity.
+        cargo llvm-cov --no-report --locked --benches --examples
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
         echo "Coverage summary:"
         grep "^TOTAL" coverage-rust.txt || tail -3 coverage-rust.txt
         SAFE_DIR=$(echo "${{ matrix.dir }}" | sed 's|^\.$|root|' | tr '/' '-')
         echo "RUST_COV_ARTIFACT_NAME=coverage-rust-${SAFE_DIR}-${{ github.run_id }}" >> $GITHUB_ENV
+    - name: Install datadog-ci
+      if: always()
+      continue-on-error: true
+      uses: DataDog/install-datadog-ci-github-action@501e9d922bf506902d2ecc2c830b0f4471760396  # v1.0.6
+      with:
+        version: v5.18.0
+    - name: Upload Rust test results to Datadog
+      if: always()
+      continue-on-error: true
+      env:
+        DD_API_KEY: ${{ secrets.DD_API_KEY }}
+        DD_SITE: us3.datadoghq.com
+        DD_SERVICE: dynamo-rust
+        DD_ENV: ci
+        DD_TAGS: language:rust,suite:nightly-coverage
+      run: datadog-ci junit upload --auto-discovery ${{ matrix.dir }}/target/nextest
     - name: Upload Rust Coverage Data
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       if: always()

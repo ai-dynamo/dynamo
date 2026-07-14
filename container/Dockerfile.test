@@ -24,6 +24,14 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
             --requirement /tmp/requirements.test.txt; \
     fi
 
+# Bake cargo-nextest into the test image so the rust test jobs need no install at
+# test time. Built from crates.io at image-build time (the cache mount keeps
+# rebuilds fast; the binary lands in $CARGO_HOME/bin, on PATH); pinned for repro.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    cargo install cargo-nextest@0.9.137 --locked
+
+USER dynamo
+
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
 # Required: blocks dynamo.vllm/sglang from shadowing the installed packages.
