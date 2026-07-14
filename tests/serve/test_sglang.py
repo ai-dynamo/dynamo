@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
+import functools
 import logging
 import os
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from tests.serve.multimodal_profiles.sglang import (
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
+from tests.utils.otel import wait_for_engine_generate_count
 from tests.utils.payload_builder import (
     anthropic_messages_payload_default,
     anthropic_messages_stream_payload_default,
@@ -46,6 +48,8 @@ from tests.utils.payloads import (
 )
 
 logger = logging.getLogger(__name__)
+
+pytest_plugins = ("tests.utils.otel",)
 
 
 def _is_cuda13() -> bool:
@@ -894,6 +898,65 @@ def test_sglang_deployment(
         sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+_AGGREGATED_OTEL_CONFIG = SGLangConfig(
+    name="aggregated_otel",
+    directory=sglang_dir,
+    script_name="agg.sh",
+    script_args=["--enable-otel", "--unified"],
+    marks=[],  # applied on the dedicated test below
+    model="Qwen/Qwen3-0.6B",
+    request_payloads=[chat_payload_default(repeat_count=1)],
+)
+
+
+def _assert_engine_generate_span_exported(collector) -> None:
+    count = wait_for_engine_generate_count(collector, min_count=1)
+    assert count >= 1, (
+        "OTLP collector received no `engine.generate` span from the "
+        "SGLang aggregated deployment"
+    )
+
+
+@pytest.mark.sglang
+@pytest.mark.core
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(3.7)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.timeout(360)
+@pytest.mark.pre_merge
+@pytest.mark.nightly
+@pytest.mark.unified
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_aggregated_otel_exports_engine_generate_span(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+    otlp_collector,
+):
+    """The aggregated launch flag must export worker spans over OTLP/gRPC."""
+    assert num_system_ports >= 2
+    collector, otlp_port = otlp_collector
+    config = dataclasses.replace(
+        _AGGREGATED_OTEL_CONFIG,
+        frontend_port=dynamo_dynamic_ports.frontend_port,
+    )
+    run_serve_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        extra_env={
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": (f"http://127.0.0.1:{otlp_port}"),
+        },
+        post_validation=functools.partial(
+            _assert_engine_generate_span_exported, collector
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
