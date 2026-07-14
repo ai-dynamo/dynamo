@@ -14,6 +14,7 @@ subtitle: "A sample DEP that shows how proposals render on the docs site. Not a 
 */}
 
 import { GiscusComments } from "@/components/GiscusComments";
+import { PrInlineComments } from "@/components/PrInlineComments";
 
 > [!WARNING]
 > **Status: Draft.** This is an illustrative example, not an accepted decision. It exists so the Proposals tab renders with real content. Copy `TEMPLATE.mdx` to author a real DEP.
@@ -152,6 +153,11 @@ Enhancement-proposal processes such as Kubernetes KEPs and Rust RFCs store propo
 ### Acronyms and Abbreviations
 
 **DEP**: Dynamo Enhancement Proposal
+
+{/* Read-only mirror of this DEP's PR review line comments, anchored to the text
+    above. Points at the draft PR (#11687). Authoring stays on the PR. */}
+
+<PrInlineComments pr={11687} />
 
 {/* Discussion widget, last on the page. */}
 
