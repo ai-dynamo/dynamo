@@ -1,6 +1,6 @@
 ---
 name: blog-figures
-description: Design and produce blog figures in the Dynamo Dark aesthetic. Picks the right pathway (Python+Plotly, D2, hand-crafted SVG, dynamo-svg manifest, or HTML+CSS to PNG) for each task, enforces palette and typography from the canonical design tokens, and runs a mandatory render-and-critique loop. Defaults to the Digital Twin family (also called DynoSim) for hero and section-anchor figures, with flash-indexer as the compact-data alternate. Use when creating any figure, diagram, hero image, chart, or technical illustration for a Dynamo blog post, when starting a new blog post that needs a tools/ directory, or when the user mentions blog figure, blog diagram, dynamo blog figure, hero image, or technical illustration.
+description: Design and produce blog figures in the Dynamo Dark aesthetic. Picks the right pathway (Python+Plotly, D2, hand-crafted SVG, dynamo-svg manifest, or HTML+CSS to PNG) for each task, enforces palette and typography from the canonical design tokens, and runs a mandatory render-and-critique loop. Uses one house family, Dynamo Dark, anchored on the flash-indexer design tokens for every figure from inline chart to full-width hero. Use when creating any figure, diagram, hero image, chart, or technical illustration for a Dynamo blog post, when starting a new blog post that needs a tools/ directory, or when the user mentions blog figure, blog diagram, dynamo blog figure, hero image, or technical illustration.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -71,25 +71,24 @@ This loop is deliberately slow. The polished hand-tuned feel of the corpus comes
 2. **Rectangular shapes only.** `border-radius: 0` everywhere. No rounded corners. Ever.
 3. **Muted fills at `opacity: 0.75`.** Never solid saturated fills.
 4. **Selective accent.** Dynamo green (`#76b900`) only for the single primary item in a figure. Never for everything. If everything is green, nothing is green.
-5. **Typography pair from one family.** Two families maximum: a body sans + an aligned mono. Pick the family per blog (see below) and hold the line — never mix flash-indexer Arial with mocker Geist inside one blog.
-6. **One headline style per family.**
-   - **flash-indexer family** (compact data-dashboard scale): 18 px ALL-CAPS letter-spaced title, `text-transform: uppercase`, `letter-spacing: 0.08em`. Body in `'NVIDIA Sans', Arial, Helvetica, sans-serif`. Mono in `'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace`.
-   - **Digital Twin family** (display-scale headline figures; also called DynoSim): 42 px **Helvetica Neue Light** title, weight 300, sentence-case, top-left of canvas. 22 px subtitle in `#767676` with em-dash + descriptive-clause + takeaway clause. Body in `Geist, Inter, 'Helvetica Neue', Arial, sans-serif`. Mono in `'Geist Mono', 'JetBrains Mono', 'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace`. Every text element is `font-weight: 300` unless it's a callout-card label.
+5. **Two typefaces, one family.** The Dynamo Dark body sans (`Arial, Helvetica, sans-serif`) + the aligned mono (`'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace`), both from `design_tokens.yaml`. Never a third font, never a display serif or light-weight face.
+6. **One headline style.** 18 px ALL-CAPS title, weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`, top-left of canvas (per `design_tokens.yaml`). Scale the title up to 24–42 px for a full-width hero, but keep the weight, case, letter-spacing, and font — size is the only lever. A hero may add a one-line subtitle beneath the title in `#767676`, 12–14 px, weight 400, sentence case: title carries the takeaway, subtitle carries the qualifier.
 7. **1px subtle borders.** Never 2px or thicker except for emphasis on the single accent item, and never on container frames.
 
 If you find yourself writing "well, this figure is special" — you're wrong. The non-negotiables are non-negotiable. Find a way to express what you need within them.
 
-### Picking the Family
+### One Family, Scaled to Fit
 
-| Use the **flash-indexer** family when... | Use the **Digital Twin** family when (default for new Dynamo blogs)... |
-|---|---|
-| The figure is a chart with many marks, dense ticks, or a heatmap | The figure is a hero, headline, or anchors a section |
-| Multiple series demand the compact 10-12 px labels | The takeaway compresses into one descriptive sentence |
-| Embedded inline with body prose at column width | Embedded as a standalone artifact at full page width |
+There is one house family — **Dynamo Dark** — anchored on `design_tokens.yaml`. It does not fork by figure type. What changes is *size*, not fonts, weights, or palette:
 
-Within one blog, every figure uses the same family. Cross-family blogs read as two unrelated projects stapled together.
+| Figure role | Canvas | Title size |
+|---|---|---|
+| Inline / body chart (dense marks, heatmaps, many series) | 680–1280 px wide | 18 px |
+| Full-width hero / section anchor (one compressed takeaway) | 1600 px wide | 24–42 px |
 
-**Find the canonical reference before drafting.** Don't guess what a family looks like from the name. Locate an existing exemplar SVG from a prior blog in the same family (the team maintains canonical sets — ask if you're not sure where they live), open it, and read the actual `<style>` block — font sizes, weights, exact color hex codes, title placement. Five minutes of looking saves five render-and-iterate cycles of getting it wrong.
+Every figure in a blog uses the same fonts and weights; only the canvas and title size step up for heroes.
+
+**Find the canonical reference before drafting.** Don't guess the treatment. Open an existing exemplar (compact: `docs/digest/flash-indexer/images/`; hero: `docs/digest/dynosim/`) and read the actual `<style>` block — font sizes, weights, exact color hex codes, title placement. Better still, read `design_tokens.yaml` directly; it is the machine-readable source of truth. Five minutes of looking saves five render-and-iterate cycles.
 
 Full palette, typography, and component spec: [DESIGN.md](DESIGN.md). Use this file as the cite-able source of truth — automated audits and other agents quote it verbatim. Extended chart and diagram notes live in [aesthetic.md](aesthetic.md).
 
@@ -119,7 +118,7 @@ A real blog post has 6–12 figures. The 7 non-negotiables guarantee any single 
 | Legends | Bottom-center of canvas, swatches + sans labels. One row if it fits; two centered rows if it doesn't. |
 | Title position | Top-left at fixed `x` (tightly into the corner — `x=40` for 1280-wide canvases, `x=50` for 1600-wide) — never centered, never floating. |
 | Canvas widths | Body figures: 1280 px. Hero / standalone figures: 1600 px. Don't deviate per figure. |
-| Card surfaces | `#0f0f0f` fill, `#2a2a2a` 1 px hairline border. The single accent (green) item gets `#74b711` 1.5–2 px border or a subtle green-tint interior — never both at once. |
+| Card surfaces | `#1a1a1a` fill, `#3a3a3a` 1 px hairline border. The single accent (green) item gets a `#76b900` 1.5 px border OR a subtle green-tint interior — never both at once. |
 
 If you find yourself making a different choice for one figure in the set, stop and ask whether the whole set should change to match — or whether that one figure should change back to match the set. The set decides; one figure does not get a special exception.
 
@@ -156,7 +155,7 @@ When you can't grid-shape the layout (a true network or DAG), spawn the `create-
 The render-and-critique loop catches most issues. These six come up often enough across blogs to deserve naming explicitly — walk this list once before declaring a figure done:
 
 1. **Made-up numbers.** See "Anchor in Real Data." Memory sizes, latency numbers, throughput figures, percentages — every digit must come from a source of truth.
-2. **Wrong canonical reference.** Family name guessing without opening an actual exemplar SVG. The cost of guessing is 5+ render iterations vs. 5 minutes of reading one canonical file.
+2. **Wrong canonical reference.** Guessing the treatment without opening an actual exemplar or reading `design_tokens.yaml`. The cost of guessing is 5+ render iterations vs. 5 minutes of reading one canonical file.
 3. **Conceptually-wrong before/after.** See "Before / After Structural Honesty." BEFORE must not contain AFTER's machinery.
 4. **Inconsistent bar-label placement across the family.** Each chart in isolation looks fine; viewed together they read as different products. See "Multi-Figure Family Discipline."
 5. **Tiny noise-bar artifacts.** Sub-threshold phases (durations < 2% of axis range) rendered as 1–2 px slivers that look like rendering bugs. Either drop them entirely, or force a meaningful minimum width with a label.
@@ -286,7 +285,7 @@ Existing sibling skills to use, not re-implement:
 - `frontend-design` — HTML/CSS craft (loose adaptation when authoring HTML→PNG sources).
 - `parallel-agent-audit` and `plan-to-autorun` — when iterating on 4+ figures simultaneously, use the worktree-per-figure pattern (one git worktree + `.venv` per figure script) so renders run in parallel and edits to one figure can't break the others.
 
-Canonical design system source: each reference digest post under `docs/digest/` ships its own `tools/design_tokens.yaml`, `plotly_dynamo.py`, and `theme.d2`. Start from the most recent post in the family you're targeting.
+Canonical design system source: [`docs/digest/flash-indexer/tools/design_tokens.yaml`](../flash-indexer/tools/design_tokens.yaml) is the machine-readable source of truth (colors, fonts, weights, spacing). Each digest post copies it (plus `plotly_dynamo.py` and `theme.d2`) into its own `tools/` so old posts keep rendering; never fork the values.
 
 ## Self-Check Before Declaring Done
 

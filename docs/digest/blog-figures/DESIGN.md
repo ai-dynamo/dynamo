@@ -1,92 +1,108 @@
-# Dynamo Blog Figures — Design Language
+# Dynamo Dark — Design Language
 
-Source of truth for the visual system used in Dynamo blog figures. Everything here is quotable — the page-audit skill, the blog-figures skill, and any future automation cite this file verbatim.
+Source of truth for the visual system used in Dynamo Digest figures. Everything here is quotable — the blog-figures skill and any automation cite this file verbatim.
 
-Two families share a single dark aesthetic. Pick one family per blog post; never mix. Within a family, the values below are not suggestions.
+The machine-readable source of truth is [`design_tokens.yaml`](../flash-indexer/tools/design_tokens.yaml) (`meta.name: dynamo-dark`, consumed by the D2 theme and the Plotly template). This file is its prose companion. When a value here disagrees with the tokens, the tokens win — fix this file.
+
+**One family.** Every Dynamo figure uses a single aesthetic called **Dynamo Dark**. There is no second family. Figures scale in size — inline chart, body figure, full-width hero — but never switch fonts, weights, or palette. ("DynoSim" and "flash-indexer" are the names of blog posts that use this aesthetic, not separate families; "Mocker" is the Dynamo load-simulator component, not a figure family.)
 
 ## Background and Surfaces
 
 | Token | Hex | Use |
 |---|---|---|
-| Ground | `#000000` | Canvas background. No exceptions, no `#0a0a0a` "soft black". |
-| Card surface | `#0f0f0f` | Container fills (cards, panels, plot areas). |
-| Card surface, secondary | `#0a0a0a` | Inset/nested surfaces where a subtler step than `#0f0f0f` is needed. |
-| Card border, hairline | `#2a2a2a` | 1 px border on cards, panels, frames. |
-| Card border, accent | `#74b711` or `#76b900` | 1.5–2 px border on the single accented element only. |
+| `background.primary` | `#000000` | Canvas background. No exceptions, no `#0a0a0a` "soft black". |
+| `background.surface` | `#1a1a1a` | Container fill, level 1 — cards, panels, plot areas. |
+| `background.surface_alt` | `#2a2a2a` | Container fill, level 2 — nested surfaces. |
+| `background.elevated` | `#3a3a3a` | Container fill, level 3 — the most-raised surface. |
 
-Rounded corners are never used. `border-radius: 0` everywhere.
+Rounded corners are never used. `border-radius: 0` everywhere. Inset content boxes drop to `#000000`.
 
-## Accent Colors
-
-The accent palette is intentionally narrow. Each role gets one consistent color across all figures in the same blog.
-
-| Color | Hex | Role |
-|---|---|---|
-| Dynamo green | `#76b900` | The "winning" or "after" element. The accent. One per figure, ideally one role across the whole blog. |
-| Dynamo green, light | `#9ed649` | Second tier of green when contrast inside the accent is required (e.g., "best of the winners"). Used sparingly. |
-| Coral | `#b04040` | The "before" / "loser" / "bottleneck" element. Used only when a figure explicitly needs a second semantic accent. |
-| Yellow | `#fac200` | Measured / baseline data point (e.g., real GPU measurements in a sim-vs-real comparison). Semantic only — never decorative. |
-| Blue | `#0071c5` | Reference series in cost-latency / Pareto charts. Semantic only. |
-| Purple | `#a960e8` | Production / feedback / human-in-the-loop role. Semantic only. |
-
-If a figure uses more than two accent colors, the design is overloaded. Drop colors back to greys + green and let the labels carry the rest.
-
-## Greyscale Ramp
-
-Greys are the workhorse. Used for non-accented content, secondary fills, and the structural skeleton.
+## Borders
 
 | Token | Hex | Use |
 |---|---|---|
-| White | `#ffffff` | Primary text on cards, in-bar numeric labels on dark fills. |
-| Light text | `#cdcdcd` | Subtitle text, secondary labels. |
-| Muted text | `#8c8c8c` | Axis ticks, footer captions, sub-meta. |
-| Dim text | `#767676` | Mocker subtitle color; tertiary labels. |
-| Grey fill, light | `#9a9a9a` | Lightest non-accent bar fill. |
-| Grey fill, mid | `#5a5a5a` | Mid-tone bar fill. |
-| Grey fill, dark | `#3a3a3a` | Darkest non-accent bar fill, gridlines at higher opacity. |
-| Grey divider | `#1a1a1a` | Gridlines, axis lines, faint dividers. |
+| `border.frame` | `#76b900` | Outer frame / single accent border (Dynamo green), 1.5 px. |
+| `border.container` | `#008564` | Container borders (Emerald), 1 px. |
+| `border.subtle` | `#3a3a3a` | Hairline borders, grid lines, separators, 1 px. |
 
-Bar charts that need to distinguish multiple non-accented series use 2–3 shades from this ramp. Pick from `#3a3a3a`, `#5a5a5a`, `#7a7a7a`, `#9a9a9a`. Do not invent intermediate values.
+## Accent Colors
 
-## Two Type Families
+Color encodes role, never decoration. Each role gets one consistent color across all figures in the same blog.
 
-The Dynamo Dark aesthetic ships in two families. They share the palette above but differ in typography scale and headline style. Pick one per blog and hold the line.
+| Token | Hex | Role |
+|---|---|---|
+| `dynamo_green` | `#76b900` | Primary accent / GPU / data / the "winning" or "after" element. One per figure. |
+| `cpu_blue` | `#0071c5` | CPU, compute, control paths, reference series in cost-latency / Pareto charts. |
+| `fluorite` | `#fac200` | Data flow, NVLink, highlights, measured / baseline data points. |
+| `emerald` | `#008564` | Storage, databases, caches, pipelines. |
+| `garnet` | `#890c58` | NIC, network hardware. |
+| `amethyst` | `#5d1682` | Services, APIs, middleware, production / feedback / human-in-the-loop role. |
+| `amber` | `#c08050` | Queues, events, messaging. |
+| `coral` | `#b04040` | Critical paths, errors, the "before" / "loser" / bottleneck element. |
+| `olive` | `#909040` | Load balancers, infrastructure. |
 
-### Family 1 — flash-indexer (compact data-dashboard scale)
+If a figure uses more than two accent colors carrying meaning, the design is overloaded. Drop back to greys + green and let the labels carry the rest.
 
-| Role | Spec |
-|---|---|
-| Title | 18 px, ALL CAPS, weight 700, `letter-spacing: 0.08em`, `text-transform: uppercase`, color `#ffffff` |
-| Subtitle | 12 px, weight 400, color `#cdcdcd` |
-| Body sans | `'NVIDIA Sans', Arial, Helvetica, sans-serif`, weight 400, sizes 11–15 px |
-| Mono | `'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace`, weight 400, sizes 10–13 px |
-| Axis labels | 10–11 px mono, color `#8c8c8c` |
+## Muted Fills (desaturated for dark backgrounds)
 
-Use this family when the figure is a chart with many marks, dense ticks, a heatmap, or embeds inline at column width.
+D2 component fills and low-emphasis surfaces. Pair each with its accent stroke.
 
-### Family 2 — Digital Twin / DynoSim (display-scale headline)
+| Token | Hex | For |
+|---|---|---|
+| `fills.green` | `#3a5a00` | Data components. |
+| `fills.blue` | `#0f1e30` | CPU, compute. |
+| `fills.purple` | `#1a1428` | Services, APIs. |
+| `fills.teal` | `#142025` | Storage, databases. |
+| `fills.warm` | `#201810` | Queues, events. |
+| `fills.wine` | `#2a1520` | NIC, network. |
+| `fills.signal` | `#1e1a14` | Flags, signals, state. |
+| `fills.red` | `#2a1010` | Critical, alerts. |
+| `fills.neutral` | `#1a1a1a` | Generic, utility. |
 
-| Role | Spec |
-|---|---|
-| Title | 42 px (full hero) or 36 px (body figure), `'Helvetica Neue'` weight 300, sentence-case, top-left of canvas |
-| Subtitle | 22 px (full hero) or 17 px (body figure), `'Helvetica Neue'` weight 300, color `#767676`, em-dash + descriptive clause + takeaway |
-| Body sans | `Geist, Inter, 'Helvetica Neue', Arial, sans-serif`, weight 300 by default |
-| Mono | `'Geist Mono', 'JetBrains Mono', 'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace`, weight 400–500 |
-| Section / panel labels | 12–13 px, weight 600, letter-spacing `0.08em`, `text-transform: uppercase` |
-| Section sub-labels | 11–12 px mono, color `#8c8c8c` |
-| In-bar numeric labels | 11–12 px mono, weight 500, color `#ffffff` on dark fills, `#000000` on green fills |
-| Callout-card labels | weight 600 (only place weight ≥ 500 appears outside mono) |
-| Italic editorial accent | `'Iowan Old Style', Georgia, serif`, weight 300, italic — for one-line takeaway captions only |
+## Text
 
-Use this family when the figure is a hero, section anchor, or embeds standalone at full page width. Default for new Dynamo blogs.
+| Token | Hex | Use |
+|---|---|---|
+| `text.primary` | `#ffffff` | Main text; in-bar numeric labels on dark fills. |
+| `text.secondary` | `#cdcdcd` | Secondary labels, legend labels. |
+| `text.medium` | `#8c8c8c` | Axis ticks, gridline labels, medium-emphasis text. |
+| `text.muted` | `#767676` | Footer captions, sub-meta, subtitles (4.6:1 AA min). |
+
+In-bar numeric labels are `#ffffff` on dark fills and `#000000` on green fills.
+
+## Chart Colors
+
+**Series (line / bar / scatter strokes), in order:** `#76b900`, `#0071c5`, `#fac200`, `#008564`, `#8c8c8c`, `#5d1682`, `#c08050`, `#b04040`.
+
+Series 1 is always the primary (Dynamo green) — the thing the reader should look at first. Reorder data so the most important series is first.
+
+**Fills (bar / histogram fills, brighter than D2 component fills), in order:** `#4a7500`, `#0a4a80`, `#9a7800`, `#005a40`, `#555555`, `#3a1050`, `#7a5030`, `#702828`.
+
+For non-accent bars that need to distinguish 2–3 series, pull greys from `#8c8c8c` (`text.medium`), `#555555` (chart fill grey), and `#3a3a3a` (`border.subtle`). Do not invent intermediate greys.
+
+## Typography — One Family
+
+Two typefaces, straight from the tokens. Never a third.
+
+| Role | Family | Size (px) | Weight | Transform | Letter-spacing |
+|---|---|---|---|---|---|
+| Title | `Arial, Helvetica, sans-serif` | 18 | 700 | uppercase | 0.08em |
+| Heading | `Arial, Helvetica, sans-serif` | 14 | 600 | uppercase | 0.05em |
+| Label | `Arial, Helvetica, sans-serif` | 12 | 400 | none | 0 |
+| Annotation | `Arial, Helvetica, sans-serif` | 10 | 400 | none | 0 |
+| Code / ticks / numbers | `'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace` | 10–13 | 400 | none | 0 |
+
+The title is 18 px at inline / body scale. For a full-width hero figure, scale the title up (24–42 px) but keep everything else the same: weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`, and the sans stack above. Size is the only lever that changes with scale — never switch to a display serif, a light weight, or sentence case for heroes.
+
+Title color is `#ffffff`. A hero title may carry a one-line subtitle beneath it in `text.muted` (`#767676`), set at label size (12–14 px, weight 400, sentence case). The title carries the takeaway; the subtitle carries the qualifier (config, units, model).
 
 ## Canvas and Layout
 
 | Role | Canvas size | Title position |
 |---|---|---|
 | Hero / standalone | 1600 × 720–900 px | `x = 50, y = 60` |
-| Body figure (Digital Twin) | 1280 × 680–1080 px | `x = 40, y = 58` |
-| Body chart (flash-indexer) | 1024–1240 × variable | `x = 24–40, y = 24–40` |
+| Body figure | 1280 × 680–1080 px | `x = 40, y = 58` |
+| Body chart (compact) | 1024–1240 × variable | `x = 24–40, y = 24–40` |
 | Inline mini-chart | 680 × 360 px | `x = 24, y = 32` |
 
 Title is always top-left, never centered, never floating. The subtitle sits one line height below the title with a consistent `y` offset across all figures in the blog.
@@ -123,7 +139,7 @@ Legends only appear when direct-labeling is impractical (6+ series, dense heatma
 | Convention | Spec |
 |---|---|
 | Stroke | 1.5–2 px solid for primary flow; 1 px dashed `3 3` for "observed" / "dimmed" flows |
-| Color | `#7a7a7a` for neutral flows; `#74b711` for the accented flow; `#b04040` for the "bottleneck" or "loser" flow |
+| Color | `#8c8c8c` (`text.medium`) for neutral flows; `#76b900` for the accented flow; `#b04040` for the "bottleneck" or "loser" flow |
 | Arrowhead | Filled triangle, 8–10 px length, color matching the stroke |
 | Endpoints | Tail starts at the exact right edge of the source card (`source.x + source.width`); tip lands at the exact left edge of the target card (`target.x`, minus the arrowhead length) |
 | Path | Orthogonal-only (horizontal + vertical) when paths cross. No diagonals in dense layouts. |
@@ -134,13 +150,13 @@ Multi-source / multi-target connections compute a shared meeting line: `meet_x =
 
 | Convention | Spec |
 |---|---|
-| Fill | `#0f0f0f` for primary cards, `#000000` for inset content boxes |
-| Border | 1 px `#2a2a2a` hairline by default; 1.5–2 px `#74b711` for the single accent card |
-| Padding | 16–24 px interior padding before content |
-| Header pattern | Title in 14–16 px Geist 500 at top-left of card; optional state-tag (`WARM`, `LIVE`, `CAPTURED`) as 11–12 px mono caps at top-right |
-| Internal divider | 1 px `#2a2a2a` hairline between header and body |
+| Fill | `#1a1a1a` (`background.surface`) for primary cards; `#000000` for inset content boxes |
+| Border | 1 px `#3a3a3a` (`border.subtle`) hairline by default; 1.5 px `#76b900` (`border.frame`) for the single accent card |
+| Padding | 16 px interior padding before content (`spacing.padding`) |
+| Header pattern | Title in 14 px heading style at top-left of card; optional state-tag (`WARM`, `LIVE`, `CAPTURED`) as 11–12 px mono caps at top-right |
+| Internal divider | 1 px `#3a3a3a` hairline between header and body |
 
-The accented card additionally gets a subtle interior tint (e.g., `#0f1607` for a green-tinted dark). Never combine the green border AND the green-tinted interior with anything else green inside — the eye stops being able to find the single accent.
+The single accent card gets EITHER a `#76b900` border OR a subtle green-tinted interior derived from `fills.green` (`#3a5a00`) at low opacity — never both, and never with anything else green inside. When both fire, the eye stops being able to find the single accent.
 
 ## What This Design Language Forbids
 
@@ -148,7 +164,9 @@ These are anti-patterns. Every one of them has shown up in a real figure draft. 
 
 - **3D bars, isometric perspective, drop shadows, gradient fills.** The only allowed gradient is a soft green glow on a single accent element, and even that is a last resort.
 - **Rounded corners.** `border-radius: 0` everywhere.
+- **A second type family.** One family — Dynamo Dark. Do not introduce a display serif, Helvetica Neue, Geist, or any font outside the `Arial, Helvetica, sans-serif` + `Roboto Mono` token stack.
 - **More than two accent colors per figure.** If the figure has coral + green + yellow + blue all carrying meaning, the design is overloaded. Reduce.
+- **Raw hex outside the tokens.** Every color comes from `design_tokens.yaml`. If you reach for a new hex, the role does not yet exist in the system; add it canonically or reuse an existing role.
 - **Inconsistent label placement across the family.** Inside-some, outside-others, above-some in the same blog reads as broken. One rule per visual category.
 - **Made-up numbers.** Memory sizes, latency figures, throughput numbers, percentages — every digit comes from a source of truth (blog body, data file, benchmark log). Never plausible-sounding fabrications.
 - **Eyeballed geometry.** Arrow tails that don't land on card edges, "right-aligned" columns at ragged `x` positions, legends drifting off center. Compute every important coordinate from named constants or another element's known coordinate.
@@ -161,11 +179,12 @@ These are anti-patterns. Every one of them has shown up in a real figure draft. 
 Walk this list explicitly, item by item, before declaring done. No silent "looks fine."
 
 1. **Ground is `#000000`.** Background is pure black, not transparent, not soft.
-2. **Family is consistent.** Title size, body font, and headline style match the rest of the blog's figures.
+2. **Type treatment is the one family.** Title is 18 px+ uppercase weight 700 in the Arial sans stack; body sans and mono are the token stacks. No Helvetica Neue, no Geist, no third font.
 3. **Single accent.** Green appears only on the one item that's "winning"; other figures in the blog use green for the same role.
 4. **Numbers are real.** Every digit traces back to a source of truth.
 5. **Geometry is computed.** Arrow endpoints, card edges, column alignments, legend centers all derive from named constants — not eyeballed.
 6. **Label placement is uniform across the family.** Bars, lane totals, overflow values, callouts each follow one rule across all figures in the blog.
-7. **Title carries the takeaway.** The title is a declarative sentence about what the figure shows, not a category name.
+7. **Every color is a token.** No hex in the figure that isn't in `design_tokens.yaml`.
+8. **Title carries the takeaway.** The title is a declarative statement about what the figure shows, not a category name.
 
 A figure that fails any one of these gets cut, not shipped.
