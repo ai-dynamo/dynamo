@@ -69,7 +69,8 @@ def verify(model: str, replay_iterations: int) -> None:
                     eager = encoder._forward_eager(items)
                     # The graph always executes its static bucket shape. Compare
                     # against the native tower at that exact padded shape first;
-                    # SDPA can select a different bf16 kernel for an unpadded call.
+                    # FlashAttention can select a different bf16 kernel for an
+                    # unpadded call.
                     padded_eager = encoder._forward_eager(
                         items + [padding_item] * (bucket - real_count)
                     )[:real_count]

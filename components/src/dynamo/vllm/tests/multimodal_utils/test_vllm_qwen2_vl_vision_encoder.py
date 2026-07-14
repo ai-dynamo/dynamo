@@ -19,6 +19,7 @@ from examples.custom_encoder.qwen2_vl_vision_encoder import (
     Qwen2VLVisionEncoder,
     _parse_graph_buckets,
     _parse_graph_image_sizes,
+    _VllmQwen2_5VisionAttention,
 )
 
 pytestmark = [
@@ -48,6 +49,45 @@ class _FakeVisual(torch.nn.Module):
         )
 
 
+class _FakeHFVisionAttention(torch.nn.Module):
+    num_heads = 2
+    head_dim = 2
+    scaling = head_dim**-0.5
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.qkv = torch.nn.Linear(4, 12)
+        self.proj = torch.nn.Linear(4, 4)
+
+
+class _FakeVisionBlock(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attn = _FakeHFVisionAttention()
+
+
+class _FakeAttentionVisual(torch.nn.Module):
+    dtype = torch.float32
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.blocks = torch.nn.ModuleList([_FakeVisionBlock(), _FakeVisionBlock()])
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.parameters()).device
+
+
+class _RecordingVarlenAttention(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.call: dict[str, torch.Tensor] | None = None
+
+    def forward(self, **kwargs: torch.Tensor) -> torch.Tensor:
+        self.call = kwargs
+        return kwargs["value"]
+
+
 def _item(grid: tuple[int, int, int]) -> Qwen2VLImageInputs:
     patch_count = grid[0] * grid[1] * grid[2]
     return Qwen2VLImageInputs(
@@ -69,6 +109,42 @@ def test_forward_batch_packs_and_splits_variable_resolution_inputs() -> None:
     assert encoder._visual.calls[0][0] == (80, 6)
     assert encoder._visual.calls[0][1].tolist() == [[1, 4, 4], [1, 8, 8]]
     assert outputs[1][0, 0] == 16
+
+
+def test_installs_vllm_attention_without_replacing_hf_projections() -> None:
+    visual = _FakeAttentionVisual()
+    original_qkv = [block.attn.qkv for block in visual.blocks]
+    original_proj = [block.attn.proj for block in visual.blocks]
+
+    Qwen2VLVisionEncoder._install_vllm_attention(visual)
+
+    for layer_index, block in enumerate(visual.blocks):
+        assert isinstance(block.attn, _VllmQwen2_5VisionAttention)
+        assert block.attn.qkv is original_qkv[layer_index]
+        assert block.attn.proj is original_proj[layer_index]
+
+
+def test_vllm_attention_receives_packed_sequence_boundaries() -> None:
+    attention = _VllmQwen2_5VisionAttention(
+        _FakeHFVisionAttention(), prefix="test.attn"
+    )
+    recording_attention = _RecordingVarlenAttention()
+    attention.attn = recording_attention
+    hidden_states = torch.randn(6, 4)
+    cu_seqlens = torch.tensor([0, 2, 6], dtype=torch.int32)
+    position_embeddings = (torch.ones(6, 2), torch.zeros(6, 2))
+
+    output = attention(
+        hidden_states,
+        cu_seqlens=cu_seqlens,
+        position_embeddings=position_embeddings,
+    )
+
+    assert output.shape == (6, 4)
+    assert recording_attention.call is not None
+    assert recording_attention.call["query"].shape == (1, 6, 2, 2)
+    assert recording_attention.call["cu_seqlens"] is cu_seqlens
+    assert recording_attention.call["max_seqlen"].item() == 4
 
 
 @pytest.mark.parametrize(
