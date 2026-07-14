@@ -953,11 +953,19 @@ class NativePlannerBase:
                     pod.metadata.name,
                 )
             except ApiException as e:
-                logger.warning(
-                    "Failed to remove power annotation from pod %s: %s",
-                    pod.metadata.name,
-                    e,
-                )
+                if e.status in (409, 429):
+                    logger.debug(
+                        "Transient %d removing power annotation from pod %s; "
+                        "will retry on next sweep.",
+                        e.status,
+                        pod.metadata.name,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to remove power annotation from pod %s: %s",
+                        pod.metadata.name,
+                        e,
+                    )
 
     def _run_power_annotation_sweep(self, connector: KubernetesConnector) -> None:
         """Blocking power-annotation reconcile sweep (runs off the event loop).
@@ -1049,11 +1057,19 @@ class NativePlannerBase:
                     limit_str,
                 )
             except ApiException as e:
-                logger.warning(
-                    "Failed to patch power annotation on pod %s: %s",
-                    pod.metadata.name,
-                    e,
-                )
+                if e.status in (409, 429):
+                    logger.debug(
+                        "Transient %d patching power annotation on pod %s; "
+                        "will retry on next sweep.",
+                        e.status,
+                        pod.metadata.name,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to patch power annotation on pod %s: %s",
+                        pod.metadata.name,
+                        e,
+                    )
 
     def _current_worker_counts(self) -> tuple[int, int]:
         """Best-known current (prefill, decode) ready worker counts.

@@ -342,6 +342,15 @@ class KubernetesAPI:
             kwargs = {
                 "namespace": self.current_namespace,
                 "label_selector": label_selector,
+                # Cap page size so the apiserver emits a _continue token and
+                # pagination actually triggers. Without a limit the server
+                # returns all matching objects in one response and _continue
+                # is never set, making the loop a no-op.
+                "limit": 500,
+                # Serve from the apiserver watch cache instead of forcing a
+                # quorum etcd read. A few hundred ms of cache staleness is
+                # acceptable for annotation reconciliation.
+                "resource_version": "0",
             }
             if _continue:
                 kwargs["_continue"] = _continue
