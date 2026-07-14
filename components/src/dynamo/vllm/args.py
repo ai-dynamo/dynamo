@@ -361,12 +361,24 @@ def update_engine_config_with_dynamo(
             )
         dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
             "mode": dynamo_config.benchmark_mode,
-            "prefill_isl_granularity": dynamo_config.benchmark_prefill_granularity,
-            "decode_length_granularity": dynamo_config.benchmark_decode_length_granularity,
-            "decode_batch_size_granularity": dynamo_config.benchmark_decode_batch_granularity,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "prefill_max_new_token_samples": (
+                dynamo_config.prefill_max_new_token_samples
+            ),
+            "prefill_max_kv_read_token_samples": (
+                dynamo_config.prefill_max_kv_read_token_samples
+            ),
+            "decode_max_kv_read_token_samples": (
+                dynamo_config.decode_max_kv_read_token_samples
+            ),
+            "decode_max_batch_size_samples": (
+                dynamo_config.decode_max_batch_size_samples
+            ),
+            "prefix_max_batch_size_samples": (
+                dynamo_config.prefix_max_batch_size_samples
+            ),
         }
         logger.info(
             "Benchmark mode=%s configured (output=%s)",

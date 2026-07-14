@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -161,6 +162,18 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			`must be "mp" or "ray"`,
 		))
 	}
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists &&
+		value != string(grovev1alpha1.RollingRecreateStrategy) &&
+		value != string(grovev1alpha1.OnDeleteStrategy) {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
+			value,
+			[]string{
+				string(grovev1alpha1.RollingRecreateStrategy),
+				string(grovev1alpha1.OnDeleteStrategy),
+			},
+		))
+	}
 	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
 		allErrs = append(allErrs, field.NotSupported(
 			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
@@ -186,6 +199,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	fldPath *field.Path,
 	opts dynamoGraphDeploymentSpecValidationOptions,
 ) field.ErrorList {
+	const validateInferencePoolAvailability = true
+
 	allErrs := field.ErrorList{}
 
 	if spec.PriorityClassName != "" && !opts.grovePathway {
@@ -242,6 +257,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			component,
 			componentPath,
 			opts.grovePathway,
+			validateInferencePoolAvailability,
 		)...)
 	}
 
@@ -282,9 +298,9 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				var err error
 				topologyInfo, err = readGroveClusterTopology(v.ctx, v.mgr, spec.TopologyConstraint.ClusterTopologyName)
 				if err != nil {
-					detail := fmt.Sprintf("failed to read ClusterTopology: %v", err)
+					detail := fmt.Sprintf("failed to read ClusterTopologyBinding: %v", err)
 					if k8serrors.IsNotFound(err) {
-						detail = "references a ClusterTopology resource that was not found"
+						detail = "references a ClusterTopologyBinding resource that was not found"
 					}
 					topologyErrs = append(topologyErrs, field.Invalid(
 						constraintPath.Child("clusterTopologyName"),
@@ -391,7 +407,7 @@ func (v *dynamoGraphDeploymentValidation) validateSpecTopologyConstraint(
 	return field.ErrorList{field.Invalid(
 		fldPath.Child("packDomain"),
 		constraint.PackDomain,
-		fmt.Sprintf("does not exist in ClusterTopology %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
+		fmt.Sprintf("does not exist in ClusterTopologyBinding %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
 	)}
 }
 
@@ -445,9 +461,9 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicy(
 
 	topologyInfo, err := readGroveClusterTopology(v.ctx, v.mgr, policy.ClusterTopologyName)
 	if err != nil {
-		detail := fmt.Sprintf("failed to read ClusterTopology: %v", err)
+		detail := fmt.Sprintf("failed to read ClusterTopologyBinding: %v", err)
 		if k8serrors.IsNotFound(err) {
-			detail = "references a ClusterTopology resource that was not found"
+			detail = "references a ClusterTopologyBinding resource that was not found"
 		}
 		return append(allErrs, field.Invalid(namePath, policy.ClusterTopologyName, detail))
 	}
@@ -455,7 +471,7 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicy(
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("domain"),
 			policy.Domain,
-			fmt.Sprintf("does not exist in ClusterTopology %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
+			fmt.Sprintf("does not exist in ClusterTopologyBinding %q; available domains: %v", topologyInfo.name, topologyInfo.domains),
 		))
 	}
 	return allErrs
@@ -530,6 +546,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 			oldComponent,
 			componentsPath.Index(i),
 			canModifyReplicas,
+			nvidiacomv1beta1.DynamoGraphDeploymentGVK.GroupKind(),
 		)...)
 	}
 

@@ -11,10 +11,10 @@ This guide walks you through installing everything needed to deploy models with 
 
 Before you begin, make sure you have:
 
-- A **Kubernetes cluster (v1.24+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
+- A **Kubernetes cluster (v1.30+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
   - [Amazon EKS](cloud-providers/eks/eks.md) | [Azure AKS](cloud-providers/aks/aks.md) | [Google GKE](cloud-providers/gke/gke.md)
   - For local development: [Minikube Setup](deployment/minikube.md)
-- **kubectl** v1.24+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
+- **kubectl** v1.30+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
 - **Helm** v3.0+ — [Install Helm](https://helm.sh/docs/intro/install/)
 
 > [!IMPORTANT]
@@ -23,7 +23,7 @@ Before you begin, make sure you have:
 Verify your tools:
 
 ```bash
-kubectl version --client  # Should show v1.24+
+kubectl version --client  # Should show v1.30+
 helm version              # Should show v3.0+
 ```
 
@@ -83,7 +83,7 @@ Set your environment variables:
 
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.0.2  # match a version from https://github.com/ai-dynamo/dynamo/releases
+export RELEASE_VERSION=1.2.1  # match a version from https://github.com/ai-dynamo/dynamo/releases
 ```
 
 ```bash
@@ -117,7 +117,9 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > ```
 
 > [!WARNING]
-> **Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use the default cluster-wide mode for all new deployments.
+> **Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is only for development and
+> testing. It is not supported for production. Install it with `--skip-crds` and
+> `dynamo-operator.upgradeCRD=false`; see [Dynamo Operator](dynamo-operator.md#namespace-restricted-mode).
 
 Verify the Dynamo platform is running:
 
@@ -155,6 +157,10 @@ For the `enabled=true` path, install Grove and KAI Scheduler separately first. S
 > |-----------------|---------------|-------|
 > | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 > | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
+> | 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
+> | 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.10 |
+>
+> Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
 #### LWS + Volcano
 
@@ -242,7 +248,8 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 
 Cause: Attempting cluster-wide install on a shared cluster with existing namespace-restricted operators.
 
-Solution: Migrate the existing namespace-restricted operators to cluster-wide mode. Namespace-restricted mode is deprecated.
+Solution: Remove the development/test namespace-restricted operators, then install one cluster-wide
+operator for production use.
 
 **CRDs already exist**
 

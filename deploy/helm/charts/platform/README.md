@@ -33,7 +33,7 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## 📋 Prerequisites
 
-- Kubernetes cluster (v1.20+)
+- Kubernetes cluster (v1.30+)
 - Helm 3.8+
 - Sufficient cluster resources for your deployment scale
 - Container registry access (if using private images)
@@ -49,58 +49,44 @@ No action is required for most upgrades — the operator's built-in cert-control
 
 ---
 
-## ⚠️ Important: Cluster-Wide vs Namespace-Scoped Deployment
+## ⚠️ Important: Cluster-Wide and Namespace-Restricted Deployment
 
-### Single Cluster-Wide Operator (Recommended)
+Deploy one cluster-wide operator per cluster. It owns the Custom Resource Definitions (CRDs),
+conversion webhook, and conversion certificate authority (CA).
 
-**By default, the Dynamo operator runs with cluster-wide permissions and should only be deployed ONCE per cluster.**
+> [!WARNING]
+> Namespace-restricted mode is only for development and testing. It is not supported for production.
 
-- ✅ **Recommended**: Deploy one cluster-wide operator per cluster
-- ❌ **Not Recommended**: Multiple cluster-wide operators in the same cluster
+A namespace-restricted operator owns reconciliation, validation, and mutation only in its target
+namespace. Its Lease makes the cluster-wide operator skip that namespace. Install it alongside an
+existing cluster-wide operator with CRD management disabled:
 
-### Multiple Namespace-Scoped Operators (Advanced)
-
-If you need multiple operator instances (e.g., for multi-tenancy), use namespace-scoped deployment:
-
-```yaml
-# values.yaml
-dynamo-operator:
-  namespaceRestriction:
-    enabled: true
-    targetNamespace: "my-tenant-namespace"  # Optional, defaults to release namespace
+```bash
+helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace test-namespace \
+  --create-namespace \
+  --skip-crds \
+  --set dynamo-operator.namespaceRestriction.enabled=true \
+  --set dynamo-operator.upgradeCRD=false
 ```
 
-### Validation and Safety
-
-The chart includes built-in validation to prevent all operator conflicts:
-
-- **Automatic Detection**: Scans for existing operators (both cluster-wide and namespace-restricted) during installation
-- **Prevents Multiple Cluster-Wide**: Installation will fail if another cluster-wide operator exists
-- **Prevents Mixed Deployments (Type 1)**: Installation will fail if trying to install namespace-restricted operator when cluster-wide exists
-- **Prevents Mixed Deployments (Type 2)**: Installation will fail if trying to install cluster-wide operator when namespace-restricted operators exist
-- **Safe Defaults**: Leader election uses shared ID for proper coordination
-
-#### 🚫 **Blocked Conflict Scenarios**
-
-| Existing Operator | New Operator | Status | Reason |
-|-------------------|--------------|---------|--------|
-| None | Cluster-wide | ✅ **Allowed** | No conflicts |
-| None | Namespace-restricted | ✅ **Allowed** | No conflicts |
-| Cluster-wide | Cluster-wide | ❌ **Blocked** | Multiple cluster managers |
-| Cluster-wide | Namespace-restricted | ❌ **Blocked** | Cluster-wide already manages target namespace |
-| Namespace-restricted | Cluster-wide | ❌ **Blocked** | Would conflict with existing namespace operators |
-| Namespace-restricted A | Namespace-restricted B (diff ns) | ✅ **Allowed** | Different scopes |
+The cluster-wide operator should run the same or a newer version and provide the newest APIs in the
+cluster. A newer namespaced controller can be used for development when it remains compatible with
+the installed CRDs. Helm rejects namespace-restricted installations with `upgradeCRD=true` and
+rejects custom `webhook.namespaceSelector` values.
 
 ## 🔧 Configuration
 
 ## Requirements
+
+Kubernetes: `>=1.30.0-0`
 
 | Repository | Name | Version |
 |------------|------|---------|
 | file://components/operator | dynamo-operator | 1.3.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
-| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.8 |
+| oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.11 |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values
@@ -111,21 +97,22 @@ The chart includes built-in validation to prevent all operator conflicts:
 | global.nats.install | bool | `true` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes). |
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
+| global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
 | global.grove.install | bool | `false` | Whether this chart should install the bundled Grove subchart. When true, deploys the Grove operator cluster-wide. Integration is automatically enabled. NOTE: For production environments, it is recommended to install Grove separately. |
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
-| dynamo-operator.upgradeCRD | bool | `true` | Whether to manage CRDs via a pre-install/pre-upgrade hook Job. The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply. |
-| dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
-| dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: "http://hostname:port" or "https://hostname:port" |
+| dynamo-operator.upgradeCRD | bool | `true` | Whether the cluster-wide operator applies bundled CRDs via crd-apply. This must be false for namespace-restricted installations, which must also be installed with Helm's --skip-crds flag. |
+| dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: `nats://hostname:4222` |
+| dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
-| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments. |
-| dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated. |
-| dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
-| dynamo-operator.namespaceRestriction.lease | object | `{"duration":"30s","renewInterval":"10s"}` | DEPRECATED: Only used in namespace-restricted mode, which is deprecated. |
-| dynamo-operator.namespaceRestriction.lease.duration | string | `"30s"` | DEPRECATED: Lease duration for namespace-restricted mode, which is deprecated. |
-| dynamo-operator.namespaceRestriction.lease.renewInterval | string | `"10s"` | DEPRECATED: Lease renew interval for namespace-restricted mode, which is deprecated. |
-| dynamo-operator.gpuDiscovery | object | `{"enabled":true}` | DEPRECATED: GPU discovery for namespace-scoped operators is deprecated along with namespace-restricted mode. |
-| dynamo-operator.gpuDiscovery.enabled | bool | `true` | DEPRECATED: Only relevant when namespaceRestriction is enabled, which is deprecated. |
+| dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments. |
+| dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production. |
+| dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | DEVELOPMENT AND TESTING ONLY: Target namespace. Defaults to the Helm release namespace. |
+| dynamo-operator.namespaceRestriction.lease | object | `{"duration":"30s","renewInterval":"10s"}` | DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease settings. |
+| dynamo-operator.namespaceRestriction.lease.duration | string | `"30s"` | DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease duration. |
+| dynamo-operator.namespaceRestriction.lease.renewInterval | string | `"10s"` | DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease renewal interval. |
+| dynamo-operator.gpuDiscovery | object | `{"enabled":true}` | DEVELOPMENT AND TESTING ONLY: GPU discovery settings for namespace-restricted operators. |
+| dynamo-operator.gpuDiscovery.enabled | bool | `true` | DEVELOPMENT AND TESTING ONLY: Enable GPU discovery in namespace-restricted mode. |
 | dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
 | dynamo-operator.controllerManager.affinity | object | `{}` | Affinity for controller manager pods |
 | dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |
@@ -166,7 +153,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.failurePolicy | string | `"Fail"` | Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees. |
 | dynamo-operator.webhook.podCheckpointRestoreFailurePolicy | string | `"Ignore"` | Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods. |
 | dynamo-operator.webhook.timeoutSeconds | int | `10` | Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy. |
-| dynamo-operator.webhook.namespaceSelector | object | `{}` | Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace. |
+| dynamo-operator.webhook.namespaceSelector | object | `{}` | Unsupported; must remain empty. Helm configures global admission for the cluster-wide operator and target-namespace admission for restricted operators. |
 | dynamo-operator.webhook.certManager.enabled | bool | `false` | Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will provision and rotate certificates instead of the operator's built-in cert-controller. |
 | dynamo-operator.webhook.certManager.certificate.duration | string | `"8760h"` | Certificate duration for webhook certificates managed by cert-manager (e.g., "8760h" for 1 year). cert-manager will automatically renew the certificate before it expires. |
 | dynamo-operator.webhook.certManager.certificate.renewBefore | string | `"360h"` | Time before certificate expiration to trigger renewal (e.g., "360h" for 15 days). cert-manager will attempt to renew the certificate when this threshold is reached. |
@@ -218,13 +205,29 @@ For **production environments**, Kai Scheduler and Grove should be installed sep
 |-----------------|---------------|-------|
 | 1.0.x           | >= v0.13.0    | >= v0.1.0-alpha.6 |
 | 1.1.x           | >= v0.13.4    | >= v0.1.0-alpha.8 |
+| 1.3.x           | >= v0.13.4    | >= v0.1.0-alpha.8, < v0.1.0-alpha.9 |
+| 1.4.x           | >= v0.13.4    | >= v0.1.0-alpha.11 |
+
+Grove should be upgraded in lockstep with Dynamo while Grove APIs are not stable. Dynamo 1.3.x expects Grove's earlier `ClusterTopology` API and is incompatible with the newer `ClusterTopologyBinding` API; Dynamo 1.4.x expects `ClusterTopologyBinding`.
 
 After installing them separately, enable Dynamo integration:
+
+Kai Scheduler:
 
 ```yaml
 global:
   kai-scheduler:
     enabled: true   # Enables queue creation and schedulerName injection
+  grove:
+    enabled: true   # Enables multinode orchestration via PodCliqueSets
+```
+
+Volcano:
+
+```yaml
+global:
+  volcano-scheduler:
+    enabled: true   # EXPERIMENTAL: Enables Volcano schedulerName injection for Grove PodCliqueSets
   grove:
     enabled: true   # Enables multinode orchestration via PodCliqueSets
 ```

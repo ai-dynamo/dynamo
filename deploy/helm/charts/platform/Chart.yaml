@@ -20,6 +20,8 @@ maintainers:
 description: A Helm chart for NVIDIA Dynamo Platform.
 type: application
 version: 1.3.0
+# Kubernetes 1.30 enables CRD validation ratcheting by default; generated CRDs use optionalOldSelf.
+kubeVersion: ">=1.30.0-0"
 home: https://nvidia.com
 dependencies:
   - name: dynamo-operator
@@ -40,6 +42,6 @@ dependencies:
     condition: global.kai-scheduler.install
   - name: grove-charts
     alias: grove
-    version: v0.1.0-alpha.8
+    version: v0.1.0-alpha.11
     repository: oci://ghcr.io/ai-dynamo/grove
     condition: global.grove.install

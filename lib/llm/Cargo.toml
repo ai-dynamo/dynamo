@@ -223,6 +223,7 @@ rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.17.1"
+tracing-subscriber = { workspace = true }
 insta = { version = "1.41", features = [
   "glob",
   "json",
@@ -234,6 +235,10 @@ lazy_static = "1.4"
 mockito = "1.7.0"
 dynamo-bench = { path = "../bench" }
 tokio-tungstenite = "0.26"
+
+[[test]]
+name = "lora_simulation"
+path = "tests/lora_simulation/main.rs"
 
 [[bin]]
 name = "generate-frontend-openapi"

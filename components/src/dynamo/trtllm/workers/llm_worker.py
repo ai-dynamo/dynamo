@@ -440,7 +440,10 @@ async def init_llm_worker(
 
     if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
-        model_config = AutoConfig.from_pretrained(config.model, trust_remote_code=True)
+        model_config = AutoConfig.from_pretrained(
+            config.model,
+            trust_remote_code=engine_args.get("trust_remote_code", False),
+        )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
             model_dir=config.model,
@@ -455,8 +458,9 @@ async def init_llm_worker(
         default_sampling_params.detokenize = False
 
     connector = None
-    needs_nixl = config.disaggregation_mode != DisaggregationMode.AGGREGATED or (
+    needs_nixl = (
         config.modality == Modality.MULTIMODAL
+        and config.disaggregation_mode != DisaggregationMode.AGGREGATED
         and (
             config.frontend_decoding
             or config.disaggregation_mode == DisaggregationMode.ENCODE

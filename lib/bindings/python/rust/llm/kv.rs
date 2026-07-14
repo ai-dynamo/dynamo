@@ -29,8 +29,9 @@ use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionError, SelectionService as RustSelectionService,
-    SelectionServiceBuilder, SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
+    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
+    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
+    WorkerPatchRequest, WorkerRequest,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -126,9 +127,13 @@ struct KvIndexerCli {
     #[arg(long, default_value = "default")]
     model_name: String,
 
-    /// Tenant ID for initial workers registered via --workers
+    /// Routing group for initial workers registered via --workers
     #[arg(long, default_value = "default")]
-    tenant_id: String,
+    routing_group: String,
+
+    /// Legacy compatibility input; accepted but ignored
+    #[arg(long = "tenant-id", default_value = "default", hide = true)]
+    _tenant_id: String,
 
     /// Comma-separated peer URLs for P2P recovery (e.g. "http://host1:8090,http://host2:8091")
     #[arg(long)]
@@ -174,7 +179,7 @@ where
             threads: cli.threads,
             workers: cli.workers,
             model_name: cli.model_name,
-            tenant_id: cli.tenant_id,
+            routing_group: cli.routing_group,
             peers: cli.peers,
             access_log: cli.access_log,
             trace_id_header,
@@ -288,6 +293,18 @@ struct SelectServiceCli {
     /// Comma-separated ZMQ PUB endpoints for peer selectors
     #[arg(long, value_delimiter = ',', requires = "replica_sync_port")]
     replica_sync_peers: Vec<String>,
+
+    /// Seconds an unclaimed pending selection lives before eviction
+    #[arg(long)]
+    selection_cache_ttl_secs: Option<f64>,
+
+    /// Maximum number of resident pending selections
+    #[arg(long)]
+    selection_cache_max_entries: Option<usize>,
+
+    /// Approximate byte budget across resident pending selections
+    #[arg(long)]
+    selection_cache_max_bytes: Option<usize>,
 }
 
 #[cfg(all(test, feature = "select-service"))]
@@ -326,6 +343,29 @@ mod select_service_cli_tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
     }
+
+    #[test]
+    fn parses_selection_cache_overrides() {
+        let cli = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--selection-cache-ttl-secs",
+            "30",
+            "--selection-cache-max-entries",
+            "100",
+            "--selection-cache-max-bytes",
+            "1048576",
+        ])
+        .unwrap();
+
+        let config = selection_cache_config_from_overrides(
+            cli.selection_cache_ttl_secs,
+            cli.selection_cache_max_entries,
+            cli.selection_cache_max_bytes,
+        );
+        assert_eq!(config.ttl, std::time::Duration::from_secs(30));
+        assert_eq!(config.max_entries, 100);
+        assert_eq!(config.max_bytes, 1_048_576);
+    }
 }
 
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -350,6 +390,11 @@ where
             replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
             kv_router_config: kv_router_config_from_dynamo_env(),
+            selection_cache: selection_cache_config_from_overrides(
+                cli.selection_cache_ttl_secs,
+                cli.selection_cache_max_entries,
+                cli.selection_cache_max_bytes,
+            ),
         }))
     }
 
@@ -382,6 +427,49 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
     })
 }
 
+/// Build a [`RsSelectionCacheConfig`] from optional overrides, falling back to
+/// the service default for each field left unset. Shared by the Python
+/// `SelectionCacheConfig` and the `dynamo.select_service` CLI.
+#[cfg(feature = "select-service")]
+fn selection_cache_config_from_overrides(
+    ttl_secs: Option<f64>,
+    max_entries: Option<usize>,
+    max_bytes: Option<usize>,
+) -> RsSelectionCacheConfig {
+    let mut config = RsSelectionCacheConfig::default();
+    if let Some(ttl_secs) = ttl_secs {
+        config.ttl = std::time::Duration::from_secs_f64(ttl_secs);
+    }
+    if let Some(max_entries) = max_entries {
+        config.max_entries = max_entries;
+    }
+    if let Some(max_bytes) = max_bytes {
+        config.max_bytes = max_bytes;
+    }
+    config
+}
+
+/// Bounds for the in-flight selection cache. Each field defaults to the
+/// service default when omitted.
+#[cfg(feature = "select-service")]
+#[pyclass]
+#[derive(Clone, Default)]
+pub(crate) struct SelectionCacheConfig {
+    inner: RsSelectionCacheConfig,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl SelectionCacheConfig {
+    #[new]
+    #[pyo3(signature = (*, ttl_secs = None, max_entries = None, max_bytes = None))]
+    fn new(ttl_secs: Option<f64>, max_entries: Option<usize>, max_bytes: Option<usize>) -> Self {
+        Self {
+            inner: selection_cache_config_from_overrides(ttl_secs, max_entries, max_bytes),
+        }
+    }
+}
+
 /// In-process handle to a managed Dynamo `SelectionService`.
 #[cfg(feature = "select-service")]
 #[pyclass]
@@ -394,13 +482,14 @@ pub(crate) struct SelectionService {
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None))]
     fn new(
         py: Python<'_>,
         indexer_threads: usize,
         indexer_peers: Option<Vec<String>>,
         replica_sync_port: Option<u16>,
         replica_sync_peers: Option<Vec<String>>,
+        selection_cache: Option<SelectionCacheConfig>,
     ) -> PyResult<Self> {
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
         if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
@@ -410,7 +499,8 @@ impl SelectionService {
         }
         let mut builder = SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
             .indexer_threads(indexer_threads)
-            .indexer_peers(indexer_peers.unwrap_or_default());
+            .indexer_peers(indexer_peers.unwrap_or_default())
+            .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
@@ -483,17 +573,17 @@ impl SelectionService {
         })
     }
 
-    /// List catalog records, optionally filtered by model and tenant.
-    #[pyo3(signature = (*, model_name = None, tenant_id = None))]
+    /// List catalog records, optionally filtered by model and routing group.
+    #[pyo3(signature = (*, model_name = None, routing_group = None))]
     fn list_workers(
         &self,
         py: Python<'_>,
         model_name: Option<String>,
-        tenant_id: Option<String>,
+        routing_group: Option<String>,
     ) -> PyResult<PyObject> {
         let workers = self
             .inner
-            .list_workers(model_name.as_deref(), tenant_id.as_deref());
+            .list_workers(model_name.as_deref(), routing_group.as_deref());
         pythonize(py, &workers)
             .map(|o| o.unbind())
             .map_err(to_pyerr)
@@ -546,7 +636,8 @@ impl SelectionService {
         })
     }
 
-    /// Book a request's load against a chosen worker (dict, see `ReservationRequest`).
+    /// Book a request's load (dict, see `ReservationRequest`): replay a cached
+    /// selection via `selection_id`, or book self-contained via `worker_id`.
     fn create_reservation<'p>(
         &self,
         py: Python<'p>,
@@ -568,11 +659,11 @@ impl SelectionService {
     fn prefill_complete<'p>(
         &self,
         py: Python<'p>,
-        reservation_id: String,
+        selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            core.prefill_complete(&reservation_id)
+            core.prefill_complete(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
             Ok(())
@@ -580,14 +671,10 @@ impl SelectionService {
     }
 
     /// Record one decode output block for a reservation, advancing its decode load.
-    #[pyo3(signature = (reservation_id, *, decay_fraction = None))]
-    fn add_output_block(
-        &self,
-        reservation_id: String,
-        decay_fraction: Option<f64>,
-    ) -> PyResult<()> {
+    #[pyo3(signature = (selection_id, *, decay_fraction = None))]
+    fn add_output_block(&self, selection_id: String, decay_fraction: Option<f64>) -> PyResult<()> {
         self.inner
-            .add_output_block(&reservation_id, decay_fraction)
+            .add_output_block(&selection_id, decay_fraction)
             .map_err(selection_to_pyerr)
     }
 
@@ -595,11 +682,11 @@ impl SelectionService {
     fn free_reservation<'p>(
         &self,
         py: Python<'p>,
-        reservation_id: String,
+        selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            core.free_reservation(&reservation_id)
+            core.free_reservation(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
             Ok(())
@@ -607,16 +694,16 @@ impl SelectionService {
     }
 
     /// Current per-model active load (pending counts + per-worker potential loads).
-    #[pyo3(signature = (*, model_name = None, tenant_id = None))]
+    #[pyo3(signature = (*, model_name = None, routing_group = None))]
     fn loads(
         &self,
         py: Python<'_>,
         model_name: Option<String>,
-        tenant_id: Option<String>,
+        routing_group: Option<String>,
     ) -> PyResult<PyObject> {
         let loads = self
             .inner
-            .loads(model_name.as_deref(), tenant_id.as_deref());
+            .loads(model_name.as_deref(), routing_group.as_deref());
         pythonize(py, &loads).map(|o| o.unbind()).map_err(to_pyerr)
     }
 
@@ -705,7 +792,7 @@ mod selection_service_lifecycle_tests {
     #[test]
     fn idempotent_shutdown() {
         let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None)).unwrap();
+            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None)).unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
             service.shutdown(py);
@@ -729,7 +816,7 @@ fn init_standalone_logging() {
 }
 
 #[pyfunction]
-#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None))]
+#[pyo3(name = "compute_block_hash_for_seq", signature = (tokens, kv_block_size, block_mm_infos=None, lora_name=None, is_eagle=None, cache_namespace=None))]
 pub fn compute_block_hash_for_seq_py(
     _py: Python,
     tokens: Vec<u32>,
@@ -737,6 +824,7 @@ pub fn compute_block_hash_for_seq_py(
     block_mm_infos: Option<Bound<PyAny>>,
     lora_name: Option<String>,
     is_eagle: Option<bool>,
+    cache_namespace: Option<String>,
 ) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -755,6 +843,7 @@ pub fn compute_block_hash_for_seq_py(
         BlockHashOptions {
             block_mm_infos: mm_infos.as_deref(),
             lora_name: lora_name.as_deref(),
+            cache_namespace: cache_namespace.as_deref(),
             is_eagle,
         },
     );
@@ -898,11 +987,12 @@ impl KvEventPublisher {
     ///         so that routers can recover events directly from this worker.
     ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
     ///     zmq_topic: ZMQ topic filter (default "").
-    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
-    ///         events into a single batch before flushing.
-    ///         ``None`` disables batching: every event is published immediately.
-    ///         ``50`` to enable batching with a 50 ms window.
-    ///         ``0`` is treated as ``None`` (also disables batching).
+    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to retain a
+    ///         compatible pending tail across input lists. ``None`` and ``0``
+    ///         disable cross-list timeout batching and flush at each input-list
+    ///         boundary. A ZMQ input list is one native SGLang/vLLM event batch,
+    ///         so compatible events within that list are still coalesced.
+    ///         Use ``50`` to allow compatible tails to span lists for up to 50 ms.
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
     #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
@@ -952,7 +1042,7 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None))]
+    #[pyo3(signature = (token_ids, num_block_tokens, block_hashes, parent_hash=None, block_mm_infos=None, lora_name=None, is_eagle=None, cache_salt=None))]
     fn publish_stored(
         &self,
         py: Python,
@@ -963,6 +1053,7 @@ impl KvEventPublisher {
         block_mm_infos: Option<Bound<PyAny>>,
         lora_name: Option<String>,
         is_eagle: Option<bool>,
+        cache_salt: Option<String>,
     ) -> PyResult<()> {
         let kv_block_size = self.kv_block_size as u32;
         let dp_rank = self.dp_rank;
@@ -989,6 +1080,7 @@ impl KvEventPublisher {
                         &num_block_tokens,
                         &block_hashes_u64,
                         lora_name.as_deref(),
+                        cache_salt.as_deref(),
                         &warning_count,
                         mm_infos.as_deref(),
                         is_eagle,
@@ -1808,7 +1900,7 @@ impl KvRouter {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0, policy_class=None))]
+    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None, update_indexer=false, block_mm_infos=None, lora_name=None, routing_constraints=None, strict_priority=0, policy_class=None, cache_namespace=None))]
     fn best_worker<'p>(
         &self,
         py: Python<'p>,
@@ -1821,6 +1913,7 @@ impl KvRouter {
         routing_constraints: Option<RoutingConstraints>,
         strict_priority: u32,
         policy_class: Option<String>,
+        cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1847,6 +1940,7 @@ impl KvRouter {
                     update_states,
                     false,
                     lora_name.clone(),
+                    cache_namespace.clone(),
                     0.0,
                     strict_priority,
                     policy_class,
@@ -1880,6 +1974,10 @@ impl KvRouter {
                     }
                     if let Some(lora_name) = lora_name.as_ref() {
                         tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+                    }
+                    if let Some(cache_namespace) = cache_namespace.as_ref() {
+                        tokens_with_hashes =
+                            tokens_with_hashes.with_cache_namespace(cache_namespace.clone());
                     }
                     chooser
                         .record_routing_decision(tokens_with_hashes, best_worker)
@@ -1919,13 +2017,14 @@ impl KvRouter {
         })
     }
 
-    #[pyo3(signature = (token_ids, block_mm_infos=None, lora_name=None))]
+    #[pyo3(signature = (token_ids, block_mm_infos=None, lora_name=None, cache_namespace=None))]
     fn get_potential_loads<'p>(
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
+        cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
@@ -1939,6 +2038,7 @@ impl KvRouter {
                     None,
                     block_mm_infos.as_deref(),
                     lora_name.as_deref(),
+                    cache_namespace.as_deref(),
                 )
                 .await
                 .map_err(to_pyerr)?;
@@ -1953,7 +2053,8 @@ impl KvRouter {
         })
     }
 
-    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (token_ids, router_config_override=None, block_mm_infos=None, lora_name=None, include_shared=true, cache_namespace=None))]
     fn get_overlap_scores<'p>(
         &self,
         py: Python<'p>,
@@ -1962,6 +2063,7 @@ impl KvRouter {
         block_mm_infos: Option<PyObject>,
         lora_name: Option<String>,
         include_shared: bool,
+        cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
             let override_config: RouterConfigOverride =
@@ -1982,6 +2084,7 @@ impl KvRouter {
                     router_config_override.as_ref(),
                     block_mm_infos.as_deref(),
                     lora_name.as_deref(),
+                    cache_namespace.as_deref(),
                     include_shared,
                 )
                 .await

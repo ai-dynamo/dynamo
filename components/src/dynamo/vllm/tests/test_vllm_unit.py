@@ -362,6 +362,11 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
         headless=False,
         component="backend",
+        namespace="dynamo",
+        route_to_encoder=False,
+        enable_multimodal=False,
+        frontend_decoding=False,
+        multimodal_embedding_cache_capacity_gb=0.0,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
     )
@@ -419,6 +424,10 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     engine.engine_client = SimpleNamespace(generate=fake_generate)
     engine._default_sampling_params = {}
     engine._model_max_len = 4096
+    engine._multimodal_request_processor = llm_engine.VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
 
     monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
 
@@ -597,6 +606,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
 
     config = SimpleNamespace(
         component="backend",
+        namespace="dynamo",
         engine_args=FakeEngineArgs(),
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,
@@ -894,9 +904,6 @@ class TestBenchmarkConfig:
 
         cfg = BenchmarkConfig()
         assert cfg.mode == "agg"
-        assert cfg.prefill_isl_granularity == 16
-        assert cfg.decode_length_granularity == 6
-        assert cfg.decode_batch_size_granularity == 6
         assert cfg.warmup_iterations == 5
         assert cfg.output_path == "/tmp/benchmark_results.json"
 
@@ -905,14 +912,12 @@ class TestBenchmarkConfig:
 
         cfg = BenchmarkConfig(
             mode="decode",
-            prefill_isl_granularity=4,
-            decode_length_granularity=3,
-            decode_batch_size_granularity=3,
             warmup_iterations=2,
             output_path="/tmp/test.json",
         )
         assert cfg.mode == "decode"
-        assert cfg.prefill_isl_granularity == 4
+        assert cfg.warmup_iterations == 2
+        assert cfg.output_path == "/tmp/test.json"
 
     def test_benchmark_config_kwargs_unpack(self):
         from dynamo.vllm.instrumented_scheduler import BenchmarkConfig
@@ -921,7 +926,232 @@ class TestBenchmarkConfig:
         cfg = BenchmarkConfig(**d)
         assert cfg.mode == "prefill"
         assert cfg.warmup_iterations == 1
-        assert cfg.prefill_isl_granularity == 16
+
+    def test_benchmark_operational_controls_reach_scheduler_config(
+        self, mock_vllm_cli, tmp_path
+    ):
+        output = tmp_path / "benchmark.json"
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--benchmark-warmup-iterations",
+            "2",
+            "--benchmark-output-path",
+            str(output),
+        )
+
+        config = parse_args()
+
+        assert config._benchmark_additional_config == {
+            "mode": "prefill",
+            "warmup_iterations": 2,
+            "output_path": str(output),
+            "timeout": 900,
+            "prefill_max_new_token_samples": 64,
+            "prefill_max_kv_read_token_samples": 16,
+            "decode_max_kv_read_token_samples": 128,
+            "decode_max_batch_size_samples": 128,
+            "prefix_max_batch_size_samples": 3,
+        }
+
+    def test_benchmark_sampling_controls_reach_scheduler_config(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--prefill-max-new-token-samples",
+            "12",
+            "--prefill-max-kv-read-token-samples",
+            "6",
+            "--decode-max-kv-read-token-samples",
+            "24",
+            "--decode-max-batch-size-samples",
+            "20",
+            "--prefix-max-batch-size-samples",
+            "2",
+        )
+
+        config = parse_args()
+
+        assert (
+            config._benchmark_additional_config["prefill_max_new_token_samples"] == 12
+        )
+        assert (
+            config._benchmark_additional_config["prefill_max_kv_read_token_samples"]
+            == 6
+        )
+        assert (
+            config._benchmark_additional_config["decode_max_kv_read_token_samples"]
+            == 24
+        )
+        assert (
+            config._benchmark_additional_config["decode_max_batch_size_samples"] == 20
+        )
+        assert config._benchmark_additional_config["prefix_max_batch_size_samples"] == 2
+
+    @pytest.mark.parametrize(
+        ("legacy_flag", "replacement_name", "legacy_value", "expected"),
+        [
+            ("--benchmark-prefill-granularity", "prefill_max_new_token_samples", 1, 2),
+            (
+                "--benchmark-prefill-kv-read-granularity",
+                "prefill_max_kv_read_token_samples",
+                6,
+                6,
+            ),
+            (
+                "--benchmark-prefill-batch-granularity",
+                "prefix_max_batch_size_samples",
+                1,
+                1,
+            ),
+            (
+                "--benchmark-decode-length-granularity",
+                "decode_max_kv_read_token_samples",
+                1,
+                2,
+            ),
+            (
+                "--benchmark-decode-batch-granularity",
+                "decode_max_batch_size_samples",
+                7,
+                7,
+            ),
+        ],
+    )
+    def test_legacy_benchmark_sampling_flags_are_mapped(
+        self,
+        mock_vllm_cli,
+        legacy_flag,
+        replacement_name,
+        legacy_value,
+        expected,
+    ):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            legacy_flag,
+            str(legacy_value),
+        )
+
+        with pytest.warns(DeprecationWarning):
+            config = parse_args()
+
+        assert getattr(config, replacement_name) == expected
+        assert config._benchmark_additional_config[replacement_name] == expected
+
+    @pytest.mark.parametrize(
+        ("legacy_env", "replacement_name", "expected"),
+        [
+            ("DYN_BENCHMARK_PREFILL_GRANULARITY", "prefill_max_new_token_samples", 2),
+            (
+                "DYN_BENCHMARK_PREFILL_KV_READ_GRANULARITY",
+                "prefill_max_kv_read_token_samples",
+                5,
+            ),
+            (
+                "DYN_BENCHMARK_PREFILL_BATCH_GRANULARITY",
+                "prefix_max_batch_size_samples",
+                1,
+            ),
+            (
+                "DYN_BENCHMARK_DECODE_LENGTH_GRANULARITY",
+                "decode_max_kv_read_token_samples",
+                2,
+            ),
+            (
+                "DYN_BENCHMARK_DECODE_BATCH_GRANULARITY",
+                "decode_max_batch_size_samples",
+                9,
+            ),
+        ],
+    )
+    def test_legacy_benchmark_sampling_env_vars_are_mapped(
+        self,
+        mock_vllm_cli,
+        monkeypatch,
+        legacy_env,
+        replacement_name,
+        expected,
+    ):
+        monkeypatch.setenv(legacy_env, str(expected))
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--benchmark-mode", "agg")
+
+        with pytest.warns(DeprecationWarning):
+            config = parse_args()
+
+        assert getattr(config, replacement_name) == expected
+        assert isinstance(getattr(config, replacement_name), int)
+
+    def test_legacy_and_new_benchmark_sampling_conflict(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--benchmark-prefill-granularity",
+            "12",
+            "--prefill-max-new-token-samples",
+            "20",
+        )
+
+        with pytest.raises(ValueError, match="cannot combine"):
+            parse_args()
+
+    def test_legacy_conflicts_with_explicit_new_default(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--benchmark-prefill-granularity",
+            "12",
+            "--prefill-max-new-token-samples",
+            "64",
+        )
+
+        with pytest.raises(ValueError, match="cannot combine"):
+            parse_args()
+
+    def test_legacy_env_conflicts_with_explicit_new_default_env(
+        self, mock_vllm_cli, monkeypatch
+    ):
+        monkeypatch.setenv("DYN_BENCHMARK_PREFILL_GRANULARITY", "12")
+        monkeypatch.setenv("DYN_PREFILL_MAX_NEW_TOKEN_SAMPLES", "64")
+        mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--benchmark-mode", "prefill")
+
+        with pytest.raises(ValueError, match="cannot combine"):
+            parse_args()
+
+    @pytest.mark.parametrize("value", [0, 1025])
+    def test_legacy_benchmark_sampling_range_is_validated(self, mock_vllm_cli, value):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--benchmark-prefill-granularity",
+            str(value),
+        )
+
+        with pytest.raises(ValueError, match="must be between 1 and 1024"):
+            parse_args()
+
+    def test_prefill_without_prefix_caching_is_allowed(self, mock_vllm_cli):
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--no-enable-prefix-caching",
+        )
+
+        assert parse_args().benchmark_mode == "prefill"
 
 
 class TestBenchmarkGrid:
@@ -1059,6 +1289,60 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
+@pytest.mark.parametrize(
+    ("constraint_name", "constraint_value"),
+    [
+        pytest.param(
+            "json",
+            {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+            },
+            id="json-object",
+        ),
+        pytest.param(
+            "json",
+            json.dumps(
+                {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                }
+            ),
+            id="json-string",
+        ),
+        pytest.param("regex", r"(red|blue|green)", id="regex"),
+        pytest.param(
+            "grammar",
+            'root ::= "red" | "blue" | "green"',
+            id="grammar",
+        ),
+        pytest.param("choice", ["red", "blue", "green"], id="choice"),
+    ],
+)
+def test_build_sampling_params_maps_guided_decoding(constraint_name, constraint_value):
+    from vllm.sampling_params import StructuredOutputsParams
+
+    from dynamo.vllm.handlers import build_sampling_params
+
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {
+            "guided_decoding": {constraint_name: constraint_value},
+        },
+        "stop_conditions": {},
+        "output_options": {},
+    }
+
+    sp = build_sampling_params(request, default_sampling_params={})
+
+    assert isinstance(sp.structured_outputs, StructuredOutputsParams)
+    for field in ("json", "regex", "grammar", "choice"):
+        expected = constraint_value if field == constraint_name else None
+        assert getattr(sp.structured_outputs, field) == expected
+
+
 def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
     from dynamo.vllm.handlers import build_sampling_params
 
@@ -1105,6 +1389,14 @@ def _make_dynamo_config(**overrides):
         "multimodal_decode_worker": False,
         "fpm_trace": False,
         "benchmark_mode": None,
+        "benchmark_warmup_iterations": 5,
+        "benchmark_output_path": "/tmp/benchmark_results.json",
+        "benchmark_timeout": 900,
+        "prefill_max_new_token_samples": 64,
+        "prefill_max_kv_read_token_samples": 16,
+        "decode_max_kv_read_token_samples": 128,
+        "decode_max_batch_size_samples": 128,
+        "prefix_max_batch_size_samples": 3,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -1347,9 +1639,6 @@ class TestForwardPassMetricsActivation:
         dynamo_cfg = _make_dynamo_config(
             fpm_trace=True,
             benchmark_mode="agg",
-            benchmark_prefill_granularity=16,
-            benchmark_decode_length_granularity=6,
-            benchmark_decode_batch_granularity=6,
             benchmark_warmup_iterations=5,
             benchmark_output_path=str(tmp_path / "benchmark_results.json"),
             benchmark_timeout=300,
@@ -1497,4 +1786,4 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
     ]
 
     assert chunks
-    assert captured["prompt"]["cache_salt"] == "tenant-a"
+    assert captured["prompt"]["cache_salt"] == "dynamo-cache-salt:tenant-a"
