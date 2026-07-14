@@ -16,9 +16,9 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# Whether the cluster-wide operator applies CRDs via an init container.
-# This must be false for namespace-restricted installations, which must also
-# be installed with Helm's --skip-crds flag.
+# Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container.
+# This must be false for namespace-restricted installations, which use the CRDs
+# managed by the cluster-wide operator.
 upgradeCRD: true
 
 featureGates:
