@@ -895,6 +895,21 @@ pub fn inject_trace_headers_into_map(headers: &mut std::collections::HashMap<Str
     }
 }
 
+pub fn otel_parent_context_from_distributed(
+    ctx: &DistributedTraceContext,
+) -> Option<opentelemetry::Context> {
+    let mut headers = async_nats::HeaderMap::new();
+    headers.insert("traceparent", ctx.create_traceparent());
+
+    if let Some(ref tracestate) = ctx.tracestate {
+        headers.insert("tracestate", tracestate.as_str());
+    }
+
+    let (otel_context, _trace_id, _parent_span_id) =
+        extract_otel_context_from_nats_headers(&headers);
+    otel_context
+}
+
 /// Create a client_request span linked to the parent trace context
 pub fn make_client_request_span(
     operation: &str,
@@ -903,15 +918,7 @@ pub fn make_client_request_span(
     instance_id: Option<&str>,
 ) -> Span {
     if let Some(ctx) = trace_context {
-        let mut headers = async_nats::HeaderMap::new();
-        headers.insert("traceparent", ctx.create_traceparent());
-
-        if let Some(ref tracestate) = ctx.tracestate {
-            headers.insert("tracestate", tracestate.as_str());
-        }
-
-        let (otel_context, _extracted_trace_id, _extracted_parent_span_id) =
-            extract_otel_context_from_nats_headers(&headers);
+        let otel_context = otel_parent_context_from_distributed(ctx);
 
         let span = if let Some(inst_id) = instance_id {
             tracing::info_span!(
