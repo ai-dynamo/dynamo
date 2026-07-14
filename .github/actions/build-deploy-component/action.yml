@@ -59,7 +59,7 @@ inputs:
     default: 'false'
   diff_event_context:
     description: |
-      OSRB CSV diff baseline context (operator only): pr | push | ''. Empty
+      OSRB CSV diff baseline context (operator + snapshot): pr | push | ''. Empty
       skips baseline resolution and ships a baseline_unavailable diff. Selects
       the rule in container/compliance/resolve_diff_base.py.
     required: false
@@ -266,16 +266,16 @@ runs:
         mv /tmp/compliance/osrb-deps.csv "/tmp/compliance/osrb-${{ inputs.component }}-${ARCH}-${SHA8}.csv"
         mv /tmp/compliance/osrb.cdx.json "/tmp/compliance/osrb-${{ inputs.component }}-${ARCH}-${SHA8}.cdx.json"
 
-    # Inline-compliance OSRB diff (operator only). Resolves a baseline build,
-    # downloads its compliance artifact, and emits osrb-operator-<arch>-<sha8>.diff.csv
+    # Inline-compliance OSRB diff (operator + snapshot). Resolves a baseline build,
+    # downloads its compliance artifact, and emits osrb-<component>-<arch>-<sha8>.diff.csv
     # next to the full CSV — the same resolve -> fetch -> diff flow the framework
     # images get from shared-build-image.yml + the compliance-extract action,
-    # which the operator can't reuse (its Dockerfile isn't rendered by
+    # which these hand-written Dockerfiles can't reuse (they aren't rendered by
     # container/render.py). Empty diff_event_context or a missing baseline
     # soft-degrades to a baseline_unavailable marker; the build stays green.
     - name: Resolve diff baseline
       id: resolve-diff-base
-      if: ${{ inputs.component == 'operator' && inputs.diff_event_context != '' }}
+      if: ${{ steps.settings.outputs.run_compliance == 'true' && inputs.diff_event_context != '' }}
       shell: bash
       # All workflow-context values pass via env (never interpolated into the
       # script body) so attacker-controllable strings like branch names can't
@@ -289,6 +289,7 @@ runs:
         DIFF_CURRENT_SHA: ${{ github.sha }}
         DIFF_REPO: ${{ github.repository }}
         DIFF_RUN_ID: ${{ github.run_id }}
+        IMAGE_TAG: ${{ inputs.image_tag }}
       run: |
         # The build checkout is shallow with no tags. Make the refs each baseline
         # rule needs reachable (all best-effort; a miss just yields an empty
@@ -300,9 +301,11 @@ runs:
           git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk
         fi
         CURRENT_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)
-        # --artifact-prefix operator: the operator artifact is
-        # compliance-<sha>-operator (image_tag is <github.sha>-operator), so the
-        # baseline lookup targets compliance-<baseSHA>-operator.
+        # The compliance artifact is compliance-<image_tag>, and image_tag is
+        # <github.sha>-<suffix> (e.g. -operator, -snapshot-agent), so the baseline
+        # lookup targets compliance-<baseSHA>-<suffix>. Derive the suffix from
+        # image_tag by stripping the leading <sha>- (the SHA carries no dash).
+        ARTIFACT_PREFIX="${IMAGE_TAG#*-}"
         python3 container/compliance/resolve_diff_base.py \
           --event-context "${DIFF_EVENT_CONTEXT}" \
           --current-branch "${DIFF_CURRENT_BRANCH}" \
@@ -310,7 +313,7 @@ runs:
           --merge-base-sha "${DIFF_MERGE_BASE_SHA}" \
           --current-sha "${DIFF_CURRENT_SHA}" \
           --current-version "${CURRENT_VERSION}" \
-          --artifact-prefix operator \
+          --artifact-prefix "${ARTIFACT_PREFIX}" \
           --repo "${DIFF_REPO}" \
           --current-run-id "${DIFF_RUN_ID}" \
           >> "$GITHUB_OUTPUT"
@@ -320,7 +323,7 @@ runs:
     # token) leaves /tmp/compliance-base empty and the diff marks it unavailable.
     - name: Fetch baseline compliance artifact
       id: fetch-baseline
-      if: ${{ inputs.component == 'operator' && steps.resolve-diff-base.outputs.base_artifact_id != '' && inputs.gh_token != '' }}
+      if: ${{ steps.settings.outputs.run_compliance == 'true' && steps.resolve-diff-base.outputs.base_artifact_id != '' && inputs.gh_token != '' }}
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.gh_token }}
@@ -343,13 +346,13 @@ runs:
           echo "baseline_available=false" >> "$GITHUB_OUTPUT"
         fi
 
-    # Emit osrb-operator-<arch>-<sha8>.diff.csv next to the full CSV, plus a
+    # Emit osrb-<component>-<arch>-<sha8>.diff.csv next to the full CSV, plus a
     # self-describing baseline/ folder. Always runs so a diff (real or a
-    # baseline_unavailable marker) always ships. The operator's compliance
-    # artifact is single-platform and flat, so both the current and baseline
+    # baseline_unavailable marker) always ships. The operator + snapshot compliance
+    # artifacts are single-platform and flat, so both the current and baseline
     # CSVs sit directly under their dest dirs (arch_dir ".").
     - name: Compute OSRB diff
-      if: ${{ inputs.component == 'operator' && always() }}
+      if: ${{ steps.settings.outputs.run_compliance == 'true' && always() }}
       shell: bash
       env:
         REPO: ${{ github.repository }}

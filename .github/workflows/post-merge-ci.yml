@@ -124,6 +124,11 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+          # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+          # release/* -> prior release tag (see resolve_diff_base.py).
+          diff_event_context: push
+          diff_current_branch: ${{ github.ref_name }}
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
 
 # ============================================================================
 # Power Agent
@@ -413,6 +418,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 45
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-frontend' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-frontend-{0}', github.sha) || '' }}

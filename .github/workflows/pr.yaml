@@ -214,6 +214,12 @@ jobs:
       needs.changed-files.outputs.deploy == 'true'
     name: Snapshot Agent
     runs-on: prod-default-v2
+    # actions: read lets the compliance step download a prior run's baseline
+    # snapshot compliance artifact to diff the OSRB CSV against. Missing -> the
+    # diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -231,6 +237,13 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+          # OSRB CSV diff baseline: the target branch selects the rule, while the
+          # merge-base pins PR->main diffs to the PR's fork point.
+          diff_event_context: pr
+          diff_current_branch: ${{ github.ref_name }}
+          diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+          diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
 
 # ============================================================================
 # Power Agent
@@ -578,6 +591,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 45
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   # ============================================================================
