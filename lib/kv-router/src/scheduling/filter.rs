@@ -25,6 +25,9 @@ pub enum WorkerEligibilityError {
     #[error("worker {worker_id} is overloaded")]
     WorkerOverloaded { worker_id: WorkerId },
 
+    #[error("worker {worker_id} is fenced (dead/deregistered)")]
+    WorkerFenced { worker_id: WorkerId },
+
     #[error("worker {worker_id} does not satisfy routing constraints")]
     RoutingConstraintsUnsatisfied { worker_id: WorkerId },
 }
@@ -33,6 +36,10 @@ pub enum WorkerEligibilityError {
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
+    // DIS-2404: workers fenced on death/deregistration. Unlike `overloaded`
+    // (a transient, affinity-ignorable condition), a fenced worker is never
+    // eligible on any path — availability overrides cache affinity.
+    fenced_worker_ids: Option<&'a HashSet<WorkerId>>,
     pinned_worker: Option<WorkerWithDpRank>,
     routing_constraints: &'a RoutingConstraints,
 }
@@ -48,9 +55,25 @@ impl<'a> RoutingEligibility<'a> {
         Self {
             allowed_worker_ids,
             overloaded_worker_ids,
+            fenced_worker_ids: None,
             pinned_worker,
             routing_constraints,
         }
+    }
+
+    /// Attach the set of fenced (dead/deregistered) workers. A fenced worker is
+    /// rejected on every eligibility path, including the affinity/pinned path
+    /// that otherwise ignores transient overload.
+    #[inline]
+    pub fn with_fenced_workers(mut self, fenced_worker_ids: Option<&'a HashSet<WorkerId>>) -> Self {
+        self.fenced_worker_ids = fenced_worker_ids;
+        self
+    }
+
+    #[inline]
+    pub fn is_worker_fenced(&self, worker_id: WorkerId) -> bool {
+        self.fenced_worker_ids
+            .is_some_and(|worker_ids| worker_ids.contains(&worker_id))
     }
 
     #[inline]
@@ -72,7 +95,9 @@ impl<'a> RoutingEligibility<'a> {
 
     #[inline]
     pub fn allows_worker_id(&self, worker_id: WorkerId) -> bool {
-        self.caller_allows_worker_id(worker_id) && !self.is_worker_overloaded(worker_id)
+        self.caller_allows_worker_id(worker_id)
+            && !self.is_worker_fenced(worker_id)
+            && !self.is_worker_overloaded(worker_id)
     }
 
     #[inline]
@@ -82,6 +107,7 @@ impl<'a> RoutingEligibility<'a> {
         config: &C,
     ) -> bool {
         self.caller_allows_worker_id(worker_id)
+            && !self.is_worker_fenced(worker_id)
             && self
                 .routing_constraints
                 .is_compatible_with_worker_taints(config.taints())
@@ -137,6 +163,14 @@ impl<'a> RoutingEligibility<'a> {
     ) -> Result<&'w C, WorkerEligibilityError> {
         if !self.caller_allows_worker_id(worker.worker_id) {
             return Err(WorkerEligibilityError::WorkerNotAllowed {
+                worker_id: worker.worker_id,
+            });
+        }
+
+        // A fenced worker is dead — reject before taint/overload checks so it is
+        // never selected, even on a cache-hit affinity pin.
+        if self.is_worker_fenced(worker.worker_id) {
+            return Err(WorkerEligibilityError::WorkerFenced {
                 worker_id: worker.worker_id,
             });
         }
@@ -339,6 +373,49 @@ mod tests {
         assert_eq!(
             result.err(),
             Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
+        );
+    }
+
+    // DIS-2404: a fenced (dead/deregistered) worker must be rejected on rank
+    // validation even though it is allowed, in range, taint-compatible, and not
+    // overloaded — availability overrides cache affinity.
+    #[test]
+    fn routing_eligibility_rejects_fenced_worker() {
+        let workers = workers();
+        let fenced = HashSet::from([7]);
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_fenced_workers(Some(&fenced));
+
+        let result = eligibility.validate_worker_rank(&workers, WorkerWithDpRank::new(7, 3));
+
+        assert_eq!(
+            result.err(),
+            Some(WorkerEligibilityError::WorkerFenced { worker_id: 7 })
+        );
+    }
+
+    // DIS-2404: unlike transient overload (which the affinity/pinned pre-validation
+    // path deliberately ignores), a fence must NOT be ignored — a dead worker is
+    // never eligible, even for a cache-hit affinity pin.
+    #[test]
+    fn fenced_worker_not_ignored_by_affinity_path() {
+        let workers = workers();
+        let config = workers.get(&7).unwrap();
+        let fenced = HashSet::from([7]);
+        let constraints = RoutingConstraints::default();
+
+        let unfenced = RoutingEligibility::new(None, None, None, &constraints);
+        assert!(
+            unfenced.allows_worker_ignoring_overload(7, config),
+            "worker 7 is eligible when not fenced"
+        );
+
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_fenced_workers(Some(&fenced));
+        assert!(
+            !eligibility.allows_worker_ignoring_overload(7, config),
+            "fenced worker 7 must be rejected even on the affinity-ignoring-overload path"
         );
     }
 
