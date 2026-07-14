@@ -191,7 +191,7 @@ pub fn query_lower_tiers(
     )
 }
 
-fn combine_router_hint_root_candidates(
+fn merge_router_hint_tier_candidates(
     device_candidates: Option<&RouterHintRootCandidates>,
     continuations: &FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
     tier_matches: &LowerTierMatchDetails,
@@ -316,7 +316,7 @@ pub fn query_lower_tiers_with_options(
             retain_router_hint_chain,
         );
         if retain_router_hint_chain {
-            tier_matches.router_hint_root_candidates = combine_router_hint_root_candidates(
+            tier_matches.router_hint_root_candidates = merge_router_hint_tier_candidates(
                 device_matches.router_hint_root_candidates.as_ref(),
                 &continuations,
                 &tier_matches,

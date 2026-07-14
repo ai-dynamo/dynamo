@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -111,24 +115,48 @@ fn cache_hit_for_worker(
     }
 }
 
-fn target_cached_prefix_blocks_from_tiered_matches(
-    tiered_matches: &indexer::TieredMatchDetails,
-    target: WorkerWithDpRank,
-) -> u32 {
-    let device_blocks = tiered_matches
-        .device
-        .overlap_scores
-        .scores
-        .get(&target)
-        .copied()
-        .unwrap_or(0) as usize;
-    let secondary_extension_blocks = tiered_matches
-        .lower_tier
-        .get(&StorageTier::HostPinned)
-        .and_then(|details| details.hits.get(&target))
-        .copied()
-        .unwrap_or(0);
-    u32::try_from(device_blocks + secondary_extension_blocks).unwrap_or(u32::MAX)
+#[derive(Debug, Clone, Default)]
+struct RouterHintPrep {
+    candidates: Option<RouterHintRootCandidates>,
+    target_cached_prefix_blocks: HashMap<WorkerWithDpRank, u32>,
+}
+
+impl RouterHintPrep {
+    fn from_tiered_matches(tiered_matches: &indexer::TieredMatchDetails) -> Self {
+        let candidates = tiered_matches
+            .lower_tier
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .or(tiered_matches.device.router_hint_root_candidates.as_ref())
+            .cloned();
+
+        let mut target_cached_prefix_blocks = HashMap::new();
+        for (worker, blocks) in &tiered_matches.device.overlap_scores.scores {
+            target_cached_prefix_blocks.insert(*worker, *blocks);
+        }
+        if let Some(lower_tier_details) = tiered_matches.lower_tier.get(&StorageTier::HostPinned) {
+            for (worker, blocks) in &lower_tier_details.hits {
+                let entry = target_cached_prefix_blocks.entry(*worker).or_insert(0);
+                *entry = entry.saturating_add(usize_to_u32_saturating(*blocks));
+            }
+        }
+
+        Self {
+            candidates,
+            target_cached_prefix_blocks,
+        }
+    }
+
+    fn target_cached_prefix_blocks(&self, target: WorkerWithDpRank) -> u32 {
+        self.target_cached_prefix_blocks
+            .get(&target)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 // [gluo TODO] shouldn't need to be public
@@ -675,6 +703,12 @@ where
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, self.block_size, &tiered_matches)
                 .signals();
+        let router_hint_prep = if self.kv_router_config.router_hints {
+            RouterHintPrep::from_tiered_matches(&tiered_matches)
+        } else {
+            RouterHintPrep::default()
+        };
+        drop(tiered_matches);
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
@@ -721,18 +755,12 @@ where
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
-        let lower_tier_router_hint_root_candidates = tiered_matches
-            .lower_tier
-            .get(&StorageTier::HostPinned)
-            .and_then(|details| details.router_hint_root_candidates.as_ref());
-        let router_hint_root_candidates = lower_tier_router_hint_root_candidates
-            .or(tiered_matches.device.router_hint_root_candidates.as_ref());
         let target_cached_prefix_blocks =
-            target_cached_prefix_blocks_from_tiered_matches(&tiered_matches, response.best_worker);
+            router_hint_prep.target_cached_prefix_blocks(response.best_worker);
         let router_hint = self.router_hint_for_selection(
             response.best_worker,
             target_cached_prefix_blocks,
-            router_hint_root_candidates,
+            router_hint_prep.candidates.as_ref(),
         );
 
         let total_elapsed = start.elapsed();
