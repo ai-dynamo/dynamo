@@ -268,6 +268,10 @@ pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
+    /// Embedding-only tokenizer configured to apply the HuggingFace
+    /// post-processor (for example BOS/EOS). Kept separate so chat and
+    /// completion tokenization retains its existing behavior.
+    embedding_tokenizer_with_special_tokens: Option<Arc<dyn Tokenizer>>,
     model_info: Arc<dyn ModelInfo>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -526,13 +530,40 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Build the preprocessor used by token-input embedding pipelines.
+    ///
+    /// Embedding requests never render chat prompts, and pooling-only model
+    /// repositories commonly omit a chat template. Use Dynamo's no-op
+    /// formatter here so model registration does not impose an unrelated chat
+    /// requirement while keeping the shared tokenization/response machinery.
+    pub fn new_for_embeddings(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        if !mdc.model_type.supports_embedding() {
+            anyhow::bail!("embedding preprocessor requires an embedding-capable model");
+        }
+
+        let tokenizer = mdc.tokenizer()?;
+        let PromptFormatter::OAI(formatter) = PromptFormatter::no_op();
+        Self::new_with_parts(mdc, formatter, tokenizer)
+    }
+
     pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
+        let embedding_tokenizer = if mdc.model_type.supports_embedding() {
+            Some(
+                mdc.tokenizer_with_options(crate::tokenizers::TokenizerOptions {
+                    add_special_tokens: true,
+                })?,
+            )
+        } else {
+            None
+        };
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
+        let embedding_tokenizer_with_special_tokens: Option<Arc<dyn Tokenizer>> =
+            embedding_tokenizer.map(|tokenizer| (*tokenizer).clone());
         let lora_name = mdc.lora.as_ref().map(|l| l.name.clone());
         let Some(ref model_info) = mdc.model_info else {
             anyhow::bail!(
@@ -719,6 +750,7 @@ impl OpenAIPreprocessor {
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
+            embedding_tokenizer_with_special_tokens,
             model_info,
             mdcsum,
             lora_name,
@@ -1950,15 +1982,32 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
+        // Preserve the existing tokenizer path when the request omits
+        // `add_special_tokens`. Only an explicit true opts into the tokenizer
+        // configured to apply the HuggingFace post-processor; explicit false
+        // and omission both retain the legacy tokenizer behavior. Caller-
+        // provided token IDs are already final and never pass through either
+        // tokenizer.
+        let tokenizer = if request.add_special_tokens == Some(true) {
+            self.embedding_tokenizer_with_special_tokens
+                .clone()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "embedding special-token tokenizer is unavailable for a non-embedding model"
+                    )
+                })?
+        } else {
+            self.tokenizer.clone()
+        };
         let all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
+                let encoding = tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
             dynamo_protocols::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
-                    let tokenizer = self.tokenizer.clone();
+                    let tokenizer = tokenizer.clone();
                     let strs = input_strs.clone();
                     move || {
                         tokenizer.encode_batch(&strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())

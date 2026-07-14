@@ -1144,6 +1144,19 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        self.tokenizer_with_options(Default::default())
+    }
+
+    /// Load a tokenizer with backend-specific construction options.
+    ///
+    /// This is kept separate from Self::tokenizer so chat/completion
+    /// preprocessing retains its historical defaults while embedding
+    /// preprocessing can honor an explicit request to add model-declared
+    /// special tokens to raw text.
+    pub(crate) fn tokenizer_with_options(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
         let use_fast = self
             .runtime_config
             .effective_tokenizer_backend()
@@ -1197,11 +1210,23 @@ impl ModelDeploymentCard {
                 };
 
                 // Merge already applied above; just wrap.
-                let wrap_hf =
-                    |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                let wrap_hf = |hf: HfTokenizer| {
+                    let tokenizer = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                    crate::tokenizers::traits::Tokenizer::with_options(tokenizer, options)
+                };
 
                 // Pick the inner backend.
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast
+                    && options.add_special_tokens
+                {
+                    // FastTokenizer does not apply the HuggingFace
+                    // post-processor, so it cannot honor add_special_tokens.
+                    // Prefer correctness for this embedding-only tokenizer.
+                    tracing::info!(
+                        "Using HuggingFace tokenizer backend for embedding special tokens"
+                    );
+                    Arc::new(wrap_hf(hf))
+                } else if use_fast {
                     if let Some(path_str) = p.to_str() {
                         match crate::tokenizers::FastTokenizer::from_file(path_str) {
                             Ok(fast) => {
@@ -1227,7 +1252,7 @@ impl ModelDeploymentCard {
                     Arc::new(wrap_hf(hf))
                 };
 
-                if cache_enabled {
+                if cache_enabled && !options.add_special_tokens {
                     tracing::info!(
                         cache_bytes,
                         cache_extend,
@@ -1242,6 +1267,10 @@ impl ModelDeploymentCard {
                         self.name(),
                     )
                 } else {
+                    // When special-token processing is enabled, incremental
+                    // prefix-cache segments must not each run the HuggingFace
+                    // post-processor (which could add BOS/EOS per segment).
+                    // A globally disabled cache also reaches this raw path.
                     raw
                 }
             }

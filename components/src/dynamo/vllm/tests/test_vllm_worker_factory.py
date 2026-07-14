@@ -14,6 +14,7 @@ from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
+    _embedding_model_input,
     _wait_and_load_benchmark,
 )
 
@@ -29,6 +30,28 @@ pytestmark = [
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, ModelInput.Text),
+        ("0", ModelInput.Text),
+        ("false", ModelInput.Text),
+        ("1", ModelInput.Tokens),
+        ("true", ModelInput.Tokens),
+    ],
+)
+def test_embedding_model_input(
+    monkeypatch: pytest.MonkeyPatch,
+    env_value: str | None,
+    expected: ModelInput,
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("DYN_EMBEDDING_FRONTEND_TOKENIZATION", raising=False)
+    else:
+        monkeypatch.setenv("DYN_EMBEDDING_FRONTEND_TOKENIZATION", env_value)
+    assert _embedding_model_input() == expected
 
 
 def _make_config(**overrides) -> Mock:

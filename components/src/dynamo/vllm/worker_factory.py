@@ -54,6 +54,18 @@ logger = logging.getLogger(__name__)
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
 
 
+def _embedding_model_input() -> ModelInput:
+    """Select whether the Dynamo frontend or vLLM tokenizes embedding text."""
+    frontend_tokenization = os.environ.get(
+        "DYN_EMBEDDING_FRONTEND_TOKENIZATION", "0"
+    ).strip().lower()
+    return (
+        ModelInput.Tokens
+        if frontend_tokenization not in ("", "0", "false", "no")
+        else ModelInput.Text
+    )
+
+
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
     """Wait for benchmark result files and aggregate across DP ranks."""
     base_path = Path(
@@ -343,7 +355,7 @@ class WorkerFactory:
                     health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
-                    ModelInput.Text,
+                    _embedding_model_input(),
                     ModelType.Embedding,
                     generate_endpoint,
                     config,

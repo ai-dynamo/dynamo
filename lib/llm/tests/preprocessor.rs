@@ -745,3 +745,91 @@ mod context_length_validation {
         assert!(result.is_ok(), "context_length=0 should skip validation");
     }
 }
+
+mod embedding_without_chat_template {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::model_type::ModelType;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::openai::embeddings::NvCreateEmbeddingRequest;
+    use serde_json::json;
+
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+    #[test]
+    fn embedding_preprocessor_does_not_require_chat_template() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.model_type = ModelType::Embedding;
+        mdc.prompt_formatter = None;
+        mdc.chat_template_file = None;
+
+        assert!(
+            OpenAIPreprocessor::new(mdc.clone()).is_err(),
+            "the general chat preprocessor should still require a prompt formatter"
+        );
+        OpenAIPreprocessor::new_for_embeddings(mdc)
+            .expect("embedding-only preprocessing must not require a chat template");
+    }
+
+    #[test]
+    fn embedding_constructor_rejects_non_embedding_model() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.model_type = ModelType::Chat;
+
+        let err = match OpenAIPreprocessor::new_for_embeddings(mdc) {
+            Ok(_) => panic!("non-embedding models must use the general constructor"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("requires an embedding-capable model")
+        );
+    }
+
+    fn embedding_request(add_special_tokens: Option<bool>) -> NvCreateEmbeddingRequest {
+        let mut value = json!({
+            "model": "test-model",
+            "input": "hello"
+        });
+        if let Some(value_) = add_special_tokens {
+            value["add_special_tokens"] = json!(value_);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn omitted_add_special_tokens_preserves_legacy_tokenization() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.model_type = ModelType::Embedding;
+        mdc.prompt_formatter = None;
+        mdc.chat_template_file = None;
+        let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+
+        let omitted = preprocessor
+            .preprocess_embedding_request(&embedding_request(None))
+            .await
+            .unwrap()
+            .0
+            .token_ids;
+        let explicit_false = preprocessor
+            .preprocess_embedding_request(&embedding_request(Some(false)))
+            .await
+            .unwrap()
+            .0
+            .token_ids;
+        let explicit_true = preprocessor
+            .preprocess_embedding_request(&embedding_request(Some(true)))
+            .await
+            .unwrap()
+            .0
+            .token_ids;
+
+        assert_eq!(omitted, explicit_false);
+        assert_ne!(omitted, explicit_true);
+        assert_eq!(explicit_true[0][0], 128000, "explicit true adds BOS");
+        assert_ne!(
+            omitted[0].first(),
+            Some(&128000),
+            "omission does not add BOS"
+        );
+    }
+}

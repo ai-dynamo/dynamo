@@ -3708,12 +3708,21 @@ class EmbeddingWorkerHandler:
         serialized as a base64-encoded string of little-endian ``f32`` bytes
         per the OpenAI spec, so the byte count matches the (possibly reduced)
         dimensionality. Optional ``truncate_prompt_tokens`` is forwarded to
-        vLLM's tokenizer path for raw-text inputs.
+        vLLM's tokenizer path for raw-text inputs. Optional
+        ``add_special_tokens`` is also forwarded for raw text; when omitted,
+        vLLM's embedding default is retained. Rust-preprocessed and
+        caller-supplied token IDs are never modified.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
+        # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
+        # requests carry the same logical batch as 'token_ids'.
         input_field = request.get("input")
         if input_field is None:
-            raise ValueError("Embedding request missing required 'input' field")
+            input_field = request.get("token_ids")
+        if input_field is None:
+            raise ValueError(
+                "Embedding request missing required 'input' or 'token_ids' field"
+            )
 
         # Per OpenAI spec, `input` can be:
         #   - str           : single text prompt
@@ -3743,7 +3752,7 @@ class EmbeddingWorkerHandler:
             )
 
         truncate_prompt_tokens = request.get("truncate_prompt_tokens")
-        tokenization_kwargs: dict[str, Any] | None = None
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             if not isinstance(truncate_prompt_tokens, int) or isinstance(
                 truncate_prompt_tokens, bool
@@ -3757,9 +3766,16 @@ class EmbeddingWorkerHandler:
                     "truncate_prompt_tokens must be >= -1, "
                     f"got {truncate_prompt_tokens}"
                 )
-            tokenization_kwargs = {
-                "truncate_prompt_tokens": truncate_prompt_tokens,
-            }
+            tokenization_kwargs["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+        add_special_tokens = request.get("add_special_tokens")
+        if add_special_tokens is not None:
+            if not isinstance(add_special_tokens, bool):
+                raise TypeError(
+                    "Invalid 'add_special_tokens' type "
+                    f"{type(add_special_tokens).__name__}; expected bool"
+                )
+            tokenization_kwargs["add_special_tokens"] = add_special_tokens
 
         # Request the pooled sentence embedding. With no task, vLLM's
         # encode() resolves to per-token output (the full ``n_tokens x
@@ -3806,7 +3822,7 @@ class EmbeddingWorkerHandler:
                     "pooling_params": pooling_params,
                     "request_id": request_id,
                 }
-                if tokenization_kwargs is not None and isinstance(encode_arg, str):
+                if tokenization_kwargs and isinstance(encode_arg, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
                 async for out in self.engine_client.encode(**encode_kwargs):

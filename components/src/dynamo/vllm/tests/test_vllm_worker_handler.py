@@ -1521,6 +1521,100 @@ class TestEmbeddingWorkerHandlerCancellation:
             },
         ]
 
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_raw_text_add_special_tokens_forwarded_to_vllm(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: list[dict | None] = []
+
+        async def fake_encode(
+            prompt, pooling_params, request_id, *, tokenization_kwargs=None
+        ):
+            captured.append(tokenization_kwargs)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        for add_special_tokens in (True, False):
+            request = {
+                "input": "hello",
+                "model": "test-model",
+                "add_special_tokens": add_special_tokens,
+                "truncate_prompt_tokens": 128,
+            }
+            _ = [r async for r in handler.generate(request, context)]
+
+        assert captured == [
+            {"truncate_prompt_tokens": 128, "add_special_tokens": True},
+            {"truncate_prompt_tokens": 128, "add_special_tokens": False},
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_omitted_add_special_tokens_is_not_forwarded_to_vllm(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: list[dict] = []
+
+        async def fake_encode(prompt, pooling_params, request_id, **kwargs):
+            captured.append(kwargs)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        request = {"input": "hello", "model": "test-model"}
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert captured == [{}]
+
+    @pytest.mark.parametrize("value", ["true", 1, 0, []])
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_add_special_tokens_rejects_non_bool(self, value):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        request = {
+            "input": "hello",
+            "model": "test-model",
+            "add_special_tokens": value,
+        }
+        with pytest.raises(TypeError, match="Invalid 'add_special_tokens' type"):
+            async for _ in handler.generate(request, context):
+                pass
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_rust_preprocessed_token_ids_are_not_retokenized(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            captured.append(prompt)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        request = {
+            "token_ids": [[11, 12, 13], [21, 22]],
+            "model": "test-model",
+            "add_special_tokens": True,
+        }
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert [p["prompt_token_ids"] for p in captured] == [
+            [11, 12, 13],
+            [21, 22],
+        ]
+
     @pytest.mark.parametrize(
         ("truncate_prompt_tokens", "error_type", "match"),
         [
