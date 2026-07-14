@@ -55,6 +55,12 @@ class DynamoRuntimeConfig(ConfigBase):
     # default; when set, these surface env vars that the Rust runtime reads
     # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
     engine_request_limit: Optional[int] = None
+    tcp_tls_cert_path: Optional[str] = None
+    tcp_tls_key_path: Optional[str] = None
+    tcp_tls_ca_cert_path: Optional[str] = None
+    tcp_tls_insecure: bool = False
+    tcp_tls_server_name: Optional[str] = None
+    tcp_tls_handshake_timeout_secs: Optional[int] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -89,6 +95,28 @@ class DynamoRuntimeConfig(ConfigBase):
         if self.engine_request_limit is not None and self.engine_request_limit <= 0:
             raise ValueError(
                 f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+            )
+
+        # Propagate TCP TLS CLI flags to env vars so the Rust runtime picks them up.
+        if self.tcp_tls_cert_path:
+            os.environ["DYN_TCP_TLS_CERT_PATH"] = self.tcp_tls_cert_path
+        if self.tcp_tls_key_path:
+            os.environ["DYN_TCP_TLS_KEY_PATH"] = self.tcp_tls_key_path
+        if self.tcp_tls_ca_cert_path:
+            os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = self.tcp_tls_ca_cert_path
+        if self.tcp_tls_insecure:
+            os.environ["DYN_TCP_TLS_INSECURE"] = "1"
+        else:
+            os.environ.pop("DYN_TCP_TLS_INSECURE", None)
+        if self.tcp_tls_server_name:
+            os.environ["DYN_TCP_TLS_SERVER_NAME"] = self.tcp_tls_server_name
+        if self.tcp_tls_handshake_timeout_secs is not None:
+            if self.tcp_tls_handshake_timeout_secs <= 0:
+                raise ValueError(
+                    f"--tcp-tls-handshake-timeout must be a positive integer, got {self.tcp_tls_handshake_timeout_secs}"
+                )
+            os.environ["DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS"] = str(
+                self.tcp_tls_handshake_timeout_secs
             )
 
     def _validate_output_modalities(self) -> None:
@@ -334,4 +362,54 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Max requests handled concurrently by the engine (worker-pool "
             "semaphore size). Enables worker-side request rejection when set. "
             "Disabled by default.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-cert-path",
+            env_var="DYN_TCP_TLS_CERT_PATH",
+            default=None,
+            help="Path to PEM certificate for the TCP server.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-key-path",
+            env_var="DYN_TCP_TLS_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP server certificate.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-ca-cert-path",
+            env_var="DYN_TCP_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate used by this node to verify the TCP peer's certificate.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--tcp-tls-insecure",
+            env_var="DYN_TCP_TLS_INSECURE",
+            default=False,
+            help="Disable TCP TLS certificate verification. For local development only.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-server-name",
+            env_var="DYN_TCP_TLS_SERVER_NAME",
+            default=None,
+            help="Override TLS SNI server name for TCP connections (useful when connecting by IP).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-handshake-timeout",
+            env_var="DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS",
+            default=None,
+            arg_type=int,
+            dest="tcp_tls_handshake_timeout_secs",
+            help="TLS handshake timeout in seconds (default: 3).",
         )

@@ -269,6 +269,12 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tcp_tls_cert_path:
+        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
+    if config.tcp_tls_key_path:
+        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
+    if config.tcp_tls_ca_cert_path:
+        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
