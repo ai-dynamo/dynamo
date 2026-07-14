@@ -182,6 +182,17 @@ class DynamoVllmArgGroup(ArgGroup):
             "and InstrumentedScheduler injection (none apply to pooling models).",
         )
 
+        add_argument(
+            g,
+            flag_name="--embedding-worker-processes",
+            env_var="DYN_VLLM_EMBEDDING_WORKER_PROCESSES",
+            default=1,
+            arg_type=int,
+            help="Number of Dynamo embedding endpoint processes sharing one "
+            "vLLM EngineCore. Only valid with --embedding-worker. The parent "
+            "process counts as one worker (default: 1).",
+        )
+
         # Headless mode for multi-node TP/PP
         add_negatable_bool_argument(
             g,
@@ -349,6 +360,7 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+    embedding_worker_processes: int = 1
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
@@ -382,6 +394,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
         self._validate_benchmark_config()
+        self._validate_embedding_worker_processes()
 
     def _validate_benchmark_config(self) -> None:
         if self.benchmark_mode is None:
@@ -669,4 +682,22 @@ class DynamoVllmConfig(ConfigBase):
                 "generation scheduler and not compatible with pooling engines. "
                 "Embedding workers do not run generation, so prefill/decode "
                 "benchmark sweeps are not meaningful."
+            )
+
+    def _validate_embedding_worker_processes(self) -> None:
+        """Validate the embedding-only shared-EngineCore process count."""
+        if self.embedding_worker_processes < 1:
+            raise ValueError("--embedding-worker-processes must be at least 1.")
+        if self.embedding_worker_processes == 1:
+            return
+        if not self.embedding_worker:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 requires "
+                "--embedding-worker."
+            )
+        if self.headless:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot be combined "
+                "with --headless. Shared-EngineCore processes serve Dynamo "
+                "embedding endpoints and therefore require the runtime."
             )

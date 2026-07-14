@@ -39,6 +39,8 @@ def create_config() -> DynamoVllmConfig:
     config.multimodal_decode_worker = False
     config.enable_multimodal = False
     config.embedding_worker = False
+    config.embedding_worker_processes = 1
+    config.headless = False
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
@@ -320,3 +322,37 @@ class TestValidateBenchmarkConfig:
         config.benchmark_prefill_batch_granularity = 1024
 
         config._validate_benchmark_config()
+
+
+class TestEmbeddingWorkerProcesses:
+    def test_default_single_process_is_accepted(self):
+        config = create_config()
+        config._validate_embedding_worker_processes()
+
+    def test_multiple_processes_require_embedding_worker(self):
+        config = create_config()
+        config.embedding_worker_processes = 4
+        with pytest.raises(ValueError, match="requires --embedding-worker"):
+            config._validate_embedding_worker_processes()
+
+    def test_multiple_embedding_processes_are_accepted(self):
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 8
+        config._validate_embedding_worker_processes()
+
+    @pytest.mark.parametrize("count", [0, -1])
+    def test_process_count_must_be_positive(self, count):
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = count
+        with pytest.raises(ValueError, match="at least 1"):
+            config._validate_embedding_worker_processes()
+
+    def test_headless_is_rejected(self):
+        config = create_config()
+        config.embedding_worker = True
+        config.embedding_worker_processes = 4
+        config.headless = True
+        with pytest.raises(ValueError, match="--headless"):
+            config._validate_embedding_worker_processes()
