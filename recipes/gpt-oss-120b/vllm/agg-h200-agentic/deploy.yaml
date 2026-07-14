@@ -74,11 +74,14 @@ spec:
                 - --compilation-config=$(COMPILATION_CONFIG)
                 - --speculative-config=$(SPECULATIVE_CONFIG)
                 # CPU KV offload is ON by default on H200: +9% tok/s/GPU at the 50-tps/user floor on the
-                # agentic trace (2026-07-09 A/B, see perf/README.md) — the host tier relieves GPU KV eviction
-                # pressure. SimpleCPUOffloadConnector is native + SupportsHMA (hybrid KV manager stays on; no
-                # --disable-hybrid-kv-cache-manager needed). Do NOT swap in LMCache — it crashes on H200
-                # (request_finished `assert self.lmcache_engine is not None` → EngineDeadError) and forces the
-                # hybrid KV manager off. To disable offload, remove this one line:
+                # agentic trace (2026-07-09 perf A/B) — the host tier relieves GPU KV eviction pressure — and it
+                # is QUALITY-NEUTRAL (2026-07-13 controlled A/B, 541-prompt IFEval: offload-off 78.7 vs on 77.6
+                # p-strict, within noise; GPQA 73.7 either way; truncation 0.6%). SimpleCPUOffloadConnector is
+                # native + SupportsHMA (hybrid KV manager stays on; no --disable-hybrid-kv-cache-manager needed).
+                # Note: offload adds KV-reload tail latency — an lm_eval run through it undercounted IFEval
+                # (client timeouts under load), so measure quality with generous request timeouts. To disable
+                # offload, remove the next line. Do NOT swap in LMCache — it crashes on H200 (request_finished →
+                # EngineDeadError) and forces the HMA off.
                 - --kv-transfer-config=$(KV_TRANSFER_CONFIG)
                 - --dyn-reasoning-parser
                 - gpt_oss
