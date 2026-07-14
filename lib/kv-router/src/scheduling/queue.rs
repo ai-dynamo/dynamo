@@ -21,8 +21,8 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
-    SchedulingResponse,
+    FencedWorkerProvider, KvSchedulerError, OverloadedWorkerProvider, SchedulingContext,
+    SchedulingRequest, SchedulingResponse,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerWithDpRank,
@@ -87,6 +87,8 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    // DIS-2404: fenced (dead) workers, rejected on every eligibility path.
+    fenced_worker_provider: Option<FencedWorkerProvider>,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -143,6 +145,7 @@ impl<
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            None,
         )
     }
 
@@ -156,6 +159,7 @@ impl<
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        fenced_worker_provider: Option<FencedWorkerProvider>,
     ) -> Self {
         Self::new_with_policy_profile_and_capacity(
             slots,
@@ -166,6 +170,7 @@ impl<
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            fenced_worker_provider,
             ADMISSION_CHANNEL_CAPACITY,
         )
     }
@@ -180,6 +185,7 @@ impl<
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        fenced_worker_provider: Option<FencedWorkerProvider>,
         admission_channel_capacity: usize,
     ) -> Self {
         let queueing_enabled = profile
@@ -240,6 +246,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider,
+            fenced_worker_provider,
         };
         tokio::spawn(actor.run(admission_rx));
         Self {
@@ -682,7 +689,13 @@ impl<
                 .overloaded_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
-            let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
+            let fenced_worker_ids = self
+                .fenced_worker_provider
+                .as_ref()
+                .and_then(|provider| provider());
+            let eligibility = request
+                .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
+                .with_fenced_workers(fenced_worker_ids.as_ref());
             self.selector
                 .select_worker(&workers, &request, eligibility, self.block_size)
                 .map(|selection| {
@@ -1204,6 +1217,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         ));
         (queue, slots, cfg_tx)
     }
@@ -1412,6 +1426,7 @@ mod tests {
             DefaultWorkerSelector::new(None, "test"),
             None,
             Some(refresher),
+            None,
             None,
             admission_channel_capacity,
         ));

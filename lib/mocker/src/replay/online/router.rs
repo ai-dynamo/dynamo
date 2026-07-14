@@ -165,6 +165,7 @@ impl KvReplayRouter {
             prefill_load_estimator,
             None,
             None,
+            None,
             config.router_queue_recheck_interval(),
             config.router_track_prefill_tokens,
             scheduler_cancel.clone(),

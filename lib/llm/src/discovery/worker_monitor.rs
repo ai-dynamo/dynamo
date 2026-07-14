@@ -751,12 +751,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
                         overloaded_tracker.remove_workers(&removed_workers);
                         client.clear_overloaded_instances_for_removed(&removed_workers);
+                        // DIS-2404: fence removed workers so the router stops selecting
+                        // them (candidate/affinity) before the candidate watch converges.
+                        client.fence_instances_removed(&removed_workers);
                         // Mirror the prune to the prefill Client (disagg). Prefill workers are
                         // routed by a separate PrefillRouter with its own Client, so its
                         // overloaded set must be cleared too or removed prefill ids would
                         // linger as phantom-overloaded entries.
                         if let Some(prefill_client) = prefill_client_holder.read().unwrap().clone() {
                             prefill_client.clear_overloaded_instances_for_removed(&removed_workers);
+                            prefill_client.fence_instances_removed(&removed_workers);
                         }
 
                         // Update worker load states with runtime config values for all dp_ranks
@@ -908,6 +912,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
                             overloaded_tracker.remove_workers(&removed_workers);
                             client.clear_overloaded_instances_for_removed(&removed_workers);
+                            client.fence_instances_removed(&removed_workers);
                         }
 
                         known_decode_workers = current_instances;
@@ -959,6 +964,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             }
                             overloaded_tracker.remove_workers(&removed_workers);
                             client.clear_overloaded_instances_for_removed(&removed_workers);
+                            client.fence_instances_removed(&removed_workers);
                         }
 
                         known_prefill_workers = current_instances;

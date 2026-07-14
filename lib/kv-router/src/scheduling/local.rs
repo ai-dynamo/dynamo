@@ -18,8 +18,8 @@ use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    FencedWorkerProvider, KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode,
+    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -89,6 +89,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        fenced_worker_provider: Option<FencedWorkerProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -105,6 +106,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            fenced_worker_provider,
             recheck_interval,
             track_prefill_tokens_default,
             cancellation_token,
@@ -123,6 +125,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        fenced_worker_provider: Option<FencedWorkerProvider>,
         recheck_interval: Duration,
         track_prefill_tokens_default: bool,
         cancellation_token: CancellationToken,
@@ -175,6 +178,7 @@ where
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            fenced_worker_provider,
         ));
         let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);
@@ -580,6 +584,7 @@ where
             prefill_load_estimator,
             None,
             overloaded_worker_provider,
+            None,
             recheck_interval,
             track_prefill_tokens_default,
             cancellation_token,
@@ -649,6 +654,7 @@ where
             prefill_load_estimator,
             None,
             overloaded_worker_provider,
+            None,
             recheck_interval,
             track_prefill_tokens_default,
             cancellation_token,

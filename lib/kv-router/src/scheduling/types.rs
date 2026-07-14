@@ -23,6 +23,12 @@ use crate::sequences::WorkerLoadProjection;
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
 
+/// DIS-2404: supplies the set of fenced (dead/deregistered) workers at
+/// selection time. Same shape as [`OverloadedWorkerProvider`], but a fenced
+/// worker is rejected on every eligibility path (availability overrides
+/// cache affinity), whereas overload is ignored by the affinity path.
+pub type FencedWorkerProvider = Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TierOverlapBlocks {
     #[serde(default)]

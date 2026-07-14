@@ -468,8 +468,14 @@ pub struct Client {
     /// reject dead workers on every path (availability overrides cache affinity)
     /// while the candidate watch catches up, and to break a sticky session
     /// affinity bound to a now-dead worker. Cleared when the same id re-registers.
-    fenced_instances: Arc<std::sync::RwLock<HashSet<u64>>>,
+    fenced_instances: Arc<std::sync::RwLock<HashMap<u64, std::time::Instant>>>,
 }
+
+/// DIS-2404: how long a fenced (dead) worker stays fenced. Only needs to exceed
+/// the candidate-watch convergence window — the affinity path re-binds after a
+/// single fenced rejection (`select_with_affinity`) — with margin. TTL-bounded
+/// so churn of unique-per-lease ids cannot grow the fenced set without limit.
+const FENCE_TTL: Duration = Duration::from_secs(30);
 
 impl Client {
     // Client with auto-discover instances using key-value store
@@ -507,7 +513,7 @@ impl Client {
             instance_source: instance_source.clone(),
             routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
             reconcile_interval,
-            fenced_instances: Arc::new(std::sync::RwLock::new(HashSet::new())),
+            fenced_instances: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
         client.monitor_instance_source();
         Ok(client)
@@ -622,8 +628,11 @@ impl Client {
         if removed_instance_ids.is_empty() {
             return;
         }
+        let now = std::time::Instant::now();
         let mut fenced = self.fenced_instances.write().unwrap();
-        fenced.extend(removed_instance_ids.iter().copied());
+        for id in removed_instance_ids {
+            fenced.insert(*id, now);
+        }
     }
 
     /// Clear the fence for instances that are present again. A re-registered
@@ -644,12 +653,21 @@ impl Client {
 
     /// Snapshot of currently fenced workers, or `None` when empty (matching the
     /// overloaded-set convention so selection can skip the check cheaply).
+    /// Entries older than [`FENCE_TTL`] are pruned here so the set stays bounded.
     pub fn fenced_instance_ids(&self) -> Option<HashSet<u64>> {
-        let fenced = self.fenced_instances.read().unwrap();
+        {
+            let fenced = self.fenced_instances.read().unwrap();
+            if fenced.is_empty() {
+                return None;
+            }
+        }
+        let now = std::time::Instant::now();
+        let mut fenced = self.fenced_instances.write().unwrap();
+        fenced.retain(|_, fenced_at| now.duration_since(*fenced_at) < FENCE_TTL);
         if fenced.is_empty() {
             None
         } else {
-            Some(fenced.clone())
+            Some(fenced.keys().copied().collect())
         }
     }
 
