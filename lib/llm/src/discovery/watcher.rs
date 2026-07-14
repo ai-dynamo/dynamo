@@ -37,7 +37,10 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{EncoderRouter, PrefillRouter},
-    local_model::runtime_config::{TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY},
+    local_model::runtime_config::{
+        SGLANG_INFERENCE_V1_GENERATE_CAPABILITY, TokenizerBackend,
+        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -139,13 +142,16 @@ fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
             .any(|worker_type| *worker_type == WorkerType::Encode)
 }
 
-fn supports_vllm_generate(card: &ModelDeploymentCard) -> bool {
+fn supports_generate_capability(card: &ModelDeploymentCard, capability: &str) -> bool {
     matches!(
-        card.runtime_config
-            .runtime_data
-            .get(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+        card.runtime_config.runtime_data.get(capability),
         Some(serde_json::Value::Bool(true))
     )
+}
+
+fn supports_engine_generate(card: &ModelDeploymentCard) -> bool {
+    supports_generate_capability(card, VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+        || supports_generate_capability(card, SGLANG_INFERENCE_V1_GENERATE_CAPABILITY)
 }
 
 const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
@@ -228,8 +234,8 @@ pub struct ModelWatcher {
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
-    /// Whether the frontend configured the vLLM-compatible Generate API.
-    /// Keep the raw Generate pipeline out of non-HTTP and default-off paths.
+    /// Whether the frontend configured an engine-native Generate API. Keep the
+    /// raw Generate pipeline out of non-HTTP and default-off paths.
     generate_engine_enabled: bool,
 }
 
@@ -1552,7 +1558,7 @@ impl ModelWatcher {
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
             let needs_generate_pipeline =
-                self.generate_engine_enabled && supports_vllm_generate(card);
+                self.generate_engine_enabled && supports_engine_generate(card);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -2131,20 +2137,28 @@ mod tests {
     use crate::model_card::ModelDeploymentCard;
 
     #[test]
-    fn vllm_generate_requires_explicit_worker_capability() {
-        let mut card = ModelDeploymentCard::with_name_only("model");
-        card.model_type = ModelType::Chat | ModelType::Completions;
-        assert!(!supports_vllm_generate(&card));
+    fn generate_requires_explicit_worker_capability() {
+        for capability in [
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+            SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+        ] {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.model_type = ModelType::Chat | ModelType::Completions;
+            assert!(!supports_generate_capability(&card, capability));
+            assert!(!supports_engine_generate(&card));
 
-        card.runtime_config
-            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
-            .unwrap();
-        assert!(supports_vllm_generate(&card));
+            card.runtime_config
+                .set_engine_specific(capability, true)
+                .unwrap();
+            assert!(supports_generate_capability(&card, capability));
+            assert!(supports_engine_generate(&card));
 
-        card.runtime_config
-            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, false)
-            .unwrap();
-        assert!(!supports_vllm_generate(&card));
+            card.runtime_config
+                .set_engine_specific(capability, false)
+                .unwrap();
+            assert!(!supports_generate_capability(&card, capability));
+            assert!(!supports_engine_generate(&card));
+        }
     }
 
     #[test]

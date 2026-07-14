@@ -20,6 +20,7 @@ from dynamo.sglang._compat import (
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import Config
+from dynamo.sglang.engine_generate import EngineGenerateRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -270,6 +271,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Returns:
             Dict of sampling parameters for SGLang engine.
         """
+        engine_request = EngineGenerateRequest.from_request(request)
+        if engine_request is not None:
+            return engine_request.build_sampling_params()
+
         if not self.use_sglang_tokenizer:
             # Token-based request format
             sampling_opts = request.get("sampling_options", {})
@@ -343,10 +348,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         logging.debug(f"New Request ID: {context.id()}")
         trace_id = context.trace_id
+        engine_request = EngineGenerateRequest.from_request(request)
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
-        logprob_kwargs = self._build_logprob_kwargs(request)
+        logprob_kwargs = (
+            engine_request.build_logprob_kwargs()
+            if engine_request is not None
+            else self._build_logprob_kwargs(request)
+        )
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
@@ -579,13 +589,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
+                engine_data = {}
                 routed_experts = meta_info.get("routed_experts")
                 if routed_experts is not None and metadata_uploader is None:
                     # sglang >= 0.5.11 base64-encodes routed_experts upstream. It rides
                     # the engine's opaque engine_data passthrough (surfaced by the frontend
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
-                    out["engine_data"] = {"routed_experts": routed_experts}
+                    engine_data["routed_experts"] = routed_experts
                 if finish_reason:
+                    prompt_payload = (
+                        _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
+                            meta_info
+                        )
+                    )
+                    if prompt_payload is not None and metadata_uploader is None:
+                        engine_data["prompt_logprobs"] = prompt_payload
                     input_tokens = meta_info.get("prompt_tokens")
                     completion_tokens = meta_info.get("completion_tokens")
                     cached_tokens = meta_info.get("cached_tokens")
@@ -610,6 +628,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             meta_info.clear()
                 elif metadata_uploader is not None:
                     meta_info.clear()
+                if engine_data:
+                    out["engine_data"] = engine_data
                 if not context.is_stopped():
                     yield out
 

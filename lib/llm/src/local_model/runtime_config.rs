@@ -55,6 +55,14 @@ pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// Worker-advertised support for Dynamo's SGLang-compatible
+/// `POST /sglang/inference/v1/generate` adapter.
+///
+/// Keep this separate from [`VLLM_INFERENCE_V1_GENERATE_CAPABILITY`] so a
+/// mixed-backend frontend never forwards one engine's opaque request envelope
+/// to the other engine.
+pub const SGLANG_INFERENCE_V1_GENERATE_CAPABILITY: &str = "sglang_inference_v1_generate";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

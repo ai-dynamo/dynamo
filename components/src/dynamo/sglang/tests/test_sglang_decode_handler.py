@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
+from dynamo.sglang.engine_generate import EngineGenerateRequest
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
@@ -178,6 +179,106 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
 
     handler._cancellation_monitor = no_cancellation_monitor
     return handler
+
+
+def _engine_generate_request(sampling_params, **fields):
+    payload = {
+        "request_id": "req-sglang-generate",
+        "sampling_params": sampling_params,
+        "model": "test-model",
+        "stream": False,
+        "priority": 0,
+    }
+    payload.update(fields)
+    return {"extra_args": {"sglang_tito": payload}}
+
+
+def test_engine_generate_maps_vllm_sampling_names_to_sglang():
+    handler = _new_decode_handler()
+    request = _engine_generate_request(
+        {
+            "max_tokens": 8,
+            "min_tokens": 2,
+            "seed": 17,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "stop": ["END"],
+            "stop_token_ids": [99],
+            "n": 2,
+            "structured_outputs": {"json": {"type": "object", "required": ["answer"]}},
+            "logprobs": 2,
+        }
+    )
+
+    sampling_params = handler._build_sampling_params(request)
+
+    assert sampling_params == {
+        "max_new_tokens": 8,
+        "min_new_tokens": 2,
+        "sampling_seed": 17,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "stop": ["END"],
+        "stop_token_ids": [99],
+        "n": 2,
+        "json_schema": json.dumps({"type": "object", "required": ["answer"]}),
+    }
+
+
+def test_engine_generate_maps_output_and_prompt_logprobs(monkeypatch):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
+    request = _engine_generate_request({"logprobs": 2, "prompt_logprobs": 3})
+    adapter = EngineGenerateRequest.from_request(request)
+
+    assert adapter is not None
+    assert adapter.build_logprob_kwargs() == {
+        "return_logprob": True,
+        "logprob_start_len": 0,
+        "top_logprobs_num": 3,
+        "return_text_in_logprobs": False,
+    }
+
+
+def test_engine_generate_honors_top_logprob_safety_gate(monkeypatch):
+    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
+    adapter = EngineGenerateRequest.from_request(
+        _engine_generate_request({"logprobs": 1})
+    )
+
+    assert adapter is not None
+    with pytest.raises(ValueError, match="does not currently support logprobs"):
+        adapter.build_logprob_kwargs()
+
+
+def test_engine_generate_rejects_ambiguous_or_unsupported_sampling_fields():
+    handler = _new_decode_handler()
+    with pytest.raises(ValueError, match="both map"):
+        handler._build_sampling_params(
+            _engine_generate_request({"max_tokens": 8, "max_new_tokens": 9})
+        )
+    with pytest.raises(ValueError, match="unsupported sampling parameter"):
+        handler._build_sampling_params(_engine_generate_request({"best_of": 2}))
+
+
+def test_engine_generate_rejects_private_transfer_and_invalid_logprob_fields():
+    for field, value in [
+        ("cache_salt", "tenant-a"),
+        ("kv_transfer_params", {"remote": "client"}),
+        ("bootstrap_info", {"bootstrap_host": "client"}),
+    ]:
+        adapter = EngineGenerateRequest.from_request(
+            _engine_generate_request({}, **{field: value})
+        )
+        assert adapter is not None
+        with pytest.raises(ValueError):
+            adapter.build_sampling_params()
+
+    adapter = EngineGenerateRequest.from_request(
+        _engine_generate_request({"logprobs": -1})
+    )
+    assert adapter is not None
+    with pytest.raises(ValueError, match="non-negative integer"):
+        adapter.build_logprob_kwargs()
 
 
 async def _stream(items):

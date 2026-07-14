@@ -138,6 +138,13 @@ impl WorkerSet {
         self.generate_engine.is_some()
     }
 
+    pub fn supports_runtime_capability(&self, capability: &str) -> bool {
+        matches!(
+            self.card.runtime_config.runtime_data.get(capability),
+            Some(serde_json::Value::Bool(true))
+        )
+    }
+
     /// Whether this set has any decode engine (chat or completions)
     pub fn has_decode_engine(&self) -> bool {
         self.has_chat_engine() || self.has_completions_engine()

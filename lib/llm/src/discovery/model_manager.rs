@@ -549,6 +549,14 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_generate_models_for_capability(&self, capability: &str) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_generate_engine_for_capability(capability))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_prefill_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -645,6 +653,17 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_generate_engine()
+    }
+
+    pub fn get_generate_engine_for_capability(
+        &self,
+        model: &str,
+        capability: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_for_capability(capability)
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --

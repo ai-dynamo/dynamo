@@ -33,9 +33,24 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.engine_generate import SGLANG_INFERENCE_V1_GENERATE_CAPABILITY
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+
+
+def _supports_engine_generate(
+    input_type: ModelInput,
+    output_type: ModelType,
+    worker_type: WorkerType,
+) -> bool:
+    if input_type != ModelInput.Tokens:
+        return False
+    if worker_type == WorkerType.Prefill:
+        return output_type == ModelType.Prefill
+    return worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
+        output_type.supports_chat() or output_type == ModelType.Completions
+    )
 
 
 def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> str:
@@ -128,6 +143,12 @@ async def _register_model_with_runtime_config(
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
 
+    if _supports_engine_generate(input_type, output_type, worker_type):
+        runtime_config.set_engine_specific(
+            SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+            json.dumps(True),
+        )
+        logging.info("Published SGLang engine-native generate capability")
     # Configure the Rust frontend's media decoder so it ships pre-decoded
     # images via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None

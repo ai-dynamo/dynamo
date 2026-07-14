@@ -57,3 +57,31 @@ def test_decode_bootstrap_raises_when_router_left_no_info():
     # leave the decode worker waiting on a phantom KV transfer.
     with pytest.raises(ValueError, match="bootstrap"):
         SglangLLMEngine._resolve_decode_bootstrap({"token_ids": [1, 2, 3]})
+
+
+def test_prefill_generate_envelope_keeps_bootstrap_internal():
+    engine = _engine_with_cached_bootstrap()
+    request = {
+        "token_ids": [1, 2, 3],
+        "bootstrap_info": {
+            "bootstrap_host": "router.host",
+            "bootstrap_port": 9999,
+            "bootstrap_room": 42,
+        },
+        "extra_args": {
+            "sglang_tito": {
+                "request_id": "request-1",
+                "sampling_params": {"max_tokens": 8, "seed": 17},
+                "model": "test-model",
+                "stream": False,
+                "priority": 0,
+            }
+        },
+    }
+
+    assert engine._build_sampling_params(request) == {
+        "max_new_tokens": 8,
+        "sampling_seed": 17,
+    }
+    assert engine._resolve_prefill_bootstrap(request) == request["bootstrap_info"]
+    assert "bootstrap_info" not in request["extra_args"]["sglang_tito"]
