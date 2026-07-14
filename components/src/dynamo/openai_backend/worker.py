@@ -283,21 +283,34 @@ def _mark_forced_tools_strict(request: dict[str, Any]) -> None:
         function["strict"] = True
 
 
+def _extract_priority_hint(request: dict[str, Any]) -> int:
+    """Read normalized or raw OpenAI-request priority, defaulting to neutral."""
+    routing = request.get("routing")
+    if isinstance(routing, dict):
+        priority = routing.get("priority")
+        if isinstance(priority, int) and not isinstance(priority, bool):
+            return priority
+
+    # ModelInput.Text workers bypass Dynamo's OpenAIPreprocessor, so they
+    # receive the original OpenAI-shaped request rather than routing.priority.
+    nvext = request.get("nvext")
+    if isinstance(nvext, dict):
+        agent_hints = nvext.get("agent_hints")
+        if isinstance(agent_hints, dict):
+            priority = agent_hints.get("priority")
+            if isinstance(priority, int) and not isinstance(priority, bool):
+                return priority
+
+    return 0
+
+
 def _forward_priority_hint(
     request: dict[str, Any], priority_multiplier: Optional[int]
 ) -> None:
     if priority_multiplier is None:
         return
 
-    routing = request.get("routing")
-    if not isinstance(routing, dict):
-        return
-
-    priority = routing.get("priority")
-    if not isinstance(priority, int):
-        return
-
-    request["priority"] = priority * priority_multiplier
+    request["priority"] = _extract_priority_hint(request) * priority_multiplier
 
 
 def _normalize_reasoning_content(payload: dict[str, Any]) -> None:
