@@ -114,14 +114,7 @@ def configure_snapshot_capture_env() -> None:
         )
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
 
-    nccl_p2p_disable = os.environ.get("NCCL_P2P_DISABLE")
-    if nccl_p2p_disable and nccl_p2p_disable != "0":
-        logger.warning(
-            "Overriding NCCL_P2P_DISABLE=%r with '0' for snapshot mode "
-            "to keep NCCL on GPU P2P transport when topology allows it",
-            nccl_p2p_disable,
-        )
-    os.environ["NCCL_P2P_DISABLE"] = "0"
+    os.environ.setdefault("NCCL_P2P_DISABLE", "0")
 
     nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
     if nccl_nvls_enable and nccl_nvls_enable != "0":

@@ -11,7 +11,10 @@ from dynamo.common.snapshot.constants import (
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
 )
-from dynamo.common.snapshot.lifecycle import SnapshotConfig
+from dynamo.common.snapshot.lifecycle import (
+    SnapshotConfig,
+    configure_snapshot_capture_env,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -29,6 +32,38 @@ class _PauseController:
 
     def mark_resumed(self) -> None:
         pass
+
+
+@pytest.mark.parametrize(
+    ("initial_p2p_disable", "expected_p2p_disable"),
+    [(None, "0"), ("0", "0"), ("1", "1")],
+)
+def test_configure_snapshot_capture_env_preserves_explicit_p2p_disable(
+    monkeypatch, initial_p2p_disable, expected_p2p_disable
+):
+    if initial_p2p_disable is None:
+        monkeypatch.delenv("NCCL_P2P_DISABLE", raising=False)
+    else:
+        monkeypatch.setenv("NCCL_P2P_DISABLE", initial_p2p_disable)
+
+    monkeypatch.setenv("NCCL_CUMEM_ENABLE", "1")
+    monkeypatch.setenv("NCCL_NVLS_ENABLE", "1")
+    monkeypatch.setenv("NCCL_IB_DISABLE", "0")
+    monkeypatch.setenv("NCCL_RAS_ENABLE", "1")
+    monkeypatch.setenv("TORCH_NCCL_ENABLE_MONITORING", "1")
+    monkeypatch.setenv("TORCH_NCCL_DUMP_ON_TIMEOUT", "1")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+
+    configure_snapshot_capture_env()
+
+    assert os.environ["NCCL_P2P_DISABLE"] == expected_p2p_disable
+    assert os.environ["NCCL_CUMEM_ENABLE"] == "0"
+    assert os.environ["NCCL_NVLS_ENABLE"] == "0"
+    assert os.environ["NCCL_IB_DISABLE"] == "1"
+    assert os.environ["NCCL_RAS_ENABLE"] == "0"
+    assert os.environ["TORCH_NCCL_ENABLE_MONITORING"] == "0"
+    assert os.environ["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
 
 
 async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tmp_path):
