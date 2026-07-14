@@ -19,6 +19,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"sort"
@@ -54,7 +56,16 @@ var disaggregatedSetGVK = schema.GroupVersionKind{
 	Kind:    "DisaggregatedSet",
 }
 
-const maxDisaggregatedSetRoles = 10
+const (
+	maxDisaggregatedSetRoles       = 10
+	disaggregatedSetRevisionLength = 8
+	// LWS names children <set>-<revision>-<role> without truncation. Reserve
+	// readable budgets for both user-derived names while keeping the result at
+	// the DNS label limit: 31 + 1 + 8 + 1 + 22 = 63.
+	maxDisaggregatedSetNameLength     = 31
+	maxDisaggregatedSetRoleNameLength = 63 - maxDisaggregatedSetNameLength - disaggregatedSetRevisionLength - 2
+	disaggregatedSetNameHashLength    = 8
+)
 
 type disaggregatedSetSelection struct {
 	componentToRole map[string]string
@@ -158,10 +169,11 @@ func disaggregatedSetRoleName(component *nvidiacomv1beta1.DynamoComponentDeploym
 	if preferred == "" || roleNameUsed(preferred, used) {
 		preferred = dynamo.NormalizeKubeResourceName(component.ComponentName)
 	}
+	preferred = truncateDNSLabelWithHash(preferred, maxDisaggregatedSetRoleNameLength)
 	roleName := preferred
 	for i := 2; roleNameUsed(roleName, used); i++ {
 		suffix := fmt.Sprintf("-%d", i)
-		roleName = truncateDNSLabel(preferred, 63-len(suffix)) + suffix
+		roleName = truncateDNSLabel(preferred, maxDisaggregatedSetRoleNameLength-len(suffix)) + suffix
 	}
 	return roleName
 }
@@ -178,8 +190,22 @@ func truncateDNSLabel(value string, maxLength int) string {
 	return strings.TrimRight(value[:maxLength], "-")
 }
 
+func truncateDNSLabelWithHash(value string, maxLength int) string {
+	if len(value) <= maxLength {
+		return value
+	}
+	hash := sha256.Sum256([]byte(value))
+	hashText := hex.EncodeToString(hash[:])[:disaggregatedSetNameHashLength]
+	if maxLength <= len(hashText) {
+		return hashText[:maxLength]
+	}
+	suffix := "-" + hashText
+	prefix := strings.TrimRight(value[:maxLength-len(suffix)], "-")
+	return prefix + suffix
+}
+
 func disaggregatedSetName(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
-	return dynamo.NormalizeKubeResourceName(dgd.Name)
+	return truncateDNSLabelWithHash(dynamo.NormalizeKubeResourceName(dgd.Name), maxDisaggregatedSetNameLength)
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
@@ -512,11 +538,40 @@ func (r *DynamoGraphDeploymentReconciler) adoptSelectedModelServices(ctx context
 		if err != nil {
 			return fmt.Errorf("failed to get DisaggregatedSet model service %s/%s: %w", dgd.Namespace, serviceName, err)
 		}
+		canAdopt, err := r.canAdoptModelServiceForDisaggregatedSet(ctx, dgd, service)
+		if err != nil {
+			return err
+		}
+		if !canAdopt {
+			continue
+		}
 		if err := r.ensureControlledByDGD(ctx, dgd, service); err != nil {
 			return fmt.Errorf("failed to adopt DisaggregatedSet model service %s/%s: %w", service.Namespace, service.Name, err)
 		}
 	}
 	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) canAdoptModelServiceForDisaggregatedSet(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	service *corev1.Service,
+) (bool, error) {
+	owner := metav1.GetControllerOf(service)
+	if owner == nil || isControlledByBetaDGD(service, dgd) {
+		return true, nil
+	}
+	if owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || owner.Kind != "DynamoComponentDeployment" {
+		return false, nil
+	}
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: service.Namespace}, dcd); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to verify model Service owner %s/%s: %w", service.Namespace, owner.Name, err)
+	}
+	return isControlledByBetaDGD(dcd, dgd), nil
 }
 
 func sortedDCDKeys(dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment) []string {

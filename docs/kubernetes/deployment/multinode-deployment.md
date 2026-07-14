@@ -88,7 +88,7 @@ Dynamo automatically selects the best available orchestrator for multinode deplo
 #### When the DisaggregatedSet API is Available:
 - **DS is selected** only if you set `nvidia.com/enable-disaggregatedset: "true"`
 - **Grove still wins by default** when Grove is enabled, so also set `nvidia.com/enable-grove: "false"` if you want the DS path on clusters that have Grove
-- **LWS is used as the fallback** when the DS request cannot be honored
+- **The standard DCD pathway is used as the fallback** when the DS request cannot be honored; multinode components then still require the existing LWS + Volcano pathway
 
 #### When Only One Orchestrator is Available:
 - The installed orchestrator (Grove or LWS) is automatically selected

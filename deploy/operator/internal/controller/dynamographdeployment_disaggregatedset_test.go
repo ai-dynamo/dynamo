@@ -8,6 +8,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -103,6 +104,37 @@ func TestSelectDisaggregatedSetComponents(t *testing.T) {
 		_, reason := selectDisaggregatedSetComponents(dgd)
 		require.Contains(t, reason, "at most 10 roles")
 	})
+}
+
+func TestDisaggregatedSetChildNamesFitDNSLabelLimit(t *testing.T) {
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("d", 63)},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: strings.Repeat("p", 63),
+					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+				},
+				{
+					ComponentName: strings.Repeat("q", 63),
+					ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+				},
+			},
+		},
+	}
+
+	selection, reason := selectDisaggregatedSetComponents(dgd)
+	require.Empty(t, reason)
+	require.Len(t, selection.componentToRole, 2)
+	setName := disaggregatedSetName(dgd)
+	require.LessOrEqual(t, len(setName), maxDisaggregatedSetNameLength)
+	for _, roleName := range selection.componentToRole {
+		require.LessOrEqual(t, len(roleName), maxDisaggregatedSetRoleNameLength)
+		childName := disaggregatedsetutils.GenerateName(setName, roleName, strings.Repeat("a", disaggregatedSetRevisionLength))
+		require.LessOrEqual(t, len(childName), 63)
+	}
 }
 
 func TestCheckDisaggregatedSetReadiness(t *testing.T) {
@@ -210,6 +242,47 @@ func TestDeleteStaleDisaggregatedSetComponentServices(t *testing.T) {
 	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(userManaged), &corev1.Service{}))
 	require.True(t, apierrors.IsNotFound(reconciler.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.Service{})))
 	require.True(t, apierrors.IsNotFound(reconciler.Get(t.Context(), client.ObjectKeyFromObject(removedComponent), &corev1.Service{})))
+}
+
+func TestAdoptSelectedModelServicesLeavesSharedForeignServiceOwner(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "prefill", ModelRef: &nvidiacomv1beta1.ModelReference{Name: "shared-model"}},
+		}},
+	}
+	foreignDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", UID: "other-uid"},
+	}
+	foreignDCD := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "other-prefill",
+			Namespace:       "default",
+			UID:             "other-prefill-uid",
+			OwnerReferences: []metav1.OwnerReference{*dgdControllerOwnerReference(foreignDGD)},
+		},
+	}
+	modelService := &corev1.Service{ObjectMeta: metav1.ObjectMeta{
+		Name:      dynamo.GenerateServiceName("shared-model"),
+		Namespace: "default",
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(
+			foreignDCD,
+			nvidiacomv1beta1.GroupVersion.WithKind("DynamoComponentDeployment"),
+		)},
+	}}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, foreignDGD, foreignDCD, modelService).Build(),
+	}
+	selection := disaggregatedSetSelection{componentToRole: map[string]string{"prefill": "prefill"}}
+
+	require.NoError(t, reconciler.adoptSelectedModelServices(t.Context(), dgd, selection))
+	updated := &corev1.Service{}
+	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(modelService), updated))
+	require.Equal(t, foreignDCD.UID, metav1.GetControllerOf(updated).UID)
 }
 
 func TestCheckDisaggregatedSetReadinessFallsBackToTargetRevisionChildLWS(t *testing.T) {
