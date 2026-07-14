@@ -61,6 +61,20 @@ def _command_output(command: list[str]) -> str | None:
         return None
 
 
+def _gpu_metadata() -> str | None:
+    command = ["nvidia-smi"]
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible_devices:
+        command.append(f"--id={visible_devices.split(',', 1)[0]}")
+    command.extend(
+        [
+            "--query-gpu=name,uuid,driver_version",
+            "--format=csv,noheader",
+        ]
+    )
+    return _command_output(command)
+
+
 def _metadata(
     model: str, rates: tuple[int, ...], smoke: bool, workload_dir: Path
 ) -> dict[str, Any]:
@@ -93,16 +107,11 @@ def _metadata(
         "container_image": os.environ.get("DYNAMO_BENCHMARK_IMAGE"),
         "vllm_version": vllm_version,
         "aiperf_version": aiperf_version,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "workload_manifest_sha256": hashlib.sha256(
             manifest_path.read_bytes()
         ).hexdigest(),
-        "gpu": _command_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,uuid,driver_version",
-                "--format=csv,noheader",
-            ]
-        ),
+        "gpu": _gpu_metadata(),
         "host": platform.node(),
     }
 

@@ -22,10 +22,6 @@ METRICS = [
     ("TTFT p50 (ms)", "time_to_first_token", "p50", False, 1),
     ("TTFT p90 (ms)", "time_to_first_token", "p90", False, 1),
     ("TTFT p99 (ms)", "time_to_first_token", "p99", False, 1),
-    ("E2E latency avg (ms)", "request_latency", "avg", False, 1),
-    ("E2E latency p50 (ms)", "request_latency", "p50", False, 1),
-    ("E2E latency p90 (ms)", "request_latency", "p90", False, 1),
-    ("E2E latency p99 (ms)", "request_latency", "p99", False, 1),
     ("Throughput (req/s)", "request_throughput", "avg", True, 3),
 ]
 
@@ -89,6 +85,7 @@ def _markdown(root: Path, rows: list[dict[str, Any]]) -> str:
         f"- vLLM version: `{metadata.get('vllm_version')}`",
         f"- AIPerf version: `{metadata.get('aiperf_version')}`",
         f"- GPU: `{metadata.get('gpu')}`",
+        f"- CUDA_VISIBLE_DEVICES: `{metadata.get('cuda_visible_devices')}`",
         f"- Custom encoder: `{metadata['custom_encoder_class']}`",
         f"- ViT loading: {metadata['custom_encoder_load']}.",
         "- Custom embedding/preprocess caches: disabled; queue wait: 1 ms.",
@@ -116,12 +113,20 @@ def _markdown(root: Path, rows: list[dict[str, Any]]) -> str:
                 f"| {rate} | {label} | [artifact]({row['artifact']}) | "
                 f"[command]({row['command']}) |"
             )
-    manifest = root / "workload" / "workload_manifest.json"
-    if manifest.exists():
+    manifests = [
+        root / "workload" / "workload_manifest.json",
+        root.parent / "workload" / "workload_manifest.json",
+    ]
+    manifest = next((path for path in manifests if path.exists()), None)
+    if manifest is not None:
+        if manifest.is_relative_to(root):
+            manifest_link = manifest.relative_to(root)
+        else:
+            manifest_link = Path("..") / manifest.relative_to(root.parent)
         lines.extend(
             [
                 "",
-                f"Workload manifest: [workload_manifest.json]({manifest.relative_to(root)})",
+                f"Workload manifest: [workload_manifest.json]({manifest_link})",
             ]
         )
     return "\n".join(lines) + "\n"

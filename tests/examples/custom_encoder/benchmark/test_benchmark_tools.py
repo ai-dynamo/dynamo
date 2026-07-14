@@ -62,6 +62,7 @@ def test_validation_and_markdown_cover_nine_cells(tmp_path: Path) -> None:
         "vllm_version": "test",
         "aiperf_version": "0.8.0",
         "gpu": "H100",
+        "cuda_visible_devices": "0",
         "custom_encoder_class": "examples.custom_encoder.Qwen3VLVisionEncoder",
         "custom_encoder_load": "retains model.visual",
     }
@@ -72,7 +73,10 @@ def test_validation_and_markdown_cover_nine_cells(tmp_path: Path) -> None:
     assert len(validate_matrix(tmp_path)) == 9
     markdown = _markdown(tmp_path, _load_rows(tmp_path))
     assert "=== TTFT avg (ms) ===" in markdown
-    assert "=== E2E latency p99 (ms) ===" in markdown
     assert "=== Throughput (req/s) ===" in markdown
+    assert "E2E latency" not in markdown
+    assert markdown.index("=== TTFT p99 (ms) ===") < markdown.index(
+        "=== Throughput (req/s) ==="
+    )
     assert markdown.count("[artifact]") == 9
     assert markdown.count("[command]") == 9
