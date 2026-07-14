@@ -12,8 +12,10 @@ The workload contains three disjoint pools of 1,000 deterministic JPEGs, one
 pool for each offered rate (16, 24, and 32 requests/second). Every request has
 one globally unique 500×500 RGB image between 50 and 60 KiB, exact server-side
 ISL 515, and exact OSL 70. The native and custom JSONLs share the same image
-order and semantic prompt; the custom prompt adds two harmless filler tokens to
-compensate for its template omitting Qwen2.5-VL's two vision-boundary tokens.
+order and semantic prompt. Each prompt is calibrated independently: the native
+path uses the checkpoint processor, while the custom path counts its exact Jinja
+tokens and replaces the single image placeholder with the processor-derived
+number of merged image tokens.
 
 Generate and audit the workload:
 
@@ -75,7 +77,8 @@ WORKLOAD_DIR="$RUN_DIR/workload" OUTPUT_DIR="$ABLATION_DIR" \
     examples/custom_encoder/benchmark/run_ablation.sh
 ```
 
-It isolates eager batching, CUDA graphs without batching, and full, coarse, or
-single-rung graph ladders at all three offered rates. Results are written to
+It isolates immediate-drain eager execution (0 ms queue wait, maximum batch cost
+1 or 8), CUDA graphs without batching, and full, coarse, or single-rung graph
+ladders (1 ms queue wait) at all three offered rates. Results are written to
 `ablation.md`, `ablation.csv`, and `ablation_validation.json` without changing
 the fixed nine-cell benchmark audit.

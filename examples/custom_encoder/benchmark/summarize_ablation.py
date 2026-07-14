@@ -40,6 +40,7 @@ def _load_rows(root: Path) -> list[dict[str, Any]]:
                 "graph_buckets": variant[1],
                 "max_batch_cost": variant[2],
                 "cuda_graphs_disabled": variant[3],
+                "queue_wait_ms": 0 if variant[3] else 1,
                 "ttft_avg_ms": _metric(data, "time_to_first_token"),
                 "ttft_p99_ms": _metric(data, "time_to_first_token", "p99"),
                 "e2e_avg_ms": _metric(data, "request_latency"),
@@ -72,15 +73,16 @@ def _markdown(root: Path, rows: list[dict[str, Any]]) -> str:
             [
                 f"## Offered QPS {rate}",
                 "",
-                "| Variant | Graphs | Buckets | Max batch | TTFT avg | Δ | E2E avg | Δ | Throughput | Δ |",
-                "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| Variant | Graphs | Queue wait | Buckets | Max batch | TTFT avg | Δ | E2E avg | Δ | Throughput | Δ |",
+                "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for label, buckets, max_batch_cost, disabled in VARIANTS:
             row = by_key[(label, rate)]
             lines.append(
-                f"| {label} | {'off' if disabled else 'on'} | {buckets} | "
-                f"{max_batch_cost} | {row['ttft_avg_ms']:.1f} ms | "
+                f"| {label} | {'off' if disabled else 'on'} | "
+                f"{row['queue_wait_ms']} ms | {buckets} | {max_batch_cost} | "
+                f"{row['ttft_avg_ms']:.1f} ms | "
                 f"{_delta(row['ttft_avg_ms'], baseline['ttft_avg_ms'])} | "
                 f"{row['e2e_avg_ms']:.1f} ms | "
                 f"{_delta(row['e2e_avg_ms'], baseline['e2e_avg_ms'])} | "

@@ -51,6 +51,7 @@ def run_ablation(
             "graph_buckets": buckets,
             "max_batch_cost": max_batch_cost,
             "cuda_graphs_disabled": disabled,
+            "queue_wait_ms": 0 if disabled else 1,
         }
         for label, buckets, max_batch_cost, disabled in VARIANTS
     ]
@@ -84,6 +85,7 @@ def run_ablation(
                     "DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS": buckets,
                     "DYN_QWEN2_VL_MAX_BATCH_COST": str(max_batch_cost),
                     "DYN_QWEN2_VL_DISABLE_CUDA_GRAPHS": "1" if disabled else "0",
+                    "DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS": "0" if disabled else "1",
                 }
             )
             config.validate(repo_root=REPO_ROOT)
