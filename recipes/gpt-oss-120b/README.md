@@ -22,25 +22,9 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 | **MoE backend**          | flashinfer_trtllm (MXFP4xFP8)      | flashinfer_cutlass                 | flashinfer_trtllm                  | flashinfer_cutlass                 |
 | **Attention backend**    | FlashInfer                         | FlashInfer                         | FlashInfer                         | FlashInfer                         |
 | **Routing**              | KV-aware                           | KV-aware                           | KV-aware                           | KV-aware (NIXL P→D, cuda_ipc/NVLink)|
-| **Speculative decoding** | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON (both)¹       | EAGLE3-v3 (DL=3), ON (both)¹       |
-| **KV cache offloading**  | none (SimpleCPUOffload opt-in²)    | **SimpleCPUOffload ON**²           | none (NIXL-incompatible¹)          | none (NIXL-incompatible¹)          |
+| **Speculative decoding** | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON (both)¹       | EAGLE3-v3 (DL=3), ON (both)        |
+| **KV cache offloading**  | none (SimpleCPUOffload opt-in)     | **SimpleCPUOffload ON**            | none (NIXL-incompatible)           | none (NIXL-incompatible)           |
 
-¹ **Disagg is single-node in-pod on rc.4** (one Pod, all 8 GPUs, `hostIPC`, NIXL cuda_ipc over NVLink, hybrid KV manager on). The multi-pod DGD
-disagg and LMCache/MultiConnector break the NIXL handshake, so disagg is one co-located Pod with NixlConnector-only (CPU offload
-stays aggregated-only). EAGLE3 spec runs on both prefill and decode so the draft-layer KV layout matches. Aggregated recipes use the DGD format.
-
-² **CPU KV offload** (`SimpleCPUOffloadConnector` — native, `SupportsHMA` → hybrid KV manager stays on; verified coherent and
-stable through the `request_finished` path) is **ON by default for H200 agg** (+9% tok/s/GPU at the 50-tps/user floor on the
-agentic trace — the host tier relieves GPU KV eviction pressure) and **OFF by default for B200 agg** (net-neutral to slightly
-negative — B200's larger GPU KV pool already holds the 90%-hit working set; opt in by adding
-`--kv-transfer-config=$(KV_TRANSFER_CONFIG)`, no `--disable-hybrid-kv-cache-manager` needed). **Do not use LMCache for
-gpt-oss**: `LMCacheConnectorV1` crashes (`lmcache vllm_v1_adapter request_finished: assert self.lmcache_engine is not None` →
-`EngineDeadError`) and is not `SupportsHMA`, so it force-disables the hybrid KV manager, costing KV capacity on gpt-oss
-sliding-window attention. See [perf/README.md](perf/README.md).
-
-³ **Disagg P:D splits are decode-heavy** per the 2026-07-09 P:D sweep (throughput proxy, agentic trace): decode-heavier wins
-monotonically (B200: 2P6D > 4P4D > 6P2D; on H200, 4P4D is the best *usable* split — 2P6D is throughput-competitive but its 2
-prefill workers queue 64k prompts, TTFT 3–37s).
 
 ## Supported features
 
@@ -120,9 +104,9 @@ Measured 2026-07-09 on the agentic 15% trace (see [perf/README.md](perf/README.m
 
 | SKU  | config (shipped)                 | conc | tok/s/GPU | tok/s/user | TTFT avg | note                                        |
 |------|----------------------------------|------|-----------|------------|----------|---------------------------------------------|
-| B200 | **agg** — 8x TP1                 | c384 | **2790**  | 74         | 0.9s     | ≥50-floor crossing ≈ c500 / ~2850 tok/s/GPU |
+| B200 | **agg** — 8x TP1                 | c512 | **2896**  | 58         | 4.4s     | offload quality-neutral                     |
 | B200 | disagg — 2P6D in-pod             | c256 | 2069      | 99         | 5.6s     | plateau; TTFT-limited above c256            |
-| H200 | **agg** — 8x TP1 + CPU offload   | c256 | **1256**  | 47.5       | 1.4s     | at the 50-tps floor; offload = +9%          |
+| H200 | **agg** — 8x TP1 + CPU offload   | c256 | **1256**  | 47.5       | 1.4s     | at the 50-tps floor; offload = +9%, quality-neutral |
 | H200 | disagg — 4P4D in-pod             | c256 | 1046      | 43         | 4.4s     | best usable H200 split                      |
 
 ## Known issues
