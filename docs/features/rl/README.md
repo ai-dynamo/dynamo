@@ -89,7 +89,11 @@ The relevant response fields have this shape:
   ],
   "nvext": {
     "completion_token_ids": [9707, 11],
-    "prompt_logprobs": [null, {"8948": {"logprob": -0.42}}]
+    "prompt_logprobs": [
+      null,
+      {"8948": {"logprob": -0.42}},
+      {"198": {"logprob": -0.31}}
+    ]
   }
 }
 ```
@@ -132,6 +136,12 @@ contracts.
 SGLang can upload the final cumulative `meta_info` for each choice to any filesystem supported by
 the installed fsspec backend. This path keeps large log probability tensors, routed-expert data,
 and custom metadata out of the HTTP response.
+
+> [!WARNING]
+> Treat `metadata_upload.url` as trusted RL control-plane input. The worker trims the value, checks
+> that it is a non-empty string, and passes it to fsspec without restricting the storage scheme or
+> destination. Do not allow untrusted inference callers to set this URL; fsspec can access local or
+> remote storage with the worker's permissions and credentials.
 
 Start the worker with RL support. Add the routed-expert flag only when the SGLang engine build
 supports it:
@@ -261,16 +271,34 @@ curl http://10.0.0.12:8081/engine/liveness_probe \
 ```
 
 For a weight update cycle, pause the selected worker, call one of its advertised weight-update
-routes, and resume generation:
+routes, validate the result, and resume generation. Install `jq` before running this example. The
+exit trap attempts to resume the worker if the update or another command fails:
 
 ```bash
-curl http://10.0.0.12:8081/engine/pause_generation \
-  -H 'Content-Type: application/json' \
-  -d '{"mode": "keep", "clear_cache": false}'
+set -euo pipefail
 
-curl http://10.0.0.12:8081/engine/resume_generation \
+worker_url=http://10.0.0.12:8081
+
+resume_generation() {
+  response=$(curl --fail-with-body "$worker_url/engine/resume_generation" \
+    -H 'Content-Type: application/json' \
+    -d '{}')
+  jq -e '.status == "ok"' <<<"$response" >/dev/null
+}
+
+pause_response=$(curl --fail-with-body "$worker_url/engine/pause_generation" \
   -H 'Content-Type: application/json' \
-  -d '{}'
+  -d '{"mode": "keep", "clear_cache": false}')
+jq -e '.status == "ok"' <<<"$pause_response" >/dev/null
+trap resume_generation EXIT
+
+update_response=$(curl --fail-with-body "$worker_url/engine/update_weights_from_disk" \
+  -H 'Content-Type: application/json' \
+  -d '{"model_path": "/models/checkpoint-42", "weight_version": "42"}')
+jq -e '.status == "ok"' <<<"$update_response" >/dev/null
+
+resume_generation
+trap - EXIT
 ```
 
 Route request bodies and response fields are engine-specific. A callback can return
