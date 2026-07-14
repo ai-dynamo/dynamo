@@ -26,5 +26,8 @@ python3 gen_fig_throughput_bars.py
 echo "==> Comparison cards (HTML -> PNG)..."
 python3 gen_fig_cards.py
 
+echo "==> Linting sources against Dynamo Dark tokens (fails on ERROR)..."
+python3 ../tools/lint_figures.py --score .
+
 echo "==> Done. Output:"
 ls -lh images/*.png

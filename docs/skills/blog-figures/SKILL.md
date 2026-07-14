@@ -57,11 +57,12 @@ After **every** render (not just the first one), walk this loop out loud in chat
 
 1. **View the PNG.** For SVG-only outputs, also render to PNG at 2x via `rsvg-convert -z 2`.
 2. **State the single takeaway** in one declarative sentence. If you cannot, the figure has no reason to exist.
-3. **Walk the seven non-negotiables** (next section). Name any that fail.
-4. **Walk the relevant anti-pattern bank.** Use [aesthetic.md](aesthetic.md) for diagrams. Use [plotting.md](plotting.md) for charts.
-5. **List the next two improvements** if any non-negotiable or anti-pattern failed. Re-render. Loop.
+3. **Run the automated gate.** `python3 tools/lint_figures.py --score` (or `examples/build.sh`, which runs it after rendering) checks the mechanical floor. Fix every ERROR — off-palette hex, a non-Dynamo-Dark font, a WCAG-AA contrast failure — and confirm the measured score is >= 85. Rubric and the measured-vs-judged split: [RATINGS.md](RATINGS.md).
+4. **Walk the seven non-negotiables** (next section). Name any that fail.
+5. **Walk the relevant anti-pattern bank.** Use [aesthetic.md](aesthetic.md) for diagrams. Use [plotting.md](plotting.md) for charts.
+6. **List the next two improvements** if any non-negotiable or anti-pattern failed. Re-render. Loop.
 
-Only when (a) the takeaway sentence holds, (b) the seven non-negotiables pass, and (c) no anti-pattern is present, may you claim done.
+Only when (a) the takeaway sentence holds, (b) the automated gate is clean (no ERROR, measured score >= 85), (c) the seven non-negotiables pass, (d) no anti-pattern is present, and (e) the judged dimensions in [RATINGS.md](RATINGS.md) pass, may you claim done. The linter mechanizes the color / typography / contrast floor; the judged dimensions still need eyes on the rendered figure.
 
 This loop is deliberately slow. The polished hand-tuned feel of the corpus comes from this discipline, not from clever tools.
 
@@ -285,6 +286,8 @@ Runnable generators for every pathway live in [`examples/`](examples/) — read 
 
 Prerequisites and the sample-data note are in [`examples/README.md`](examples/README.md). The DynoSim Pareto hero has a full worked generator at [`gen_hero.py`](../../digest/dynosim/tools/gen_hero.py). Example data is representative and deterministic — swap in a source of truth before shipping a real figure.
 
+**Lint and score.** [`tools/lint_figures.py`](tools/lint_figures.py) statically checks the generators against the tokens (raw hex, fonts, WCAG contrast) and computes the measured half of the 0–100 rating in [RATINGS.md](RATINGS.md). `examples/build.sh` runs it after rendering and fails on any ERROR.
+
 ## Cross-References
 
 Sister files in this skill:
@@ -293,6 +296,8 @@ Sister files in this skill:
 - [aesthetic.md](aesthetic.md) — extended notes on diagram conventions, D2 class catalog, semantic color map.
 - [plotting.md](plotting.md) — chart craft: sparse round-number ticks, axis hygiene, direct labeling, sorting, annotations, chart anti-pattern bank.
 - [html-to-png.md](html-to-png.md) — worked recipe with `figure.html` template, Playwright snippet, Satori alternative.
+- [RATINGS.md](RATINGS.md) — the 0–100 rating rubric (five dimensions) and the measured-vs-judged split.
+- [tools/lint_figures.py](tools/lint_figures.py) — the runnable linter + scorer: raw-hex, font-family, WCAG contrast, and the measured design score.
 
 Existing sibling skills to use, not re-implement:
 
