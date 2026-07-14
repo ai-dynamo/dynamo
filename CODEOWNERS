@@ -236,6 +236,7 @@
 /components/src/dynamo/global_router/                                                         @ai-dynamo/dynamo-router-codeowners
 /deploy/operator/internal/checkpoint/                                                         @ai-dynamo/dynamo-gms-codeowners
 /dev/observability/prometheus-xpu.yml                                                         @ai-dynamo/dynamo-xpu-codeowners
+/components/src/dynamo/sglang_sidecar/                                                        @ai-dynamo/dynamo-backend-sglang-codeowners
 /dev/observability/xpu-alert-rules.yml                                                        @ai-dynamo/dynamo-xpu-codeowners
 /dev/observability/xpu_smi_exporter.py                                                        @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/common/snapshot/                                                       @ai-dynamo/dynamo-gms-codeowners
