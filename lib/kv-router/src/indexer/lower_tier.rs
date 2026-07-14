@@ -412,8 +412,7 @@ impl LowerTierIndexer {
     where
         S: BuildHasher,
     {
-        let mut router_hint_extensions =
-            retain_router_hint_extensions.then(FxHashMap::default);
+        let mut router_hint_extensions = retain_router_hint_extensions.then(FxHashMap::default);
 
         // Build the sorted breakpoint list. Each entry is a position in the
         // hash sequence and a set of (parent_hash -> workers) groups that start
