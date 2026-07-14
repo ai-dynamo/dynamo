@@ -116,7 +116,8 @@ session headers described in [Session IDs](../../agents/session-ids.md);
 `nvext` does not accept session identity fields.
 
 When session affinity is enabled with `--router-session-affinity-ttl-secs`, the
-router also uses `X-Dynamo-Session-ID` for router-local affinity. See
+router uses the header configured by `--router-session-header-key` (default:
+`X-Dynamo-Session-ID`) for router-local affinity. See
 [Configuration and Tuning](../router/router-configuration.md#session-affinity)
 for routing behavior and TTL settings.
 

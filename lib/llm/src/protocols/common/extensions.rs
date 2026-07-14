@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, header::HeaderName};
 use derive_builder::Builder;
 use dynamo_protocols::types::StopReason;
 use serde::{Deserialize, Serialize};
@@ -287,8 +287,11 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
     agent_context_header_values(headers).map(AgentContext::from)
 }
 
-pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
-    session_affinity_header_value(headers).map(SessionAffinityId::new)
+pub fn session_affinity_from_headers(
+    headers: &HeaderMap,
+    header_name: &HeaderName,
+) -> Option<SessionAffinityId> {
+    session_affinity_header_value(headers, header_name).map(SessionAffinityId::new)
 }
 
 /// Apply HTTP routing header overrides to nvext.
@@ -971,8 +974,9 @@ mod tests {
     }
 
     #[test]
-    fn session_affinity_requires_explicit_dynamo_header() {
+    fn session_affinity_uses_configured_header() {
         let mut headers = HeaderMap::new();
+        let header_name = HeaderName::from_static(HEADER_DYNAMO_SESSION_ID);
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
             "claude-session".parse().unwrap(),
@@ -982,21 +986,24 @@ mod tests {
             HEADER_OPENCODE_SESSION_ID,
             "opencode-session".parse().unwrap(),
         );
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert!(session_affinity_from_headers(&headers, &header_name).is_none());
 
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         assert_eq!(
-            session_affinity_from_headers(&headers).unwrap().as_str(),
+            session_affinity_from_headers(&headers, &header_name)
+                .unwrap()
+                .as_str(),
             "canonical"
         );
 
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert!(session_affinity_from_headers(&headers, &header_name).is_none());
     }
 
     #[test]
     fn native_agent_session_does_not_enable_affinity() {
         let mut headers = HeaderMap::new();
+        let header_name = HeaderName::from_static(HEADER_DYNAMO_SESSION_ID);
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
             "claude-session".parse().unwrap(),
@@ -1005,7 +1012,7 @@ mod tests {
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "claude-agent");
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert!(session_affinity_from_headers(&headers, &header_name).is_none());
 
         headers.insert(
             HEADER_DYNAMO_SESSION_ID,
@@ -1014,7 +1021,9 @@ mod tests {
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "affinity-session");
         assert_eq!(
-            session_affinity_from_headers(&headers).unwrap().as_str(),
+            session_affinity_from_headers(&headers, &header_name)
+                .unwrap()
+                .as_str(),
             "affinity-session"
         );
     }
