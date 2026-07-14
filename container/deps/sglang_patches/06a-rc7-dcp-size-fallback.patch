@@ -1,0 +1,16 @@
+diff --git a/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py b/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
+index e4e7f81fd..8cf70e1fd 100644
+--- a/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
++++ b/python/sglang/srt/model_executor/model_runner_kv_cache_mixin.py
+@@ -1299,7 +1299,10 @@ class ModelRunnerKVCacheMixin:
+             return
+ 
+         context_len = self.model_config.context_len
+-        token_capacity = self.max_token_pool_size * self.dcp_size
++        dcp_size = getattr(
++            self, "dcp_size", getattr(self.server_args, "dcp_size", 1)
++        )
++        token_capacity = self.max_token_pool_size * dcp_size
+         required_capacity = context_len
+         if (
+             self.is_hybrid_swa
