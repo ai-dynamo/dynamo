@@ -68,7 +68,7 @@ from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
-from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.port_utils import allocate_port, deallocate_port, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
@@ -197,9 +197,12 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         self.bench_mode = bench_mode
         self.is_prefill = is_prefill
         self.frontend_port = frontend_port
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda ports=allocated_ports: deallocate_ports(ports))
 
         # Allocate a per-worker system port like the cancellation test does.
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        allocated_ports.append(self.system_port)
         # Allocate a per-worker forward-pass-metrics ZMQ publisher port.
         # ``InstrumentedScheduler`` (auto-injected by --benchmark-mode) binds
         # ``tcp://*:DYN_FORWARDPASS_METRIC_PORT + dp_rank`` for the FPM
@@ -209,6 +212,7 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         # cancellation test never hits this because it doesn't run with
         # --benchmark-mode and so doesn't auto-inject InstrumentedScheduler.
         self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        allocated_ports.append(self.fpm_port)
 
         env = os.environ.copy()
         if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in env:

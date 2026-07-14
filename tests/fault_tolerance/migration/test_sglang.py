@@ -124,7 +124,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.append("--skip-tokenizer-init")
         else:
             # Disaggregated
-            self.bootstrap_port = allocate_port(12340)
+            self.bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
             request.addfinalizer(lambda port=self.bootstrap_port: deallocate_port(port))
             command.extend(
                 [
@@ -139,7 +139,7 @@ class DynamoWorkerProcess(ManagedProcess):
                 ]
             )
             if disagg_mode == "prefill":
-                self.prefill_port = allocate_port(20000)
+                self.prefill_port = allocate_port(DynamoPortRange.PREFILL.value)
                 request.addfinalizer(
                     lambda port=self.prefill_port: deallocate_port(port)
                 )
