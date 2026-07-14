@@ -48,6 +48,7 @@ def _make_prefill_handler():
     handler.generate_endpoint = object()
     handler.model_max_len = 8192
     handler.loaded_loras = {}
+    handler._engine_loaded_loras = set()
     handler._lora_load_locks = {}
     handler._lora_load_locks_guard = threading.Lock()
     return handler
@@ -142,6 +143,7 @@ async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
 async def test_legacy_unload_unregisters_before_engine_removal(monkeypatch):
     handler = _make_prefill_handler()
     handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    handler._engine_loaded_loras = {"adapterA"}
     order: list[str] = []
     unregister = AsyncMock(side_effect=lambda **_kwargs: order.append("unregister"))
     handler.engine_client.remove_lora.side_effect = lambda _id: order.append("remove")
@@ -154,6 +156,39 @@ async def test_legacy_unload_unregisters_before_engine_removal(monkeypatch):
     assert results[-1]["status"] == "success"
     assert order == ["unregister", "remove"]
     assert "adapterA" not in handler.loaded_loras
+
+
+@pytest.mark.asyncio
+async def test_legacy_prefill_unload_skips_engine_removal_for_metadata_only_adapter(
+    monkeypatch,
+):
+    handler = _make_prefill_handler()
+    manager = SimpleNamespace(
+        download_lora=AsyncMock(
+            return_value={"status": "success", "local_path": "/cache/adapter"}
+        )
+    )
+    unregister = AsyncMock()
+    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+    monkeypatch.setattr(handlers_mod, "register_model", AsyncMock())
+    monkeypatch.setattr(handlers_mod, "unregister_model", unregister)
+
+    load_results = [
+        result
+        async for result in handler.load_lora(
+            {"lora_name": "adapterA", "source": {"uri": "file:///adapter"}}
+        )
+    ]
+    unload_results = [
+        result async for result in handler.unload_lora({"lora_name": "adapterA"})
+    ]
+
+    assert load_results[-1]["status"] == "success"
+    assert unload_results[-1]["status"] == "success"
+    unregister.assert_awaited_once()
+    handler.engine_client.add_lora.assert_not_awaited()
+    handler.engine_client.remove_lora.assert_not_awaited()
 
 
 @pytest.mark.asyncio

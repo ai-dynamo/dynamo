@@ -998,6 +998,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.model_config = model_config
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
+        # Only adapters explicitly activated by lifecycle management belong in
+        # this set. Prefill registration is metadata-only and must not later
+        # call vLLM's remove_lora for an adapter it never added.
+        self._engine_loaded_loras: set[str] = set()
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
         # Guard lock-map access in case handlers are invoked from multiple threads.
@@ -1967,6 +1971,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     old_info = self.loaded_loras.get(lora_name)
                     hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
                     is_hot_swap = old_info is not None and hot_swap_enabled
+                    old_engine_loaded = lora_name in self._engine_loaded_loras
 
                     if old_info is not None and not hot_swap_enabled:
                         logger.info(
@@ -2000,9 +2005,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Generate deterministic ID from lora_name before using it
                     lora_id = lora_name_to_id(lora_name)
 
-                    if is_hot_swap and old_info is not None:
+                    if is_hot_swap and old_info is not None and old_engine_loaded:
                         try:
                             await self.engine_client.remove_lora(old_info.id)
+                            self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
                             logger.error(
                                 f"Failed to remove existing LoRA '{lora_name}' "
@@ -2033,8 +2039,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                     lora_path=lora_path,
                                 )
                             )
+                            self._engine_loaded_loras.add(lora_name)
                         except Exception as e:
-                            if is_hot_swap and old_info is not None:
+                            if (
+                                is_hot_swap
+                                and old_info is not None
+                                and old_engine_loaded
+                            ):
                                 try:
                                     await self.engine_client.add_lora(
                                         LoRARequest(
@@ -2043,6 +2054,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                             lora_path=old_info.path,
                                         )
                                     )
+                                    self._engine_loaded_loras.add(lora_name)
                                 except Exception as rollback_error:
                                     self.loaded_loras.pop(lora_name, None)
                                     logger.exception(
@@ -2079,15 +2091,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 try:
                                     if preload_into_engine:
                                         await self.engine_client.remove_lora(lora_id)
-                                    await self.engine_client.add_lora(
-                                        LoRARequest(
-                                            lora_name=lora_name,
-                                            lora_int_id=old_info.id,
-                                            lora_path=old_info.path,
+                                        self._engine_loaded_loras.discard(lora_name)
+                                    if old_engine_loaded:
+                                        await self.engine_client.add_lora(
+                                            LoRARequest(
+                                                lora_name=lora_name,
+                                                lora_int_id=old_info.id,
+                                                lora_path=old_info.path,
+                                            )
                                         )
-                                    )
+                                        self._engine_loaded_loras.add(lora_name)
                                     self.loaded_loras[lora_name] = old_info
-                                    rolled_back = "engine+tracking"
+                                    rolled_back = (
+                                        "engine+tracking"
+                                        if old_engine_loaded
+                                        else "tracking only"
+                                    )
                                 except Exception as rollback_error:
                                     # Engine is in an indeterminate adapter state;
                                     # drop tracking so we never claim a clean swap.
@@ -2210,6 +2229,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                         f"Rolling back: removing LoRA '{lora_name}' from engine"
                                     )
                                     await self.engine_client.remove_lora(lora_id)
+                                    self._engine_loaded_loras.discard(lora_name)
                                 self.loaded_loras.pop(lora_name, None)
                                 logger.debug(
                                     f"Successfully rolled back LoRA '{lora_name}'"
@@ -2316,10 +2336,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
                         )
 
-                    # Discovery no longer routes new requests here. If engine
-                    # removal fails, keep tracking so a retry can remove it
-                    # without ever falling back to the base model.
-                    await self.engine_client.remove_lora(lora_id)
+                    # Prefill lifecycle registration is metadata-only. Remove
+                    # only adapters explicitly activated by the lifecycle
+                    # path; vLLM rejects removal of adapters that were never
+                    # added and would otherwise strand local tracking.
+                    if lora_name in self._engine_loaded_loras:
+                        await self.engine_client.remove_lora(lora_id)
+                        self._engine_loaded_loras.discard(lora_name)
                     del self.loaded_loras[lora_name]
 
                     logger.info(

@@ -605,6 +605,7 @@ async def test_unload_lora_happy_path(monkeypatch):
     _, unregister = _patch_discovery(monkeypatch)
     # Healthy adapter: loaded into the engine AND published to discovery.
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     engine._published_loras = {"adapterA"}
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -623,6 +624,7 @@ async def test_unload_lora_unregisters_before_engine_removal(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     _, unregister = _patch_discovery(monkeypatch)
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     engine._published_loras = {"adapterA"}
 
     order: list[str] = []
@@ -642,6 +644,7 @@ async def test_unload_lora_loaded_but_unpublished_skips_unregister(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     _, unregister = _patch_discovery(monkeypatch)
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     # _published_loras intentionally empty.
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -669,6 +672,7 @@ async def test_unload_lora_happy_path_clears_published(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     _, unregister = _patch_discovery(monkeypatch)
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     engine._published_loras = {"adapterA"}
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -725,6 +729,7 @@ async def test_unload_lora_engine_removal_failure_after_unregister(monkeypatch):
     _, unregister = _patch_discovery(monkeypatch)
     engine.engine_client.remove_lora.side_effect = RuntimeError("engine wedged")
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     engine._published_loras = {"adapterA"}
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -734,6 +739,26 @@ async def test_unload_lora_engine_removal_failure_after_unregister(monkeypatch):
     unregister.assert_awaited_once()
     assert "adapterA" not in engine._published_loras
     assert "adapterA" in engine.loaded_loras
+
+
+@pytest.mark.asyncio
+async def test_prefill_unload_skips_engine_removal_for_metadata_only_adapter(
+    monkeypatch,
+):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    _, unregister = _patch_discovery(monkeypatch)
+
+    load_result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert load_result["status"] == "success"
+    assert result["status"] == "success"
+    unregister.assert_awaited_once()
+    engine.engine_client.add_lora.assert_not_awaited()
+    engine.engine_client.remove_lora.assert_not_awaited()
 
 
 # --------------------------------------------------------------------------- #
