@@ -282,14 +282,11 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         loop {
             match decoder.receive_frame(&mut decoded_frame) {
                 Ok(()) => {
-                    let timestamp = match get_sample_timestamp(
-                        config,
-                        &decoded_frame,
-                        decoder_time_base,
-                    )? {
-                        Some(timestamp) => timestamp,
-                        None => continue,
-                    };
+                    let timestamp =
+                        match get_sample_timestamp(config, &decoded_frame, decoder_time_base)? {
+                            Some(timestamp) => timestamp,
+                            None => continue,
+                        };
                     if timestamp < target_times[*target_index].as_secs() as f64 {
                         continue;
                     }
