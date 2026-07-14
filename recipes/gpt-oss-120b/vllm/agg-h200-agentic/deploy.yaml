@@ -42,7 +42,7 @@ spec:
               resources: {}
     - name: agg
       type: worker
-      replicas: 8          # 8× TP1 replicas → one per GPU on an 8×B200 node; KV router load-balances
+      replicas: 8          # 8× TP1 replicas → one per GPU on an 8×H200 node; KV router load-balances
       podTemplate:
         spec:
           hostIPC: true

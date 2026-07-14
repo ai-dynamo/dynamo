@@ -60,7 +60,7 @@ This is the default `TRACE_FILE` in `perf.yaml`. The full trace and 30% subset (
 
 ## KV-cache setup
 
-The recipes ship **prefix-caching only** (`--enable-prefix-caching`, no `--kv-transfer-config`). CPU KV offload was tested and is **net-neutral** on the canonical trace (the on-GPU prefix cache already holds the 90%-hit working set):
+KV-offload defaults differ by SKU: **B200 agg ships prefix-caching only** (net-neutral there) while **H200 agg ships CPU offload ON** (`--kv-transfer-config=$(KV_TRANSFER_CONFIG)`, +9% at the 50-tps floor, quality-neutral). Details:
 
 - **Do not enable LMCache for gpt-oss.** `LMCacheConnectorV1` crashes the engine on the request-completion path
   (`lmcache vllm_v1_adapter request_finished: assert self.lmcache_engine is not None` → `EngineDeadError`) and is not
