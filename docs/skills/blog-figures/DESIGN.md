@@ -204,3 +204,5 @@ Walk this list explicitly, item by item, before declaring done. No silent "looks
 8. **Title carries the takeaway.** The title is a declarative statement about what the figure shows, not a category name.
 
 A figure that fails any one of these gets cut, not shipped.
+
+Items 1, 2, and 7 (pure-black ground, one type family, every color a token) plus WCAG contrast are checked mechanically by [`tools/lint_figures.py`](tools/lint_figures.py); it also computes the measured half of the 0–100 rating in [RATINGS.md](RATINGS.md). The remaining checks need eyes on the rendered figure.
