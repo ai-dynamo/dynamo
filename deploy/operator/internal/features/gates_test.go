@@ -7,6 +7,7 @@ package features
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,18 +15,43 @@ import (
 
 func TestDefaults(t *testing.T) {
 	gates := Defaults()
-	for _, name := range []Name{GMSSnapshot, Checkpoint, Grove, LWS, KaiScheduler, VolcanoScheduler, DRA, Istio} {
-		if gates.Enabled(name) {
-			t.Errorf("Defaults().Enabled(%q) = true, want false", name)
+	for _, name := range allNames {
+		if got, want := gates.Enabled(name), name == GPUDiscovery; got != want {
+			t.Errorf("Defaults().Enabled(%q) = %v, want %v", name, got, want)
 		}
-	}
-	if !gates.Enabled(GPUDiscovery) {
-		t.Error("Defaults().Enabled(GPUDiscovery) = false, want true")
 	}
 }
 
 func TestGatesEnabled(t *testing.T) {
-	gates := Gates{
+	gates := allEnabledGates()
+	for _, name := range allNames {
+		if !gates.Enabled(name) {
+			t.Errorf("Gates.Enabled(%q) = false, want true", name)
+		}
+	}
+}
+
+func TestGateRegistryIsComplete(t *testing.T) {
+	encoded, err := json.Marshal(allEnabledGates())
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	values := make(map[string]bool)
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got, want := len(values), len(allNames); got != want {
+		t.Fatalf("encoded gate count = %d, want %d", got, want)
+	}
+	for _, name := range allNames {
+		if enabled, exists := values[string(name)]; !exists || !enabled {
+			t.Errorf("encoded gate %q = %v, exists = %v; want true", name, enabled, exists)
+		}
+	}
+}
+
+func allEnabledGates() Gates {
+	return Gates{
 		GMSSnapshot:      true,
 		Checkpoint:       true,
 		Grove:            true,
@@ -35,11 +61,6 @@ func TestGatesEnabled(t *testing.T) {
 		DRA:              true,
 		Istio:            true,
 		GPUDiscovery:     true,
-	}
-	for _, name := range []Name{GMSSnapshot, Checkpoint, Grove, LWS, KaiScheduler, VolcanoScheduler, DRA, Istio, GPUDiscovery} {
-		if !gates.Enabled(name) {
-			t.Errorf("Gates.Enabled(%q) = false, want true", name)
-		}
 	}
 }
 

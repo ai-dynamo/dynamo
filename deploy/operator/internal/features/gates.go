@@ -27,32 +27,107 @@ type Name string
 
 const (
 	// GMSSnapshot enables the temporary GMS + Snapshot integration.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: false
+	// Default since: N/A
 	GMSSnapshot Name = "gmsSnapshot"
 
 	// Checkpoint enables checkpoint creation and restore.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: false
+	// Default since: N/A
 	Checkpoint Name = "checkpoint"
 
 	// Grove enables Grove-backed workload orchestration.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: false
+	// Default since: N/A
 	Grove Name = "grove"
 
 	// LWS enables LeaderWorkerSet-backed workload orchestration.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: false
+	// Default since: N/A
 	LWS Name = "lws"
 
 	// KaiScheduler enables Kai Scheduler integration.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: false
+	// Default since: N/A
 	KaiScheduler Name = "kaiScheduler"
 
 	// VolcanoScheduler enables Volcano scheduling for Grove workloads.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: false
+	// Default since: N/A
 	VolcanoScheduler Name = "volcanoScheduler"
 
 	// DRA enables Dynamic Resource Allocation using resource.k8s.io/v1.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: false
+	// Default since: N/A
 	DRA Name = "dra"
 
-	// Istio enables Istio DestinationRule reconciliation.
+	// Istio records resolved Istio DestinationRule API availability.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: false
+	// Default since: N/A
 	Istio Name = "istio"
 
 	// GPUDiscovery enables automatic GPU hardware discovery.
+	//
+	// Owner: N/A
+	// Experimental: N/A
+	// Beta: N/A
+	// GA: N/A
+	// Default: true
+	// Default since: N/A
 	GPUDiscovery Name = "gpuDiscovery"
 )
+
+var allNames = [...]Name{
+	GMSSnapshot,
+	Checkpoint,
+	Grove,
+	LWS,
+	KaiScheduler,
+	VolcanoScheduler,
+	DRA,
+	Istio,
+	GPUDiscovery,
+}
 
 // GMSSnapshotEnvVar enables GMSSnapshot when set to "1".
 const GMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
@@ -60,99 +135,6 @@ const GMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
 // Gate reports whether operator features are enabled.
 type Gate interface {
 	Enabled(Name) bool
-}
-
-// Stage is the lifecycle stage of a feature gate.
-type Stage string
-
-const (
-	StageExperimental Stage = "experimental"
-	StageBeta         Stage = "beta"
-	StageGA           Stage = "ga"
-)
-
-// Definition describes the ownership, lifecycle, and default of a feature gate.
-type Definition struct {
-	Owner        string
-	Stage        Stage
-	Since        string
-	Default      bool
-	DefaultSince string
-}
-
-var definitions = map[Name]Definition{
-	GMSSnapshot: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      false,
-		DefaultSince: "",
-	},
-	Checkpoint: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      false,
-		DefaultSince: "",
-	},
-	Grove: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      false,
-		DefaultSince: "",
-	},
-	LWS: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      false,
-		DefaultSince: "",
-	},
-	KaiScheduler: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      false,
-		DefaultSince: "",
-	},
-	VolcanoScheduler: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      false,
-		DefaultSince: "",
-	},
-	DRA: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      false,
-		DefaultSince: "",
-	},
-	Istio: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      false,
-		DefaultSince: "",
-	},
-	GPUDiscovery: {
-		Owner:        "",
-		Stage:        "",
-		Since:        "",
-		Default:      true,
-		DefaultSince: "",
-	},
-}
-
-// DefinitionFor returns the metadata for name.
-func DefinitionFor(name Name) Definition {
-	definition, ok := definitions[name]
-	if !ok {
-		panic(fmt.Sprintf("unknown feature gate %q", name))
-	}
-	return definition
 }
 
 // Gates is the complete set of operator feature gates.
@@ -171,15 +153,7 @@ type Gates struct {
 // Defaults returns the default feature gates.
 func Defaults() Gates {
 	return Gates{
-		GMSSnapshot:      DefinitionFor(GMSSnapshot).Default,
-		Checkpoint:       DefinitionFor(Checkpoint).Default,
-		Grove:            DefinitionFor(Grove).Default,
-		LWS:              DefinitionFor(LWS).Default,
-		KaiScheduler:     DefinitionFor(KaiScheduler).Default,
-		VolcanoScheduler: DefinitionFor(VolcanoScheduler).Default,
-		DRA:              DefinitionFor(DRA).Default,
-		Istio:            DefinitionFor(Istio).Default,
-		GPUDiscovery:     DefinitionFor(GPUDiscovery).Default,
+		GPUDiscovery: true,
 	}
 }
 
@@ -227,11 +201,9 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		"DRA is explicitly enabled in config but the resource.k8s.io/v1 API was not detected in the cluster (requires Kubernetes 1.34+)"); err != nil {
 		return Gates{}, err
 	}
-	if config.ServiceMesh.IsEnabled() {
-		if gates.Istio, err = resolve(config.ServiceMesh.Enabled, available.istio,
-			"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
-			return Gates{}, err
-		}
+	if gates.Istio, err = resolve(config.ServiceMesh.Enabled, available.istio,
+		"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
+		return Gates{}, err
 	}
 
 	log.FromContext(ctx).Info("Resolved operator feature gates",

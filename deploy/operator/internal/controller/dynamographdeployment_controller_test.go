@@ -128,6 +128,39 @@ func TestDynamoGraphDeploymentReconciler_preserveExistingDCDBackendFramework(t *
 	gomega.NewWithT(t).Expect(desiredNew.Spec.BackendFramework).To(gomega.Equal("vllm"))
 }
 
+func TestDynamoGraphDeploymentReconciler_istioState(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		provider      string
+		available     bool
+		wantEnabled   bool
+		wantAvailable bool
+	}{
+		{
+			name:        "configured but unavailable",
+			provider:    string(configv1alpha1.ServiceMeshProviderIstio),
+			wantEnabled: true,
+		},
+		{
+			name:          "disabled but available for cleanup",
+			available:     true,
+			wantAvailable: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Config: &configv1alpha1.OperatorConfiguration{
+					ServiceMesh: configv1alpha1.ServiceMeshConfiguration{Provider: tt.provider},
+				},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Istio: tt.available}},
+			}
+			enabled, available := reconciler.istioState()
+			assert.Equal(t, tt.wantEnabled, enabled)
+			assert.Equal(t, tt.wantAvailable, available)
+		})
+	}
+}
+
 func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) {
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 
