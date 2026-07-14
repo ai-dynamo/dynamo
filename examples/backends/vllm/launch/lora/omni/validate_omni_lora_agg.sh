@@ -225,11 +225,11 @@ if [[ -n "$LORA_PATH" && -d "$LORA_PATH" ]]; then
     RESP=$(api -X DELETE "$SYSTEM/v1/loras/$LORA_NAME" || echo '{"status":"error"}')
     check_json_field "$RESP" "status" "success" "unload_lora succeeds"
 
-    MODELS=$(api "$SYSTEM/v1/loras" || echo '{}')
+    MODELS=$(api "$FRONTEND/v1/models" || echo '{}')
     if echo "$MODELS" | python3 -c "import sys,json; ids=[m['id'] for m in json.load(sys.stdin).get('data',[])]; assert '$LORA_NAME' not in ids" 2>/dev/null; then
-        pass "LoRA removed from backend /v1/loras"
+        pass "LoRA removed from /v1/models"
     else
-        fail "LoRA still present in backend /v1/loras after unload"
+        fail "LoRA still present in /v1/models after unload"
     fi
 
     if [[ -f "${TMP_LORA_IMG:-}" && -f "$TMP_BASE_IMG" ]]; then
