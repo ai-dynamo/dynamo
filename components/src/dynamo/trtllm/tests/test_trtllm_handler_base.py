@@ -831,6 +831,33 @@ class TestHealthCheckPriority:
         assert kwargs["sampling_params"].max_tokens == 60
 
     @pytest.mark.asyncio
+    async def test_expanded_prompt_len_is_not_forwarded_to_engine(self):
+        handler = self._make_handler()
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={
+                "prompt_token_ids": [1, 2, 3],
+                "expanded_prompt_len": 42,
+            }
+        )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert "expanded_prompt_len" not in kwargs["inputs"]
+
+    @pytest.mark.asyncio
     async def test_routing_cache_salt_forwarded_to_generate_async(self):
         handler = self._make_handler()
         generation_result = self._make_mock_generation_result()

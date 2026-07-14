@@ -1047,16 +1047,17 @@ class HandlerBase(BaseGenerativeHandler):
                         sampling_params, "prompt_logprobs", int(prompt_logprobs_value)
                     )
 
+        expanded_prompt_len = (
+            processed_input.pop("expanded_prompt_len", None)
+            if isinstance(processed_input, dict)
+            else None
+        )
+
         max_tokens = request["stop_conditions"]["max_tokens"]
         if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
         else:
             has_images = self._request_has_images(processed_input)
-            expanded_prompt_len = (
-                processed_input.get("expanded_prompt_len")
-                if isinstance(processed_input, dict)
-                else None
-            )
             prompt_token_ids = (
                 processed_input.get("prompt_token_ids")
                 if isinstance(processed_input, dict)
