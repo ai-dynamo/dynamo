@@ -141,7 +141,11 @@ fn frontend_route_extension_from_routes(routes: Vec<PyFrontendRoute>) -> Fronten
         for route in routes.iter() {
             docs.push(RouteDoc::new(route.method.clone(), route.path.clone()));
             let path = route.path.clone();
-            let handler = route.handler.clone();
+            // Clone the Python handler under the GIL (`Py::clone_ref` requires it)
+            // and share it into the per-request handlers via `Arc`, whose clone is
+            // GIL-free — the axum handler closures run on tokio workers that do not
+            // hold the GIL, so a bare `PyObject::clone` there would panic.
+            let handler = Arc::new(Python::with_gil(|py| route.handler.clone_ref(py)));
             let route_context = context.clone();
             router = match route.method {
                 Method::GET => router.route(
@@ -179,13 +183,13 @@ fn frontend_route_extension_from_routes(routes: Vec<PyFrontendRoute>) -> Fronten
 }
 
 async fn call_python_frontend_route(
-    handler: PyObject,
+    handler: Arc<PyObject>,
     context: RsFrontendRouteContext,
 ) -> Response {
     // Run the synchronous Python handler on a blocking thread so a slow
     // extension cannot pin a tokio worker and reduce request concurrency.
     let outcome = tokio::task::spawn_blocking(move || {
-        Python::with_gil(|py| call_python_frontend_route_inner(py, handler, context))
+        Python::with_gil(|py| call_python_frontend_route_inner(py, &handler, context))
     })
     .await;
 
@@ -212,7 +216,7 @@ async fn call_python_frontend_route(
 
 fn call_python_frontend_route_inner(
     py: Python<'_>,
-    handler: PyObject,
+    handler: &PyObject,
     context: RsFrontendRouteContext,
 ) -> PyResult<(StatusCode, Value)> {
     let py_context = Py::new(py, PyFrontendRouteContext { inner: context })?;
