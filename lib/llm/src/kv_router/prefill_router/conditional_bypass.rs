@@ -7,6 +7,7 @@ use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 use super::{InnerPrefillRouter, PrefillRouter};
 use crate::protocols::common::llm_backend::PreprocessedRequest;
+use crate::session_affinity::AffinityTarget;
 
 /// Conditional-disagg decision: which decode worker to pin the request to,
 /// plus diagnostic counts for logging.
@@ -27,17 +28,17 @@ impl PrefillRouter {
         &self,
         req: &PreprocessedRequest,
         request_id: &str,
+        decode_affinity_target: Option<AffinityTarget>,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
         if !self.router_mode.is_kv_routing() {
             return Ok(None);
         }
 
-        if req
+        let has_explicit_prefill_pin = req
             .routing
             .as_ref()
-            .and_then(|routing| routing.prefill_worker_id)
-            .is_some()
-        {
+            .is_some_and(|routing| routing.prefill_worker_id.is_some());
+        if has_explicit_prefill_pin {
             tracing::debug!(
                 request_id,
                 "Skipping conditional disagg because request has a preselected prefill worker"
@@ -84,13 +85,31 @@ impl PrefillRouter {
             .routing
             .as_ref()
             .and_then(|routing| routing.allowed_worker_ids.clone());
-        let pinned_worker = req.routing.as_ref().and_then(|routing| {
+        let affinity_pinned_worker = match decode_affinity_target {
+            Some(target) => {
+                let Some(dp_rank) = target
+                    .dp_rank
+                    .or_else(|| decode_router.unique_dp_rank_for_worker(target.worker_id))
+                else {
+                    tracing::debug!(
+                        request_id,
+                        worker_id = target.worker_id,
+                        "Skipping conditional disagg because decode affinity target has no resolved DP rank"
+                    );
+                    return Ok(None);
+                };
+                Some(WorkerWithDpRank::new(target.worker_id, dp_rank))
+            }
+            None => None,
+        };
+        let request_pinned_worker = req.routing.as_ref().and_then(|routing| {
             let worker_id = routing.decode_worker_id.or(routing.backend_instance_id)?;
             let dp_rank = routing
                 .dp_rank
                 .or_else(|| decode_router.unique_dp_rank_for_worker(worker_id))?;
             Some(WorkerWithDpRank::new(worker_id, dp_rank))
         });
+        let pinned_worker = request_pinned_worker.or(affinity_pinned_worker);
         let routing_constraints = req
             .routing
             .as_ref()
@@ -98,12 +117,11 @@ impl PrefillRouter {
             .unwrap_or_default();
 
         let outcome = decode_router
-            .find_best_match_details(
+            .find_best_match_details_without_admission(
                 Some(request_id),
                 routing_token_ids,
                 block_mm_infos,
                 req.router_config_override.as_ref(),
-                false,
                 false,
                 lora_name,
                 cache_namespace,
@@ -115,12 +133,19 @@ impl PrefillRouter {
                 routing_constraints,
             )
             .await?;
-        let (worker, overlap_blocks) = match outcome {
+        let (worker, overlap_blocks, cached_tokens, potential_decode_blocks) = match outcome {
             crate::kv_router::FindBestMatchOutcome::Routed {
                 worker,
                 overlap_blocks,
+                cached_tokens,
+                potential_decode_blocks,
                 ..
-            } => (worker, overlap_blocks),
+            } => (
+                worker,
+                overlap_blocks,
+                cached_tokens,
+                potential_decode_blocks,
+            ),
             crate::kv_router::FindBestMatchOutcome::QueueRejected { .. } => {
                 return Ok(None);
             }
@@ -129,8 +154,7 @@ impl PrefillRouter {
         let block_size = decode_router.block_size() as usize;
         let prompt_tokens = routing_token_ids.len();
 
-        let mut input =
-            ConditionalDisaggDecisionInput::new(prompt_tokens, block_size, overlap_blocks);
+        let mut input = ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens);
         if self.conditional_disagg_policy.needs_prefill_worker_busy() {
             let busy = self.peek_prefill_chosen_worker_busy(req).await;
             tracing::debug!(
@@ -148,9 +172,22 @@ impl PrefillRouter {
             .should_bypass_remote_prefill(input)
             .await;
 
+        // This gate is advisory, not a decode-capacity reservation. Normal
+        // decode routing books scheduler state before returning a routing
+        // decision; conditional-disagg is still deciding whether to enter that
+        // decode path, so booking here would double-count unless we added a
+        // reservation handoff to the downstream decode router. Use the selected
+        // worker's projected decode load, including this request, but allow for
+        // concurrent bypass decisions to race the same threshold.
         let decode_busy = if policy_says_bypass {
             self.conditional_disagg_decode_busy_threshold
-                .and_then(|threshold| decode_router.worker_is_decode_busy(worker, threshold))
+                .and_then(|threshold| {
+                    decode_router.projected_decode_load_exceeds(
+                        worker,
+                        potential_decode_blocks,
+                        threshold,
+                    )
+                })
         } else {
             None
         };
@@ -178,6 +215,8 @@ impl PrefillRouter {
             overlap_tokens,
             prefill_chosen_worker_busy = ?input.prefill_chosen_worker_busy,
             decode_chosen_worker_busy = ?decode_busy,
+            cached_tokens,
+            potential_decode_blocks,
             decode_busy_threshold = ?self.conditional_disagg_decode_busy_threshold,
             decode_gate_decision,
             bypass,
@@ -238,12 +277,11 @@ impl PrefillRouter {
 
         let outcome = router
             .chooser
-            .find_best_match_details(
+            .find_best_match_details_without_admission(
                 None,
                 routing_token_ids,
                 block_mm_infos,
                 req.router_config_override.as_ref(),
-                false,
                 false,
                 lora_name,
                 cache_namespace,

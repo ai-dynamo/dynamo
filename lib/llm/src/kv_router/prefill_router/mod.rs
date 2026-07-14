@@ -29,7 +29,7 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
-    session_affinity::AffinityTarget,
+    session_affinity::{AffinityCoordinator, AffinityTarget},
 };
 
 mod activation;
@@ -133,6 +133,7 @@ pub struct PrefillRouter {
     /// Reference to the decode-side `KvRouter` so conditional disagg can peek
     /// the cache-hot decode worker. `None` for non-KV routing and disabled routers.
     decode_router: Option<Arc<super::KvRouter>>,
+    decode_session_affinity: OnceLock<AffinityCoordinator>,
     model_manager: Arc<ModelManager>,
     endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
@@ -201,9 +202,16 @@ impl
             .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .map_err(|message| anyhow::anyhow!("invalid session affinity context: {message}"))?;
 
+        let decode_affinity_target =
+            self.decode_session_affinity_target(session_affinity.as_deref())?;
+
         if self.conditional_disagg_policy.is_enabled() {
             match self
-                .select_decode_worker_for_conditional_disagg(&req, &request_id)
+                .select_decode_worker_for_conditional_disagg(
+                    &req,
+                    &request_id,
+                    decode_affinity_target,
+                )
                 .await
             {
                 Ok(Some(decision)) => {
@@ -391,6 +399,37 @@ impl
 }
 
 impl PrefillRouter {
+    pub(crate) fn get_or_create_decode_session_affinity(
+        &self,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<Option<AffinityCoordinator>> {
+        let Some(ttl) = ttl else {
+            return Ok(None);
+        };
+        if let Some(affinity) = self.decode_session_affinity.get() {
+            return Ok(Some(affinity.clone()));
+        }
+
+        let affinity = AffinityCoordinator::new(ttl)?;
+        if self.decode_session_affinity.set(affinity.clone()).is_ok() {
+            return Ok(Some(affinity));
+        }
+        Ok(self.decode_session_affinity.get().cloned())
+    }
+
+    fn decode_session_affinity_target(
+        &self,
+        session_affinity: Option<&SessionAffinityId>,
+    ) -> Result<Option<AffinityTarget>> {
+        let Some(session_affinity) = session_affinity else {
+            return Ok(None);
+        };
+        let Some(affinity) = self.decode_session_affinity.get() else {
+            return Ok(None);
+        };
+        affinity.query_target(session_affinity, None)
+    }
+
     fn prepare_prefill_dispatch(
         &self,
         request: &mut PreprocessedRequest,

@@ -69,7 +69,14 @@ impl KvPushRouter {
         let affinity = session_affinity_ttl
             .map(AffinityCoordinator::new)
             .transpose()?;
+        Self::new_with_affinity(inner, chooser, affinity)
+    }
 
+    pub(crate) fn new_with_affinity(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        chooser: Arc<KvRouter>,
+        affinity: Option<AffinityCoordinator>,
+    ) -> Result<Self, Error> {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.

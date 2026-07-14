@@ -37,6 +37,7 @@ impl PrefillRouter {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
             decode_router: None,
+            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
@@ -82,6 +83,7 @@ impl PrefillRouter {
         let router = Arc::new(Self {
             prefill_router,
             decode_router,
+            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: cancel_token.clone(),

@@ -27,11 +27,8 @@ pub struct ConditionalDisaggDecisionInput {
     /// Total prompt token count.
     pub prompt_tokens: usize,
 
-    /// KV cache block size, in tokens.
-    pub block_size: usize,
-
-    /// Device-prefix overlap on the cache-hot decode worker, in blocks.
-    pub decode_chosen_overlap_blocks: u32,
+    /// Effective cache credit on the chosen decode worker, in weighted tokens.
+    pub decode_chosen_cached_tokens: usize,
 
     /// Whether the prefill worker the router would pick for this request is
     /// over the prefill-busy line. `None` means the signal is unavailable.
@@ -44,11 +41,10 @@ pub struct ConditionalDisaggDecisionInput {
 }
 
 impl ConditionalDisaggDecisionInput {
-    pub fn new(prompt_tokens: usize, block_size: usize, decode_chosen_overlap_blocks: u32) -> Self {
+    pub fn new(prompt_tokens: usize, decode_chosen_cached_tokens: usize) -> Self {
         Self {
             prompt_tokens,
-            block_size,
-            decode_chosen_overlap_blocks,
+            decode_chosen_cached_tokens,
             prefill_chosen_worker_busy: None,
             decode_chosen_worker_busy: None,
         }
@@ -64,12 +60,11 @@ impl ConditionalDisaggDecisionInput {
         self
     }
 
-    /// Effective net-new prefill in tokens after the decode-side device
+    /// Effective net-new prefill in tokens after the decode-side weighted
     /// cache hit is subtracted.
     pub fn net_new_tokens(self) -> usize {
-        let overlap_tokens =
-            (self.decode_chosen_overlap_blocks as usize).saturating_mul(self.block_size);
-        self.prompt_tokens.saturating_sub(overlap_tokens)
+        self.prompt_tokens
+            .saturating_sub(self.decode_chosen_cached_tokens.min(self.prompt_tokens))
     }
 }
 
@@ -304,18 +299,29 @@ impl ConditionalDisaggPolicy for RandomBypassConditionalDisaggPolicy {
 mod tests {
     use super::*;
 
-    fn input(
+    fn input(prompt_tokens: usize, cached_tokens: usize) -> ConditionalDisaggDecisionInput {
+        ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens)
+    }
+
+    fn input_from_blocks(
         prompt_tokens: usize,
         overlap_blocks: u32,
         block_size: usize,
     ) -> ConditionalDisaggDecisionInput {
-        ConditionalDisaggDecisionInput::new(prompt_tokens, block_size, overlap_blocks)
+        input(
+            prompt_tokens,
+            (overlap_blocks as usize).saturating_mul(block_size),
+        )
     }
 
     #[tokio::test]
     async fn disabled_never_bypasses() {
         let policy = IslBoundingPolicy::new(false, 2048, 0.7);
-        assert!(!policy.should_bypass_remote_prefill(input(100, 0, 64)).await);
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(input_from_blocks(100, 0, 64))
+                .await
+        );
     }
 
     #[tokio::test]
@@ -323,7 +329,7 @@ mod tests {
         let policy = IslBoundingPolicy::new(true, 2048, 0.7);
         assert!(
             policy
-                .should_bypass_remote_prefill(input(1000, 14, 64))
+                .should_bypass_remote_prefill(input_from_blocks(1000, 14, 64))
                 .await
         );
     }
@@ -333,7 +339,7 @@ mod tests {
         let policy = IslBoundingPolicy::new(true, 2048, 0.99);
         assert!(
             !policy
-                .should_bypass_remote_prefill(input(100_000, 1000, 64))
+                .should_bypass_remote_prefill(input_from_blocks(100_000, 1000, 64))
                 .await
         );
     }
@@ -341,7 +347,11 @@ mod tests {
     #[tokio::test]
     async fn small_eff_isl_but_ratio_at_or_above_threshold_does_not_bypass() {
         let policy = IslBoundingPolicy::new(true, 2048, 0.7);
-        assert!(!policy.should_bypass_remote_prefill(input(200, 0, 64)).await);
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(input_from_blocks(200, 0, 64))
+                .await
+        );
     }
 
     #[tokio::test]
@@ -349,7 +359,7 @@ mod tests {
         let policy = IslBoundingPolicy::new(true, 2048, 0.99);
         assert!(
             !policy
-                .should_bypass_remote_prefill(input(2048, 0, 64))
+                .should_bypass_remote_prefill(input_from_blocks(2048, 0, 64))
                 .await
         );
     }
@@ -357,7 +367,11 @@ mod tests {
     #[tokio::test]
     async fn zero_prompt_tokens_does_not_panic() {
         let policy = IslBoundingPolicy::new(true, 2048, 0.7);
-        assert!(policy.should_bypass_remote_prefill(input(0, 0, 64)).await);
+        assert!(
+            policy
+                .should_bypass_remote_prefill(input_from_blocks(0, 0, 64))
+                .await
+        );
     }
 
     #[tokio::test]
@@ -365,22 +379,36 @@ mod tests {
         let policy = IslBoundingPolicy::new(true, 2048, 0.7);
         assert!(
             policy
-                .should_bypass_remote_prefill(input(500, 10, 64))
+                .should_bypass_remote_prefill(input_from_blocks(500, 10, 64))
                 .await
         );
     }
 
     #[tokio::test]
+    async fn weighted_cached_tokens_do_not_round_up_to_full_block() {
+        let policy = IslBoundingPolicy::new(true, 2048, 0.99);
+        assert!(!policy.should_bypass_remote_prefill(input(2100, 48)).await);
+    }
+
+    #[tokio::test]
     async fn random_bypass_when_disabled_never_bypasses() {
         let policy = RandomBypassConditionalDisaggPolicy::new(false, 1.0);
-        assert!(!policy.should_bypass_remote_prefill(input(100, 0, 64)).await);
+        assert!(
+            !policy
+                .should_bypass_remote_prefill(input_from_blocks(100, 0, 64))
+                .await
+        );
     }
 
     #[tokio::test]
     async fn random_bypass_zero_probability_never_bypasses() {
         let policy = RandomBypassConditionalDisaggPolicy::new(true, 0.0);
         for _ in 0..50 {
-            assert!(!policy.should_bypass_remote_prefill(input(100, 0, 64)).await);
+            assert!(
+                !policy
+                    .should_bypass_remote_prefill(input_from_blocks(100, 0, 64))
+                    .await
+            );
         }
     }
 
@@ -388,7 +416,11 @@ mod tests {
     async fn random_bypass_one_probability_always_bypasses() {
         let policy = RandomBypassConditionalDisaggPolicy::new(true, 1.0);
         for _ in 0..50 {
-            assert!(policy.should_bypass_remote_prefill(input(100, 0, 64)).await);
+            assert!(
+                policy
+                    .should_bypass_remote_prefill(input_from_blocks(100, 0, 64))
+                    .await
+            );
         }
     }
 
@@ -398,7 +430,7 @@ mod tests {
         block_size: usize,
         busy: Option<bool>,
     ) -> ConditionalDisaggDecisionInput {
-        ConditionalDisaggDecisionInput::new(prompt_tokens, block_size, overlap_blocks)
+        input_from_blocks(prompt_tokens, overlap_blocks, block_size)
             .with_prefill_chosen_worker_busy(busy)
     }
 
@@ -532,15 +564,15 @@ mod tests {
 
     #[tokio::test]
     async fn decision_input_new_defaults_busy_to_none() {
-        let input = ConditionalDisaggDecisionInput::new(1000, 64, 0);
+        let input = ConditionalDisaggDecisionInput::new(1000, 0);
         assert_eq!(input.prefill_chosen_worker_busy, None);
         assert_eq!(input.decode_chosen_worker_busy, None);
     }
 
     #[tokio::test]
     async fn decision_input_with_decode_chosen_worker_busy_round_trips() {
-        let input = ConditionalDisaggDecisionInput::new(1000, 64, 0)
-            .with_decode_chosen_worker_busy(Some(true));
+        let input =
+            ConditionalDisaggDecisionInput::new(1000, 0).with_decode_chosen_worker_busy(Some(true));
         assert_eq!(input.decode_chosen_worker_busy, Some(true));
         assert_eq!(input.prefill_chosen_worker_busy, None);
     }

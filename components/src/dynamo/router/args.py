@@ -15,7 +15,6 @@ from dynamo.common.configuration.groups.kv_router_args import (
     CONDITIONAL_DISAGG_POLICY_CHOICES,
     KvRouterArgGroup,
     KvRouterConfigBase,
-    warn_conditional_disagg_prefill_busy_threshold_resolution,
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.llm import AicPerfConfig, KvRouterConfig
@@ -84,10 +83,10 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
                 "--router-conditional-disagg-eff-isl-ratio-threshold must be in [0.0, 1.0]"
             )
         if self.conditional_disagg_enabled:
-            warn_conditional_disagg_prefill_busy_threshold_resolution(
-                policy=self.conditional_disagg_policy,
-                busy_threshold=self.conditional_disagg_prefill_busy_threshold,
-                queue_threshold=self.router_queue_threshold,
+            raise ValueError(
+                "--router-conditional-disagg is only supported by dynamo.frontend "
+                "disaggregated serving; standalone dynamo.router constructs KvRouter "
+                "directly and cannot perform conditional prefill bypass"
             )
 
 

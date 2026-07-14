@@ -60,6 +60,10 @@ enum AdmissionCommand {
         block_hashes: Option<Vec<LocalBlockHash>>,
         ack_tx: oneshot::Sender<()>,
     },
+    SelectWithoutAdmission {
+        request: SchedulingRequest,
+        resp_tx: oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>,
+    },
     Update {
         ack_tx: oneshot::Sender<()>,
     },
@@ -377,6 +381,27 @@ impl<
         }
     }
 
+    /// Select a worker from current scheduler state without entering admission.
+    ///
+    /// This is for advisory policy probes that must not wait in the router
+    /// queue and must not book active scheduler state.
+    pub async fn select_without_admission(
+        &self,
+        request: SchedulingRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        request.eligibility().validate_pinned_worker_allowed()?;
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let command = AdmissionCommand::SelectWithoutAdmission { request, resp_tx };
+        if self.admission_tx.send(command).await.is_err() {
+            return Err(KvSchedulerError::SubscriberShutdown);
+        }
+
+        resp_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+    }
+
     /// Called on prefill_complete/free. Drains pending requests while workers have capacity.
     /// Each scheduled request updates active_tokens via add_request, so the prefill-busy check
     /// sees fresh state on the next iteration.
@@ -436,6 +461,18 @@ impl<
         Some((blocks as f64) > threshold * (total_kv_blocks as f64))
     }
 
+    pub fn projected_decode_load_exceeds(
+        &self,
+        worker: WorkerWithDpRank,
+        projected_blocks: usize,
+        threshold: f64,
+    ) -> Option<bool> {
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker.worker_id)?;
+        let total_kv_blocks = config.total_kv_blocks()?;
+        Some((projected_blocks as f64) > threshold * (total_kv_blocks as f64))
+    }
+
     pub fn class_queue_stats(&self, class_index: usize) -> Option<ClassQueueStats> {
         let counters = self.class_counters.get(class_index)?;
         Some(ClassQueueStats {
@@ -477,6 +514,13 @@ impl<
                 } => {
                     self.handle_enqueue(request, block_hashes);
                     let _ = ack_tx.send(());
+                }
+                AdmissionCommand::SelectWithoutAdmission {
+                    mut request,
+                    resp_tx,
+                } => {
+                    let result = self.select_without_admission_inner(&mut request, Instant::now());
+                    let _ = resp_tx.send(result);
                 }
                 AdmissionCommand::Update { ack_tx } => {
                     self.handle_update().await;
@@ -677,9 +721,11 @@ impl<
         }
     }
 
-    /// Run the full scheduling pipeline for a single request:
-    /// compute projected load -> select worker -> book tracked state -> respond.
-    fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
+    fn select_without_admission_inner(
+        &self,
+        request: &mut SchedulingRequest,
+        decay_now: Instant,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
         request.worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
@@ -692,7 +738,7 @@ impl<
                 .and_then(|provider| provider());
             let eligibility = request.eligibility_with_overloaded(overloaded_worker_ids.as_ref());
             self.selector
-                .select_worker(&workers, &request, eligibility, self.block_size)
+                .select_worker(&workers, request, eligibility, self.block_size)
                 .map(|selection| {
                     let config = workers
                         .get(&selection.worker.worker_id)
@@ -704,20 +750,27 @@ impl<
                 })
         };
 
-        let (selection, selected_worker_tiers) = match selection {
-            Ok(s) => s,
+        let (selection, selected_worker_tiers) = selection?;
+
+        Ok(SchedulingResponse {
+            best_worker: selection.worker,
+            effective_overlap_blocks: selection.effective_overlap_blocks,
+            cached_tokens: selection.cached_tokens,
+            selected_worker_tiers,
+            potential_decode_blocks: selection.potential_decode_blocks,
+        })
+    }
+
+    /// Run the full scheduling pipeline for a single request:
+    /// compute projected load -> select worker -> book tracked state -> respond.
+    fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
+        let response = match self.select_without_admission_inner(&mut request, decay_now) {
+            Ok(response) => response,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
                 request.respond(Err(e));
                 return;
             }
-        };
-
-        let response = SchedulingResponse {
-            best_worker: selection.worker,
-            effective_overlap_blocks: selection.effective_overlap_blocks,
-            cached_tokens: selection.cached_tokens,
-            selected_worker_tiers,
         };
 
         if !request.mode.is_tracked() {
@@ -733,7 +786,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selection.cached_tokens,
+            response.cached_tokens,
             request.track_prefill_tokens,
         );
 
@@ -743,7 +796,7 @@ impl<
             track_prefill_tokens: request.track_prefill_tokens,
             expected_output_tokens: request.expected_output_tokens,
             prefill_load_hint,
-            worker: selection.worker,
+            worker: response.best_worker,
             lora_name: request.lora_name.take(),
         };
         self.book_and_respond(request, sequence_request, response);
@@ -1031,6 +1084,7 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
+                potential_decode_blocks: request.worker_load_for(worker).potential_decode_blocks(),
             })
         }
     }

@@ -24,7 +24,7 @@ use crate::{
         preprocessor::MultimodalData,
     },
     request_template::RequestTemplate,
-    session_affinity::SessionAffinityPushRouter,
+    session_affinity::{AffinityCoordinator, SessionAffinityPushRouter},
     types::{
         Annotated,
         openai::chat_completions::{
@@ -181,6 +181,7 @@ fn preprocessed_backend_engine(
     chooser: Option<Arc<KvRouter>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
     session_affinity_ttl: Option<Duration>,
+    decode_session_affinity: Option<AffinityCoordinator>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
@@ -222,7 +223,11 @@ fn preprocessed_backend_engine(
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new(router, chooser, session_affinity_ttl)?)
+            Arc::new(KvPushRouter::new_with_affinity(
+                router,
+                chooser,
+                decode_session_affinity,
+            )?)
         }
     };
 
@@ -292,12 +297,20 @@ pub async fn build_preprocessed_routing(
         )
     });
 
+    let session_affinity_ttl = session_affinity_ttl_secs.map(Duration::from_secs);
+    let decode_session_affinity = if router_mode.is_kv_routing() {
+        prefill_router.get_or_create_decode_session_affinity(session_affinity_ttl)?
+    } else {
+        None
+    };
+
     let backend_engine = preprocessed_backend_engine(
         router,
         router_mode,
         chooser,
         &model_manager,
-        session_affinity_ttl_secs.map(Duration::from_secs),
+        session_affinity_ttl,
+        decode_session_affinity,
     )?;
     Ok(PreprocessedRouting {
         backend_engine,

@@ -75,6 +75,7 @@ pub struct SchedulingResponse {
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
+    pub potential_decode_blocks: usize,
 }
 
 #[derive(Debug, Clone)]
