@@ -86,7 +86,7 @@ Two canonical families. **Pick one per blog and hold the line.** Mixing families
 
 | Role | Family | Size (px) | Weight | Transform | Letter-Spacing |
 |---|---|---|---|---|---|
-| Title | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 18 | 600 | uppercase | 0.08em |
+| Title | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 18 | 700 | uppercase | 0.08em |
 | Heading | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 14 | 600 | uppercase | 0.05em |
 | Label | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 12 | 400 | none | 0 |
 | Annotation | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 10 | 400 | none | 0 |
