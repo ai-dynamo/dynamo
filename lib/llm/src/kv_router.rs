@@ -721,10 +721,12 @@ where
             }
             Err(error) => return Err(map_scheduler_error(error)),
         };
-        let router_hint_root_candidates = tiered_matches
+        let lower_tier_router_hint_root_candidates = tiered_matches
             .lower_tier
             .get(&StorageTier::HostPinned)
             .and_then(|details| details.router_hint_root_candidates.as_ref());
+        let router_hint_root_candidates = lower_tier_router_hint_root_candidates
+            .or(tiered_matches.device.router_hint_root_candidates.as_ref());
         let target_cached_prefix_blocks =
             target_cached_prefix_blocks_from_tiered_matches(&tiered_matches, response.best_worker);
         let router_hint = self.router_hint_for_selection(

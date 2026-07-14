@@ -91,6 +91,15 @@ impl RadixTree {
         sequence: Vec<LocalBlockHash>,
         early_exit: bool,
     ) -> MatchDetails {
+        self.find_match_details_with_options(sequence, early_exit, false)
+    }
+
+    pub fn find_match_details_with_options(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        early_exit: bool,
+        retain_router_hint_chain: bool,
+    ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.is_empty() {
             return details;
@@ -102,6 +111,8 @@ impl RadixTree {
         let mut seq_pos = 0usize;
         let mut first_node = true;
         let mut last_matched_hash = None;
+        let mut router_hint_root_chain =
+            retain_router_hint_chain.then(|| Vec::with_capacity(sequence.len()));
 
         while seq_pos < sequence.len() {
             let Some(node) = next.take() else {
@@ -120,6 +131,16 @@ impl RadixTree {
 
             if edge_match_len == 0 {
                 break;
+            }
+
+            if let Some(block_hashes) = router_hint_root_chain.as_mut() {
+                block_hashes.extend(
+                    node.state
+                        .edge
+                        .iter()
+                        .take(edge_match_len)
+                        .map(|(_, block_hash)| *block_hash),
+                );
             }
 
             if first_node {
@@ -192,6 +213,10 @@ impl RadixTree {
             if let Some(hash) = last_matched_hash {
                 details.last_matched_hashes.insert(worker, hash);
             }
+        }
+
+        if let Some(block_hashes) = router_hint_root_chain {
+            details.retain_router_hint_root_candidates(block_hashes);
         }
 
         details
@@ -801,6 +826,44 @@ mod tests {
         assert_eq!(
             snapshot_events(tree.dump_tree_as_events()),
             vec![make_store_event(0, &[1, 2, 3, 4])]
+        );
+    }
+
+    #[test]
+    fn find_match_details_can_retain_router_hint_root_candidates() {
+        let mut tree = RadixTree::new();
+        tree.apply_event(make_store_event(7, &[11, 12])).unwrap();
+        tree.apply_event(make_store_event(8, &[11, 12, 13]))
+            .unwrap();
+
+        let details = tree.find_match_details_with_options(
+            vec![
+                LocalBlockHash(11),
+                LocalBlockHash(12),
+                LocalBlockHash(13),
+                LocalBlockHash(14),
+            ],
+            false,
+            true,
+        );
+
+        let expected_hashes = compute_seq_hash_for_block(&[
+            LocalBlockHash(11),
+            LocalBlockHash(12),
+            LocalBlockHash(13),
+        ])
+        .into_iter()
+        .map(ExternalSequenceBlockHash)
+        .collect::<Vec<_>>();
+
+        let candidates = details.router_hint_root_candidates.unwrap();
+        assert_eq!(candidates.block_hashes, expected_hashes);
+        assert_eq!(
+            candidates.owner_prefix_blocks,
+            vec![
+                (WorkerWithDpRank::new(7, 0), 2),
+                (WorkerWithDpRank::new(8, 0), 3),
+            ]
         );
     }
 

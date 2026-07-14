@@ -32,6 +32,7 @@ use crate::router_hint::RouterHintRootCandidates;
 type WorkerSet = FxHashSet<WorkerWithDpRank>;
 type FrontierBuckets = FxHashMap<Option<ExternalSequenceBlockHash>, WorkerSet>;
 type FinalStates = FxHashMap<WorkerWithDpRank, (usize, Option<ExternalSequenceBlockHash>)>;
+type RouterHintExtensions = FxHashMap<WorkerWithDpRank, Vec<ExternalSequenceBlockHash>>;
 type WorkerBlockIndex =
     FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, TransitionKey>>;
 
@@ -170,6 +171,7 @@ pub struct LowerTierMatchDetails {
     pub hits: FxHashMap<WorkerWithDpRank, usize>,
     pub next_continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
     pub router_hint_root_candidates: Option<RouterHintRootCandidates>,
+    pub router_hint_extensions: Option<FxHashMap<WorkerWithDpRank, Vec<ExternalSequenceBlockHash>>>,
 }
 
 /// Standalone lower-tier continuation index.
@@ -337,75 +339,6 @@ impl LowerTierIndexer {
             .unwrap_or_default()
     }
 
-    pub fn root_chain_candidates(
-        &self,
-        local_hashes: &[LocalBlockHash],
-    ) -> Option<RouterHintRootCandidates> {
-        let mut current_parent = None;
-        let mut active: Option<WorkerSet> = None;
-        let mut chain = Vec::with_capacity(local_hashes.len());
-        let mut owner_prefix_blocks = FxHashMap::default();
-
-        for &local_hash in local_hashes {
-            let key = TransitionKey {
-                parent_hash: current_parent,
-                local_hash,
-            };
-            let Some(edge) = self.edges.get(&key) else {
-                if let Some(active) = active.take() {
-                    for worker in active {
-                        owner_prefix_blocks.insert(worker, chain.len());
-                    }
-                }
-                break;
-            };
-
-            let next_active = match active.take() {
-                Some(active_workers) => {
-                    let mut next_active = WorkerSet::default();
-                    for worker in active_workers {
-                        if edge.contains(&worker) {
-                            next_active.insert(worker);
-                        } else if !chain.is_empty() {
-                            owner_prefix_blocks.insert(worker, chain.len());
-                        }
-                    }
-                    next_active
-                }
-                None => edge.collect_workers().into_iter().collect(),
-            };
-
-            if next_active.is_empty() {
-                break;
-            }
-
-            let child_hash = edge.child_hash();
-            chain.push(child_hash);
-            current_parent = Some(child_hash);
-            active = Some(next_active);
-        }
-
-        if let Some(active) = active {
-            for worker in active {
-                owner_prefix_blocks.insert(worker, chain.len());
-            }
-        }
-
-        let mut owner_prefix_blocks: Vec<_> = owner_prefix_blocks
-            .into_iter()
-            .filter(|(_, blocks)| *blocks > 0)
-            .collect();
-        if chain.is_empty() || owner_prefix_blocks.is_empty() {
-            return None;
-        }
-        owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
-
-        Some(RouterHintRootCandidates {
-            block_hashes: chain,
-            owner_prefix_blocks,
-        })
-    }
-
     /// Reconstruct store events from the per-worker block index. Each block
     /// becomes a single-block `Stored` event with the correct parent hash,
     /// suitable for replaying into a fresh indexer to recreate the same state.
@@ -467,6 +400,21 @@ impl LowerTierIndexer {
     where
         S: BuildHasher,
     {
+        self.query_match_details_with_options(local_hashes, continuations, false)
+    }
+
+    pub fn query_match_details_with_options<S>(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        continuations: &std::collections::HashMap<WorkerWithDpRank, LowerTierContinuation, S>,
+        retain_router_hint_extensions: bool,
+    ) -> LowerTierMatchDetails
+    where
+        S: BuildHasher,
+    {
+        let mut router_hint_extensions =
+            retain_router_hint_extensions.then(FxHashMap::default);
+
         // Build the sorted breakpoint list. Each entry is a position in the
         // hash sequence and a set of (parent_hash -> workers) groups that start
         // walking from that position. The set of positions is fixed — the walk
@@ -521,6 +469,7 @@ impl LowerTierIndexer {
                     next_breakpoint,
                     &mut overflow,
                     &mut final_states,
+                    router_hint_extensions.as_mut(),
                 );
             }
 
@@ -535,7 +484,10 @@ impl LowerTierIndexer {
 
         // Convert final_states into the result. Workers that never appeared in
         // final_states (e.g. empty sequence) keep their original continuation.
-        let mut results = LowerTierMatchDetails::default();
+        let mut results = LowerTierMatchDetails {
+            router_hint_extensions,
+            ..Default::default()
+        };
         for (worker, continuation) in continuations {
             let (final_pos, final_hash) = final_states
                 .get(worker)
@@ -708,6 +660,7 @@ fn advance_state_to_breakpoint(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
+    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
 ) {
     let mut cur_pos = start_pos;
     let mut cur_hash = start_hash;
@@ -726,6 +679,7 @@ fn advance_state_to_breakpoint(
             next_breakpoint,
             overflow,
             final_states,
+            router_hint_extensions.as_deref_mut(),
         );
         return;
     }
@@ -787,7 +741,13 @@ fn advance_state_to_breakpoint(
             }
         }
 
-        cur_hash = Some(edge.child_hash());
+        let child_hash = edge.child_hash();
+        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+            for worker in &active {
+                extensions.entry(*worker).or_default().push(child_hash);
+            }
+        }
+        cur_hash = Some(child_hash);
         cur_pos += 1;
 
         // If we're down to one worker, switch to the scalar loop for the
@@ -803,6 +763,7 @@ fn advance_state_to_breakpoint(
                 next_breakpoint,
                 overflow,
                 final_states,
+                router_hint_extensions.as_deref_mut(),
             );
             return;
         }
@@ -835,6 +796,7 @@ fn advance_single_worker(
     next_breakpoint: usize,
     overflow: &mut FrontierBuckets,
     final_states: &mut FinalStates,
+    mut router_hint_extensions: Option<&mut RouterHintExtensions>,
 ) {
     while *cur_pos < next_breakpoint {
         let Some(edge) = index.edges.get(&TransitionKey {
@@ -850,7 +812,11 @@ fn advance_single_worker(
             return;
         }
 
-        *cur_hash = Some(edge.child_hash());
+        let child_hash = edge.child_hash();
+        if let Some(extensions) = router_hint_extensions.as_deref_mut() {
+            extensions.entry(worker).or_default().push(child_hash);
+        }
+        *cur_hash = Some(child_hash);
         *cur_pos += 1;
     }
 
@@ -970,38 +936,6 @@ mod tests {
         fn dump_events(&self) -> Vec<crate::protocols::RouterEvent> {
             LowerTierIndexer::dump_events(&self.worker_blocks)
         }
-    }
-
-    #[test]
-    fn root_chain_candidates_record_owner_prefix_lengths() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
-            .unwrap();
-        index
-            .apply_event(store_event(8, 0, 1, None, &[11, 12, 13], &[101, 102, 103]))
-            .unwrap();
-
-        let candidates = index
-            .index
-            .root_chain_candidates(&local_hashes(&[11, 12, 13, 14]))
-            .unwrap();
-
-        assert_eq!(
-            candidates.block_hashes,
-            vec![
-                ExternalSequenceBlockHash(101),
-                ExternalSequenceBlockHash(102),
-                ExternalSequenceBlockHash(103),
-            ]
-        );
-        assert_eq!(
-            candidates.owner_prefix_blocks,
-            vec![
-                (WorkerWithDpRank::new(7, 0), 2),
-                (WorkerWithDpRank::new(8, 0), 3)
-            ]
-        );
     }
 
     #[test]

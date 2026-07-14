@@ -370,7 +370,11 @@ impl KvIndexer {
                             }
 
                             Some(req) = match_details_rx.recv() => {
-                                let matches = trie.find_match_details(req.sequence, req.early_exit);
+                                let matches = trie.find_match_details_with_options(
+                                    req.sequence,
+                                    req.early_exit,
+                                    req.retain_router_hint_chain,
+                                );
                                 let _ = req.resp.send(matches);
                             }
 
@@ -433,9 +437,22 @@ impl KvIndexer {
         &self,
         sequence: Vec<LocalBlockHash>,
     ) -> Result<MatchDetails, KvRouterError> {
+        self.find_match_details_with_options(sequence, false).await
+    }
+
+    pub async fn find_match_details_with_options(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+        retain_router_hint_chain: bool,
+    ) -> Result<MatchDetails, KvRouterError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.match_details_tx
-            .send(MatchDetailsRequest::new(sequence, false, resp_tx))
+            .send(MatchDetailsRequest::new(
+                sequence,
+                false,
+                retain_router_hint_chain,
+                resp_tx,
+            ))
             .await
             .map_err(|_| KvRouterError::IndexerOffline)?;
 
