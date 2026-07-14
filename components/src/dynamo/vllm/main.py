@@ -761,7 +761,7 @@ async def register_vllm_model(
         model_aliases=config.served_model_aliases or None,
         # Advertise LoRA capacity on the BASE card so the frontend can place the first
         # adapter onto an idle worker. Decode, aggregated, and prefill workers all serve
-        # lifecycle registration; embeddings still do not.
+        # lifecycle registration; embeddings and classify still do not.
         max_gpu_lora_count=_base_model_lora_capacity(config, model_type),
     )
 
@@ -769,7 +769,7 @@ async def register_vllm_model(
 def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
     if not getattr(config.engine_args, "enable_lora", False):
         return None
-    if model_type == ModelType.Embedding:
+    if model_type in (ModelType.Embedding, ModelType.Classify):
         return None
     return config.engine_args.max_loras
 

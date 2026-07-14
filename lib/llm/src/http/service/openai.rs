@@ -58,6 +58,7 @@ use crate::protocols::openai::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
     },
+    classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
@@ -1242,6 +1243,102 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
         floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Ok(floats)
+}
+
+#[tracing::instrument(skip_all)]
+async fn classify(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateClassifyRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service or model is not ready
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("classify", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
+
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (mirrors `embeddings` / `completions_single`).
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let request_id = request.id().to_string();
+
+    // Classification, like embeddings, is a pooling task returned as a single
+    // (non-streaming) response.
+    let streaming = false;
+
+    let model = &request.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+
+    // Create inflight_guard early to ensure all errors are counted
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Classify,
+        streaming,
+        &request_id,
+    );
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+
+    let engine = state.manager().get_classify_engine(model).map_err(|e| {
+        let err_response = ErrorMessage::from_model_error(&e);
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let model_name = model.to_string();
+
+    // issue the generate call on the engine
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, super::metrics::Endpoint::Classify);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate classification");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Fold the (single-response) stream into one classification response.
+    let response = NvCreateClassifyResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fold classification stream for {}: {:?}",
+                request_id,
+                e
+            );
+            let err_response =
+                ErrorMessage::internal_server_error("Failed to fold classification stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
 }
 
 async fn handler_chat_completions(
@@ -2812,6 +2909,23 @@ pub fn embeddings_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(embeddings))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
+/// Create an Axum [`Router`] for the `/classify` endpoint (sequence
+/// classification / cross-encoder pooling). If no path is provided, the
+/// default path is `/classify`.
+pub fn classify_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/classify".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(classify))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);

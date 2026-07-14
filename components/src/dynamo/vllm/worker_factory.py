@@ -33,6 +33,7 @@ from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .handlers import (
     BaseWorkerHandler,
+    ClassifyWorkerHandler,
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
     PrefillWorkerHandler,
@@ -573,6 +574,15 @@ class WorkerFactory:
             )
             return
 
+        # Classify worker: same pooling-AsyncLLM shape as embedding, but
+        # registers ModelType.Classify (frontend mounts POST /classify).
+        # Aggregated-only — enforced in _validate_classify_worker_exclusivity.
+        if config.classify_worker:
+            await self._create_classify_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
+            return
+
         # NOTE: --benchmark-mode is only supported for prefill/decode workers.
         # The encode worker path does not wire benchmark waiting or
         # the get_perf_metrics endpoint.
@@ -751,6 +761,82 @@ class WorkerFactory:
             )
         except Exception as e:
             logger.error(f"Failed to serve embedding worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    async def _create_classify_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> None:
+        """Initialize an aggregated sequence-classification worker.
+
+        Structurally identical to ``_create_embedding_worker`` — pooling
+        ``AsyncLLM``, no KV cache / decode / stat-logger — but the handler
+        runs ``task="classify"`` and registers the model as
+        ``ModelType.Classify`` so the frontend mounts ``POST /classify``.
+        See ``_create_embedding_worker`` for the rationale behind the
+        skipped decode-worker machinery (all of it applies here too).
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
+        (
+            engine_client,
+            vllm_config,
+            _default_sampling_params,
+            _prometheus_temp_dir,
+            _component_gauges,
+        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        handler = ClassifyWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            model_config=getattr(vllm_config, "model_config", None),
+            shutdown_event=shutdown_event,
+        )
+
+        # The embedding health probe (`{"input": "probe"}`) matches the
+        # /classify request shape too, so we reuse it — the canary runs a real
+        # pooling forward pass.
+        classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
+        logger.info("Starting to serve the classify worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                    health_check_payload=classify_health_check_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Classify,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    # Classification is a single pooling pass — no prefill/decode
+                    # split — so it advertises as Aggregated with no peers.
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to serve classify worker endpoint: {e}")
             raise
         finally:
             handler.cleanup()

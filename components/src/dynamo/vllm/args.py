@@ -238,6 +238,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
     """Return the worker role when trace-based FPM activation is unsupported."""
     if dynamo_config.embedding_worker:
         return "embedding"
+    if dynamo_config.classify_worker:
+        return "classify"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:

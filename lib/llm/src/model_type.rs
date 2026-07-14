@@ -52,6 +52,10 @@ bitflags! {
         const Audios = 1 << 6;
         const Videos = 1 << 7;
         const Realtime = 1 << 8;
+        /// Sequence-classification / cross-encoder pooling models served on
+        /// the `/classify` endpoint (e.g. NLI, sentiment). Like `Embedding`,
+        /// this is a pooling capability, not a token-generating surface.
+        const Classify = 1 << 9;
     }
 }
 
@@ -91,6 +95,9 @@ impl ModelType {
     pub fn supports_realtime(&self) -> bool {
         self.contains(ModelType::Realtime)
     }
+    pub fn supports_classify(&self) -> bool {
+        self.contains(ModelType::Classify)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -120,6 +127,9 @@ impl ModelType {
         }
         if self.supports_realtime() {
             result.push("realtime");
+        }
+        if self.supports_classify() {
+            result.push("classify");
         }
         result
     }
@@ -154,6 +164,9 @@ impl ModelType {
         }
         if self.supports_realtime() {
             result.push(ModelType::Realtime);
+        }
+        if self.supports_classify() {
+            result.push(ModelType::Classify);
         }
         result
     }
@@ -198,6 +211,9 @@ impl ModelType {
         }
         if self.contains(Self::Realtime) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Realtime);
+        }
+        if self.contains(Self::Classify) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Classify);
         }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
@@ -319,6 +335,32 @@ mod tests {
         let endpoints = (ModelType::Chat | ModelType::Realtime).as_endpoint_types();
         assert!(endpoints.contains(&EndpointType::Chat));
         assert!(endpoints.contains(&EndpointType::Realtime));
+    }
+
+    #[test]
+    fn classify_bit_position() {
+        assert_eq!(ModelType::Classify.bits(), 1 << 9);
+    }
+
+    #[test]
+    fn classify_supports_classify() {
+        assert!(ModelType::Classify.supports_classify());
+        assert!(!ModelType::Chat.supports_classify());
+        assert!(!ModelType::Embedding.supports_classify());
+    }
+
+    #[test]
+    fn classify_in_as_vec_and_units() {
+        assert_eq!(ModelType::Classify.as_vec(), vec!["classify"]);
+        assert_eq!(ModelType::Classify.units(), vec![ModelType::Classify]);
+    }
+
+    #[test]
+    fn classify_endpoint_mapping() {
+        assert_eq!(
+            ModelType::Classify.as_endpoint_types(),
+            vec![EndpointType::Classify]
+        );
     }
 
     #[test]

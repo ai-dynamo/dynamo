@@ -14,6 +14,7 @@ use crate::types::TokenIdType;
 
 pub mod audios;
 pub mod chat_completions;
+pub mod classify;
 pub mod common_ext;
 pub mod completions;
 pub(crate) mod delta_common;
