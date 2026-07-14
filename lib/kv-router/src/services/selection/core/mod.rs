@@ -480,6 +480,9 @@ impl SelectionCore {
             None,
             Some(overlap_refresh),
             None,
+            // DIS-2404: fenced_worker_provider — not wired on the standalone-selection
+            // path (no Client fence source here); None keeps behaviour unchanged.
+            None,
             self.kv_router_config.router_queue_recheck_interval(),
             self.kv_router_config.router_track_prefill_tokens,
             self.cancel_token.child_token(),
