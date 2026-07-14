@@ -235,7 +235,6 @@ def test_engine_generate_maps_output_and_prompt_logprobs(monkeypatch):
         "return_logprob": True,
         "logprob_start_len": 0,
         "top_logprobs_num": 3,
-        "return_text_in_logprobs": False,
     }
 
 

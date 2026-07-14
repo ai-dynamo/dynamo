@@ -248,7 +248,6 @@ def _build_logprob_kwargs(sglang_tito: dict[str, Any]) -> dict[str, Any]:
         allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
     )
     kwargs.setdefault("logprob_start_len", -1)
-    kwargs["return_text_in_logprobs"] = False
     return kwargs
 
 
