@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -61,7 +62,7 @@ class ServerManager:
         self.wait_for_ready(model)
 
     def wait_for_ready(self, model: str) -> None:
-        """Poll /v1/models until the expected model name appears."""
+        """Wait for model registration, then require one real inference."""
         import urllib.error
         import urllib.request
 
@@ -85,14 +86,44 @@ class ServerManager:
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     body = resp.read().decode()
                     if model in body:
-                        print("Server is ready (model registered).", flush=True)
-                        return
+                        if self._chat_probe(model):
+                            print(
+                                "Server is ready (chat inference succeeded).",
+                                flush=True,
+                            )
+                            return
             except (urllib.error.URLError, OSError, TimeoutError):
                 pass
             time.sleep(5)
 
         self.stop()
         raise TimeoutError(f"Server did not become ready within {self.timeout}s")
+
+    def _chat_probe(self, model: str) -> bool:
+        """Return true only after a minimal non-streaming generation succeeds."""
+        import urllib.error
+        import urllib.request
+
+        body = json.dumps(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": "Reply ready."}],
+                "max_tokens": 1,
+                "temperature": 0,
+                "stream": False,
+            }
+        ).encode()
+        request = urllib.request.Request(
+            f"http://localhost:{self.port}/v1/chat/completions",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return 200 <= response.status < 300
+        except (urllib.error.URLError, OSError, TimeoutError):
+            return False
 
     def stop(self) -> None:
         """Stop the server by killing its process group."""

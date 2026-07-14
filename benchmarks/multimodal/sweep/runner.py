@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 def _build_aiperf_cmd(
@@ -18,13 +19,14 @@ def _build_aiperf_cmd(
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    extra_args: Optional[List[str]] = None,
 ) -> List[str]:
     if sweep_mode == "concurrency":
         sweep_flag = "--concurrency"
     else:
         sweep_flag = "--request-rate"
 
-    return [
+    cmd = [
         "aiperf",
         "profile",
         "-m",
@@ -56,6 +58,9 @@ def _build_aiperf_cmd(
         "none",
         "--no-server-metrics",
     ]
+    if extra_args:
+        cmd.extend(extra_args)
+    return cmd
 
 
 def run_aiperf_single(
@@ -68,6 +73,7 @@ def run_aiperf_single(
     input_file: str,
     osl: int,
     artifact_dir: Path,
+    extra_args: Optional[List[str]] = None,
 ) -> None:
     """Run a single aiperf profile invocation."""
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -81,10 +87,15 @@ def run_aiperf_single(
         input_file=input_file,
         osl=osl,
         artifact_dir=artifact_dir,
+        extra_args=extra_args,
     )
+
+    (artifact_dir / "command.txt").write_text(shlex.join(cmd) + "\n", encoding="utf-8")
 
     print(f"  aiperf {sweep_mode}={sweep_value} -> {artifact_dir}", flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    (artifact_dir / "aiperf.stdout.log").write_text(proc.stdout, encoding="utf-8")
+    (artifact_dir / "aiperf.stderr.log").write_text(proc.stderr, encoding="utf-8")
 
     if proc.returncode != 0:
         print(f"  aiperf FAILED (exit {proc.returncode})", flush=True)
@@ -109,6 +120,7 @@ def run_sweep(
     input_file: str,
     osl: int,
     output_dir: Path,
+    extra_args: Optional[List[str]] = None,
 ) -> None:
     """Run aiperf across all sweep values, writing results under output_dir/{mode}{N}/."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -124,6 +136,7 @@ def run_sweep(
             input_file=input_file,
             osl=osl,
             artifact_dir=output_dir / f"{sweep_mode}{value}",
+            extra_args=extra_args,
         )
 
     print(f"Sweep complete. Results in {output_dir}", flush=True)

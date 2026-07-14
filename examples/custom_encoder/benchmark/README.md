@@ -1,182 +1,67 @@
-# Qwen3-VL CustomEncoder benchmark
+# Qwen3-VL CustomEncoder image benchmark
 
-This workload exercises Dynamo's cross-request custom vision batching with a
-public Qwen3-VL-2B vision tower and the full Qwen3-VL-2B checkpoint in vLLM.
+This recipe compares three single-H100 runtimes with
+`Qwen/Qwen3-VL-2B-Instruct`:
 
-Start the topology:
+- upstream `vllm serve`;
+- native aggregated `dynamo.vllm`;
+- aggregated Dynamo with
+  `examples.custom_encoder.qwen3_vl_vision_encoder.Qwen3VLVisionEncoder`.
+
+The workload contains three disjoint pools of 1,000 deterministic JPEGs, one
+pool for each offered rate (16, 24, and 32 requests/second). Every request has
+one globally unique 500×500 RGB image between 50 and 60 KiB, exact server-side
+ISL 515, and exact OSL 70. The native and custom JSONLs share the same image
+order and semantic prompt; the custom prompt adds two harmless filler tokens to
+compensate for its template omitting Qwen3-VL's two vision-boundary tokens.
+
+Generate and audit the workload:
 
 ```bash
-examples/custom_encoder/launch/agg_qwen3_vl.sh
+WORKLOAD_DIR=/dynamo-tmp/logs/$(date +%m-%d)/qwen3-vl-custom-sweep/workload
+python examples/custom_encoder/benchmark/generate_workload.py \
+    --output-dir "$WORKLOAD_DIR"
+python examples/custom_encoder/benchmark/validate_workload.py "$WORKLOAD_DIR"
 ```
 
-In another shell, generate and run the workload:
+Run the nine benchmark cells and write `benchmark.md` plus `benchmark.csv`:
 
 ```bash
-python examples/custom_encoder/benchmark/generate_workload.py
-examples/custom_encoder/benchmark/run_aiperf.sh
-```
-
-The generator creates five 299×299 and four 500×500 deterministic JPEGs, then
-cycles them across 100 requests. Every request contains one image and the same
-text prompt. It pads that prompt so the estimated mean server-side ISL is near
-515 after the variable number of visual tokens is spliced in. The benchmark
-uses concurrency 8 and forces 70 generated tokens with `ignore_eos:true`.
-
-Artifacts are written below `logs/qwen3_vl_custom_encoder/`. The command uses
-server token counts because client-side tokenization cannot see the visual-token
-expansion performed by the custom encoder. Confirm the actual mean ISL and OSL
-from the aiperf export rather than relying only on the generator's estimate.
-
-The Qwen3-VL custom encoder captures CUDA graphs for exact image-grid and padded
-batch-rung pairs. Defaults cover this workload's 299×299 and 500×500 images with
-batch rungs 1, 2, 4, and 8. Override before server startup when needed:
-
-```bash
-DYN_QWEN3_VL_GRAPH_IMAGE_SIZES="299x299,500x500" \
-DYN_QWEN3_VL_GRAPH_BATCH_BUCKETS="1,2,4,8" \
-    examples/custom_encoder/launch/agg_qwen3_vl.sh
-```
-
-For the eager A/B control, set
-``DYN_QWEN3_VL_DISABLE_CUDA_GRAPHS=1``. The independent
-``DYN_QWEN3_VL_MAX_BATCH_COST`` defaults to 8 in either mode.
-
-Unsupported image grids fail during preprocessing rather than triggering lazy
-capture or an unbudgeted eager fallback. The launcher explicitly retains
-``--enable-prefix-caching``. It currently keeps vLLM's native tower loaded:
-the installed Qwen3-VL ``--language-model-only`` path fails compilation when
-DeepStack-related tensors remain on the meta device.
-
-Choose the ladder from observed batch costs. A rung above the configured
-``max_batch_cost`` is unreachable, while extra rungs reserve one graph per
-image grid. For this concurrency-8 workload, 1, 2, 4, and 8 covered every
-batch; dense 1-through-8 capture did not improve throughput enough to justify
-its additional graph memory. Re-benchmark if the workload or concurrency
-changes.
-
-H2D inputs use reusable pinned staging buffers, and each batch returns through
-one D2H copy before it is split into per-image CPU views. These are always
-enabled. If image sources are stable and repeat exactly, preprocessing can also
-be cached by source string:
-
-```bash
-DYN_QWEN3_VL_PREPROCESS_CACHE_SIZE=16 \
-    examples/custom_encoder/launch/agg_qwen3_vl.sh
-```
-
-The bounded cache stores decoded/patchified CPU tensors, not image embeddings.
-It is disabled by default because the same HTTP URL or local path can later
-refer to different bytes; enable it only when source-string identity is a valid
-freshness policy. Data URLs and immutable content-addressed URLs are natural
-candidates. Set the capacity at least as high as the expected working set (nine
-for this benchmark). Capacity bounds entries, not bytes: processed tensors and
-large source strings still consume host memory. Raw keys remain resident until
-eviction or shutdown, so do not use credential-bearing URLs as cache keys.
-Cached tensors are shared read-only values; concurrent misses may compute the
-same key more than once before one result is retained. Shutdown waits for active
-preprocessing before clearing the cache and logs final hit/miss counts.
-
-Post-ViT embeddings are cached separately in a byte-bounded CPU LRU. The Qwen3-VL
-backend hashes the encoded image bytes that it decodes, so repeated content skips
-H2D, the vision tower, and D2H even when it arrives through a different source
-string. The default logical tensor budget is 1 GiB per encoder instance:
-
-```bash
-DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES=1073741824 \
-    examples/custom_encoder/launch/agg_qwen3_vl.sh
-```
-
-Set the value to ``0`` to disable content hashing and embedding retention. The
-capacity accounts for retained tensor payloads, not Python objects, transient
-copies, the preprocess cache, allocator retention, or process RSS. Mutable URLs
-and files are fetched and content-hashed on every request unless the source-string
-preprocess cache above is also enabled. Cache entries live only for one loaded
-encoder instance and are cleared during teardown.
-
-The per-image CPU tensors returned by `forward_batch` have independent storage.
-Cache hits are cloned before return, so caller mutation cannot corrupt retained
-entries or sibling results.
-
-On one H100 PCIe, the 1,000-request OSL=70 workload above produced the following
-matched throughput. Each aiperf run used 20 warmup requests, and all runs
-completed with zero errors:
-
-| Concurrency | Cache disabled | 1 GiB cache | Gain |
-| ---: | ---: | ---: | ---: |
-| 1 | 3.424 req/s | 3.461 req/s | 1.1% |
-| 2 | 5.777 req/s | 6.233 req/s | 7.9% |
-| 4 | 10.662 req/s | 11.943 req/s | 12.0% |
-| 8 | 18.519 req/s | 21.940 req/s | 18.5% |
-
-The cached server executed exactly nine vision-tower graph replays across the
-four runs (4,080 warmup plus measured images), matching the nine-image working
-set. After those cold misses, repeated requests skipped H2D, ViT, and D2H. The
-remaining latency is language-model prefill and generation; prefix-cache hits do
-not make the 70-token decode instantaneous.
-
-The CustomEncoder runtime uses immediate eager-drain by default. Graph backends
-can opt into an experimental bounded coalescing delay before server startup:
-
-```bash
-DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS=1 \
-    examples/custom_encoder/launch/agg_qwen3_vl.sh
-```
-
-Collection dispatches before the deadline when one compatible `bucket_key`
-group's summed cost reaches `max_batch_cost`; incompatible shapes never count
-toward each other's fullness. The delay starts when the actor dequeues the first
-item, so it does not bound time already spent behind an in-flight forward. It is
-a latency/throughput tradeoff and must be swept for the deployment's concurrency
-and shape distribution; it is not assumed to improve throughput. Nonzero values
-are rejected for backends without CUDA graph buckets.
-
-For this workload, a matched 1,000-request H100 sweep favored the zero-delay
-default at every tested concurrency: 4.095/7.813/14.257/24.315 req/s at
-concurrency 1/2/4/8, versus 4.094/7.708/14.152/24.144 req/s with a 1 ms delay.
-
-## Timing and saturation sweep
-
-Start the topology with stage timing enabled and retain its append-only log:
-
-```bash
-mkdir -p logs/qwen3_vl_custom_encoder
-DYN_CUSTOM_ENCODER_TIMING=1 \
-    examples/custom_encoder/launch/agg_qwen3_vl.sh \
-    2>&1 | tee logs/qwen3_vl_custom_encoder/server.log
-```
-
-In another shell, run both an encoder-sensitive OSL=1 workload and the target
-OSL=70 workload across concurrency 1, 2, 4, 8, 16, and 32:
-
-```bash
-SERVER_LOG="$PWD/logs/qwen3_vl_custom_encoder/server.log" \
+RUN_DIR=/dynamo-tmp/logs/$(date +%m-%d)/qwen3-vl-custom-sweep
+WORKLOAD_DIR="$RUN_DIR/workload" OUTPUT_DIR="$RUN_DIR" \
     examples/custom_encoder/benchmark/run_sweep.sh
 ```
 
-Override the matrix without editing the script, for example:
+The canonical multimodal sweep runner launches each server independently and
+invokes an equivalent of:
 
 ```bash
-CONCURRENCIES="4 8 16" OSLS="1 70" REQUEST_COUNT=100 \
-SERVER_LOG="$PWD/logs/qwen3_vl_custom_encoder/server.log" \
-    examples/custom_encoder/benchmark/run_sweep.sh
+aiperf profile -m Qwen/Qwen3-VL-2B-Instruct -u http://localhost:8000 \
+    --request-rate 16 --conversation-num 1000 --warmup-request-count 20 \
+    --input-file image_native_qps16_1000_isl515.jsonl \
+    --custom-dataset-type single_turn \
+    --extra-inputs max_tokens:70 --extra-inputs min_tokens:70 \
+    --extra-inputs ignore_eos:true --extra-inputs stream:true --streaming \
+    --endpoint-type chat --endpoint /v1/chat/completions \
+    --warmup-request-rate 1000 --warmup-arrival-pattern constant \
+    --random-seed 42 --workers-max 20 --record-processors 32 \
+    --use-server-token-count --request-timeout-seconds 300 \
+    --artifact-dir <cell-dir> --ui none --no-server-metrics
 ```
 
-Each run gets its corresponding slice of the server log. At completion,
-`summarize_results.py` writes `aiperf_summary.csv`,
-`stage_timing_summary.csv`, and `cuda_graph_summary.csv` into the sweep
-directory. The timing summary consumes log entries with this stable grammar:
+No `AIPERF_HTTP_CONNECTION_LIMIT` override is used. Each cell stores its exact
+expanded command in `command.txt`.
 
-```text
-custom_encoder_timing stage=vit_forward elapsed_ms=1.23 batch_size=8 bucket=8 cost=8
-custom_encoder_graph selected_bucket=8 actual_cost=7 batch_size=7
-```
+## Custom encoder loading
 
-The stage summary covers `preprocess`, `queue_wait`, `h2d`, `vit_forward`, and
-`d2h`; the graph summary shows which captured bucket was selected and for what
-actual batch size/cost. `DYN_CUSTOM_ENCODER_TIMING` must be set on the server
-process, not only on the aiperf client.
+`Qwen3VLVisionEncoder.build()` loads `AutoProcessor` and
+`Qwen3VLForConditionalGeneration` in bf16, retains `model.visual` as the ViT,
+detaches that module from the full checkpoint, and releases the remaining
+weights. It captures CUDA graphs for the configured image-grid and batch-bucket
+pairs. This benchmark disables both CPU embedding and preprocessing caches and
+uses a 1 ms custom-encoder queue wait, so every unique image executes the ViT.
 
-Qwen3-VL's native path also injects DeepStack vision features into intermediate
+The native Qwen3-VL path also injects DeepStack features into intermediate
 language-model layers. The current CustomEncoder interface carries only primary
-image embeddings, so this workload measures the real ViT/projector and Dynamo
-batching path but is not a native-output parity test.
+image embeddings. This is a performance comparison of the custom vision path,
+not a numerical-output parity claim.

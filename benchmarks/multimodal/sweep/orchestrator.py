@@ -156,7 +156,7 @@ def _run_config(
     try:
         for input_file, file_tag, value, artifact_dir, conversation_num in pending_runs:
             _print_banner(
-                f"[{file_tag}] Config: {bench_cfg.label}  " f"{sweep_mode}={value}",
+                f"[{file_tag}] Config: {bench_cfg.label}  {sweep_mode}={value}",
                 char="-",
             )
 
@@ -179,6 +179,7 @@ def _run_config(
                     input_file=input_file,
                     osl=config.osl,
                     artifact_dir=artifact_dir,
+                    extra_args=config.aiperf_extra_args,
                 )
             finally:
                 if config.restart_server_every_benchmark:

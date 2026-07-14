@@ -41,6 +41,14 @@ output_dir: benchmarks/multimodal/sweep/results/vllm_serve
 env:
   ENABLE_ENCODER_CACHE: "0"
 
+# Optional arguments appended to every aiperf invocation. Values are converted
+# to strings, so numeric YAML values are accepted.
+aiperf_extra_args:
+  - --random-seed
+  - 42
+  - --workers-max
+  - 20
+
 # JSONL files produced by benchmarks/multimodal/jsonl/
 input_files:
   - benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_http.jsonl

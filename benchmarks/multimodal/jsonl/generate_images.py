@@ -3,13 +3,19 @@
 
 """Utilities for generating and sampling image pools."""
 
+import hashlib
+import io
 import json
 import random
 import uuid as _uuid
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PIL import Image
+
+JPEG_TARGET_MIN_BYTES = 50 * 1024
+JPEG_TARGET_MAX_BYTES = 60 * 1024
 
 
 def compute_image_uuid(ref: str) -> str:
@@ -46,6 +52,136 @@ def generate_image_pool_base64(
         f"  {pool_size} unique {image_size[0]}x{image_size[1]} images saved to {image_dir}"
     )
     return pool
+
+
+def _encode_resampled_noise_jpeg(
+    noise: Image.Image,
+    texture_side: int,
+    image_size: tuple[int, int],
+    quality: int,
+) -> bytes:
+    """Encode deterministic, compressible noise at a fixed JPEG quality."""
+    image = noise.resize(
+        (texture_side, texture_side), Image.Resampling.BILINEAR
+    ).resize(image_size, Image.Resampling.BICUBIC)
+    encoded = io.BytesIO()
+    image.save(
+        encoded,
+        format="JPEG",
+        quality=quality,
+        optimize=True,
+        subsampling=2,
+    )
+    return encoded.getvalue()
+
+
+def generate_target_sized_jpeg(
+    np_rng: np.random.Generator,
+    path: Path,
+    image_size: tuple[int, int] = (500, 500),
+    quality: int = 85,
+    min_bytes: int = JPEG_TARGET_MIN_BYTES,
+    max_bytes: int = JPEG_TARGET_MAX_BYTES,
+) -> dict[str, Any]:
+    """Write one deterministic JPEG whose encoded size is within a byte range.
+
+    JPEG quality remains fixed. The generator changes only the resolution of a
+    seeded noise texture, which controls compressibility without changing the
+    decoded image dimensions. A 180-pixel texture normally lands near 55 KiB;
+    binary search is used only when an encoder/version produces a result outside
+    the requested range.
+    """
+    if min_bytes <= 0 or max_bytes < min_bytes:
+        raise ValueError("expected 0 < min_bytes <= max_bytes")
+    if not 1 <= quality <= 100:
+        raise ValueError("quality must be between 1 and 100")
+
+    width, height = image_size
+    pixels = np_rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
+    noise = Image.fromarray(pixels)
+    target_bytes = (min_bytes + max_bytes) // 2
+
+    candidates: list[tuple[int, bytes]] = []
+
+    def encode(texture_side: int) -> bytes:
+        payload = _encode_resampled_noise_jpeg(noise, texture_side, image_size, quality)
+        candidates.append((texture_side, payload))
+        return payload
+
+    payload = encode(min(180, width, height))
+    if not min_bytes <= len(payload) <= max_bytes:
+        lower = 8
+        upper = min(width, height)
+        while lower <= upper:
+            texture_side = (lower + upper) // 2
+            payload = encode(texture_side)
+            if min_bytes <= len(payload) <= max_bytes:
+                break
+            if len(payload) < min_bytes:
+                lower = texture_side + 1
+            else:
+                upper = texture_side - 1
+
+    texture_side, payload = min(
+        candidates, key=lambda candidate: abs(len(candidate[1]) - target_bytes)
+    )
+    if not min_bytes <= len(payload) <= max_bytes:
+        raise RuntimeError(
+            f"could not generate JPEG in [{min_bytes}, {max_bytes}] bytes; "
+            f"closest was {len(payload)} bytes"
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+    with Image.open(io.BytesIO(payload)) as encoded:
+        decoded = encoded.convert("RGB")
+        decoded_hash = hashlib.sha256(decoded.tobytes()).hexdigest()
+
+    return {
+        "path": str(path.resolve()),
+        "width": width,
+        "height": height,
+        "size_bytes": len(payload),
+        "jpeg_quality": quality,
+        "texture_side": texture_side,
+        "encoded_sha256": hashlib.sha256(payload).hexdigest(),
+        "decoded_rgb_sha256": decoded_hash,
+    }
+
+
+def generate_target_sized_jpeg_pool(
+    pool_size: int,
+    image_dir: Path,
+    seed: int,
+    image_size: tuple[int, int] = (500, 500),
+    quality: int = 85,
+    min_bytes: int = JPEG_TARGET_MIN_BYTES,
+    max_bytes: int = JPEG_TARGET_MAX_BYTES,
+    start_index: int = 0,
+) -> list[dict[str, Any]]:
+    """Generate a deterministic pool of unique target-sized JPEGs."""
+    image_dir.mkdir(parents=True, exist_ok=True)
+    records: list[dict[str, Any]] = []
+    encoded_hashes: set[str] = set()
+    decoded_hashes: set[str] = set()
+    for offset in range(pool_size):
+        index = start_index + offset
+        record = generate_target_sized_jpeg(
+            np.random.default_rng(seed + index),
+            image_dir / f"image_{index:04d}_{image_size[0]}x{image_size[1]}.jpg",
+            image_size=image_size,
+            quality=quality,
+            min_bytes=min_bytes,
+            max_bytes=max_bytes,
+        )
+        if record["encoded_sha256"] in encoded_hashes:
+            raise RuntimeError(f"duplicate encoded JPEG at {record['path']}")
+        if record["decoded_rgb_sha256"] in decoded_hashes:
+            raise RuntimeError(f"duplicate decoded RGB image at {record['path']}")
+        encoded_hashes.add(record["encoded_sha256"])
+        decoded_hashes.add(record["decoded_rgb_sha256"])
+        records.append(record)
+    return records
 
 
 def generate_image_pool_http(
