@@ -202,7 +202,13 @@ impl<'a> LookupPipeline<'a> {
                 // them as lower-tier anchors would over-credit host/disk cache
                 // hits and break the score/hash lockstep `query_lower_tiers`
                 // expects.
-                let primary_device = self.primary.find_match_details_retained(&sequence).await?;
+                let primary_device = self
+                    .primary
+                    .find_match_details_retained_with_options(
+                        &sequence,
+                        lower_tier_options.retain_router_hint_chain,
+                    )
+                    .await?;
                 let lt = query_lower_tiers_with_options(
                     lower_tier,
                     sequence.as_slice(),
@@ -307,15 +313,29 @@ impl<'a> PrimaryLookup<'a> {
         &self,
         sequence: &HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
+        self.find_match_details_retained_with_options(sequence, false)
+            .await
+    }
+
+    async fn find_match_details_retained_with_options(
+        &self,
+        sequence: &HashInput<'_>,
+        retain_router_hint_chain: bool,
+    ) -> Result<MatchDetails, KvRouterError> {
         let primary_details = match self {
             Self::KvIndexer(primary) => {
                 primary
-                    .find_match_details(sequence.clone_for_boundary())
+                    .find_match_details_with_options(
+                        sequence.clone_for_boundary(),
+                        retain_router_hint_chain,
+                    )
                     .await?
             }
-            Self::Concurrent(primary) => primary
-                .backend()
-                .find_match_details_impl(sequence.as_slice(), false),
+            Self::Concurrent(primary) => primary.backend().find_match_details_impl_with_options(
+                sequence.as_slice(),
+                false,
+                retain_router_hint_chain,
+            ),
             Self::Remote(primary) => {
                 let tiered = primary
                     .find_matches_by_tier(sequence.clone_for_boundary(), true)

@@ -21,7 +21,9 @@ use crate::indexer::{
     KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
     ThreadPoolIndexer, WireTieredMatchDetails,
 };
-use crate::protocols::{LocalBlockHash, StorageTier};
+use crate::protocols::{LocalBlockHash, StorageTier, WorkerWithDpRank};
+use crate::router_hint::RouterHintRootCandidates;
+use rustc_hash::FxHashMap;
 
 /// Holds one per-tier [`ThreadPoolIndexer<LowerTierIndexer>`] for every
 /// non-device [`StorageTier`] that has received at least one event.
@@ -189,6 +191,77 @@ pub fn query_lower_tiers(
     )
 }
 
+fn combine_router_hint_root_candidates(
+    device_candidates: Option<&RouterHintRootCandidates>,
+    continuations: &FxHashMap<WorkerWithDpRank, LowerTierContinuation>,
+    tier_matches: &LowerTierMatchDetails,
+) -> Option<RouterHintRootCandidates> {
+    let mut block_hashes = device_candidates
+        .map(|candidates| candidates.block_hashes.clone())
+        .unwrap_or_default();
+    let mut owner_prefix_blocks: FxHashMap<WorkerWithDpRank, usize> = FxHashMap::default();
+
+    if let Some(candidates) = device_candidates {
+        owner_prefix_blocks.extend(candidates.owner_prefix_blocks.iter().copied());
+    }
+
+    let Some(extensions) = tier_matches.router_hint_extensions.as_ref() else {
+        return device_candidates.cloned();
+    };
+
+    let mut extension_rows = extensions
+        .iter()
+        .filter_map(|(worker, hashes)| {
+            let continuation = continuations.get(worker)?;
+            (!hashes.is_empty()).then_some((*worker, continuation.start_pos, hashes.as_slice()))
+        })
+        .collect::<Vec<_>>();
+    extension_rows.sort_unstable_by_key(|(worker, start_pos, _)| (*start_pos, *worker));
+
+    for (worker, start_pos, hashes) in extension_rows {
+        if block_hashes.len() < start_pos {
+            continue;
+        }
+
+        let original_len = block_hashes.len();
+        let mut valid = true;
+        for (offset, hash) in hashes.iter().copied().enumerate() {
+            let pos = start_pos + offset;
+            if pos < block_hashes.len() {
+                if block_hashes[pos] != hash {
+                    valid = false;
+                    break;
+                }
+            } else if pos == block_hashes.len() {
+                block_hashes.push(hash);
+            } else {
+                valid = false;
+                break;
+            }
+        }
+
+        if valid {
+            owner_prefix_blocks.insert(worker, start_pos + hashes.len());
+        } else {
+            block_hashes.truncate(original_len);
+        }
+    }
+
+    let mut owner_prefix_blocks = owner_prefix_blocks
+        .into_iter()
+        .filter(|(_, blocks)| *blocks > 0)
+        .collect::<Vec<_>>();
+    if block_hashes.is_empty() || owner_prefix_blocks.is_empty() {
+        return None;
+    }
+    owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
+
+    Some(RouterHintRootCandidates {
+        block_hashes,
+        owner_prefix_blocks,
+    })
+}
+
 pub fn query_lower_tiers_with_options(
     indexers: &LowerTierIndexers,
     sequence: &[LocalBlockHash],
@@ -235,14 +308,20 @@ pub fn query_lower_tiers_with_options(
             }
         }
 
-        let router_hint_root_candidates = (options.retain_router_hint_chain
-            && storage_tier == StorageTier::HostPinned)
-            .then(|| indexer.backend().root_chain_candidates(sequence))
-            .flatten();
-        let mut tier_matches = indexer
-            .backend()
-            .query_match_details(sequence, &continuations);
-        tier_matches.router_hint_root_candidates = router_hint_root_candidates;
+        let retain_router_hint_chain =
+            options.retain_router_hint_chain && storage_tier == StorageTier::HostPinned;
+        let mut tier_matches = indexer.backend().query_match_details_with_options(
+            sequence,
+            &continuations,
+            retain_router_hint_chain,
+        );
+        if retain_router_hint_chain {
+            tier_matches.router_hint_root_candidates = combine_router_hint_root_candidates(
+                device_matches.router_hint_root_candidates.as_ref(),
+                &continuations,
+                &tier_matches,
+            );
+        }
         let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
         tracing::debug!(
             ?storage_tier,
@@ -308,11 +387,59 @@ mod tests {
         let device_matches = MatchDetails {
             overlap_scores,
             last_matched_hashes: Default::default(),
+            router_hint_root_candidates: None,
         };
 
         let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
         let result = query_lower_tiers(&indexers, &sequence, &device_matches);
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn query_lower_tiers_extends_router_hint_chain_from_device_prefix() {
+        let indexers = LowerTierIndexers::new(1, 4);
+        let worker = WorkerWithDpRank::new(7, 0);
+        let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
+        lower_tier
+            .apply_event(store_event(7, 0, 0, Some(101), &[12], &[102]))
+            .await;
+        let _ = lower_tier.dump_events().await.unwrap();
+
+        let mut overlap_scores = OverlapScores::new();
+        overlap_scores.scores.insert(worker, 1);
+        let mut last_matched_hashes = FxHashMap::default();
+        last_matched_hashes.insert(worker, ExternalSequenceBlockHash(101));
+        let device_matches = MatchDetails {
+            overlap_scores,
+            last_matched_hashes,
+            router_hint_root_candidates: Some(RouterHintRootCandidates {
+                block_hashes: vec![ExternalSequenceBlockHash(101)],
+                owner_prefix_blocks: vec![(worker, 1)],
+            }),
+        };
+
+        let sequence = local_hashes(&[11, 12, 13]);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions {
+                retain_router_hint_chain: true,
+            },
+        );
+        let candidates = result
+            .get(&StorageTier::HostPinned)
+            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            candidates.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ]
+        );
+        assert_eq!(candidates.owner_prefix_blocks, vec![(worker, 2)]);
     }
 
     #[tokio::test]
