@@ -32,7 +32,7 @@ This document tracks backend support across three composable projects in this wo
 | :--- | :---: | :---: | :---: |
 | **vLLM** | ✅ | ✅ | ✅ |
 | **SGLang** | ✅ | 🚧 | ✅ |
-| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 |
+| **TensorRT-LLM** | 🚧 | 🚧 | ✅ |
 
 See the per-feature sections below for detailed per-backend status.
 
@@ -73,7 +73,7 @@ See the per-feature sections below for detailed per-backend status.
 
 ### Dynamo Snapshot
 
-Dynamo Snapshot uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a worker's initialized state once (including GPU memory and CUDA contexts) and restore subsequent workers from that checkpoint, reducing cold starts from minutes to seconds for large LLMs. This feature is enabled via the DynamoCheckpoint custom resource and is natively supported via the Dynamo Graph Deployments (DGDs).
+Dynamo Snapshot uses CRIU and CUDA checkpointing capabilities to capture a worker's initialized state once (including GPU memory and CUDA contexts) and restore subsequent workers from that checkpoint, reducing cold starts from minutes to seconds for large LLMs. This feature is enabled via the DynamoCheckpoint custom resource and is natively supported via the Dynamo Graph Deployments (DGDs).
 
 #### Status
 
@@ -81,9 +81,8 @@ Dynamo Snapshot uses CRIU and NVIDIA's `cuda-checkpoint` utility to capture a wo
 | :--- | :---: | :---: | :---: |
 | **vLLM** | ✅ | ✅ (highly experimental) | 🚧 |
 | **SGLang** | ✅ | 🚧 | 🚧 |
-| **TensorRT-LLM** | 🚧 | 🚧 | 🚧 |
+| **TensorRT-LLM** | ✅ | 🚧 | 🚧 |
 
 **Notes:**
-- GMS integration is currently gated on a pending driver release.
-- CRIU performance is only optimal with the following patches folded into criu-dev: [AIO support](https://github.com/checkpoint-restore/criu/pull/3022) and [parallel memfd support](https://github.com/checkpoint-restore/criu/pull/3021)
+- GMS integration is currently disabled by default. CUDA Driver r610 is the minimum required version for Dynamo Snapshot + GMS integration.
 - Multi-GPU, Single Node is available in a highly experimental/slightly limited path that uses legacy IPC only for P2P.
