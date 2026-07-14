@@ -9,8 +9,8 @@ The Dynamo KV Router intelligently routes requests by evaluating their computati
 
 ## Quick Start
 
-Event-driven KV routing requires configuration on both the frontend and every worker that performs
-prefill:
+Event-driven KV routing requires configuration on both the frontend and the KV-routed backend
+workers:
 
 1. Start the frontend with the KV router enabled:
 
@@ -18,16 +18,25 @@ prefill:
    python -m dynamo.frontend --router-mode kv --http-port 8000
    ```
 
-2. Enable KV event publication on the backend workers. For vLLM, pass
-   `--kv-events-config` to each aggregated worker or disaggregated prefill worker:
+2. Enable KV event publication with the configuration for your backend.
+
+   For vLLM, pass `--kv-events-config` to each aggregated worker or disaggregated prefill worker:
 
    ```bash
    python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
      --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
    ```
 
-Do not pass `--kv-events-config` to vLLM decode-only workers. For SGLang, pass its
-backend-specific `--kv-events-config`; for TensorRT-LLM, pass `--publish-events-and-metrics`. See
+   For SGLang, pass `--kv-events-config` to each aggregated worker. In disaggregated deployments,
+   pass it to both prefill and decode workers:
+
+   ```bash
+   python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B \
+     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+   ```
+
+Do not pass `--kv-events-config` to vLLM decode-only workers. Use a unique ZMQ endpoint port for
+workers that share a network namespace. For TensorRT-LLM, pass `--publish-events-and-metrics`. See
 [Router Operations](router-operations.md#additional-notes) for all backend settings.
 
 > [!TIP]
