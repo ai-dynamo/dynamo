@@ -18,17 +18,20 @@ python -m dynamo.frontend --router-mode kv &
 
 # run decode worker on GPU 0, without LMCache; NixlConnector pairs with the
 # prefill worker's Nixl transfer (matches disagg_kvbm.sh / disagg_flexkv.sh)
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # wait for decode worker to initialize
 sleep 20
 
-# run prefill worker on GPU 1 with LMCache
+# run prefill worker on GPU 1 with LMCache.
+# --disable-hybrid-kv-cache-manager: PdConnector wraps LMCacheConnectorV1, which
+# doesn't support the hybrid KV cache manager, so MultiConnector requires it off.
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 \
   python3 -m dynamo.vllm \
     --model "$MODEL" \
     --disaggregation-mode prefill \
+    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 
