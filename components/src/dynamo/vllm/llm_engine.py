@@ -229,6 +229,10 @@ class VllmLLMEngine(LLMEngine):
         # publishes against it.
         self._endpoint: Optional[Endpoint] = None
         self.loaded_loras: dict[str, LoRAInfo] = {}
+        # Adapters explicitly added through the lifecycle control path. Prefill
+        # registration is metadata-only, so only these adapters can be safely
+        # removed through ``engine_client.remove_lora`` during unload.
+        self._engine_loaded_loras: set[str] = set()
         # Adapters whose discovery ModelDeploymentCard is currently published.
         # Tracked separately from `loaded_loras` because the engine load and the
         # discovery publish can diverge on partial failure: an adapter may be
@@ -1035,6 +1039,7 @@ class VllmLLMEngine(LLMEngine):
                             lora_path=lora_path,
                         )
                     )
+                    self._engine_loaded_loras.add(lora_name)
 
                 self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
                 logger.info(
@@ -1077,6 +1082,7 @@ class VllmLLMEngine(LLMEngine):
                                     lora_name,
                                 )
                                 await self.engine_client.remove_lora(lora_id)
+                                self._engine_loaded_loras.discard(lora_name)
                             self.loaded_loras.pop(lora_name, None)
                             logger.debug(
                                 "Successfully rolled back LoRA '%s'", lora_name
@@ -1216,25 +1222,29 @@ class VllmLLMEngine(LLMEngine):
                         lora_name,
                     )
 
-                # Discovery no longer routes to this adapter; remove it from
-                # the engine.
-                try:
-                    await self.engine_client.remove_lora(lora_id)
-                except Exception as e:
-                    # The discovery card is already gone but the engine still
-                    # holds the adapter (loaded-but-unpublished). Leave it in
-                    # loaded_loras so a retried unload skips the unregister
-                    # and retries only the engine removal.
-                    logger.exception(
-                        "Failed to remove LoRA %s from engine: %s",
-                        lora_name,
-                        e,
-                    )
-                    return {
-                        "status": "error",
-                        "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
-                        "lora_name": lora_name,
-                    }
+                # Prefill lifecycle registration is metadata-only. Only
+                # remove adapters this process explicitly preloaded; asking
+                # vLLM to remove a metadata-only adapter fails and leaves the
+                # discovery and local lifecycle state out of sync.
+                if lora_name in self._engine_loaded_loras:
+                    try:
+                        await self.engine_client.remove_lora(lora_id)
+                    except Exception as e:
+                        # The discovery card is already gone but the engine still
+                        # holds the adapter (loaded-but-unpublished). Leave it in
+                        # loaded_loras so a retried unload skips the unregister
+                        # and retries only the engine removal.
+                        logger.exception(
+                            "Failed to remove LoRA %s from engine: %s",
+                            lora_name,
+                            e,
+                        )
+                        return {
+                            "status": "error",
+                            "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
+                            "lora_name": lora_name,
+                        }
+                    self._engine_loaded_loras.discard(lora_name)
 
                 del self.loaded_loras[lora_name]
 

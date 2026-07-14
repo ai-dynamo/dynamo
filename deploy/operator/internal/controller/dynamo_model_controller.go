@@ -374,8 +374,45 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				GenericFunc: func(e event.GenericEvent) bool { return false },
 			}),
 		).
+		// The vLLM-prefill fallback classification depends on the owning
+		// component or graph deployment. Reconcile the affected namespace's
+		// LoRA models when either workload definition changes instead of
+		// waiting for an unrelated EndpointSlice update.
+		Watches(
+			&v1beta1.DynamoComponentDeployment{},
+			handler.EnqueueRequestsFromMapFunc(r.findLoRAModelsForWorkloadChange),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
+		Watches(
+			&v1beta1.DynamoGraphDeployment{},
+			handler.EnqueueRequestsFromMapFunc(r.findLoRAModelsForWorkloadChange),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoModel))
+}
+
+// findLoRAModelsForWorkloadChange maps a DCD or DGD change to the LoRA models
+// in its namespace. Either resource can alter the fallback classification of
+// any discovered LoRA endpoint in that namespace.
+func (r *DynamoModelReconciler) findLoRAModelsForWorkloadChange(ctx context.Context, obj client.Object) []reconcile.Request {
+	models := &v1alpha1.DynamoModelList{}
+	if err := r.List(ctx, models, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list LoRA DynamoModels for workload change", "namespace", obj.GetNamespace())
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(models.Items))
+	for i := range models.Items {
+		model := &models.Items[i]
+		if !model.IsLoRA() {
+			continue
+		}
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(model),
+		})
+	}
+	return requests
 }
 
 // findModelsForEndpointSlice maps an EndpointSlice to DynamoModels

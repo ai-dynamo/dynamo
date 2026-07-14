@@ -18,15 +18,50 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 )
+
+func TestFindLoRAModelsForWorkloadChangeScopesToLoRAModelsInNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add DynamoModel scheme: %v", err)
+	}
+	reconciler := &DynamoModelReconciler{Client: fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(
+			&v1alpha1.DynamoModel{
+				ObjectMeta: metav1.ObjectMeta{Name: "lora-a", Namespace: "test"},
+				Spec:       v1alpha1.DynamoModelSpec{ModelType: "lora"},
+			},
+			&v1alpha1.DynamoModel{
+				ObjectMeta: metav1.ObjectMeta{Name: "base", Namespace: "test"},
+				Spec:       v1alpha1.DynamoModelSpec{ModelType: "base"},
+			},
+			&v1alpha1.DynamoModel{
+				ObjectMeta: metav1.ObjectMeta{Name: "lora-other-ns", Namespace: "other"},
+				Spec:       v1alpha1.DynamoModelSpec{ModelType: "lora"},
+			},
+		).
+		Build()}
+
+	requests := reconciler.findLoRAModelsForWorkloadChange(context.Background(), &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "test"},
+	})
+	if len(requests) != 1 || requests[0].Name != "lora-a" || requests[0].Namespace != "test" {
+		t.Fatalf("expected only test/lora-a to reconcile, got %#v", requests)
+	}
+}
 
 func TestMarkLoRAManagementUnavailableFallbackEligible(t *testing.T) {
 	candidates := []modelendpoint.Candidate{
