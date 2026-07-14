@@ -11,10 +11,10 @@ This guide walks you through installing everything needed to deploy models with 
 
 Before you begin, make sure you have:
 
-- A **Kubernetes cluster (v1.24+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
+- A **Kubernetes cluster (v1.30+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
   - [Amazon EKS](cloud-providers/eks/eks.md) | [Azure AKS](cloud-providers/aks/aks.md) | [Google GKE](cloud-providers/gke/gke.md)
   - For local development: [Minikube Setup](deployment/minikube.md)
-- **kubectl** v1.24+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
+- **kubectl** v1.30+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
 - **Helm** v3.0+ — [Install Helm](https://helm.sh/docs/intro/install/)
 
 <Info>
@@ -24,7 +24,7 @@ Before you begin, make sure you have:
 Verify your tools:
 
 ```bash
-kubectl version --client  # Should show v1.24+
+kubectl version --client  # Should show v1.30+
 helm version              # Should show v3.0+
 ```
 
@@ -121,7 +121,9 @@ kubectl get clusterrolebinding -o json | \
 </Tip>
 
 <Warning>
-**Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use the default cluster-wide mode for all new deployments.
+**Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is only for development and
+testing. It is not supported for production. Install it with `--skip-crds` and
+`dynamo-operator.upgradeCRD=false`; see [Dynamo Operator](dynamo-operator.md#namespace-restricted-mode).
 </Warning>
 
 Verify the Dynamo platform is running:
@@ -252,7 +254,8 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 
 Cause: Attempting cluster-wide install on a shared cluster with existing namespace-restricted operators.
 
-Solution: Migrate the existing namespace-restricted operators to cluster-wide mode. Namespace-restricted mode is deprecated.
+Solution: Remove the development/test namespace-restricted operators, then install one cluster-wide
+operator for production use.
 
 **CRDs already exist**
 
