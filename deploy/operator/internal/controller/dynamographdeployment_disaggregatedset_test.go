@@ -6,13 +6,21 @@
 package controller
 
 import (
+	"context"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	disaggregatedsetv1 "sigs.k8s.io/lws/api/disaggregatedset/v1"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
+	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -114,6 +122,82 @@ func TestCheckDisaggregatedSetReadiness(t *testing.T) {
 	require.True(t, ready)
 }
 
+func TestCheckDisaggregatedSetReadinessFallsBackToTargetRevisionChildLWS(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, leaderworkersetv1.AddToScheme(scheme))
+
+	ds := newDisaggregatedSetObject()
+	ds.SetName("demo")
+	ds.SetNamespace("default")
+	ds.SetUID("ds-uid")
+	typedDS := &disaggregatedsetv1.DisaggregatedSet{
+		Spec: disaggregatedsetv1.DisaggregatedSetSpec{Roles: []disaggregatedsetv1.DisaggregatedRoleSpec{
+			{Name: "prefill"},
+			{Name: "decode"},
+		}},
+	}
+	typedObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(typedDS)
+	require.NoError(t, err)
+	ds.Object["spec"] = typedObject["spec"]
+	targetRevision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
+	selection := disaggregatedSetSelection{
+		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		desiredReplicas: map[string]int32{"prefill": 1, "decode": 1},
+	}
+	owner := metav1.OwnerReference{
+		APIVersion: disaggregatedSetGVK.GroupVersion().String(),
+		Kind:       disaggregatedSetGVK.Kind,
+		Name:       ds.GetName(),
+		UID:        ds.GetUID(),
+		Controller: ptr.To(true),
+	}
+	child := func(name, role, revision string, ready int32) *leaderworkersetv1.LeaderWorkerSet {
+		return &leaderworkersetv1.LeaderWorkerSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       name,
+				Namespace:  ds.GetNamespace(),
+				Generation: 1,
+				Labels: map[string]string{
+					disaggregatedsetv1.SetNameLabelKey:  ds.GetName(),
+					disaggregatedsetv1.RoleLabelKey:     role,
+					disaggregatedsetv1.RevisionLabelKey: revision,
+				},
+				OwnerReferences: []metav1.OwnerReference{owner},
+			},
+			Status: leaderworkersetv1.LeaderWorkerSetStatus{
+				ObservedGeneration: 1,
+				Replicas:           1,
+				UpdatedReplicas:    ready,
+				ReadyReplicas:      ready,
+			},
+		}
+	}
+	objects := []client.Object{
+		child("demo-old-prefill", "prefill", "old", 1),
+		child("demo-new-prefill", "prefill", targetRevision, 0),
+		child("demo-decode", "decode", targetRevision, 1),
+	}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build(),
+	}
+
+	ready, reason, statuses, err := reconciler.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.False(t, ready)
+	require.Contains(t, reason, "demo-new-prefill")
+	require.Equal(t, []string{"demo-new-prefill"}, statuses["prefill"].ComponentNames)
+
+	newPrefill := &leaderworkersetv1.LeaderWorkerSet{}
+	require.NoError(t, reconciler.Get(t.Context(), types.NamespacedName{Name: "demo-new-prefill", Namespace: ds.GetNamespace()}, newPrefill))
+	newPrefill.Status.UpdatedReplicas = 1
+	newPrefill.Status.ReadyReplicas = 1
+	require.NoError(t, reconciler.Update(t.Context(), newPrefill))
+
+	ready, _, _, err = reconciler.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.True(t, ready)
+}
+
 func TestListOwnedSelectedDCDsSkipsUserManagedDCDs(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
@@ -176,6 +260,90 @@ func TestListOwnedSelectedDCDsSkipsUserManagedDCDs(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, owned.Name, got[0].Name)
+}
+
+func TestReconcileReplacementBeforeDisaggregatedSetCleanup(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+	}
+	ds := newDisaggregatedSetObject()
+	ds.SetName(disaggregatedSetName(dgd))
+	ds.SetNamespace(dgd.Namespace)
+	ds.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
+
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build(),
+		RuntimeConfig: newTestRuntimeConfig(true),
+	}
+	key := types.NamespacedName{Name: ds.GetName(), Namespace: ds.GetNamespace()}
+
+	result, err := reconciler.reconcileReplacementBeforeDisaggregatedSetCleanup(t.Context(), dgd, func() (ReconcileResult, error) {
+		existing := newDisaggregatedSetObject()
+		require.NoError(t, reconciler.Get(t.Context(), key, existing), "DisaggregatedSet must remain while its replacement is pending")
+		return ReconcileResult{State: nvidiacomv1beta1.DGDStatePending}, nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, nvidiacomv1beta1.DGDStatePending, result.State)
+	require.NoError(t, reconciler.Get(t.Context(), key, newDisaggregatedSetObject()))
+
+	result, err = reconciler.reconcileReplacementBeforeDisaggregatedSetCleanup(t.Context(), dgd, func() (ReconcileResult, error) {
+		return ReconcileResult{State: nvidiacomv1beta1.DGDStateSuccessful}, nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
+	require.True(t, apierrors.IsNotFound(reconciler.Get(t.Context(), key, newDisaggregatedSetObject())))
+}
+
+type notFoundOnDeleteClient struct {
+	client.Client
+}
+
+func (c notFoundOnDeleteClient) Delete(_ context.Context, obj client.Object, _ ...client.DeleteOption) error {
+	return apierrors.NewNotFound(schema.GroupResource{Group: disaggregatedSetGVK.Group, Resource: "disaggregatedsets"}, obj.GetName())
+}
+
+func TestDeleteDisaggregatedSetIgnoresNotFoundRace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+	}
+	ds := newDisaggregatedSetObject()
+	ds.SetName(disaggregatedSetName(dgd))
+	ds.SetNamespace(dgd.Namespace)
+	ds.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build()
+	reconciler := &DynamoGraphDeploymentReconciler{Client: notFoundOnDeleteClient{Client: baseClient}}
+
+	require.NoError(t, reconciler.deleteDisaggregatedSetIfExists(t.Context(), dgd))
+}
+
+func TestMapDisaggregatedSetChildLWSToDGD(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+	}
+	ds := newDisaggregatedSetObject()
+	ds.SetName(disaggregatedSetName(dgd))
+	ds.SetNamespace(dgd.Namespace)
+	ds.SetUID("ds-uid")
+	ds.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(ds).Build(),
+	}
+	child := &leaderworkersetv1.LeaderWorkerSet{ObjectMeta: metav1.ObjectMeta{
+		Name:      "demo-revision-prefill",
+		Namespace: dgd.Namespace,
+		Labels:    map[string]string{disaggregatedsetv1.SetNameLabelKey: ds.GetName()},
+	}}
+
+	requests := reconciler.mapDisaggregatedSetChildLWSToDGD(t.Context(), child)
+	require.Len(t, requests, 1)
+	require.Equal(t, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, requests[0].NamespacedName)
 }
 
 func TestShouldUseDisaggregatedSet(t *testing.T) {

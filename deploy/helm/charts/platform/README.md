@@ -244,17 +244,6 @@ global:
 
 Note: `global.*.install` controls whether the bundled subcharts are deployed. When set, integration is automatically enabled. `global.*.enabled` can be set independently when using externally-managed installations.
 
-### LWS and DisaggregatedSet
-
-This chart does not bundle [LeaderWorkerSet (LWS)](https://lws.sigs.k8s.io/docs/) or expose a `disaggregatedset.enabled` Helm value.
-
-For multinode deployments without Grove:
-
-- Install LWS and Volcano separately if you want the standard LWS pathway.
-- Install an LWS release that serves `disaggregatedset.x-k8s.io/v1` if you want the DisaggregatedSet pathway.
-
-Dynamo detects `leaderworkerset.x-k8s.io`, `disaggregatedset.x-k8s.io/v1`, and Volcano availability at runtime. DisaggregatedSet is requested per `DynamoGraphDeployment` with the `nvidia.com/enable-disaggregatedset: "true"` annotation. If Grove is installed in the cluster, also set `nvidia.com/enable-grove: "false"` on that DGD to stay on the LWS/DS path.
-
 ## 📚 Additional Resources
 
 - [Dynamo Cloud Deployment Installation Guide](../../../../docs/kubernetes/installation-guide.md)

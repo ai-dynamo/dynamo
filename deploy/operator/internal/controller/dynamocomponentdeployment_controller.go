@@ -608,7 +608,7 @@ func (r *DynamoComponentDeploymentReconciler) renderMultinodePodTemplateSpecs(
 	}
 	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, leaderLabels)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "renderMultinodePodTemplateSpecs: failed to generate leader pod template")
+		return nil, nil, err
 	}
 
 	workerLabels := make(map[string]string, len(podLabels))
@@ -617,7 +617,7 @@ func (r *DynamoComponentDeploymentReconciler) renderMultinodePodTemplateSpecs(
 	}
 	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, workerLabels)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "renderMultinodePodTemplateSpecs: failed to generate worker pod template")
+		return nil, nil, err
 	}
 
 	return leaderPodTemplateSpec, workerPodTemplateSpec, nil

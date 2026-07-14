@@ -53,6 +53,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -106,6 +107,8 @@ var _ = BeforeSuite(func() {
 	err = v1alpha1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = v1beta1.AddToScheme(scheme)
+	Expect(err).NotTo(HaveOccurred())
+	err = leaderworkersetv1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())
 	err = corev1.AddToScheme(scheme)
 	Expect(err).NotTo(HaveOccurred())

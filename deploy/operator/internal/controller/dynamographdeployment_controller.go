@@ -54,6 +54,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -495,10 +496,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
 
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
-		if err := r.deleteDisaggregatedSetOnLegacyPath(ctx, dynamoDeployment); err != nil {
-			return ReconcileResult{}, err
-		}
-		return r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
+		return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, func() (ReconcileResult, error) {
+			return r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
+		})
 	}
 
 	if useDisaggregatedSet {
@@ -506,9 +506,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
 		return r.reconcileDisaggregatedSetResources(ctx, dynamoDeployment, restartState, checkpointInfos)
 	}
 
-	if err := r.deleteDisaggregatedSetOnLegacyPath(ctx, dynamoDeployment); err != nil {
-		return ReconcileResult{}, err
-	}
 	if r.wantsDisaggregatedSet(dynamoDeployment) && disaggregatedSetFallbackReason != "" {
 		logger.Info("DisaggregatedSet requested but falling back to DynamoComponentDeployments", "reason", disaggregatedSetFallbackReason)
 		if r.Recorder != nil {
@@ -516,7 +513,24 @@ func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
 		}
 	}
 	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
-	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
+	return r.reconcileReplacementBeforeDisaggregatedSetCleanup(ctx, dynamoDeployment, func() (ReconcileResult, error) {
+		return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
+	})
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileReplacementBeforeDisaggregatedSetCleanup(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	reconcileReplacement func() (ReconcileResult, error),
+) (ReconcileResult, error) {
+	result, err := reconcileReplacement()
+	if err != nil || result.State != nvidiacomv1beta1.DGDStateSuccessful {
+		return result, err
+	}
+	if err := r.deleteDisaggregatedSetOnLegacyPath(ctx, dgd); err != nil {
+		return ReconcileResult{}, err
+	}
+	return result, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) deleteDisaggregatedSetOnLegacyPath(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
@@ -2862,7 +2876,16 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return disaggregatedSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		}))
+		})).Watches(
+			&leaderworkersetv1.LeaderWorkerSet{},
+			handler.EnqueueRequestsFromMapFunc(r.mapDisaggregatedSetChildLWSToDGD),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(ce event.CreateEvent) bool { return true },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return leaderWorkerSetStatusChanged(ue.ObjectOld, ue.ObjectNew) },
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		)
 	}
 	if r.RuntimeConfig.GroveEnabled {
 		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
