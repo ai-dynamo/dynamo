@@ -347,7 +347,8 @@ fn generate_description_for_path(path: &str) -> String {
                 .to_string()
         }
         "/health" => {
-            "Returns the health status of the service. Used for readiness probes."
+            "Returns the health status of the service, including discovered instances and endpoints. \
+            For Kubernetes readiness use the dedicated /ready endpoint."
                 .to_string()
         }
         "/live" => {

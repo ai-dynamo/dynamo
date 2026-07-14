@@ -25,27 +25,29 @@ pub enum ReadinessMode {
     LocalWorker,
 }
 
+/// A set-but-unrecognized [`READINESS_MODE_ENV`] value. Kept distinct from
+/// "unset" so callers can fail closed instead of silently downgrading to
+/// `Process` (a typo must not let a sidecar report Ready without a routable
+/// model).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidReadinessMode(pub String);
+
 impl ReadinessMode {
-    /// Resolve the mode from the environment; defaults to `Process`.
-    pub fn from_env() -> Self {
+    /// Resolve the mode from the environment. An unset (or empty) variable
+    /// defaults to `Process`; a set-but-unrecognized value is an error so the
+    /// caller can fail closed.
+    pub fn from_env() -> Result<Self, InvalidReadinessMode> {
         match std::env::var(READINESS_MODE_ENV) {
             Ok(value) => Self::parse(&value),
-            Err(_) => Self::Process,
+            Err(_) => Ok(Self::Process),
         }
     }
 
-    fn parse(value: &str) -> Self {
+    fn parse(value: &str) -> Result<Self, InvalidReadinessMode> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "" | "process" => Self::Process,
-            "local-worker" | "local_worker" | "localworker" | "model" => Self::LocalWorker,
-            other => {
-                tracing::warn!(
-                    value = other,
-                    env = READINESS_MODE_ENV,
-                    "unrecognized frontend readiness mode; defaulting to 'process'"
-                );
-                Self::Process
-            }
+            "" | "process" => Ok(Self::Process),
+            "local-worker" | "local_worker" | "localworker" | "model" => Ok(Self::LocalWorker),
+            _ => Err(InvalidReadinessMode(value.trim().to_string())),
         }
     }
 
@@ -65,8 +67,19 @@ pub fn ready_check_router(
 ) -> (Vec<RouteDoc>, Router) {
     let ready_path = path.unwrap_or_else(|| "/ready".to_string());
 
+    let mode = match ReadinessMode::from_env() {
+        Ok(mode) => mode.as_str(),
+        Err(InvalidReadinessMode(value)) => {
+            tracing::error!(
+                value = %value,
+                env = READINESS_MODE_ENV,
+                "invalid frontend readiness mode; /ready will fail closed (503) until corrected"
+            );
+            "invalid"
+        }
+    };
     tracing::info!(
-        mode = ReadinessMode::from_env().as_str(),
+        mode,
         path = %ready_path,
         "registering frontend readiness endpoint"
     );
@@ -84,7 +97,27 @@ async fn ready_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
     // Read per-request: probes are infrequent and this keeps a plain handler.
-    let mode = ReadinessMode::from_env();
+    let mode = match ReadinessMode::from_env() {
+        Ok(mode) => mode,
+        // Fail closed on a misconfigured mode instead of silently serving as
+        // `Process`, which could let a sidecar report Ready without a model.
+        Err(InvalidReadinessMode(value)) => {
+            tracing::warn!(
+                value = %value,
+                env = READINESS_MODE_ENV,
+                "invalid frontend readiness mode; failing readiness closed"
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "not_ready",
+                    "message": format!(
+                        "invalid {READINESS_MODE_ENV} value '{value}'; expected 'process' or 'local-worker'"
+                    )
+                })),
+            );
+        }
+    };
 
     // Draining/stopping is never ready, regardless of mode.
     if !state.is_ready() {
@@ -229,36 +262,52 @@ async fn health_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::ReadinessMode;
+    use super::{InvalidReadinessMode, ReadinessMode};
 
     #[test]
     fn readiness_mode_parses_process_variants() {
-        assert_eq!(ReadinessMode::parse("process"), ReadinessMode::Process);
-        assert_eq!(ReadinessMode::parse("PROCESS"), ReadinessMode::Process);
-        assert_eq!(ReadinessMode::parse("  process  "), ReadinessMode::Process);
+        assert_eq!(ReadinessMode::parse("process"), Ok(ReadinessMode::Process));
+        assert_eq!(ReadinessMode::parse("PROCESS"), Ok(ReadinessMode::Process));
+        assert_eq!(
+            ReadinessMode::parse("  process  "),
+            Ok(ReadinessMode::Process)
+        );
         // Empty string falls back to the default (process).
-        assert_eq!(ReadinessMode::parse(""), ReadinessMode::Process);
+        assert_eq!(ReadinessMode::parse(""), Ok(ReadinessMode::Process));
     }
 
     #[test]
     fn readiness_mode_parses_local_worker_variants() {
         assert_eq!(
             ReadinessMode::parse("local-worker"),
-            ReadinessMode::LocalWorker
+            Ok(ReadinessMode::LocalWorker)
         );
         assert_eq!(
             ReadinessMode::parse("local_worker"),
-            ReadinessMode::LocalWorker
+            Ok(ReadinessMode::LocalWorker)
         );
         assert_eq!(
             ReadinessMode::parse("LocalWorker"),
-            ReadinessMode::LocalWorker
+            Ok(ReadinessMode::LocalWorker)
         );
-        assert_eq!(ReadinessMode::parse("model"), ReadinessMode::LocalWorker);
+        assert_eq!(
+            ReadinessMode::parse("model"),
+            Ok(ReadinessMode::LocalWorker)
+        );
     }
 
     #[test]
-    fn readiness_mode_unknown_defaults_to_process() {
-        assert_eq!(ReadinessMode::parse("bogus"), ReadinessMode::Process);
+    fn readiness_mode_unknown_is_rejected() {
+        // A set-but-unrecognized value (e.g. a typo) must fail closed rather
+        // than silently downgrading to `Process`; the original value is
+        // preserved (trimmed) for diagnostics.
+        assert_eq!(
+            ReadinessMode::parse("bogus"),
+            Err(InvalidReadinessMode("bogus".to_string()))
+        );
+        assert_eq!(
+            ReadinessMode::parse("  local-wroker  "),
+            Err(InvalidReadinessMode("local-wroker".to_string()))
+        );
     }
 }
