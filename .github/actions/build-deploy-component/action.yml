@@ -252,6 +252,7 @@ runs:
             --platform ${{ steps.settings.outputs.compliance_platform }} \
             "${BUILD_ARGS[@]}" \
             --build-context snapshot=../snapshot \
+            --build-context operator=../operator \
             --build-context compliance=../../container/compliance \
             --target compliance_artifact \
             --output type=local,dest=/tmp/compliance \
@@ -462,6 +463,7 @@ runs:
             --platform ${{ steps.settings.outputs.compliance_platform }} \
             "${BUILD_ARGS[@]}" \
             --build-context snapshot=../snapshot \
+            --build-context operator=../operator \
             --build-context compliance=../../container/compliance \
             --target sources_archive \
             --output type=local,dest=/tmp/sources \
