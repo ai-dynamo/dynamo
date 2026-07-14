@@ -188,6 +188,23 @@ helm install lws oci://registry.k8s.io/lws/charts/lws \
 
 See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://github.com/volcano-sh/volcano#quick-start-guide) for configuration options, and the [Multinode Deployment Guide](./deployment/multinode-deployment.md) for orchestrator selection.
 
+#### DisaggregatedSet on top of LWS
+
+If you want Dynamo to place multiple multinode worker roles into a single DisaggregatedSet, install an LWS release that serves the `disaggregatedset.x-k8s.io/v1` API. Dynamo detects that API at runtime; there is no Helm value for DS in the `dynamo-platform` chart.
+
+To request the DS path on a `DynamoGraphDeployment`, add:
+
+```yaml
+metadata:
+  annotations:
+    nvidia.com/enable-disaggregatedset: "true"
+```
+
+If Grove is also installed, add `nvidia.com/enable-grove: "false"` on the same DGD so the request uses the LWS/DS path instead of Grove.
+
+> [!NOTE]
+> The current non-DS LWS pathway requires both the LWS and Volcano APIs. The DS pathway detects `disaggregatedset.x-k8s.io/v1` separately because DS itself does not rely on Volcano.
+
 ### Network Operator / RDMA
 
 RDMA setup is cloud-provider-specific. See the [Disaggregated Communication Guide](disagg-communication-guide.md) for transport options, UCX configuration, and performance expectations, and your cloud provider guide for setup instructions:
