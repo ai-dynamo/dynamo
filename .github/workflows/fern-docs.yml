@@ -181,6 +181,16 @@ jobs:
             cp source-checkout/fern/main.css docs-checkout/fern/main.css
           fi
 
+          # Sync js/ directory (custom client scripts referenced by docs.yml
+          # `js:`). docs.yml is copied from source below, so any local `js:`
+          # path (e.g. ./js/dep-pr-comments.js) must exist on docs-website too
+          # or `fern generate` fails validation ("Path ... does not exist").
+          if [ -d source-checkout/fern/js ]; then
+            echo "Syncing js/ to docs-website branch..."
+            rm -rf docs-checkout/fern/js
+            cp -r source-checkout/fern/js docs-checkout/fern/js
+          fi
+
       - name: Transform paths in dev.yml for docs-website layout
         run: |
           # In the source repo, index.yml uses paths relative to docs/ (e.g. getting-started/quickstart.md).
