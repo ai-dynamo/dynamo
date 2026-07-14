@@ -126,7 +126,7 @@ the parser configuration, or the parser logic.
 
 ## See also
 
-- [Tool Call Parsing (Dynamo)](README.md) -- Dynamo-native parser names and
+- [Tool Call Parsing (Dynamo)](README.mdx) -- Dynamo-native parser names and
   request examples
 - [Chat Processors](chat-processors.mdx) --
   `--dyn-chat-processor` and the engine-fallback path to vLLM and SGLang parsers

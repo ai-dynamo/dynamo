@@ -239,7 +239,7 @@ navigation:
               - page: Chat Processors
                 path: tool-calling/chat-processors.mdx
               - page: Tool Call Parsing
-                path: tool-calling/README.md
+                path: tool-calling/README.mdx
               - page: Reasoning Parsing
                 path: reasoning/README.md
               - page: Troubleshooting Tool Calls
@@ -743,8 +743,6 @@ navigation:
       - section: Additional Resources
         hidden: true
         contents:
-          - page: Tool Calling Probe Snapshot (1.2)
-            path: reference/release-1.2-probe-snapshot.md
           # -- Kubernetes (hidden sub-pages) --
           - page: API Reference (K8s)
             path: kubernetes/api-reference.md

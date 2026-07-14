@@ -53,7 +53,7 @@ New here? Read the [Introduction](introduction.mdx) first for how the chat proce
               - qwen3
     ```
 
-    For the parser names, see [Tool Call Parsing](README.md) and [Reasoning Parsing](../reasoning/README.md).
+    For the parser names, see [Tool Call Parsing](README.mdx) and [Reasoning Parsing](../reasoning/README.md).
   </Tab>
   <Tab title="vLLM" language="vllm">
     vLLM parsing is an **engine fallback** — use it only when Dynamo lacks a parser for your model. Set `--dyn-chat-processor vllm` on the **Frontend**, and put the bare `--tool-call-parser` / `--reasoning-parser` there too — no `--dyn-` prefix, and using **vLLM's** parser names. The worker stays clean.
@@ -140,7 +140,7 @@ Engine fallback is supported on vLLM and SGLang only. TRT-LLM engine fallback is
 ## See Also
 
 - [Introduction](introduction.mdx) — how the chat processor, tool-call parser, and reasoning parser fit together
-- [Tool Call Parsing](README.md) — Dynamo-native tool-call parser names
+- [Tool Call Parsing](README.mdx) — Dynamo-native tool-call parser names
 - [Reasoning Parsing](../reasoning/README.md) — Dynamo-native reasoning parser names
 - [vLLM Chat Processor](../backends/vllm/vllm-chat-processor.md) / [SGLang Chat Processor](../backends/sglang/sglang-chat-processor.md) — engine-fallback processor details and engine parser names
 - [Frontend Configuration Reference](../components/frontend/frontend-config-reference.mdx) — full CLI flag reference

@@ -20,7 +20,7 @@ Setting this up is two steps: one thing that always runs, then two optional feat
   <Step title="Choose your parsers">
     With a chat processor in place, tool-call parsing and reasoning parsing are two **independent, optional** features. Turn on either, both, or neither — they do not depend on each other, and there is no required order between them:
 
-    - **Tool call parsing** extracts `tool_calls` from a model that emits tool-call markup. See [Tool Call Parsing](README.md).
+    - **Tool call parsing** extracts `tool_calls` from a model that emits tool-call markup. See [Tool Call Parsing](README.mdx).
     - **Reasoning parsing** splits chain-of-thought into `reasoning_content` for a model that emits thinking content. See [Reasoning Parsing](../reasoning/README.md).
 
     A model that only calls tools needs just the tool-call parser; a pure chain-of-thought model needs just the reasoning parser; a model that does both needs both.
@@ -38,7 +38,7 @@ In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call and reasoning par
 ## See Also
 
 - [Chat Processors](chat-processors.mdx) — the `--dyn-chat-processor` flag, the `dynamo` default, and engine fallback
-- [Tool Call Parsing](README.md) — Dynamo-native tool-call parser names and request examples
+- [Tool Call Parsing](README.mdx) — Dynamo-native tool-call parser names and request examples
 - [Reasoning Parsing](../reasoning/README.md) — Dynamo-native reasoning parser names
 - [Structural Tag (Guided Decoding for Tool Calls)](structural-tag.md) — constrain output to a valid tool-call format with xgrammar
 - [Troubleshooting Tool Calls](troubleshooting.md) — capture `logprobs` so issues can be localized
