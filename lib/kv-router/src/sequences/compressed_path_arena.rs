@@ -19,9 +19,8 @@ pub(super) struct CompressedPathNode<M> {
 
 /// A single-owner compressed path forest with generational node handles.
 ///
-/// The existing node ID always stays with the suffix during a split. During a
-/// unary merge the child ID survives. Those two rules keep request-held tail
-/// handles valid across unrelated insertions and removals.
+/// The existing node ID always stays with the suffix during a split, keeping
+/// request-held tail handles valid across unrelated insertions and removals.
 #[derive(Debug)]
 pub(super) struct CompressedPathArena<M> {
     pub(super) nodes: SlotMap<CompressedNodeId, CompressedPathNode<M>>,
@@ -156,58 +155,6 @@ impl<M> CompressedPathArena<M> {
             );
         }
         node
-    }
-
-    /// Merge a nonterminal unary parent into its child, preserving `child_id`.
-    pub(super) fn merge_parent_into_child(
-        &mut self,
-        parent_id: CompressedNodeId,
-        child_id: CompressedNodeId,
-    ) {
-        let parent = self
-            .nodes
-            .remove(parent_id)
-            .expect("compressed merge parent is missing");
-        assert_eq!(parent.children.len(), 1, "merge parent must be unary");
-        assert_eq!(
-            parent.children.values().next().copied(),
-            Some(child_id),
-            "merge parent does not reference the selected child"
-        );
-
-        let parent_parent = parent.parent;
-        let old_first = parent.edge[0];
-        let child = self
-            .nodes
-            .get_mut(child_id)
-            .expect("compressed merge child is missing");
-        assert_eq!(
-            child.parent,
-            Some(parent_id),
-            "compressed merge child has a different parent"
-        );
-        let mut merged_edge = parent.edge;
-        merged_edge.append(&mut child.edge);
-        child.edge = merged_edge;
-        child.parent = parent_parent;
-
-        if let Some(grandparent_id) = parent_parent {
-            let replaced = self.nodes[grandparent_id]
-                .children
-                .insert(old_first, child_id);
-            assert_eq!(
-                replaced,
-                Some(parent_id),
-                "compressed grandparent did not reference the merge parent"
-            );
-        } else {
-            let replaced = self.roots.insert(old_first, child_id);
-            assert_eq!(
-                replaced,
-                Some(parent_id),
-                "compressed roots did not reference the merge parent"
-            );
-        }
     }
 
     pub(super) fn path_from_root(&self, tail: CompressedNodeId) -> Vec<CompressedNodeId> {

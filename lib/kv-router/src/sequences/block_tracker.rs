@@ -103,12 +103,20 @@ impl BlockTracker {
             let (edge_len, match_len) = {
                 let node = &self.arena.nodes[node_id];
                 let remaining = &sequence[path_pos..];
-                let match_len = node
-                    .edge
-                    .iter()
-                    .zip(remaining)
-                    .take_while(|(left, right)| left == right)
-                    .count();
+                let probe_len = node.edge.len().min(remaining.len());
+                debug_assert!(probe_len > 0, "compressed path probe cannot be empty");
+                // A SequenceHash commits to its full prefix, so equality at
+                // the probe boundary implies equality before it under the
+                // trusted lineage contract documented above.
+                let match_len = if node.edge[probe_len - 1] == remaining[probe_len - 1] {
+                    probe_len
+                } else {
+                    node.edge
+                        .iter()
+                        .zip(remaining)
+                        .position(|(left, right)| left != right)
+                        .unwrap_or(probe_len)
+                };
                 (node.edge.len(), match_len)
             };
             assert!(match_len > 0, "compressed path selected a mismatched edge");
@@ -214,7 +222,6 @@ impl BlockTracker {
             tail_node.metadata.terminal_owners != 0 || !tail_node.children.is_empty()
         };
         if tail_remains_live {
-            self.recompress_from(tail);
             return None;
         }
 
@@ -231,11 +238,9 @@ impl BlockTracker {
 
         let mut removed_hashes = 0;
         let mut current = Some(tail);
-        let mut retained = None;
         while let Some(node_id) = current {
             let node = &self.arena.nodes[node_id];
             if node.metadata.terminal_owners != 0 || !node.children.is_empty() {
-                retained = Some(node_id);
                 break;
             }
             let parent = node.parent;
@@ -248,10 +253,6 @@ impl BlockTracker {
 
         if self.arena.nodes.is_empty() {
             self.prompt_total = 0.0;
-        }
-
-        if let Some(node_id) = retained {
-            self.recompress_from(node_id);
         }
 
         debug_assert!(removed_hashes > 0, "dead prompt tail removed no hashes");
@@ -309,25 +310,6 @@ impl BlockTracker {
                 .nodes
                 .values()
                 .any(|node| node.edge.contains(hash))
-    }
-
-    fn recompress_from(&mut self, mut node_id: CompressedNodeId) {
-        loop {
-            let child_id = {
-                let node = &self.arena.nodes[node_id];
-                if node.metadata.terminal_owners != 0 || node.children.len() != 1 {
-                    return;
-                }
-                node.children.values().next().copied().unwrap()
-            };
-            if self.arena.nodes[node_id].metadata.fraction
-                != self.arena.nodes[child_id].metadata.fraction
-            {
-                return;
-            }
-            self.arena.merge_parent_into_child(node_id, child_id);
-            node_id = child_id;
-        }
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -514,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_release_recompresses_while_preserving_survivor_handle() {
+    fn branch_release_preserves_split_and_survivor_handle() {
         let mut tracker = BlockTracker::default();
         let (left, _) = tracker.acquire_prompt(&[1, 2, 3]);
         let (right, first_new) = tracker.acquire_prompt(&[1, 2, 4]);
@@ -522,6 +504,7 @@ mod tests {
 
         assert_eq!(first_new, Some(2));
         assert_eq!(tracker.release(left), released(&[1, 2, 3], 2));
+        assert_eq!(tracker.arena.nodes.len(), 2);
         assert!(tracker.arena.nodes.contains_key(right_tail));
         tracker.assert_consistent([&right]);
         assert_eq!(tracker.release(right), released(&[1, 2, 4], 0));
@@ -569,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn fraction_mismatch_prevents_recompression() {
+    fn fraction_mismatch_preserves_split_and_totals() {
         let mut tracker = BlockTracker::default();
         let (longer, _) = tracker.acquire_prompt(&[1, 2, 3, 4]);
         let longer_tail = longer.prompt_tail.unwrap();
@@ -591,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_fractional_edges_recompress_and_preserve_child_handle() {
+    fn equal_fractional_edges_remain_split_and_preserve_child_handle() {
         let mut tracker = BlockTracker::default();
         let (longer, _) = tracker.acquire_prompt(&[1, 2, 3, 4]);
         let longer_tail = longer.prompt_tail.unwrap();
@@ -601,7 +584,7 @@ mod tests {
         assert_eq!(tracker.arena.nodes.len(), 2);
         assert_eq!(tracker.prompt_total, 2.0);
         assert_eq!(tracker.release(shorter), None);
-        assert_eq!(tracker.arena.nodes.len(), 1);
+        assert_eq!(tracker.arena.nodes.len(), 2);
         assert!(tracker.arena.nodes.contains_key(longer_tail));
         assert_eq!(tracker.prompt_total, 2.0);
         tracker.assert_consistent([&longer]);
