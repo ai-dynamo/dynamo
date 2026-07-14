@@ -48,6 +48,10 @@ class SGLangComponentName(ComponentName):
     )
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
+    # Aggregated mode: the single worker component is also named "decode"
+    # (matches decode_worker_k8s_name, but made explicit to keep agg logic
+    # consistent across all backends and prevent future drift).
+    agg_worker_k8s_name = "decode"
 
 
 class TrtllmComponentName(ComponentName):
@@ -61,6 +65,11 @@ class TrtllmComponentName(ComponentName):
     decode_worker_k8s_name = "decode"
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
+    # Aggregated mode: the single worker component is named "TRTLLMWorker" in
+    # all v1beta1 agg DGD examples (agg.yaml, agg-with-config.yaml,
+    # agg_router.yaml).  Without this the sweep falls back to "decode" which
+    # does not match, so no pods are found and no annotations are written.
+    agg_worker_k8s_name = "TRTLLMWorker"
 
 
 class MockerComponentName(ComponentName):

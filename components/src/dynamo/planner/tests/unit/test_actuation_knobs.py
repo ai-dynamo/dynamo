@@ -756,6 +756,66 @@ class TestGetComponentPodsLabelSelector:
         call_args = mock_kube_api.list_pods_by_label.call_args[0][0]
         assert "nvidia.com/dynamo-component=VllmWorker" in call_args
 
+    @pytest.mark.asyncio
+    async def test_trtllm_agg_mode_sweep_resolves_trtllm_worker(
+        self, connector, mock_kube_api
+    ):
+        """mode=agg + backend=trtllm must select the TRTLLMWorker component.
+
+        All v1beta1 TRT-LLM agg DGD examples (agg.yaml, agg-with-config.yaml,
+        agg_router.yaml) name the single worker ``TRTLLMWorker``.  The fallback
+        ``decode_worker_k8s_name="decode"`` would miss it, so
+        ``TrtllmComponentName.agg_worker_k8s_name`` must be defined.
+        """
+        deployment = {
+            "metadata": {"name": "test-dgd"},
+            "spec": {"components": [{"name": "TRTLLMWorker", "type": "worker"}]},
+        }
+        mock_kube_api.get_graph_deployment.return_value = deployment
+        mock_kube_api.list_pods_by_label.return_value = []
+
+        planner = _bare_planner(
+            connector,
+            _power_config(mode="agg", backend="trtllm"),
+            require_prefill=False,
+            require_decode=True,
+        )
+        await planner._apply_power_annotations()
+
+        mock_kube_api.list_pods_by_label.assert_called_once()
+        call_args = mock_kube_api.list_pods_by_label.call_args[0][0]
+        assert "nvidia.com/dynamo-component=TRTLLMWorker" in call_args
+
+    @pytest.mark.asyncio
+    async def test_sglang_agg_mode_sweep_resolves_decode_worker(
+        self, connector, mock_kube_api
+    ):
+        """mode=agg + backend=sglang must select the decode component.
+
+        SGLang v1beta1 agg DGDs name the single worker ``decode``, which
+        matches ``SGLangComponentName.agg_worker_k8s_name``.  This test pins
+        the explicit attribute so future refactors cannot silently fall through
+        to the wrong default.
+        """
+        deployment = {
+            "metadata": {"name": "test-dgd"},
+            "spec": {"components": [{"name": "decode", "type": "worker"}]},
+        }
+        mock_kube_api.get_graph_deployment.return_value = deployment
+        mock_kube_api.list_pods_by_label.return_value = []
+
+        planner = _bare_planner(
+            connector,
+            _power_config(mode="agg", backend="sglang"),
+            require_prefill=False,
+            require_decode=True,
+        )
+        await planner._apply_power_annotations()
+
+        mock_kube_api.list_pods_by_label.assert_called_once()
+        call_args = mock_kube_api.list_pods_by_label.call_args[0][0]
+        assert "nvidia.com/dynamo-component=decode" in call_args
+
 
 # ===========================================================================
 # Knob 3 — Admission-control thresholds (post_busy_threshold)
