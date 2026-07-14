@@ -61,7 +61,13 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
         ErrorType::ConnectionTimeout,
+        // DIS-2405: a stalled/frozen worker's stream-inactivity timeout surfaces
+        // as ResponseTimeout (push_router fault detection quarantines the worker
+        // via the same signal); migrate instead of hanging to the stream timeout.
+        ErrorType::ResponseTimeout,
         ErrorType::Backend(BackendError::EngineShutdown),
+        // A truncated stream from a departed worker is recoverable by failover.
+        ErrorType::Backend(BackendError::StreamIncomplete),
     ];
     const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
@@ -404,6 +410,41 @@ mod tests {
     use tokio::sync::mpsc;
 
     const TEST_MODEL: &str = "test-model";
+
+    // DIS-2405: a stalled/frozen worker's stream-inactivity timeout surfaces as
+    // ErrorType::ResponseTimeout (push_router fault detection). It must be
+    // migratable so the request fails over instead of hanging to the stream
+    // timeout. A StreamIncomplete backend error (a truncated stream from a
+    // departed worker) is likewise migratable.
+    #[test]
+    fn stall_and_incomplete_stream_errors_are_migratable() {
+        let response_timeout = DynamoError::builder()
+            .error_type(ErrorType::ResponseTimeout)
+            .message("backend response inactivity timeout")
+            .build();
+        assert!(
+            is_migratable(&response_timeout),
+            "ResponseTimeout (stalled worker) must be migratable"
+        );
+
+        let stream_incomplete = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::StreamIncomplete))
+            .message("stream ended before completion")
+            .build();
+        assert!(
+            is_migratable(&stream_incomplete),
+            "StreamIncomplete (truncated stream from departed worker) must be migratable"
+        );
+    }
+
+    // Guard: genuinely non-migratable errors stay non-migratable.
+    #[test]
+    fn cancelled_and_exhausted_are_not_migratable() {
+        for et in [ErrorType::Cancelled, ErrorType::ResourceExhausted] {
+            let err = DynamoError::builder().error_type(et).message("x").build();
+            assert!(!is_migratable(&err), "{et:?} must not be migratable");
+        }
+    }
 
     // Helper to create a mock preprocessed request
     fn create_mock_request(max_tokens: u32) -> PreprocessedRequest {
