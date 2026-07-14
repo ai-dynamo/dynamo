@@ -137,7 +137,9 @@ fi
 echo ""
 echo "Step 9: Deploying Grafana disaggregated dashboard ConfigMap..."
 kubectl apply -f "$SCRIPT_DIR/grafana-disagg-dashboard-configmap.yaml"
-echo "✅ Dashboard ConfigMap deployed - Grafana sidecar will auto-import it within a few seconds"
+echo "Step 9b: Deploying Grafana GMS shadow-failover dashboard ConfigMap..."
+kubectl apply -f "$SCRIPT_DIR/grafana-failover-dashboard-configmap.yaml"
+echo "✅ Dashboard ConfigMaps deployed - Grafana sidecar will auto-import them within a few seconds"
 
 # Step 10: Get Grafana credentials
 echo ""
