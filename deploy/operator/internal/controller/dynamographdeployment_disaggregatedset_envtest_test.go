@@ -8,11 +8,14 @@ package controller
 import (
 	"context"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -30,6 +33,8 @@ var _ = Describe("DisaggregatedSet", func() {
 
 		reconciler := &DynamoGraphDeploymentReconciler{
 			Client:        k8sClient,
+			Recorder:      record.NewFakeRecorder(10),
+			Config:        &configv1alpha1.OperatorConfiguration{},
 			RuntimeConfig: newTestRuntimeConfig(true),
 		}
 
@@ -64,13 +69,28 @@ func newDSHappyPathDGD() *nvidiacomv1beta1.DynamoGraphDeployment {
 					ComponentName: "prefill",
 					ComponentType: nvidiacomv1beta1.ComponentTypePrefill,
 					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					PodTemplate:   dsTestPodTemplate(),
 				},
 				{
 					ComponentName: "decode",
 					ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
 					Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					PodTemplate:   dsTestPodTemplate(),
 				},
 			},
+		},
+	}
+}
+
+func dsTestPodTemplate() *corev1.PodTemplateSpec {
+	return &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    "main",
+				Image:   "busybox:1.36",
+				Command: []string{"sh"},
+				Args:    []string{"-c", "sleep 3600"},
+			}},
 		},
 	}
 }
