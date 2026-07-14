@@ -4,9 +4,6 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: llama3-70b-disagg
-  annotations:
-    # Required for the frontendSidecar's local-worker readiness (pod reports Ready only once its colocated model is routable).
-    nvidia.com/dynamo-kube-discovery-mode: container
 spec:
   backendFramework: vllm
   components:

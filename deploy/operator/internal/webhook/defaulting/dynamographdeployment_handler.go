@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -110,6 +111,26 @@ func (d *DGDDefaulter) defaultV1Beta1(
 		}
 	}
 
+	// A frontend sidecar needs container discovery so the worker registers
+	// per-container and is discoverable before its pod is Ready. That lets the
+	// sidecar frontend use local-worker readiness without deadlocking: pod
+	// readiness requires the sidecar to be Ready, which local-worker readiness
+	// gates on discovering the worker — and pod discovery only exposes the
+	// worker once the pod is Ready. Default to container mode when a sidecar is
+	// present and the user has not chosen a mode explicitly (an explicit choice
+	// is respected and surfaced by the validating webhook).
+	if hasFrontendSidecar(dgd) {
+		if dgd.Annotations == nil {
+			dgd.Annotations = make(map[string]string)
+		}
+		if _, exists := dgd.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; !exists {
+			dgd.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode] = string(configv1alpha1.KubeDiscoveryModeContainer)
+			logger.Info("defaulted kube discovery mode to container for frontend sidecar",
+				"name", dgd.Name,
+				"namespace", dgd.Namespace)
+		}
+	}
+
 	if req.Operation == admissionv1.Create {
 		if dgd.Annotations == nil {
 			dgd.Annotations = make(map[string]string)
@@ -125,6 +146,16 @@ func (d *DGDDefaulter) defaultV1Beta1(
 	}
 
 	return nil
+}
+
+// hasFrontendSidecar reports whether any component declares a frontend sidecar.
+func hasFrontendSidecar(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	for i := range dgd.Spec.Components {
+		if dgd.Spec.Components[i].FrontendSidecar != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {

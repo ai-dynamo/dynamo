@@ -259,6 +259,80 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 	}
 }
 
+func TestDGDDefaulter_DefaultsKubeDiscoveryModeForFrontendSidecar(t *testing.T) {
+	const discoveryModeAnnotation = consts.KubeAnnotationDynamoKubeDiscoveryMode
+
+	tests := []struct {
+		name        string
+		op          admissionv1.Operation
+		annotations map[string]string
+		components  []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+		wantMode    string
+	}{
+		{
+			name: "CREATE defaults discovery mode to container when a sidecar is present",
+			op:   admissionv1.Create,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", FrontendSidecar: ptr.To("sidecar-frontend")},
+			},
+			wantMode: "container",
+		},
+		{
+			name: "UPDATE defaults discovery mode to container when a sidecar is present",
+			op:   admissionv1.Update,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", FrontendSidecar: ptr.To("sidecar-frontend")},
+			},
+			wantMode: "container",
+		},
+		{
+			name: "does not default discovery mode without a sidecar",
+			op:   admissionv1.Create,
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker"},
+			},
+			wantMode: "",
+		},
+		{
+			name:        "respects an explicit discovery mode",
+			op:          admissionv1.Create,
+			annotations: map[string]string{discoveryModeAnnotation: "pod"},
+			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "Worker", FrontendSidecar: ptr.To("sidecar-frontend")},
+			},
+			wantMode: "pod",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defaulter := NewDGDDefaulter("0.9.0", false)
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test",
+					Namespace:   "default",
+					Annotations: tt.annotations,
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					Components: tt.components,
+				},
+			}
+
+			if err := defaulter.Default(admissionCtx(tt.op, nvidiacomv1beta1.DynamoGraphDeploymentGVK), dgd); err != nil {
+				t.Fatalf("Default() unexpected error: %v", err)
+			}
+
+			got := ""
+			if dgd.Annotations != nil {
+				got = dgd.Annotations[discoveryModeAnnotation]
+			}
+			if got != tt.wantMode {
+				t.Errorf("annotation %q = %q, want %q", discoveryModeAnnotation, got, tt.wantMode)
+			}
+		})
+	}
+}
+
 func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 	tests := []struct {
 		name             string
