@@ -257,6 +257,10 @@ impl EngineComponent {
             .collect()
     }
 
+    pub(in crate::replay::offline) fn dp_size(&self) -> u32 {
+        self.args.dp_size.max(1)
+    }
+
     pub(in crate::replay::offline) fn rank_id(
         &self,
         worker_id: usize,
@@ -473,11 +477,7 @@ impl EngineComponent {
                     || !payload.output_signals.is_empty()
                     || !payload.lifecycle_events.is_empty()
                     || !payload.kv_events.is_empty()
-                    || payload.fpm.as_ref().is_some_and(fpm_has_scheduled_work)
-                    || effects
-                        .fpm_snapshots
-                        .iter()
-                        .any(|(_, snapshot)| fpm_has_scheduled_work(snapshot));
+                    || payload.fpm.as_ref().is_some_and(fpm_has_scheduled_work);
                 if made_progress {
                     effects.immediate_completions.push(payload);
                 }
@@ -807,7 +807,6 @@ mod tests {
         vllm.dispatch(0, request(Uuid::from_u128(10))).unwrap();
         let vllm_start = vllm.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(!vllm_start.pass_start_kv_events.is_empty());
-        assert!(vllm_start.fpm_snapshots.is_empty());
         let vllm_end = take_only_completion(vllm_start);
         assert!(vllm_end.kv_events.is_empty());
         assert!(vllm_end.fpm.is_some());
@@ -816,7 +815,6 @@ mod tests {
         sglang.dispatch(0, request(Uuid::from_u128(11))).unwrap();
         let sglang_start = sglang.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(sglang_start.pass_start_kv_events.is_empty());
-        assert!(sglang_start.fpm_snapshots.is_empty());
         let sglang_end = take_only_completion(sglang_start);
         assert!(!sglang_end.kv_events.is_empty());
         assert!(sglang_end.fpm.is_some());
@@ -918,7 +916,6 @@ mod tests {
         let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
         assert!(second.admissions.is_empty());
         assert!(second.pass_start_kv_events.is_empty());
-        assert!(second.fpm_snapshots.is_empty());
         assert_eq!(second.immediate_completions.len(), 1);
         assert!(second.scheduled_completions.is_empty());
         let second = take_only_completion(second);

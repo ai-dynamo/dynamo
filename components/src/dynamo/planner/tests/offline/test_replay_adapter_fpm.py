@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression test for the replay-path FPM feed.
-
-``ReplayPlannerAdapter._feed_extra_fpm_to_regression`` feeds accumulated
-intra-tick FPM snapshots into the regression model. The regression slots
-hold ``PlannerEnginePerfModel``, which exposes only
-``add_observations(dict)``. The pre-fix singular ``add_observation(fpm)``
-raised ``AttributeError`` on replay ticks that carried more than one FPM
-snapshot per worker.
-
-This test drives the method against a real orchestrator-owned regression and
-asserts it does not raise.
-"""
+"""Regression tests for planner replay FPM handling."""
 
 from __future__ import annotations
 
@@ -91,13 +80,30 @@ def test_fpm_cache_keeps_all_ranks_for_each_active_worker():
         _snap("1", wall_time=1.0, dp_rank=1),
     ]
 
-    _update_fpm_cache(cache, snapshots, active_count=2)
+    _update_fpm_cache(cache, snapshots, active_worker_ids=[0, 1])
 
     assert set(cache) == {("0", 0), ("0", 1), ("1", 0), ("1", 1)}
 
-    _update_fpm_cache(cache, [], active_count=1)
+    _update_fpm_cache(cache, [], active_worker_ids=[0])
 
     assert set(cache) == {("0", 0), ("0", 1)}
+
+
+def test_fpm_cache_prunes_by_active_identity_after_worker_replacement():
+    cache = {}
+    _update_fpm_cache(
+        cache,
+        [_snap("0", wall_time=1.0), _snap("1", wall_time=1.0)],
+        active_worker_ids=[0, 1],
+    )
+
+    _update_fpm_cache(
+        cache,
+        [_snap("2", wall_time=2.0)],
+        active_worker_ids=[0, 2],
+    )
+
+    assert set(cache) == {("0", 0), ("2", 0)}
 
 
 def _orch_agg_config_sla() -> PlannerConfig:
@@ -125,67 +131,21 @@ def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
     assert adapter._engine._orchestrator.get_regression("agg") is not None
 
 
-def test_get_regression_uses_orchestrator_scaling_state_without_aic_install():
-    """Replay without AIC benchmark FPMs still needs the live regression slot.
-
-    The orchestrator's public regression store is populated during benchmark
-    bootstrap for external-plugin access. No-AIC replay instead starts from
-    the adapter's ``PlannerScalingState`` regression and feeds intra-tick FPMs
-    into it.
-    """
-    cfg = _orch_agg_config_sla()
-    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
-    adapter._config = cfg
-    adapter._engine = OrchestratorEngineAdapter(cfg, _agg_caps())
-
-    assert adapter._engine._orchestrator.get_regression("agg") is None
-    assert adapter._get_regression("agg") is not None
-
-    decode_snaps = [
-        _snap("1", wall_time=1.0),
-        _snap("1", wall_time=2.0),  # last-per-worker -> excluded
-    ]
-    adapter._feed_extra_fpm_to_regression(
-        decode_snaps=decode_snaps,
-        prefill_snaps=[],
-    )
-
-
-def test_extra_fpm_feed_excludes_last_snapshot_per_worker_rank():
-    class RecordingRegression:
-        def __init__(self):
-            self.keys = []
-
-        def add_observations(self, observations):
-            self.keys.extend(observations)
-
-    regression = RecordingRegression()
-    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
-    adapter._config = _agg_config_sla()
-    adapter._get_regression = lambda _kind: regression
-
-    adapter._feed_extra_fpm_to_regression(
-        decode_snaps=[
-            _snap("0", wall_time=1.0, dp_rank=0),
-            _snap("0", wall_time=1.0, dp_rank=1),
-            _snap("0", wall_time=2.0, dp_rank=0),
-            _snap("0", wall_time=2.0, dp_rank=1),
-        ],
-        prefill_snaps=[],
-    )
-
-    assert regression.keys == [("0", 0), ("0", 1)]
-
-
 def test_build_tick_input_maps_replay_accept_length():
     # The Rust simulation drains the per-tick traffic window into
     # ``result["traffic"]``; a need_traffic_metrics tick maps it onto
     # ``TickInput.traffic`` (accept_length, isl/osl, kv-hit, latency).
     adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._prefill_fpm_cache = {}
+    adapter._decode_fpm_cache = {}
 
     tick = ScheduledTick(at_s=60.0, need_traffic_metrics=True)
     result = {
         "now_ms": 1_000.0,
+        "active_prefill_count": 0,
+        "active_decode_count": 0,
+        "active_prefill_ids": [],
+        "active_decode_ids": [],
         "traffic": {
             "duration_s": 60.0,
             "num_req": 4,
@@ -205,15 +165,13 @@ def test_build_tick_input_maps_replay_accept_length():
     assert adapter._last_traffic.accept_length == 2.5
 
 
-def test_build_tick_input_buffers_fpm_until_fpm_tick():
+def test_build_tick_input_keeps_only_latest_fpm_until_fpm_tick():
     cfg = PlannerConfig(mode="agg", optimization_target="throughput")
     adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
     adapter._config = cfg
     adapter._is_disagg = False
     adapter._prefill_fpm_cache = {}
     adapter._decode_fpm_cache = {}
-    adapter._pending_prefill_fpm_snaps = []
-    adapter._pending_decode_fpm_snaps = []
     adapter._scaling_target_prefill = None
     adapter._scaling_target_decode = None
 
@@ -222,18 +180,27 @@ def test_build_tick_input_buffers_fpm_until_fpm_tick():
         need_worker_states=True,
         need_worker_fpm=False,
     )
-    snap = _snap("1", wall_time=1.0)
     first = adapter._build_tick_input(
         no_fpm_tick,
         {
             "now_ms": 1_000.0,
             "active_prefill_count": 0,
             "active_decode_count": 1,
-            "decode_fpm_snapshots": [snap],
+            "active_prefill_ids": [],
+            "active_decode_ids": [0],
+            "decode_fpm_snapshots": [
+                _snap("0", wall_time=1.0, dp_rank=0),
+                _snap("0", wall_time=1.0, dp_rank=1),
+                _snap("0", wall_time=2.0, dp_rank=0),
+                _snap("0", wall_time=2.0, dp_rank=1),
+            ],
             "prefill_fpm_snapshots": [],
         },
     )
     assert first.fpm_observations is None
+    assert set(adapter._decode_fpm_cache) == {("0", 0), ("0", 1)}
+    assert adapter._decode_fpm_cache[("0", 0)].wall_time == 2.0
+    assert adapter._decode_fpm_cache[("0", 1)].wall_time == 2.0
 
     fpm_tick = ScheduledTick(
         at_s=7.0,
@@ -246,13 +213,17 @@ def test_build_tick_input_buffers_fpm_until_fpm_tick():
             "now_ms": 7_000.0,
             "active_prefill_count": 0,
             "active_decode_count": 1,
+            "active_prefill_ids": [],
+            "active_decode_ids": [0],
             "decode_fpm_snapshots": [],
             "prefill_fpm_snapshots": [],
         },
     )
 
     assert second.fpm_observations is not None
-    assert ("1", 0) in second.fpm_observations.decode
+    assert set(second.fpm_observations.decode) == {("0", 0), ("0", 1)}
+    assert second.fpm_observations.decode[("0", 0)].wall_time == 2.0
+    assert second.fpm_observations.decode[("0", 1)].wall_time == 2.0
 
 
 def test_replay_engine_caps_exposes_aic_nextn():

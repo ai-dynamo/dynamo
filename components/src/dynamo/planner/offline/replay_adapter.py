@@ -113,20 +113,16 @@ def _build_fpm_from_dict(d: dict[str, Any]) -> ForwardPassMetrics:
 def _update_fpm_cache(
     cache: dict[tuple[str, int], ForwardPassMetrics],
     snapshots: list[dict[str, Any]],
-    active_count: int,
+    active_worker_ids: list[int],
 ) -> None:
     """Update a last-seen FPM cache with new snapshots and prune removed workers."""
     for snap in snapshots:
         fpm = _build_fpm_from_dict(snap)
         cache[(fpm.worker_id, fpm.dp_rank)] = fpm
 
-    # Prune by logical worker, retaining every DP-rank entry for each active
-    # worker. Workers are removed highest-ID-first during scale-down.
-    active_worker_ids = set(
-        sorted({worker_id for worker_id, _ in cache}, key=int)[:active_count]
-    )
+    active_worker_ids_as_str = {str(worker_id) for worker_id in active_worker_ids}
     for key in list(cache):
-        if key[0] not in active_worker_ids:
+        if key[0] not in active_worker_ids_as_str:
             del cache[key]
 
 
@@ -232,8 +228,6 @@ class ReplayPlannerAdapter:
         # Last-seen FPM caches (separate for prefill/decode)
         self._prefill_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
         self._decode_fpm_cache: dict[tuple[str, int], ForwardPassMetrics] = {}
-        self._pending_prefill_fpm_snaps: list[dict[str, Any]] = []
-        self._pending_decode_fpm_snaps: list[dict[str, Any]] = []
         # Partial traffic window accumulated across ticks until a throughput tick
         # consumes it (``None`` = nothing pending).
         self._pending_traffic: Optional[dict[str, Any]] = None
@@ -520,94 +514,10 @@ class ReplayPlannerAdapter:
             )
         return (target_p, target_d)
 
-    def _feed_extra_fpm_to_regression(
-        self,
-        decode_snaps: list[dict[str, Any]],
-        prefill_snaps: list[dict[str, Any]],
-    ) -> None:
-        """Feed accumulated FPM snapshots to regression, excluding the last
-        per worker (which will be added by _observe_fpm via fpm_observations).
-        This avoids double-counting the cached snapshot.
-
-        Works via ``_get_regression(kind)`` for orchestrator replay. Returns
-        early on easy mode (no regressions) or when the requested regression
-        slot isn't installed.
-        """
-        if self._is_easy_mode():
-            return  # easy mode has no regression models
-
-        if self._config.mode == "agg":
-            agg_reg = self._get_regression("agg")
-            if agg_reg is None:
-                return
-            last_idx_per_worker: dict[tuple[Any, int], int] = {}
-            for i, snap in enumerate(decode_snaps):
-                last_idx_per_worker[
-                    (snap["worker_id"], int(snap.get("dp_rank", 0)))
-                ] = i
-            exclude = set(last_idx_per_worker.values())
-            for i, snap in enumerate(decode_snaps):
-                if i in exclude:
-                    continue
-                fpm = _build_fpm_from_dict(snap)
-                if fpm.wall_time > 0.0:
-                    agg_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
-        else:
-            has_prefill = self._config.mode in ("prefill", "disagg")
-            has_decode = self._config.mode in ("decode", "disagg")
-            if has_prefill:
-                p_reg = self._get_regression("prefill")
-                if p_reg is not None:
-                    last_idx: dict[tuple[Any, int], int] = {}
-                    for i, snap in enumerate(prefill_snaps):
-                        last_idx[(snap["worker_id"], int(snap.get("dp_rank", 0)))] = i
-                    exclude = set(last_idx.values())
-                    for i, snap in enumerate(prefill_snaps):
-                        if i in exclude:
-                            continue
-                        fpm = _build_fpm_from_dict(snap)
-                        if fpm.wall_time > 0.0:
-                            p_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
-            if has_decode:
-                d_reg = self._get_regression("decode")
-                if d_reg is not None:
-                    last_idx = {}
-                    for i, snap in enumerate(decode_snaps):
-                        last_idx[(snap["worker_id"], int(snap.get("dp_rank", 0)))] = i
-                    exclude = set(last_idx.values())
-                    for i, snap in enumerate(decode_snaps):
-                        if i in exclude:
-                            continue
-                        fpm = _build_fpm_from_dict(snap)
-                        if fpm.wall_time > 0.0:
-                            d_reg.add_observations({(fpm.worker_id, fpm.dp_rank): fpm})
-
     def _is_easy_mode(self) -> bool:
         """Easy-mode check routed via config — both paths honour this
         the same way (no regression in non-SLA modes)."""
         return self._config.optimization_target != "sla"
-
-    def _get_regression(self, kind: str):
-        """Return the regression model for ``kind`` (``"agg"`` /
-        ``"prefill"`` / ``"decode"``).
-
-        Normal path: read from the orchestrator adapter's shared scaling
-        state. That state owns both benchmark-installed regressions and the
-        empty live-regression slots that replay must feed when no AIC data was
-        installed.
-        """
-        attr = f"_{kind}_regression"
-        state = getattr(self._engine, "_scaling_state", None)
-        if state is not None:
-            regression = getattr(state, attr, None)
-            if regression is not None:
-                return regression
-        # Benchmark regressions are also published to the orchestrator so
-        # external plugins can read them during bootstrap hooks.
-        orch = getattr(self._engine, "_orchestrator", None)
-        if orch is None:
-            return None
-        return orch.get_regression(kind)
 
     def _build_tick_input(
         self, tick: ScheduledTick, result: dict[str, Any]
@@ -649,37 +559,26 @@ class ReplayPlannerAdapter:
             )
 
         fpm_observations = None
-        if not hasattr(self, "_pending_prefill_fpm_snaps"):
-            self._pending_prefill_fpm_snaps = []
-        if not hasattr(self, "_pending_decode_fpm_snaps"):
-            self._pending_decode_fpm_snaps = []
-        self._pending_prefill_fpm_snaps.extend(result.get("prefill_fpm_snapshots", []))
-        self._pending_decode_fpm_snaps.extend(result.get("decode_fpm_snapshots", []))
+        # Merge each callback's latest worker/rank snapshots into the last-seen
+        # cache, then expose the cache only on FPM ticks. This matches the live
+        # subscriber's latest-snapshot semantics.
+        _update_fpm_cache(
+            self._prefill_fpm_cache,
+            result.get("prefill_fpm_snapshots", []),
+            result["active_prefill_ids"],
+        )
+        _update_fpm_cache(
+            self._decode_fpm_cache,
+            result.get("decode_fpm_snapshots", []),
+            result["active_decode_ids"],
+        )
         if tick.need_worker_fpm:
-            prefill_snaps = self._pending_prefill_fpm_snaps
-            decode_snaps = self._pending_decode_fpm_snaps
-            self._pending_prefill_fpm_snaps = []
-            self._pending_decode_fpm_snaps = []
-
-            _update_fpm_cache(
-                self._prefill_fpm_cache, prefill_snaps, result["active_prefill_count"]
-            )
-            _update_fpm_cache(
-                self._decode_fpm_cache, decode_snaps, result["active_decode_count"]
-            )
-
-            # In offline replay, we accumulate many FPM snapshots per tick
-            # (one per engine pass). Feed ALL non-idle snapshots directly to
-            # the regression models for a representative fit. The last-per-worker
-            # cache is only used for the FpmObservations dict (worker count
-            # reconciliation), not as the sole regression input.
             prefill_dict = (
                 dict(self._prefill_fpm_cache) if self._prefill_fpm_cache else None
             )
             decode_dict = (
                 dict(self._decode_fpm_cache) if self._decode_fpm_cache else None
             )
-            self._feed_extra_fpm_to_regression(decode_snaps, prefill_snaps)
             fpm_observations = FpmObservations(
                 prefill=prefill_dict,
                 decode=decode_dict,
