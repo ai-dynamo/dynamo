@@ -38,6 +38,7 @@ use crate::{
         openai::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
+            classify::OpenAIClassifyStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
@@ -501,6 +502,14 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_classify_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_classify_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_tensor_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -565,6 +574,16 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_embeddings_engine()
+    }
+
+    pub fn get_classify_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_classify_engine()
     }
 
     pub fn get_completions_engine(
@@ -778,6 +797,27 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_classify_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIClassifyStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_classify_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_classify_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.classify_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
     pub fn add_tensor_model(
         &self,
         model: &str,
@@ -956,6 +996,13 @@ impl ModelManager {
 
     pub fn remove_embeddings_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_embeddings_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_classify_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_classify_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))

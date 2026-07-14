@@ -23,6 +23,7 @@ use crate::types::{
     openai::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
+        classify::OpenAIClassifyStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
         generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
         videos::OpenAIVideosStreamingEngine,
@@ -197,6 +198,13 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_embeddings_engine())
+    }
+
+    /// Check if any WorkerSet has a classify engine.
+    pub fn has_classify_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_classify_engine())
     }
 
     /// Check if any WorkerSet has a tensor engine.
@@ -555,6 +563,13 @@ impl Model {
     ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.embeddings_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_embeddings_engine()))
+    }
+
+    pub fn get_classify_engine(
+        &self,
+    ) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.classify_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_classify_engine()))
     }
 
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {

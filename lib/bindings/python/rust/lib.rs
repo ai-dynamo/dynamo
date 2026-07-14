@@ -799,6 +799,10 @@ impl ModelType {
     const Realtime: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Realtime,
     };
+    #[classattr]
+    const Classify: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Classify,
+    };
 
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()

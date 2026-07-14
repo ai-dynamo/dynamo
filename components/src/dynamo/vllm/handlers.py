@@ -3780,6 +3780,142 @@ class EmbeddingWorkerHandler:
         }
 
 
+class ClassifyWorkerHandler(EmbeddingWorkerHandler):
+    """Standalone handler for ``/classify`` requests on vLLM.
+
+    Sequence classification (cross-encoder / NLI / sentiment) is a pooling
+    task, so this shares all of ``EmbeddingWorkerHandler``'s engine plumbing
+    (pooling ``AsyncLLM``, abort monitor, engine-death monitor) and only
+    overrides ``generate`` to:
+
+      - run ``PoolingParams(task="classify")`` instead of ``task="embed"``, and
+      - shape the per-input probability vectors into the ``/classify``
+        response (``{index, label, probs, num_classes}``) instead of the
+        embedding response.
+
+    The ``label`` is resolved from the model's HF ``id2label`` map (argmax of
+    the probability vector), matching vLLM's own ``/classify`` server
+    (``vllm/entrypoints/pooling/classify/serving.py``). ``label`` is ``None``
+    when the model config exposes no ``id2label``.
+    """
+
+    def __init__(
+        self,
+        runtime,
+        engine: Any,
+        config: Config,
+        model_config: "ModelConfig | None" = None,
+        shutdown_event: Optional[asyncio.Event] = None,
+    ) -> None:
+        super().__init__(
+            runtime=runtime,
+            engine=engine,
+            config=config,
+            shutdown_event=shutdown_event,
+        )
+        self.model_config = model_config
+        logger.info("Classify worker handler initialized")
+
+    def _id2label(self) -> dict[int, str]:
+        """Best-effort HF ``id2label`` lookup. Keys may arrive as str or int
+        depending on how the HF config was loaded; normalize to int."""
+        hf_config = getattr(self.model_config, "hf_config", None)
+        raw = getattr(hf_config, "id2label", None) or {}
+        normalized: dict[int, str] = {}
+        for k, v in raw.items():
+            try:
+                normalized[int(k)] = str(v)
+            except (TypeError, ValueError):
+                continue
+        return normalized
+
+    async def generate(
+        self, request: dict, context: Context
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Handle one ``/classify`` request.
+
+        The Rust frontend forwards the request dict directly. Expected keys:
+        ``model: str``, ``input: str | list[str]``. Mirrors vLLM 0.24.0's
+        ``ClassificationRequest`` → ``ClassificationResponse`` contract.
+        """
+        model_name = request.get("model") or self.config.served_model_name or ""
+        input_field = request.get("input")
+        if input_field is None:
+            raise ValueError("Classify request missing required 'input' field")
+
+        prompts: list[Any] = _classify_embedding_input(input_field)
+
+        # Sequence classification is a pooling pass with the model's configured
+        # classification pooler. ``use_activation`` is left at the pooler
+        # default (vLLM applies sigmoid/softmax per the model's config) so
+        # per-model behaviour isn't overridden — matching bare ``vllm serve``.
+        pooling_params = PoolingParams(task="classify")
+
+        base_request_id = context.id()
+
+        async def _encode_one(idx: int, prompt: Any):
+            request_id = f"{base_request_id}-{idx}"
+            encode_arg: Any = (
+                prompt
+                if isinstance(prompt, str)
+                else TokensPrompt(prompt_token_ids=prompt)
+            )
+            final_output = None
+            async with self._abort_monitor(context, request_id):
+                async for out in self.engine_client.encode(
+                    prompt=encode_arg,
+                    pooling_params=pooling_params,
+                    request_id=request_id,
+                ):
+                    final_output = out
+            if final_output is None:
+                raise RuntimeError(
+                    f"vLLM engine.encode produced no output for input index {idx}"
+                )
+            return final_output
+
+        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
+        try:
+            outputs = await asyncio.gather(*tasks)
+        finally:
+            pending = [t for t in tasks if not t.done()]
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        id2label = self._id2label()
+        data: list[Dict[str, Any]] = []
+        prompt_tokens = 0
+        for idx, final_output in enumerate(outputs):
+            # ``final_output.outputs.data`` is the 1-D probability vector for a
+            # classification pooler (shape ``(num_classes,)``); flatten defensively.
+            probs = _pooling_output_to_list(final_output.outputs.data)
+            predicted_index = max(range(len(probs)), key=probs.__getitem__) if probs else 0
+            data.append(
+                {
+                    "index": idx,
+                    "label": id2label.get(predicted_index),
+                    "probs": probs,
+                    "num_classes": len(probs),
+                }
+            )
+            token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(token_ids)
+
+        yield {
+            "id": f"classify-{base_request_id}",
+            "object": "list",
+            "created": int(time.time()),
+            "model": model_name,
+            "data": data,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            },
+        }
+
+
 def _is_token_id(x: Any) -> bool:
     """True iff ``x`` is an int that could be a vLLM token id.
 
