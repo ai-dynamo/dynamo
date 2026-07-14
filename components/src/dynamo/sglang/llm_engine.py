@@ -510,9 +510,8 @@ class SglangLLMEngine(LLMEngine):
             task.add_done_callback(self._prefill_consume_tasks.discard)
             return
 
-        # SGLang's logprob arrays are cumulative per choice and `n > 1`
-        # requests interleave choices on the stream, so the offset is
-        # keyed by `output_idx`, not a single scalar.
+        # SGLang versions return either cumulative or per-delta logprob arrays.
+        # Track the total seen per choice because n>1 interleaves chunks.
         num_logprobs_per_choice: dict[int, int] = {}
         async for res in stream:
             # SGLang sets index when n>1; default to 0 otherwise.
@@ -530,6 +529,7 @@ class SglangLLMEngine(LLMEngine):
                 ) = _shared_logprobs.extract_from_sglang_meta(
                     meta_info,
                     num_logprobs_per_choice.get(output_idx, 0),
+                    num_output_tokens_in_chunk=len(output_ids),
                     return_tokens_as_token_ids=return_tokens_as_token_ids,
                 )
                 num_logprobs_per_choice[output_idx] = next_total

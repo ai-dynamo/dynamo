@@ -711,6 +711,42 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
 
 
 @pytest.mark.asyncio
+async def test_process_token_stream_accepts_incremental_logprob_arrays():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.1, 101, "a")],
+                        },
+                    },
+                    {
+                        "index": 0,
+                        "output_ids": [102],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.3, 102, "c")],
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
+    assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.3]]
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_uploads_large_metadata(tmp_path):
     handler = _new_decode_handler()
     uploader = MetadataUploader(

@@ -192,9 +192,10 @@ def extract_prompt_logprobs_from_sglang_meta(
     """Extract prompt logprobs from an SGLang ``meta_info`` dict.
 
     Reads ``input_token_logprobs`` (tuples ``(logprob, token_id, decoded
-    or None)``, starting at prompt position 1) and merges any
-    ``input_top_logprobs`` alternatives. Prepends ``None`` at index 0
-    so the result aligns with Rust's BOS=None ``PromptLogprobs`` shape.
+    or None)``) and merges any ``input_top_logprobs`` alternatives. Current
+    SGLang versions include a leading tuple whose logprob is ``None``; older
+    versions start at prompt position 1. Both shapes normalize to the Rust
+    BOS=None ``PromptLogprobs`` shape.
     """
     input_logprobs = meta.get("input_token_logprobs")
     if not input_logprobs:
@@ -202,9 +203,14 @@ def extract_prompt_logprobs_from_sglang_meta(
 
     input_top_logprobs = meta.get("input_top_logprobs") or []
 
-    payload: list[Optional[dict[str, dict[str, Any]]]] = [None]
+    payload: list[Optional[dict[str, dict[str, Any]]]] = []
+    if input_logprobs[0][0] is not None:
+        payload.append(None)
     for idx, item in enumerate(input_logprobs):
         logprob, tok_id, decoded_token = item
+        if logprob is None:
+            payload.append(None)
+            continue
         position_map: dict[str, dict[str, Any]] = {}
         selected_entry: dict[str, Any] = {"logprob": float(logprob)}
         if decoded_token is not None:
@@ -297,20 +303,27 @@ def extract_from_sglang_meta(
     meta_info: dict[str, Any],
     num_output_logprobs_so_far: int,
     *,
+    num_output_tokens_in_chunk: Optional[int] = None,
     return_tokens_as_token_ids: bool = False,
 ) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]], int]:
     """Extract logprobs from SGLang's ``meta_info`` dict.
 
-    SGLang's ``output_token_logprobs`` / ``output_top_logprobs`` are
-    cumulative across stream chunks even though ``output_ids`` is
-    disjoint — the caller passes the running count to slice the new
-    entries, and the returned third element is the updated count.
+    Older SGLang versions return cumulative ``output_token_logprobs`` /
+    ``output_top_logprobs`` across stream chunks even though ``output_ids`` is
+    disjoint. Current versions align those arrays to the incremental token
+    chunk. When the chunk token count is provided, both shapes are detected;
+    the returned third element is the total number of logprobs seen.
     """
     output_token_logprobs = meta_info.get("output_token_logprobs")
     if not output_token_logprobs:
         return None, None, num_output_logprobs_so_far
 
-    new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
+    is_incremental = (
+        num_output_tokens_in_chunk is not None
+        and len(output_token_logprobs) == num_output_tokens_in_chunk
+    )
+    slice_start = 0 if is_incremental else num_output_logprobs_so_far
+    new_logprobs = output_token_logprobs[slice_start:]
     if not new_logprobs:
         return None, None, num_output_logprobs_so_far
 
@@ -319,7 +332,7 @@ def extract_from_sglang_meta(
     top_logprobs: Optional[list[list[dict[str, Any]]]] = None
     output_top = meta_info.get("output_top_logprobs")
     if output_top:
-        new_top = output_top[num_output_logprobs_so_far:]
+        new_top = output_top[slice_start:]
         if new_top:
             top_logprobs = []
             for position_entries in new_top:
@@ -342,4 +355,9 @@ def extract_from_sglang_meta(
                     )
                 top_logprobs.append(position_list)
 
-    return log_probs, top_logprobs, len(output_token_logprobs)
+    next_total = (
+        num_output_logprobs_so_far + len(output_token_logprobs)
+        if is_incremental
+        else len(output_token_logprobs)
+    )
+    return log_probs, top_logprobs, next_total
