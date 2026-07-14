@@ -428,7 +428,13 @@ vllm_configs = {
             chat_payload_default(),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="vllm"),
-            metric_payload_default(min_num_requests=6, backend="lmcache"),
+            # LMCache runs on the prefill worker (SYSTEM2); the decode worker
+            # (SYSTEM1, default) has no LMCache metrics.
+            metric_payload_default(
+                min_num_requests=6,
+                backend="lmcache",
+                port=DefaultPort.SYSTEM2.value,
+            ),
         ],
     ),
     "disaggregated_same_gpu": VLLMConfig(
