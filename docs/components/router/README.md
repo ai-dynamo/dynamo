@@ -46,8 +46,9 @@ workers that share a network namespace. For TensorRT-LLM, pass `--publish-events
 > for the streaming-granularity tradeoff.
 
 For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service and add the backend event flag to
-the workers that perform prefill. For approximate routing without worker events, omit the backend
-event flag and set `--no-router-kv-events` or `DYN_ROUTER_USE_KV_EVENTS=false` on the frontend.
+the appropriate vLLM or SGLang workers as described above. For approximate routing without worker
+events, omit the backend event flag and set `--no-router-kv-events` or
+`DYN_ROUTER_USE_KV_EVENTS=false` on the frontend.
 
 | Argument | Default | Description |
 |----------|---------|-------------|
