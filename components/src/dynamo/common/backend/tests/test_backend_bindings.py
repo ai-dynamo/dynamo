@@ -45,6 +45,10 @@ def test_module_exposes_expected_classes():
         assert hasattr(backend, name), f"missing {name} on dynamo._core.backend"
 
 
+def test_module_exposes_sglang_remote_launcher():
+    assert callable(backend._run_sglang_remote)
+
+
 def test_runtime_config_accepts_optional_fields():
     """RuntimeConfig must construct with no args and with each field."""
     backend.RuntimeConfig()

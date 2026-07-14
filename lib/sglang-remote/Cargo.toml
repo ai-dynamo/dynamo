@@ -2,21 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-sglang-sidecar"
+name = "dynamo-sglang-remote"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Dynamo SGLang sidecar backend — drives an out-of-process SGLang engine over its native gRPC service through the backend-common LLMEngine trait."
+description = "Dynamo remote backend for an out-of-process SGLang engine exposed through its native gRPC service."
 
 [package.metadata.cargo-machete]
 # Referenced by the protobuf client generated into OUT_DIR at build time.
 ignored = ["prost"]
 
 [[bin]]
-name = "dynamo-sglang-sidecar"
+name = "dynamo-sglang-remote"
 path = "src/main.rs"
 
 [dependencies]

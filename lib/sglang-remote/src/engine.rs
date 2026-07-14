@@ -27,7 +27,7 @@ use crate::protocol::{
     meta_u32, output_ids_to_u32, terminal_from_meta,
 };
 
-pub struct SglangSidecarEngine {
+pub struct SglangRemoteEngine {
     endpoint: String,
     transport: TransportConfig,
     disaggregation_mode: DisaggregationMode,
@@ -37,7 +37,7 @@ pub struct SglangSidecarEngine {
     cancel: CancellationToken,
 }
 
-impl SglangSidecarEngine {
+impl SglangRemoteEngine {
     pub(crate) fn new(
         endpoint: impl Into<String>,
         transport: TransportConfig,
@@ -82,7 +82,7 @@ impl SglangSidecarEngine {
             %endpoint,
             mode = ?disaggregation_mode,
             model = %discovery.model_path,
-            "sglang sidecar bootstrapped native gRPC discovery"
+            "sglang remote backend bootstrapped native gRPC discovery"
         );
 
         let config = WorkerConfig {
@@ -136,10 +136,12 @@ impl SglangSidecarEngine {
 }
 
 #[async_trait]
-impl LLMEngine for SglangSidecarEngine {
+impl LLMEngine for SglangRemoteEngine {
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
         if self.pool.initialized() {
-            return Err(client::engine_shutdown("sglang sidecar already started"));
+            return Err(client::engine_shutdown(
+                "sglang remote backend already started",
+            ));
         }
 
         let deadline = Instant::now() + self.transport.deadline;
@@ -170,12 +172,12 @@ impl LLMEngine for SglangSidecarEngine {
         let connection_count = pool.len();
         self.pool
             .set(pool)
-            .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
+            .map_err(|_| client::engine_shutdown("sglang remote backend already started"))?;
         tracing::info!(
             model = %config.model,
             mode = ?self.disaggregation_mode,
             connections = connection_count,
-            "sglang sidecar started"
+            "sglang remote backend started"
         );
         Ok(config)
     }
@@ -385,7 +387,7 @@ impl LLMEngine for SglangSidecarEngine {
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
         self.cancel.cancel();
-        tracing::info!("sglang sidecar shutdown complete");
+        tracing::info!("sglang remote backend shutdown complete");
         Ok(())
     }
 }

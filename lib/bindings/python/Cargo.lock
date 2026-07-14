@@ -2394,7 +2394,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
- "dynamo-sglang-sidecar",
+ "dynamo-sglang-remote",
  "futures",
  "once_cell",
  "opentelemetry",
@@ -2517,7 +2517,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-sglang-sidecar"
+name = "dynamo-sglang-remote"
 version = "1.3.0"
 dependencies = [
  "anyhow",
