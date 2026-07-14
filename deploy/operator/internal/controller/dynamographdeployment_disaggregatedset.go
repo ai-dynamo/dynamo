@@ -36,6 +36,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -280,14 +281,6 @@ func (r *DynamoGraphDeploymentReconciler) generateDisaggregatedSet(
 		ds.SetOwnerReferences([]metav1.OwnerReference{*ownerRef})
 	}
 
-	dcdReconciler := &DynamoComponentDeploymentReconciler{
-		Client:                r.Client,
-		Recorder:              r.Recorder,
-		Config:                r.Config,
-		RuntimeConfig:         r.RuntimeConfig,
-		DockerSecretRetriever: r.DockerSecretRetriever,
-	}
-
 	roles := make([]any, 0, len(selection.componentToRole))
 	for i := range dgd.Spec.Components {
 		componentName := dgd.Spec.Components[i].ComponentName
@@ -299,32 +292,68 @@ func (r *DynamoGraphDeploymentReconciler) generateDisaggregatedSet(
 		if dcd == nil {
 			return nil, fmt.Errorf("generated DynamoComponentDeployment missing for selected component %q", componentName)
 		}
-		lws, _, err := dcdReconciler.generateLeaderWorkerSet(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+		role, err := r.buildDisaggregatedSetRole(ctx, dcd)
 		if err != nil {
-			return nil, fmt.Errorf("failed to generate LeaderWorkerSet template for DisaggregatedSet role %q: %w", roleName, err)
+			return nil, fmt.Errorf("failed to build DisaggregatedSet role %q: %w", roleName, err)
 		}
-		lwsSpec, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&lws.Spec)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert LeaderWorkerSet spec for DisaggregatedSet role %q: %w", roleName, err)
-		}
-		roleMetadata := map[string]any{}
-		if len(lws.Labels) > 0 {
-			roleMetadata["labels"] = stringMapToAny(lws.Labels)
-		}
-		if len(lws.Annotations) > 0 {
-			roleMetadata["annotations"] = stringMapToAny(lws.Annotations)
-		}
-		roles = append(roles, map[string]any{
-			"name":     roleName,
-			"metadata": roleMetadata,
-			"spec":     lwsSpec,
-		})
+		role["name"] = roleName
+		roles = append(roles, role)
 	}
 	if len(roles) < 2 {
 		return nil, fmt.Errorf("DisaggregatedSet requires at least two roles, got %d", len(roles))
 	}
 	ds.Object["spec"] = map[string]any{"roles": roles}
 	return ds, nil
+}
+
+// buildDisaggregatedSetRole renders a single DS role from a generated DCD by
+// reusing the shared multinode render path that the LWS pathway uses. The DS
+// pathway only needs the LWS spec fields as unstructured; the LWS object's
+// own metadata is intentionally dropped so the DGD controller (and not the
+// LWS controller) remains the visible owner of the role.
+func (r *DynamoGraphDeploymentReconciler) buildDisaggregatedSetRole(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) (map[string]any, error) {
+	dcdReconciler := &DynamoComponentDeploymentReconciler{
+		Client:                r.Client,
+		Recorder:              r.Recorder,
+		Config:                r.Config,
+		RuntimeConfig:         r.RuntimeConfig,
+		DockerSecretRetriever: r.DockerSecretRetriever,
+	}
+
+	leaderPodTemplateSpec, workerPodTemplateSpec, err := dcdReconciler.renderMultinodePodTemplateSpecs(
+		ctx,
+		generateResourceOption{dynamoComponentDeployment: dcd},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	desiredReplicas := int32(1)
+	if dcd.Spec.Replicas != nil {
+		desiredReplicas = *dcd.Spec.Replicas
+	}
+	groupSize := dcd.GetNumberOfNodes()
+
+	lwsSpec := leaderworkersetv1.LeaderWorkerSetSpec{
+		Replicas:      &desiredReplicas,
+		StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
+		LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+			LeaderTemplate: leaderPodTemplateSpec,
+			WorkerTemplate: *workerPodTemplateSpec,
+			Size:           &groupSize,
+		},
+	}
+	lwsSpecUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&lwsSpec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert LeaderWorkerSet spec: %w", err)
+	}
+
+	return map[string]any{
+		"spec": lwsSpecUnstructured,
+	}, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetSideResources(

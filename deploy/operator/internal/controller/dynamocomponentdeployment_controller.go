@@ -553,42 +553,16 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	logs := log.FromContext(ctx)
 	logs.Info("Generating LeaderWorkerSet")
 
-	kubeName := leaderWorkerSetName(opt.dynamoComponentDeployment)
-	kubeNs := opt.dynamoComponentDeployment.Namespace
-	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
-
-	if labels == nil {
-		labels = make(map[string]string)
-	}
-	podLabels, err := r.getDCDWorkloadPodLabels(ctx, opt.dynamoComponentDeployment)
+	leaderPodTemplateSpec, workerPodTemplateSpec, err := r.renderMultinodePodTemplateSpecs(ctx, opt)
 	if err != nil {
 		return nil, false, err
 	}
 
-	leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      kubeName,
-			Namespace: kubeNs,
-			Labels:    labels,
-		},
-	}
-
-	leaderPodLabels := make(map[string]string)
-	for k, v := range podLabels {
-		leaderPodLabels[k] = v
-	}
-	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, leaderPodLabels)
-	if err != nil {
-		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate leader pod template")
-	}
-
-	workerPodLabels := make(map[string]string)
-	for k, v := range podLabels {
-		workerPodLabels[k] = v
-	}
-	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, workerPodLabels)
-	if err != nil {
-		return nil, false, errors.Wrap(err, "generateLeaderWorkerSet: failed to generate worker pod template")
+	kubeName := leaderWorkerSetName(opt.dynamoComponentDeployment)
+	kubeNs := opt.dynamoComponentDeployment.Namespace
+	labels := dynamo.GetDCDKubeLabels(opt.dynamoComponentDeployment)
+	if labels == nil {
+		labels = make(map[string]string)
 	}
 
 	desiredReplicas := int32(1)
@@ -597,17 +571,56 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 	groupSize := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
-	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{
-		Replicas:      &desiredReplicas,
-		StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
-		LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
-			LeaderTemplate: leaderPodTemplateSpec,
-			WorkerTemplate: *workerPodTemplateSpec,
-			Size:           &groupSize,
+	return &leaderworkersetv1.LeaderWorkerSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      kubeName,
+			Namespace: kubeNs,
+			Labels:    labels,
 		},
+		Spec: leaderworkersetv1.LeaderWorkerSetSpec{
+			Replicas:      &desiredReplicas,
+			StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
+			LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
+				LeaderTemplate: leaderPodTemplateSpec,
+				WorkerTemplate: *workerPodTemplateSpec,
+				Size:           &groupSize,
+			},
+		},
+	}, false, nil
+}
+
+// renderMultinodePodTemplateSpecs is the shared multinode render path used by
+// both the LWS pathway and the DisaggregatedSet pathway. Returning the two
+// pod templates (rather than a fully composed LWS) keeps downstream callers
+// (DS, future templating work) free to compose their own role structure.
+func (r *DynamoComponentDeploymentReconciler) renderMultinodePodTemplateSpecs(
+	ctx context.Context,
+	opt generateResourceOption,
+) (*corev1.PodTemplateSpec, *corev1.PodTemplateSpec, error) {
+	podLabels, err := r.getDCDWorkloadPodLabels(ctx, opt.dynamoComponentDeployment)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return leaderWorkerSet, false, nil
+	leaderLabels := make(map[string]string, len(podLabels))
+	for k, v := range podLabels {
+		leaderLabels[k] = v
+	}
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, opt, leaderLabels)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "renderMultinodePodTemplateSpecs: failed to generate leader pod template")
+	}
+
+	workerLabels := make(map[string]string, len(podLabels))
+	for k, v := range podLabels {
+		workerLabels[k] = v
+	}
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, opt, workerLabels)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "renderMultinodePodTemplateSpecs: failed to generate worker pod template")
+	}
+
+	return leaderPodTemplateSpec, workerPodTemplateSpec, nil
 }
 
 // getDCDWorkloadPodLabels keeps LWS pod labels aligned with the workload

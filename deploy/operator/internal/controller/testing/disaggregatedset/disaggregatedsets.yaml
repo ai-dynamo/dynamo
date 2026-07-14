@@ -1,0 +1,26 @@
+# Minimal DisaggregatedSet CRD used by envtest. The real schema is owned by
+# the LWS upstream; this fixture only declares the surface that the operator
+# touches (spec.roles, status.roleStatuses, status.observedGeneration).
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: disaggregatedsets.disaggregatedset.x-k8s.io
+spec:
+  group: disaggregatedset.x-k8s.io
+  scope: Namespaced
+  names:
+    plural: disaggregatedsets
+    singular: disaggregatedset
+    kind: DisaggregatedSet
+    listKind: DisaggregatedSetList
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns: []
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true

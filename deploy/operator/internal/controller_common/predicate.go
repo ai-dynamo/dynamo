@@ -50,8 +50,8 @@ func DetectLWSAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 
 // DetectDisaggregatedSetAvailability checks if the DisaggregatedSet API is available.
 func DetectDisaggregatedSetAvailability(ctx context.Context, mgr ctrl.Manager) bool {
-        version := "v1"
-        return detectAPIGroupAvailability(ctx, mgr, "disaggregatedset.x-k8s.io", &version)
+	version := "v1"
+	return detectAPIGroupAvailability(ctx, mgr, "disaggregatedset.x-k8s.io", &version)
 }
 
 // DetectVolcanoAvailability checks if Volcano is available by checking if the Volcano API group is registered

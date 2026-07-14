@@ -24,10 +24,10 @@ type RuntimeConfig struct {
 	GroveEnabled bool
 	// LWSEnabled is the resolved LWS availability (config override merged with auto-detection)
 	LWSEnabled bool
-        // DisaggregatedSetEnabled is true when the DisaggregatedSet API is available.
-        // It is tracked separately because the current LWS pathway still depends on Volcano,
-        // while the DS pathway should not.
-        DisaggregatedSetEnabled bool
+	// DisaggregatedSetEnabled is true when the DisaggregatedSet API is available.
+	// It is tracked separately because the current LWS pathway still depends on Volcano,
+	// while the DS pathway should not.
+	DisaggregatedSetEnabled bool
 	// KaiSchedulerEnabled is the resolved Kai-scheduler availability (config override merged with auto-detection)
 	KaiSchedulerEnabled bool
 	// VolcanoSchedulerEnabled indicates whether Dynamo should inject Volcano scheduler settings into Grove PodCliqueSets

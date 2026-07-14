@@ -16,6 +16,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/stretchr/testify/require"
 )
@@ -175,4 +176,78 @@ func TestListOwnedSelectedDCDsSkipsUserManagedDCDs(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, owned.Name, got[0].Name)
+}
+
+func TestShouldUseDisaggregatedSet(t *testing.T) {
+	twoEligibleDGD := func() *nvidiacomv1beta1.DynamoGraphDeployment {
+		return &nvidiacomv1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo",
+				Namespace: "default",
+				Annotations: map[string]string{
+					consts.KubeAnnotationEnableDisaggregatedSet: consts.KubeLabelValueTrue,
+				},
+			},
+			Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+				Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+					{
+						ComponentName: "prefill",
+						ComponentType: nvidiacomv1beta1.ComponentTypePrefill,
+						Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					},
+					{
+						ComponentName: "decode",
+						ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
+						Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+					},
+				},
+			},
+		}
+	}
+
+	t.Run("annotation missing falls back", func(t *testing.T) {
+		dgd := twoEligibleDGD()
+		delete(dgd.Annotations, consts.KubeAnnotationEnableDisaggregatedSet)
+		r := &DynamoGraphDeploymentReconciler{
+			RuntimeConfig: newTestRuntimeConfig(true),
+		}
+		use, reason := r.shouldUseDisaggregatedSet(dgd)
+		require.False(t, use)
+		require.Empty(t, reason)
+	})
+
+	t.Run("API unavailable falls back with reason", func(t *testing.T) {
+		dgd := twoEligibleDGD()
+		r := &DynamoGraphDeploymentReconciler{
+			RuntimeConfig: newTestRuntimeConfig(false),
+		}
+		use, reason := r.shouldUseDisaggregatedSet(dgd)
+		require.False(t, use)
+		require.Contains(t, reason, "DisaggregatedSet API is not available")
+	})
+
+	t.Run("only one eligible role falls back with reason", func(t *testing.T) {
+		dgd := twoEligibleDGD()
+		dgd.Spec.Components = dgd.Spec.Components[:1]
+		r := &DynamoGraphDeploymentReconciler{
+			RuntimeConfig: newTestRuntimeConfig(true),
+		}
+		use, reason := r.shouldUseDisaggregatedSet(dgd)
+		require.False(t, use)
+		require.Contains(t, reason, "two eligible multinode worker roles")
+	})
+
+	t.Run("eligible DGD opts in", func(t *testing.T) {
+		dgd := twoEligibleDGD()
+		r := &DynamoGraphDeploymentReconciler{
+			RuntimeConfig: newTestRuntimeConfig(true),
+		}
+		use, reason := r.shouldUseDisaggregatedSet(dgd)
+		require.True(t, use)
+		require.Empty(t, reason)
+	})
+}
+
+func newTestRuntimeConfig(enabled bool) *commoncontroller.RuntimeConfig {
+	return &commoncontroller.RuntimeConfig{DisaggregatedSetEnabled: enabled}
 }
