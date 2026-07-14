@@ -7,11 +7,13 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -87,6 +89,20 @@ func TestSelectDisaggregatedSetComponents(t *testing.T) {
 		_, reason := selectDisaggregatedSetComponents(dgd)
 		require.Contains(t, reason, "scalingAdapter")
 	})
+
+	t.Run("rejects more roles than the DS API supports", func(t *testing.T) {
+		dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
+		for i := 0; i < maxDisaggregatedSetRoles+1; i++ {
+			dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: fmt.Sprintf("worker-%d", i),
+				ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+				Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+			})
+		}
+
+		_, reason := selectDisaggregatedSetComponents(dgd)
+		require.Contains(t, reason, "at most 10 roles")
+	})
 }
 
 func TestCheckDisaggregatedSetReadiness(t *testing.T) {
@@ -124,7 +140,7 @@ func TestCheckDisaggregatedSetReadiness(t *testing.T) {
 	require.True(t, ready)
 }
 
-func TestApplyDisaggregatedSetCheckpointStartupPoliciesIncludesSelectedRoles(t *testing.T) {
+func TestApplyDisaggregatedSetCheckpointStartupPoliciesCoordinatesSelectedRoles(t *testing.T) {
 	dcds := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{
 		"prefill": {
 			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
@@ -144,10 +160,56 @@ func TestApplyDisaggregatedSetCheckpointStartupPoliciesIncludesSelectedRoles(t *
 			StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 		},
 	}
+	selection := disaggregatedSetSelection{
+		componentToRole: map[string]string{"prefill": "prefill", "decode": "decode"},
+		desiredReplicas: map[string]int32{"prefill": 2, "decode": 2},
+	}
 
-	require.NoError(t, applyDisaggregatedSetCheckpointStartupPolicies(dcds, checkpointInfos))
+	gated, err := applyDisaggregatedSetCheckpointStartupPolicies(dcds, checkpointInfos, selection)
+	require.NoError(t, err)
+	require.True(t, gated)
 	require.Equal(t, int32(0), ptr.Deref(dcds["prefill"].Spec.Replicas, -1))
-	require.Equal(t, int32(2), ptr.Deref(dcds["decode"].Spec.Replicas, -1))
+	require.Equal(t, int32(0), ptr.Deref(dcds["decode"].Spec.Replicas, -1))
+	require.Equal(t, map[string]int32{"prefill": 0, "decode": 0}, selection.desiredReplicas)
+}
+
+func TestDeleteStaleDisaggregatedSetComponentServices(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	require.NoError(t, corev1.AddToScheme(scheme))
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+	}
+	labels := func(componentName string) map[string]string {
+		return map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoComponent:           componentName,
+		}
+	}
+	service := func(name, componentName string, owned bool) *corev1.Service {
+		svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: dgd.Namespace, Labels: labels(componentName)}}
+		if owned {
+			svc.OwnerReferences = []metav1.OwnerReference{*dgdControllerOwnerReference(dgd)}
+		}
+		return svc
+	}
+	current := service("demo-prefill-new", "prefill", true)
+	stale := service("demo-prefill-old", "prefill", true)
+	removedComponent := service("demo-removed-old", "removed", true)
+	userManaged := service("demo-prefill-user", "prefill", false)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, current, stale, removedComponent, userManaged).Build(),
+	}
+	dcds := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{
+		"prefill": {ObjectMeta: metav1.ObjectMeta{Name: current.Name}},
+	}
+
+	require.NoError(t, reconciler.deleteStaleDisaggregatedSetComponentServices(t.Context(), dgd, dcds))
+	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(current), &corev1.Service{}))
+	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(userManaged), &corev1.Service{}))
+	require.True(t, apierrors.IsNotFound(reconciler.Get(t.Context(), client.ObjectKeyFromObject(stale), &corev1.Service{})))
+	require.True(t, apierrors.IsNotFound(reconciler.Get(t.Context(), client.ObjectKeyFromObject(removedComponent), &corev1.Service{})))
 }
 
 func TestCheckDisaggregatedSetReadinessFallsBackToTargetRevisionChildLWS(t *testing.T) {
@@ -213,13 +275,26 @@ func TestCheckDisaggregatedSetReadinessFallsBackToTargetRevisionChildLWS(t *test
 	require.NoError(t, err)
 	require.False(t, ready)
 	require.Contains(t, reason, "demo-new-prefill")
-	require.Equal(t, []string{"demo-new-prefill"}, statuses["prefill"].ComponentNames)
+	require.Equal(t, []string{"demo-new-prefill", "demo-old-prefill"}, statuses["prefill"].ComponentNames)
+	require.Equal(t, int32(2), statuses["prefill"].Replicas)
 
 	newPrefill := &leaderworkersetv1.LeaderWorkerSet{}
 	require.NoError(t, reconciler.Get(t.Context(), types.NamespacedName{Name: "demo-new-prefill", Namespace: ds.GetNamespace()}, newPrefill))
 	newPrefill.Status.UpdatedReplicas = 1
 	newPrefill.Status.ReadyReplicas = 1
 	require.NoError(t, reconciler.Update(t.Context(), newPrefill))
+
+	ready, reason, _, err = reconciler.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
+	require.NoError(t, err)
+	require.False(t, ready)
+	require.Contains(t, reason, "old child")
+
+	oldPrefill := &leaderworkersetv1.LeaderWorkerSet{}
+	require.NoError(t, reconciler.Get(t.Context(), types.NamespacedName{Name: "demo-old-prefill", Namespace: ds.GetNamespace()}, oldPrefill))
+	oldPrefill.Status.Replicas = 0
+	oldPrefill.Status.UpdatedReplicas = 0
+	oldPrefill.Status.ReadyReplicas = 0
+	require.NoError(t, reconciler.Update(t.Context(), oldPrefill))
 
 	ready, _, _, err = reconciler.checkDisaggregatedSetReadiness(t.Context(), ds, selection)
 	require.NoError(t, err)
@@ -347,6 +422,42 @@ func TestDeleteDisaggregatedSetIgnoresNotFoundRace(t *testing.T) {
 	reconciler := &DynamoGraphDeploymentReconciler{Client: notFoundOnDeleteClient{Client: baseClient}}
 
 	require.NoError(t, reconciler.deleteDisaggregatedSetIfExists(t.Context(), dgd))
+}
+
+func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
+	scheme.AddKnownTypeWithName(disaggregatedSetGVK, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(disaggregatedSetGVK.GroupVersion().WithKind("DisaggregatedSetList"), &unstructured.UnstructuredList{})
+
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default", UID: "demo-uid"},
+	}
+	current := newDisaggregatedSetObject()
+	current.SetName("demo")
+	current.SetNamespace("default")
+	current.SetLabels(map[string]string{"example.com/keep": "label"})
+	current.SetAnnotations(map[string]string{"example.com/keep": "annotation"})
+	current.SetOwnerReferences([]metav1.OwnerReference{
+		*dgdControllerOwnerReference(dgd),
+		{APIVersion: "v1", Kind: "ConfigMap", Name: "keep", UID: "keep-uid"},
+	})
+	current.Object["spec"] = map[string]any{"roles": []any{}}
+	desired := current.DeepCopy()
+	desired.SetLabels(map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name})
+	desired.SetAnnotations(nil)
+	desired.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
+	desired.Object["spec"] = map[string]any{"roles": []any{map[string]any{"name": "prefill"}, map[string]any{"name": "decode"}}}
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd, current).Build(),
+	}
+
+	modified, synced, err := reconciler.syncDisaggregatedSet(t.Context(), dgd, desired)
+	require.NoError(t, err)
+	require.True(t, modified)
+	require.Equal(t, "label", synced.GetLabels()["example.com/keep"])
+	require.Equal(t, "annotation", synced.GetAnnotations()["example.com/keep"])
+	require.Len(t, synced.GetOwnerReferences(), 2)
 }
 
 func TestMapDisaggregatedSetChildLWSToDGD(t *testing.T) {

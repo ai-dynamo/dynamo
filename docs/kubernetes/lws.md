@@ -68,12 +68,13 @@ spec:
   # ...
 ```
 
-Dynamo falls back to the standard LWS path when the DS request cannot be honored. Common fallback cases are:
+Dynamo falls back to the standard DCD pathway when the DS request cannot be honored. Multinode components then require the existing LWS + Volcano pathway; if that pathway is unavailable, reconciliation reports that no multinode orchestrator is available. Common fallback cases are:
 
 - The `disaggregatedset.x-k8s.io/v1` API is not installed.
 - Fewer than two eligible multinode worker roles are selected.
 - A selected component uses `scalingAdapter`.
 - Selected roles mix zero replicas with positive replicas.
+- More than 10 eligible multinode worker roles are selected.
 
 DS does not depend on Volcano for API detection. The current non-DS LWS path still requires both LWS and Volcano.
 

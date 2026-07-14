@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -41,6 +42,7 @@ import (
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -51,6 +53,8 @@ var disaggregatedSetGVK = schema.GroupVersionKind{
 	Version: "v1",
 	Kind:    "DisaggregatedSet",
 }
+
+const maxDisaggregatedSetRoles = 10
 
 type disaggregatedSetSelection struct {
 	componentToRole map[string]string
@@ -126,6 +130,9 @@ func selectDisaggregatedSetComponents(dgd *nvidiacomv1beta1.DynamoGraphDeploymen
 	if len(selection.componentToRole) == 0 {
 		return selection, "no eligible multinode worker roles found"
 	}
+	if len(selection.componentToRole) > maxDisaggregatedSetRoles {
+		return selection, fmt.Sprintf("DisaggregatedSet supports at most %d roles", maxDisaggregatedSetRoles)
+	}
 	if zeroReplicas > 0 && positiveReplicas > 0 {
 		return selection, "DisaggregatedSet requires replicas to be zero for all selected roles or positive for all selected roles"
 	}
@@ -153,7 +160,8 @@ func disaggregatedSetRoleName(component *nvidiacomv1beta1.DynamoComponentDeploym
 	}
 	roleName := preferred
 	for i := 2; roleNameUsed(roleName, used); i++ {
-		roleName = fmt.Sprintf("%s-%d", truncateDNSLabel(preferred, 61), i)
+		suffix := fmt.Sprintf("-%d", i)
+		roleName = truncateDNSLabel(preferred, 63-len(suffix)) + suffix
 	}
 	return roleName
 }
@@ -208,7 +216,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 	if reason != "" {
 		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
 	}
-	if err := applyDisaggregatedSetCheckpointStartupPolicies(dynamoComponentsDeployments, checkpointInfos); err != nil {
+	checkpointGated, err := applyDisaggregatedSetCheckpointStartupPolicies(dynamoComponentsDeployments, checkpointInfos, selection)
+	if err != nil {
 		return ReconcileResult{}, err
 	}
 
@@ -230,13 +239,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 	}
 	// A patched DS can still expose readiness from its previous revision. Do not
 	// retire the legacy DCDs until the DS controller observes the new spec.
-	dsReady = dsReady && !dsModified
+	dsReady = dsReady && !dsModified && !checkpointGated
 
 	syncedDSResource, err := commoncontroller.NewResourceWithComponentStatuses(
 		syncedDS,
 		func() (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 			if dsModified {
 				return false, "DisaggregatedSet spec was updated; waiting for controller status", dsStatuses
+			}
+			if checkpointGated {
+				return false, "DisaggregatedSet roles are waiting for checkpoint readiness", dsStatuses
 			}
 			return dsReady, dsReason, dsStatuses
 		},
@@ -260,19 +272,43 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 		}
 	}
 
-	return r.checkResourcesReadiness(resources), nil
+	result := r.checkResourcesReadiness(resources)
+	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
+		if err := r.deleteStaleDisaggregatedSetComponentServices(ctx, dynamoDeployment, dynamoComponentsDeployments); err != nil {
+			return ReconcileResult{}, err
+		}
+	}
+	return result, nil
 }
 
 func applyDisaggregatedSetCheckpointStartupPolicies(
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) error {
+	selection disaggregatedSetSelection,
+) (bool, error) {
 	for _, componentName := range sortedDCDKeys(dcds) {
 		if err := applyDCDCheckpointStartupPolicy(dcds[componentName], checkpointInfos[componentName]); err != nil {
-			return fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", componentName, err)
+			return false, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", componentName, err)
 		}
 	}
-	return nil
+
+	// DS requires all roles to be either zero or positive. If any selected role
+	// is waiting for a checkpoint, gate the whole set until it is ready.
+	gateSelectedRoles := false
+	for componentName := range selection.componentToRole {
+		info := checkpointInfos[componentName]
+		if info != nil && info.Enabled && info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !info.Ready {
+			gateSelectedRoles = true
+			break
+		}
+	}
+	for componentName := range selection.componentToRole {
+		if gateSelectedRoles {
+			dcds[componentName].Spec.Replicas = ptr.To(int32(0))
+		}
+		selection.desiredReplicas[componentName] = desiredComponentReplicas(&dcds[componentName].Spec.DynamoComponentDeploymentSharedSpec)
+	}
+	return gateSelectedRoles, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetNonSelectedDCDs(
@@ -509,9 +545,15 @@ func (r *DynamoGraphDeploymentReconciler) syncDisaggregatedSet(ctx context.Conte
 		return false, nil, fmt.Errorf("refusing to update DisaggregatedSet %s/%s because it is not controlled by DynamoGraphDeployment %s/%s", desired.GetNamespace(), desired.GetName(), dgd.Namespace, dgd.Name)
 	}
 	original := current.DeepCopy()
-	current.SetLabels(desired.GetLabels())
-	current.SetAnnotations(desired.GetAnnotations())
-	current.SetOwnerReferences(desired.GetOwnerReferences())
+	if current.GetLabels() == nil {
+		current.SetLabels(map[string]string{})
+	}
+	maps.Copy(current.GetLabels(), desired.GetLabels())
+	if current.GetAnnotations() == nil && len(desired.GetAnnotations()) > 0 {
+		current.SetAnnotations(map[string]string{})
+	}
+	maps.Copy(current.GetAnnotations(), desired.GetAnnotations())
+	setDGDControllerOwnerReference(dgd, current)
 	current.Object["spec"] = desired.Object["spec"]
 	if equality.Semantic.DeepEqual(original.Object["spec"], current.Object["spec"]) &&
 		equality.Semantic.DeepEqual(original.GetLabels(), current.GetLabels()) &&
@@ -552,6 +594,38 @@ func (r *DynamoGraphDeploymentReconciler) deleteOwnedSelectedDCDs(ctx context.Co
 		dcd := &dcds[i]
 		if err := r.Delete(ctx, dcd); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete selected DynamoComponentDeployment %s/%s: %w", dcd.Namespace, dcd.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) deleteStaleDisaggregatedSetComponentServices(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+) error {
+	services := &corev1.ServiceList{}
+	if err := r.List(ctx, services, client.InNamespace(dgd.Namespace), client.MatchingLabels{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+	}); err != nil {
+		return fmt.Errorf("failed to list DisaggregatedSet component Services for cleanup: %w", err)
+	}
+
+	for i := range services.Items {
+		service := &services.Items[i]
+		if !isControlledByBetaDGD(service, dgd) {
+			continue
+		}
+		componentName := service.Labels[consts.KubeLabelDynamoComponent]
+		dcd := dcds[componentName]
+		if dcd != nil && service.Name == dynamo.NormalizeKubeResourceName(dcd.Name) {
+			continue
+		}
+		if componentName == "" {
+			continue
+		}
+		if err := r.Delete(ctx, service); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete stale DisaggregatedSet component Service %s/%s: %w", service.Namespace, service.Name, err)
 		}
 	}
 	return nil
@@ -659,8 +733,7 @@ func checkDisaggregatedSetReadiness(ds *unstructured.Unstructured, selection dis
 	for componentName, roleName := range selection.componentToRole {
 		desiredReplicas := selection.desiredReplicas[componentName]
 		componentStatus := nvidiacomv1beta1.ComponentReplicaStatus{
-			ComponentKind:  nvidiacomv1beta1.ComponentKindLeaderWorkerSet,
-			ComponentNames: []string{fmt.Sprintf("%s/%s", ds.GetName(), roleName)},
+			ComponentKind: nvidiacomv1beta1.ComponentKindLeaderWorkerSet,
 		}
 		roleStatus, found := roleStatuses[roleName]
 		if found {
@@ -730,24 +803,27 @@ func (r *DynamoGraphDeploymentReconciler) checkDisaggregatedSetReadiness(
 	}
 	targetRevision := disaggregatedsetutils.ComputeRevision(typedDS.Spec.Roles)
 	targetByRole := make(map[string]*leaderworkersetv1.LeaderWorkerSet)
+	childrenByRole := make(map[string][]*leaderworkersetv1.LeaderWorkerSet)
 	for i := range children.Items {
 		child := &children.Items[i]
 		if !metav1.IsControlledBy(child, ds) {
 			continue
 		}
+		roleName := child.Labels[disaggregatedsetv1.RoleLabelKey]
+		childrenByRole[roleName] = append(childrenByRole[roleName], child)
 		if child.Labels[disaggregatedsetv1.RevisionLabelKey] != targetRevision {
 			continue
 		}
-		roleName := child.Labels[disaggregatedsetv1.RoleLabelKey]
 		targetByRole[roleName] = child
 	}
-	ready, reason, statuses := checkDisaggregatedSetChildLWSReadiness(selection, targetByRole)
+	ready, reason, statuses := checkDisaggregatedSetChildLWSReadiness(selection, targetByRole, childrenByRole)
 	return ready, reason, statuses, nil
 }
 
 func checkDisaggregatedSetChildLWSReadiness(
 	selection disaggregatedSetSelection,
 	targetByRole map[string]*leaderworkersetv1.LeaderWorkerSet,
+	childrenByRole map[string][]*leaderworkersetv1.LeaderWorkerSet,
 ) (bool, string, map[string]nvidiacomv1beta1.ComponentReplicaStatus) {
 	statuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus, len(selection.componentToRole))
 	notReadyReasons := []string{}
@@ -755,15 +831,21 @@ func checkDisaggregatedSetChildLWSReadiness(
 		desiredReplicas := selection.desiredReplicas[componentName]
 		child := targetByRole[roleName]
 		status := nvidiacomv1beta1.ComponentReplicaStatus{ComponentKind: nvidiacomv1beta1.ComponentKindLeaderWorkerSet}
+		children := childrenByRole[roleName]
+		sort.Slice(children, func(i, j int) bool { return children[i].Name < children[j].Name })
+		readyReplicas := int32(0)
+		for _, roleChild := range children {
+			status.ComponentNames = append(status.ComponentNames, roleChild.Name)
+			status.Replicas += roleChild.Status.Replicas
+			readyReplicas += roleChild.Status.ReadyReplicas
+		}
+		status.ReadyReplicas = ptr.To(readyReplicas)
 		if child == nil {
 			statuses[componentName] = status
 			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s role %q has no child LeaderWorkerSet yet", componentName, roleName))
 			continue
 		}
-		status.ComponentNames = []string{child.Name}
-		status.Replicas = child.Status.Replicas
 		status.UpdatedReplicas = child.Status.UpdatedReplicas
-		status.ReadyReplicas = ptr.To(child.Status.ReadyReplicas)
 		statuses[componentName] = status
 		if child.Status.ObservedGeneration < child.Generation {
 			notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s child LeaderWorkerSet %q has not observed generation %d", componentName, child.Name, child.Generation))
@@ -774,6 +856,11 @@ func checkDisaggregatedSetChildLWSReadiness(
 				"%s child LeaderWorkerSet %q replicas not ready (desired=%d replicas=%d updated=%d ready=%d)",
 				componentName, child.Name, desiredReplicas, child.Status.Replicas, child.Status.UpdatedReplicas, child.Status.ReadyReplicas,
 			))
+		}
+		for _, roleChild := range children {
+			if roleChild != child && roleChild.Status.Replicas != 0 {
+				notReadyReasons = append(notReadyReasons, fmt.Sprintf("%s old child LeaderWorkerSet %q still has %d replicas", componentName, roleChild.Name, roleChild.Status.Replicas))
+			}
 		}
 	}
 	if len(notReadyReasons) > 0 {

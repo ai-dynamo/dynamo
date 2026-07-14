@@ -176,12 +176,13 @@ spec:
   # ... your deployment spec
 ```
 
-DS requests fall back to the standard LWS path when any of these conditions apply:
+DS requests fall back to the standard DCD pathway when any of these conditions apply. Multinode components require LWS + Volcano after fallback; without that pathway, reconciliation reports that no multinode orchestrator is available.
 
 - The `disaggregatedset.x-k8s.io/v1` API is not available.
 - Fewer than two eligible multinode worker roles are selected.
 - A selected component uses `scalingAdapter`.
 - Selected roles mix zero replicas with positive replicas.
+- More than 10 eligible multinode worker roles are selected.
 
 
 ### The `multinode` Section
