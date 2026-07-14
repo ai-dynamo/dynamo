@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # Minimal DisaggregatedSet CRD used by envtest. The real schema is owned by
 # the LWS upstream; this fixture only declares the surface that the operator
 # touches (spec.roles, status.roleStatuses, status.observedGeneration).

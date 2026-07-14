@@ -25,6 +25,7 @@ import (
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/go-logr/logr"
 	"github.com/imdario/mergo"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -335,42 +336,13 @@ type ReconcileResult struct {
 	RestartStatus   *nvidiacomv1beta1.RestartStatus
 }
 
+const resourceNotFoundReason = "resource not found"
+
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	// Ensure planner RBAC exists in cluster-wide mode
-	if r.Config.Namespace.Restricted == "" {
-		if r.RBACManager == nil {
-			return ReconcileResult{}, fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
-		}
-		if r.Config.RBAC.PlannerClusterRoleName == "" {
-			return ReconcileResult{}, fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
-		}
-		if err := r.RBACManager.EnsureServiceAccountWithRBAC(
-			ctx,
-			dynamoDeployment.Namespace,
-			consts.PlannerServiceAccountName,
-			r.Config.RBAC.PlannerClusterRoleName,
-		); err != nil {
-			logger.Error(err, "Failed to ensure planner RBAC")
-			return ReconcileResult{}, fmt.Errorf("failed to ensure planner RBAC: %w", err)
-		}
-
-		// Ensure EPP RBAC exists in cluster-wide mode if EPP service is present
-		if dynamoDeployment.HasEPPComponent() {
-			if r.Config.RBAC.EPPClusterRoleName == "" {
-				return ReconcileResult{}, fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
-			}
-			if err := r.RBACManager.EnsureServiceAccountWithRBAC(
-				ctx,
-				dynamoDeployment.Namespace,
-				consts.EPPServiceAccountName,
-				r.Config.RBAC.EPPClusterRoleName,
-			); err != nil {
-				logger.Error(err, "Failed to ensure EPP RBAC")
-				return ReconcileResult{}, fmt.Errorf("failed to ensure EPP RBAC: %w", err)
-			}
-		}
+	if err := r.ensureClusterScopedRBAC(ctx, dynamoDeployment, logger); err != nil {
+		return ReconcileResult{}, err
 	}
 
 	// Reconcile top-level PVCs first
@@ -437,33 +409,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
 
-	var result ReconcileResult
-	if r.isGrovePathway(dynamoDeployment) {
-		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
-		if r.RuntimeConfig.DisaggregatedSetEnabled {
-			if err := r.deleteDisaggregatedSetIfExists(ctx, dynamoDeployment); err != nil {
-				return ReconcileResult{}, err
-			}
-		}
-		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
-	} else if useDisaggregatedSet {
-		logger.Info("Reconciling DisaggregatedSet resources", "hasMultinode", hasMultinode, "disaggregatedSetEnabled", r.RuntimeConfig.DisaggregatedSetEnabled)
-		result, err = r.reconcileDisaggregatedSetResources(ctx, dynamoDeployment, restartState, checkpointInfos)
-	} else {
-		if r.RuntimeConfig.DisaggregatedSetEnabled {
-			if err := r.deleteDisaggregatedSetIfExists(ctx, dynamoDeployment); err != nil {
-				return ReconcileResult{}, err
-			}
-		}
-		if r.wantsDisaggregatedSet(dynamoDeployment) && disaggregatedSetFallbackReason != "" {
-			logger.Info("DisaggregatedSet requested but falling back to DynamoComponentDeployments", "reason", disaggregatedSetFallbackReason)
-			if r.Recorder != nil {
-				r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeWarning, "DisaggregatedSetFallback", "DisaggregatedSet requested but falling back to DynamoComponentDeployments: %s", disaggregatedSetFallbackReason)
-			}
-		}
-		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
-		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
-	}
+	result, err := r.reconcileWorkloadResources(
+		ctx,
+		dynamoDeployment,
+		hasMultinode,
+		useDisaggregatedSet,
+		disaggregatedSetFallbackReason,
+		restartState,
+		checkpointInfos,
+	)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile workload resources")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile workload resources: %w", err)
@@ -484,6 +438,92 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	}
 
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) ensureClusterScopedRBAC(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	logger logr.Logger,
+) error {
+	if r.Config.Namespace.Restricted != "" {
+		return nil
+	}
+	if r.RBACManager == nil {
+		return fmt.Errorf("RBAC manager not initialized in cluster-wide mode")
+	}
+	if r.Config.RBAC.PlannerClusterRoleName == "" {
+		return fmt.Errorf("planner ClusterRole name is required in cluster-wide mode")
+	}
+	if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+		ctx,
+		dynamoDeployment.Namespace,
+		consts.PlannerServiceAccountName,
+		r.Config.RBAC.PlannerClusterRoleName,
+	); err != nil {
+		logger.Error(err, "Failed to ensure planner RBAC")
+		return fmt.Errorf("failed to ensure planner RBAC: %w", err)
+	}
+
+	if !dynamoDeployment.HasEPPComponent() {
+		return nil
+	}
+	if r.Config.RBAC.EPPClusterRoleName == "" {
+		return fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
+	}
+	if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+		ctx,
+		dynamoDeployment.Namespace,
+		consts.EPPServiceAccountName,
+		r.Config.RBAC.EPPClusterRoleName,
+	); err != nil {
+		logger.Error(err, "Failed to ensure EPP RBAC")
+		return fmt.Errorf("failed to ensure EPP RBAC: %w", err)
+	}
+	return nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileWorkloadResources(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	hasMultinode bool,
+	useDisaggregatedSet bool,
+	disaggregatedSetFallbackReason string,
+	restartState *dynamo.RestartState,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) (ReconcileResult, error) {
+	logger := log.FromContext(ctx)
+
+	if r.isGrovePathway(dynamoDeployment) {
+		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+		if err := r.deleteDisaggregatedSetOnLegacyPath(ctx, dynamoDeployment); err != nil {
+			return ReconcileResult{}, err
+		}
+		return r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
+	}
+
+	if useDisaggregatedSet {
+		logger.Info("Reconciling DisaggregatedSet resources", "hasMultinode", hasMultinode, "disaggregatedSetEnabled", r.RuntimeConfig.DisaggregatedSetEnabled)
+		return r.reconcileDisaggregatedSetResources(ctx, dynamoDeployment, restartState, checkpointInfos)
+	}
+
+	if err := r.deleteDisaggregatedSetOnLegacyPath(ctx, dynamoDeployment); err != nil {
+		return ReconcileResult{}, err
+	}
+	if r.wantsDisaggregatedSet(dynamoDeployment) && disaggregatedSetFallbackReason != "" {
+		logger.Info("DisaggregatedSet requested but falling back to DynamoComponentDeployments", "reason", disaggregatedSetFallbackReason)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(dynamoDeployment, corev1.EventTypeWarning, "DisaggregatedSetFallback", "DisaggregatedSet requested but falling back to DynamoComponentDeployments: %s", disaggregatedSetFallbackReason)
+		}
+	}
+	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.RuntimeConfig.LWSEnabled)
+	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState, checkpointInfos)
+}
+
+func (r *DynamoGraphDeploymentReconciler) deleteDisaggregatedSetOnLegacyPath(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	if !r.RuntimeConfig.DisaggregatedSetEnabled {
+		return nil
+	}
+	return r.deleteDisaggregatedSetIfExists(ctx, dgd)
 }
 
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
@@ -1539,7 +1579,7 @@ func (r *DynamoGraphDeploymentReconciler) checkComponentFullyUpdated(ctx context
 	for _, hash := range r.activeWorkerHashCandidates(dgd, hashes) {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, hash)
 		ready, reason := checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
-		if ready || reason != "resource not found" {
+		if ready || reason != resourceNotFoundReason {
 			return ready, reason
 		}
 		lastReason = reason
@@ -1558,7 +1598,7 @@ func checkDCDReady(ctx context.Context, client client.Client, resourceName, name
 	if err != nil {
 		if errors.IsNotFound(err) {
 			logger.V(2).Info("DynamoComponentDeployment not found", "resourceName", resourceName)
-			return false, "resource not found"
+			return false, resourceNotFoundReason
 		}
 		logger.V(1).Info("Failed to get DynamoComponentDeployment", "error", err, "resourceName", resourceName)
 		return false, fmt.Sprintf("get error: %v", err)

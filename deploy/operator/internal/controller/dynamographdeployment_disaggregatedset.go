@@ -446,14 +446,6 @@ func (r *DynamoGraphDeploymentReconciler) adoptSelectedModelServices(ctx context
 	return nil
 }
 
-func stringMapToAny(in map[string]string) map[string]any {
-	out := make(map[string]any, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
 func sortedDCDKeys(dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment) []string {
 	keys := make([]string, 0, len(dcds))
 	for key := range dcds {
