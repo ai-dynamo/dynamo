@@ -26,6 +26,8 @@ This document tracks backend support across three composable projects in this wo
 - 🚧 : Work in Progress / Experimental / Limited
 - ❌ : Not started
 
+**How to read this matrix:** ✅ means Dynamo has a supported path for the backend and scope shown in the row or column; it does not mean every deployment topology, workload shape, or integration is generally available. 🚧 covers work in progress, preview, experimental, or narrowly validated paths. Use the per-feature notes and linked guides for setup steps, prerequisites, and limitations.
+
 ## Support Matrix
 
 | Backend | [GPU Memory Service](#gpu-memory-service-gms) | [Shadow Engine Failover](#shadow-engine-failover) | [Dynamo Snapshot](./snapshot.md) |
@@ -86,6 +88,6 @@ When used with GMS, weights can be restored in parallel with the CRIU/CUDA check
 | **TensorRT-LLM** | ✅ | 🚧 | 🚧 |
 
 **Notes:**
-- Dynamo Snapshot + GMS integration is currently disabled by default (override via `DYN_OPERATOR_ALLOW_GMS_SNAPSHOT=1`)
-- CUDA Driver r610 is the minimum required version for Dynamo Snapshot + GMS integration.
+- Dynamo Snapshot + GMS integration is currently disabled by default and requires both the operator gate `DYN_OPERATOR_ALLOW_GMS_SNAPSHOT=1` and CUDA Driver r610 or later.
+- TensorRT-LLM Snapshot is supported only for the experimental single-GPU aggregated text worker path; broader TensorRT-LLM coverage remains work in progress. See [Snapshotting GPU Workers](./snapshot.md) for setup steps, prerequisites, and limitations.
 - Multi-GPU, Single Node is available in a highly experimental/slightly limited path that uses legacy IPC only for P2P.
