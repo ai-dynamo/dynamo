@@ -64,7 +64,7 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.upgradeCRD }}
+      {{- if and (not .Values.namespaceRestriction.enabled) .Values.upgradeCRD }}
       initContainers:
       - name: crd-apply
         image: {{ .Values.controllerManager.manager.image.repository }}:{{ .Values.controllerManager.manager.image.tag | default .Chart.AppVersion }}

@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: namespace restriction webhooks
+templates:
+  - charts/dynamo-operator/templates/webhook-configuration.yaml
+  - charts/dynamo-operator/templates/webhook-service.yaml
+  - charts/dynamo-operator/templates/webhook-certificates.yaml
+tests:
+  - it: renders global admission for the cluster-wide installation
+    template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    asserts:
+      - hasDocuments:
+          count: 2
+      - notExists:
+          path: webhooks[0].namespaceSelector
+        documentIndex: 0
+      - notExists:
+          path: webhooks[1].namespaceSelector
+        documentIndex: 0
+      - notExists:
+          path: webhooks[2].namespaceSelector
+        documentIndex: 0
+      - notExists:
+          path: webhooks[3].namespaceSelector
+        documentIndex: 0
+      - notExists:
+          path: webhooks[4].namespaceSelector
+        documentIndex: 0
+      - notExists:
+          path: webhooks[0].namespaceSelector
+        documentIndex: 1
+      - notExists:
+          path: webhooks[1].namespaceSelector
+        documentIndex: 1
+      - notExists:
+          path: webhooks[2].namespaceSelector
+        documentIndex: 1
+      - notExists:
+          path: webhooks[3].namespaceSelector
+        documentIndex: 1
+
+  - it: scopes namespace-restricted admission to the target namespace
+    template: charts/dynamo-operator/templates/webhook-configuration.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      # Exercise a YAML boolean-like namespace to ensure the rendered selector stays a string.
+      dynamo-operator.namespaceRestriction.targetNamespace: "true"
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: webhooks[1].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: webhooks[2].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: webhooks[3].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: webhooks[4].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 0
+      - equal:
+          path: webhooks[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 1
+      - equal:
+          path: webhooks[1].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 1
+      - equal:
+          path: webhooks[2].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 1
+      - equal:
+          path: webhooks[3].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
+          value: "true"
+        documentIndex: 1
+
+  - it: renders a webhook service for a namespace-restricted installation
+    template: charts/dynamo-operator/templates/webhook-service.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - hasDocuments:
+          count: 1
+
+  - it: renders webhook certificates for a namespace-restricted installation
+    template: charts/dynamo-operator/templates/webhook-certificates.yaml
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+      dynamo-operator.webhook.certManager.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 4

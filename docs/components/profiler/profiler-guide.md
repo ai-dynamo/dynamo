@@ -167,7 +167,8 @@ The profiler enforces these rules at startup:
 | `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Allowed for planner. The perf model starts from native AIC when available or waits for enough live FPM observations. |
 | `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Allowed for planner. The Rust shim falls back to observed-FPM regression when native AIC estimates are unavailable. |
 | `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
-| SLA unachievable | Warning logged, SLA updated to best achievable value. |
+| All AIC rapid experiments return no SLA-feasible configuration | Profiling fails and no DGD is generated. SLA targets are not relaxed automatically. |
+| A real-GPU thorough sweep returns results, but none meet the SLA | Warning logged and the closest measured configuration is selected. |
 | Load-match needs more GPUs than available | Warning logged. |
 
 ## Support Matrix
@@ -337,11 +338,12 @@ The operator automatically discovers GPU resources from cluster nodes, providing
 **Requirements:**
 - **Cluster-scoped operators** (recommended): Have node read permissions by default. GPU discovery works automatically.
 
-> **DEPRECATED:** The following applies only to namespace-scoped operators, which are deprecated and will be removed in a future release. Use cluster-wide mode for new deployments.
+> [!WARNING]
+> Namespace-restricted operators are only for development and testing. They are not supported for production.
 
-- **Namespace-scoped operators** (deprecated): GPU discovery is enabled by default when installing via Helm — the chart provisions the required ClusterRole/ClusterRoleBinding automatically
+- **Namespace-restricted operators**: GPU discovery is enabled by default when installing with Helm. The chart provisions the required ClusterRole and ClusterRoleBinding.
 
-**For namespace-scoped operators (deprecated)**, GPU discovery is controlled by a Helm value:
+For namespace-restricted operators, control GPU discovery with a Helm value:
 
 ```bash
 # GPU discovery enabled (default) — Helm provisions read-only node access automatically
@@ -662,7 +664,13 @@ View traces using Chrome's `chrome://tracing`, [Perfetto UI](https://ui.perfetto
 
 ### SLA Cannot Be Met
 
-The profiler logs a warning and updates the SLA to the best achievable value. To improve results:
+The behavior depends on the search strategy:
+
+- With `searchStrategy: rapid`, profiling fails when all AIC experiments return no SLA-feasible configuration. The profiler does not relax the SLA or generate a DGD.
+- With `searchStrategy: thorough`, the profiler selects the closest measured configuration and logs a warning when the sweep produces results but none meet the SLA. Profiling fails if the sweep produces no usable results.
+
+To improve results:
+
 - Relax SLA targets (increase TTFT/ITL)
 - Add more GPU resources
 - Try a different backend

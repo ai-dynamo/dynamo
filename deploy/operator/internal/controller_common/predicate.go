@@ -222,7 +222,8 @@ func EphemeralDeploymentEventFilter(config *configv1alpha1.OperatorConfiguration
 			return objMeta.GetNamespace() == config.Namespace.Restricted
 		}
 
-		// Cluster-wide mode: check if namespace is excluded
+		// Namespace exclusion filters new events, not requests already in the reconcile queue.
+		// This best-effort isolation is acceptable for the development-and-testing-only mode.
 		if runtimeConfig.ExcludedNamespaces != nil && runtimeConfig.ExcludedNamespaces.Contains(objMeta.GetNamespace()) {
 			l.V(1).Info("Skipping resource - namespace is excluded",
 				"namespace", objMeta.GetNamespace(),
