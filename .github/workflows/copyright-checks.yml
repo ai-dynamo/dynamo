@@ -6,21 +6,9 @@ on:
 jobs:
   copyright-checks:
       runs-on: ubuntu-24.04
-      container:
-        image: ghcr.io/${{ github.repository }}/helm-tester:0.1.1
-        options: --tty
-        volumes:
-        - ${{ github.workspace }}:/workspace
-      permissions:
-        contents: read
-        packages: read
       steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Allowlist both variants of the mounted source directory.
-      - run: git config --global --add safe.directory /__w/dynamo/dynamo
-      - run: git config --global --add safe.directory /workspace
-      - run: pwsh /workspace/.github/workflows/copyright-check.ps1
+      - run: pwsh .github/workflows/copyright-check.ps1
         env:
           NVBUILD_VERBOSITY: DETAILED
         timeout-minutes: 2
-        working-directory: /workspace

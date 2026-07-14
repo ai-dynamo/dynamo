@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 doubleword.ai
-# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 """Dynamo worker for OpenAI-compatible inference backends."""

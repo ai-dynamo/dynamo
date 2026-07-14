@@ -222,9 +222,7 @@ impl TcpStreamServer {
             match resolved_ip {
                 Ok(addr) => addr,
                 Err(Error::LocalIpAddressNotFound) => {
-                    tracing::warn!(
-                        "No routable local IP address found; falling back to 127.0.0.1"
-                    );
+                    tracing::warn!("No routable local IP address found; falling back to 127.0.0.1");
                     IpAddr::from([127, 0, 0, 1])
                 }
                 Err(err) => {
@@ -250,7 +248,9 @@ impl TcpStreamServer {
         let advertise_ip = advertise_host.unwrap_or_else(|| local_ip.clone());
         let advertise_port = advertise_port_override.unwrap_or(local_port);
 
-        tracing::debug!("tcp transport service on {local_ip}:{local_port}, advertising as {advertise_ip}:{advertise_port}");
+        tracing::debug!(
+            "tcp transport service on {local_ip}:{local_port}, advertising as {advertise_ip}:{advertise_port}"
+        );
 
         Ok(Arc::new(Self {
             local_ip,

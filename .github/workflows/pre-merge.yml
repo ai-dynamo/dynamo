@@ -132,8 +132,7 @@ jobs:
   rust-tests:
     needs: changed-files
     if: needs.changed-files.outputs.rust == 'true'
-    runs-on:
-      group: Fastchecker
+    runs-on: ubuntu-latest
     strategy:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
@@ -171,7 +170,7 @@ jobs:
     - name: Install and Run cargo-deny
       working-directory: ${{ matrix.dir }}
       run: |
-        cargo-deny --version || cargo install cargo-deny@0.19.0
+        cargo-deny --version || cargo install cargo-deny@0.19.0 --locked
         cargo-deny -L error --all-features check licenses bans --config ${{ github.workspace }}/deny.toml
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
@@ -198,8 +197,7 @@ jobs:
   rust-clippy:
     needs: changed-files
     if: needs.changed-files.outputs.rust == 'true'
-    runs-on:
-      group: Fastchecker
+    runs-on: ubuntu-latest
     strategy:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'lib/bindings/kvbm'] }
     permissions:
@@ -250,5 +248,5 @@ jobs:
     - name: Install and Run cargo-machete
       working-directory: ${{ matrix.dir }}
       run: |
-        cargo-machete --version || cargo install cargo-machete@0.9.1
+        cargo-machete --version || cargo install cargo-machete@0.9.1 --locked
         cargo machete
