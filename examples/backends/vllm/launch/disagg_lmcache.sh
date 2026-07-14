@@ -16,9 +16,11 @@ print_launch_banner "Launching Disaggregated Serving + LMCache (2 GPUs)" "$MODEL
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend --router-mode kv &
 
-# run decode worker on GPU 0, without LMCache; NixlConnector pairs with the
-# prefill worker's Nixl transfer (matches disagg_kvbm.sh / disagg_flexkv.sh)
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+# run decode worker on GPU 0, without LMCache. --disaggregation-mode decode is
+# required under --router-mode kv (matches disagg_router.sh); without it the
+# worker registers as aggregated and breaks the disagg topology. NixlConnector
+# pairs with the prefill worker's Nixl transfer; kv-events stay prefill-only.
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disaggregation-mode decode --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # wait for decode worker to initialize
 sleep 20
