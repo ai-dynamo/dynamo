@@ -9,6 +9,7 @@ use uuid::Uuid;
 use super::{ReadyArrival, ReplayMode};
 use crate::common::protocols::DirectRequest;
 use crate::loadgen::WorkloadDriver;
+use crate::replay::ReplayTerminalStatus;
 
 enum AdmissionSource {
     Requests(VecDeque<DirectRequest>),
@@ -136,14 +137,6 @@ impl AdmissionQueue {
         }
     }
 
-    pub(in crate::replay::offline) fn on_request_completed(
-        &mut self,
-        uuid: Uuid,
-        now_ms: f64,
-    ) -> Result<()> {
-        self.on_request_terminal(uuid, now_ms, false)
-    }
-
     pub(in crate::replay::offline) fn on_request_terminal(
         &mut self,
         uuid: Uuid,
@@ -154,6 +147,25 @@ impl AdmissionQueue {
             return Ok(());
         };
         driver.on_terminal(uuid, now_ms, rejected)
+    }
+
+    pub(in crate::replay::offline) fn on_request_resolved(
+        &mut self,
+        uuid: Uuid,
+        now_ms: f64,
+        status: ReplayTerminalStatus,
+    ) -> Result<()> {
+        let AdmissionSource::Workload(driver) = &mut self.source else {
+            return Ok(());
+        };
+        match status {
+            ReplayTerminalStatus::Completed => driver.on_terminal(uuid, now_ms, false),
+            ReplayTerminalStatus::Rejected => driver.on_terminal(uuid, now_ms, true),
+            ReplayTerminalStatus::Canceled | ReplayTerminalStatus::Failed => {
+                driver.release_cap_slot(uuid, now_ms);
+                Ok(())
+            }
+        }
     }
 
     pub(in crate::replay::offline) fn on_output_token(

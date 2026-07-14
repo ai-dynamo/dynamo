@@ -15,13 +15,14 @@ use std::sync::Arc;
 
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
+pub use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
 
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
-pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
+pub(crate) use collector::TraceCollector;
 pub use collector::{
     PerRequestRecord, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
     TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
@@ -61,7 +62,8 @@ impl OfflineDisaggReplayConfig {
 }
 
 pub use entrypoints::{
-    ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
+    OfflineTraceReplayConfig, OfflineTraceReplayEngines, ReplayKvEventVisibility,
+    generate_trace_worker_artifacts_offline,
     generate_trace_worker_artifacts_offline_with_kv_event_visibility,
     simulate_agentic_trace_workload_with_router_mode, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
@@ -80,8 +82,8 @@ pub use entrypoints::{
     simulate_concurrency_workload_with_router_mode_and_options,
     simulate_loaded_trace_disagg_with_router_mode_and_options,
     simulate_loaded_trace_live_with_router_mode,
-    simulate_loaded_trace_with_router_mode_and_options, simulate_trace_file,
-    simulate_trace_file_disagg_with_router_mode,
+    simulate_loaded_trace_with_router_mode_and_options, simulate_offline_trace_files,
+    simulate_trace_file, simulate_trace_file_disagg_with_router_mode,
     simulate_trace_file_disagg_with_router_mode_and_format, simulate_trace_file_with_router_mode,
     simulate_trace_file_with_router_mode_and_format, simulate_trace_live_file,
     simulate_trace_live_file_with_router_mode,
@@ -158,6 +160,7 @@ mod tests {
         collector.on_token(uuid, 11.0);
         collector.on_token(uuid, 12.0);
         collector.on_token(uuid, 110.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
 

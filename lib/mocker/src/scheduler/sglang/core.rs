@@ -182,6 +182,14 @@ impl SglangCore {
                     SchedulerCommandResult::Submitted(self.submit(request)?),
                 ))
             }
+            SchedulerCommand::CancelRequest { request_id } => {
+                let result = if self.cancel_active_request(request_id) {
+                    SchedulerCommandResult::Applied
+                } else {
+                    SchedulerCommandResult::Noop
+                };
+                Ok(self.effects_after_capacity_change(result))
+            }
             SchedulerCommand::SubmitHandoffPrefill {
                 handoff_id,
                 mut request,

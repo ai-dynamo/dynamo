@@ -28,6 +28,7 @@ pub(crate) struct AggRequestState {
     pub(in crate::replay::offline) prefill_completed: bool,
     pub(in crate::replay::offline) input_tokens: usize,
     pub(in crate::replay::offline) output_tokens: usize,
+    pub(in crate::replay::offline) worker_idx: Option<usize>,
 }
 
 impl AggRequestState {
@@ -40,6 +41,7 @@ impl AggRequestState {
             prefill_completed: false,
             input_tokens,
             output_tokens,
+            worker_idx: None,
         }
     }
 
@@ -50,6 +52,7 @@ impl AggRequestState {
             prefill_completed: false,
             input_tokens,
             output_tokens,
+            worker_idx: None,
         }
     }
 
@@ -63,6 +66,10 @@ impl AggRequestState {
             .ok_or_else(|| anyhow!("offline replay missing queued request payload for {uuid}"))?;
         self.phase = AggRequestPhase::Running;
         Ok(request)
+    }
+
+    pub(crate) fn assign_worker(&mut self, worker_idx: usize) {
+        self.worker_idx = Some(worker_idx);
     }
 }
 
@@ -230,7 +237,11 @@ pub(crate) struct OfflineWorkerSnapshot {
 }
 
 impl OfflineWorkerState {
-    pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
+    pub(crate) fn new(
+        worker_idx: usize,
+        args: MockEngineArgs,
+        capture_kv_events: bool,
+    ) -> Result<Self> {
         let core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
             | crate::common::protocols::EngineType::Trtllm => {
@@ -241,11 +252,9 @@ impl OfflineWorkerState {
                     crate::scheduler::VllmCore::new_with_worker_id(args, worker_idx as u64)
                 };
                 #[cfg(feature = "kvbm-offload")]
-                if let Err(e) = core.init_offload_offline() {
-                    tracing::error!(
-                        "kvbm-offload offline init failed for worker {worker_idx}: {e}"
-                    );
-                }
+                core.init_offload_offline().map_err(|error| {
+                    anyhow!("kvbm-offload offline init failed for worker {worker_idx}: {error}")
+                })?;
                 EngineCore::Vllm(core)
             }
             crate::common::protocols::EngineType::Sglang => {
@@ -263,11 +272,11 @@ impl OfflineWorkerState {
             }
         };
 
-        Self {
+        Ok(Self {
             core,
             busy: false,
             in_flight: 0,
-        }
+        })
     }
 
     pub(crate) fn in_flight(&self) -> usize {
@@ -289,6 +298,7 @@ impl OfflineWorkerState {
     ) -> anyhow::Result<SchedulerCommandEffects> {
         enum Accounting {
             Submit,
+            CancelRequest,
             ReserveDestination,
             CancelSource,
             CancelDestination,
@@ -299,6 +309,7 @@ impl OfflineWorkerState {
             SchedulerCommand::Submit(_) | SchedulerCommand::SubmitHandoffPrefill { .. } => {
                 Accounting::Submit
             }
+            SchedulerCommand::CancelRequest { .. } => Accounting::CancelRequest,
             SchedulerCommand::ReserveDestination { .. } => Accounting::ReserveDestination,
             SchedulerCommand::CancelSource { .. } => Accounting::CancelSource,
             SchedulerCommand::CancelDestination { .. } => Accounting::CancelDestination,
@@ -316,6 +327,12 @@ impl OfflineWorkerState {
             ) => self.increment_in_flight(),
             (Accounting::CancelDestination, SchedulerCommandResult::Applied) => {
                 self.decrement_in_flight(1)
+            }
+            (Accounting::CancelRequest, SchedulerCommandResult::Applied) => {
+                let removed = requests_before
+                    .checked_sub(self.core.num_requests())
+                    .expect("request cancellation increased scheduler request ownership");
+                self.decrement_in_flight(removed);
             }
             (Accounting::CancelSource, SchedulerCommandResult::Applied) => {
                 let removed = requests_before
@@ -455,7 +472,7 @@ mod tests {
         if engine_type == EngineType::Sglang {
             builder = builder.sglang(Some(Default::default()));
         }
-        OfflineWorkerState::new(0, builder.build().unwrap(), capture_kv_events)
+        OfflineWorkerState::new(0, builder.build().unwrap(), capture_kv_events).unwrap()
     }
 
     fn request(uuid: u128, tokens: usize) -> DirectRequest {
@@ -654,6 +671,41 @@ mod tests {
             }
             assert_eq!(completed_decode.in_flight(), 0);
             assert!(completed_decode.is_drained());
+        }
+    }
+
+    #[test]
+    fn ordinary_cancellation_releases_worker_ownership_for_both_cores() {
+        for (case, engine_type) in [EngineType::Vllm, EngineType::Sglang]
+            .into_iter()
+            .enumerate()
+        {
+            for after_one_pass in [false, true] {
+                let mut worker = worker(engine_type, WorkerType::Aggregated, 64);
+                let mut request = request(20_000 + case as u128, 16);
+                request.max_output_tokens = 16;
+                let uuid = request.uuid.unwrap();
+                worker.receive_request(request);
+                if after_one_pass {
+                    let mut collector = crate::replay::TraceCollector::default();
+                    let pass = worker.execute_pass(&mut collector, 0.0);
+                    assert_eq!(pass.completed_requests, 0);
+                }
+
+                let effects = worker
+                    .apply_command(SchedulerCommand::CancelRequest { request_id: uuid })
+                    .unwrap();
+                assert_eq!(effects.result, SchedulerCommandResult::Applied);
+                assert_eq!(worker.in_flight(), 0);
+                assert!(worker.is_drained());
+                assert_eq!(
+                    worker
+                        .apply_command(SchedulerCommand::CancelRequest { request_id: uuid })
+                        .unwrap()
+                        .result,
+                    SchedulerCommandResult::Noop
+                );
+            }
         }
     }
 

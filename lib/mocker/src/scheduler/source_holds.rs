@@ -13,6 +13,10 @@ use crate::common::protocols::DirectRequest;
 #[allow(dead_code)]
 pub enum SchedulerCommand {
     Submit(DirectRequest),
+    /// Cancel an ordinary aggregate request by its request identifier.
+    CancelRequest {
+        request_id: Uuid,
+    },
     SubmitHandoffPrefill {
         handoff_id: HandoffId,
         request: DirectRequest,

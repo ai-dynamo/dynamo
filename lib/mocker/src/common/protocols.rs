@@ -606,9 +606,18 @@ pub struct MockEngineArgs {
     #[builder(default = "EngineType::Vllm")]
     pub engine_type: EngineType,
 
-    #[builder(default = "16384")]
+    #[builder(default = "16384", setter(custom))]
     #[validate(range(min = 1))]
     pub num_gpu_blocks: usize,
+
+    // This is control-plane provenance, not part of the engine wire schema.
+    // AIC replay must distinguish the default value from an explicitly authored
+    // value so it can apply the same capacity-estimation rule as
+    // `components/src/dynamo/replay/main.py:110-174`.
+    #[serde(skip)]
+    #[builder(default = "false", setter(custom))]
+    #[doc(hidden)]
+    pub num_gpu_blocks_explicit: bool,
 
     #[builder(default = "0")]
     pub block_size: usize,
@@ -1268,6 +1277,16 @@ impl Default for MockEngineArgs {
     }
 }
 
+impl MockEngineArgsBuilder {
+    /// Set the GPU KV-block capacity and preserve that it was explicitly
+    /// authored rather than supplied by the builder default.
+    pub fn num_gpu_blocks(mut self, value: usize) -> Self {
+        self.num_gpu_blocks = Some(value);
+        self.num_gpu_blocks_explicit = Some(true);
+        self
+    }
+}
+
 impl MockEngineArgs {
     const DEFAULT_VLLM_BLOCK_SIZE: usize = 64;
     const DEFAULT_SGLANG_BLOCK_SIZE: usize = 1;
@@ -1275,6 +1294,14 @@ impl MockEngineArgs {
 
     pub fn builder() -> MockEngineArgsBuilder {
         MockEngineArgsBuilder::default()
+    }
+
+    /// Whether the GPU KV-block capacity was explicitly authored.
+    ///
+    /// Omitted and JSON-null capacities remain eligible for AIC estimation;
+    /// builder and non-null JSON values are authoritative.
+    pub fn num_gpu_blocks_explicit(&self) -> bool {
+        self.num_gpu_blocks_explicit
     }
 
     /// GPUs occupied by one worker (engine), derived from the AIC parallelism:
@@ -1399,6 +1426,35 @@ impl MockEngineArgs {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tracks_explicit_num_gpu_blocks_across_builder_and_json_inputs() {
+        assert!(!MockEngineArgs::default().num_gpu_blocks_explicit());
+        assert!(
+            MockEngineArgs::builder()
+                .num_gpu_blocks(17)
+                .build()
+                .unwrap()
+                .normalized()
+                .unwrap()
+                .num_gpu_blocks_explicit()
+        );
+        assert!(
+            MockEngineArgs::from_json_str(r#"{"num_gpu_blocks":17}"#)
+                .unwrap()
+                .num_gpu_blocks_explicit()
+        );
+        assert!(
+            !MockEngineArgs::from_json_str(r#"{"num_gpu_blocks":null}"#)
+                .unwrap()
+                .num_gpu_blocks_explicit()
+        );
+        assert!(
+            !MockEngineArgs::from_json_str("{}")
+                .unwrap()
+                .num_gpu_blocks_explicit()
+        );
+    }
 
     #[test]
     fn direct_request_priorities_are_backward_compatible() {

@@ -536,6 +536,14 @@ mod tests {
             if first_decode_end_ms == 0.0 && !pass.output_signals.is_empty() {
                 first_decode_end_ms = pass.end_ms;
             }
+            for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+                let status = if signal.rejected {
+                    ReplayTerminalStatus::Rejected
+                } else {
+                    ReplayTerminalStatus::Completed
+                };
+                collector.on_terminal(signal.uuid, status);
+            }
             current_time_ms = pass.end_ms;
             enqueue_trace_arrivals_manual(
                 &mut pending,
@@ -586,6 +594,14 @@ mod tests {
             }
 
             let pass = worker.execute_pass(&mut collector, current_time_ms);
+            for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+                let status = if signal.rejected {
+                    ReplayTerminalStatus::Rejected
+                } else {
+                    ReplayTerminalStatus::Completed
+                };
+                collector.on_terminal(signal.uuid, status);
+            }
             current_time_ms = pass.end_ms;
         }
 

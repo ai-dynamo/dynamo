@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod driver;
+pub mod steppable;
 mod trace;
 mod types;
 
+pub use crate::replay::offline::agg::SteppableAgg;
+pub use crate::replay::offline::disagg::SteppableDisagg;
 pub use driver::WorkloadDriver;
+pub use steppable::{EngineEvent, StepOutcome, SteppableEngine, SteppableReplay};
 pub use trace::validate_trace_files;
 pub use types::{
     AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,

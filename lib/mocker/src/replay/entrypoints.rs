@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use dynamo_kv_router::config::KvRouterConfig;
@@ -17,7 +17,7 @@ use super::{
     SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
+use crate::loadgen::{AgenticTrace, DynamoRequestTrace, Trace, TraceFileFormat};
 use crate::scheduler::RouterEventVisibility;
 
 /// Replay artifact KV-event timestamp visibility override.
@@ -35,6 +35,265 @@ impl From<ReplayKvEventVisibility> for RouterEventVisibility {
         match visibility {
             ReplayKvEventVisibility::PassStart => Self::PassStart,
             ReplayKvEventVisibility::PassEnd => Self::PassEnd,
+        }
+    }
+}
+
+/// Engine deployment passed to the canonical offline trace harness.
+#[derive(Clone, Debug)]
+pub enum OfflineTraceReplayEngines {
+    /// One or more aggregate workers behind the selected router.
+    Aggregated {
+        /// Engine/scheduler configuration shared by every worker.
+        args: MockEngineArgs,
+        /// Number of aggregate workers.
+        num_workers: usize,
+    },
+    /// Separate prefill and decode worker pools.
+    Disaggregated(OfflineDisaggReplayConfig),
+}
+
+/// Complete transport-neutral input to the canonical offline trace harness.
+///
+/// Python DynoSim, native AIPerf, and future frontends must lower into this
+/// value and call [`simulate_offline_trace_files`] instead of reproducing the
+/// dispatch matrix. That keeps trace parsing, topology selection, clock math,
+/// collection, and report finalization on one executable path.
+#[derive(Clone)]
+pub struct OfflineTraceReplayConfig {
+    /// Aggregate or disaggregated engine deployment.
+    pub engines: OfflineTraceReplayEngines,
+    /// Optional KV-router configuration.
+    pub router_config: Option<KvRouterConfig>,
+    /// Optional AIC-backed prefill load estimator.
+    pub prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    /// One or more canonical trace files.
+    pub trace_files: Vec<PathBuf>,
+    /// Optional trace hash block size; native Dynamo traces can derive it.
+    pub trace_block_size: Option<usize>,
+    /// Optional closed-loop in-flight cap; authored timestamps are ignored.
+    pub replay_concurrency: Option<usize>,
+    /// Offline router policy.
+    pub router_mode: ReplayRouterMode,
+    /// Factor dividing authored arrival and continuation timing.
+    pub arrival_speedup_ratio: f64,
+    /// Canonical trace parser.
+    pub trace_format: TraceFileFormat,
+    /// Applied Compute shared-prefix fraction.
+    pub trace_shared_prefix_ratio: f64,
+    /// Applied Compute shared-prefix group count.
+    pub trace_num_prefix_groups: usize,
+    /// Whether to retain canonical per-request records.
+    pub record_per_request: bool,
+    /// Optional simulated-time cutoff.
+    pub max_sim_time_ms: Option<f64>,
+    /// Optional goodput thresholds.
+    pub sla: SlaThresholds,
+}
+
+/// Run every canonical offline trace mode through one shared harness.
+pub fn simulate_offline_trace_files(
+    config: OfflineTraceReplayConfig,
+) -> Result<TraceSimulationReport> {
+    let OfflineTraceReplayConfig {
+        engines,
+        router_config,
+        prefill_load_estimator,
+        trace_files,
+        trace_block_size,
+        replay_concurrency,
+        router_mode,
+        arrival_speedup_ratio,
+        trace_format,
+        trace_shared_prefix_ratio,
+        trace_num_prefix_groups,
+        record_per_request,
+        max_sim_time_ms,
+        sla,
+    } = config;
+    crate::loadgen::validate_trace_files(trace_format, &trace_files)?;
+
+    if trace_format == TraceFileFormat::Dynamo {
+        let trace = DynamoRequestTrace::from_request_trace_files(&trace_files, trace_block_size)?;
+        return simulate_loaded_dynamo_request_trace(
+            engines,
+            trace,
+            router_config,
+            prefill_load_estimator,
+            replay_concurrency,
+            router_mode,
+            arrival_speedup_ratio,
+            record_per_request,
+            max_sim_time_ms,
+            sla,
+        );
+    }
+
+    let trace_path = &trace_files[0];
+    let trace_block_size = trace_block_size.unwrap_or(512);
+    match (engines, replay_concurrency) {
+        (OfflineTraceReplayEngines::Aggregated { args, num_workers }, Some(max_in_flight)) => {
+            simulate_concurrency_file_with_router_mode_and_format(
+                args,
+                router_config,
+                prefill_load_estimator,
+                trace_path,
+                trace_block_size,
+                max_in_flight,
+                num_workers,
+                router_mode,
+                trace_format,
+                trace_shared_prefix_ratio,
+                trace_num_prefix_groups,
+                record_per_request,
+                max_sim_time_ms,
+                sla,
+            )
+        }
+        (OfflineTraceReplayEngines::Aggregated { args, num_workers }, None) => {
+            simulate_trace_file_with_router_mode_and_format(
+                args,
+                router_config,
+                prefill_load_estimator,
+                trace_path,
+                trace_block_size,
+                num_workers,
+                arrival_speedup_ratio,
+                router_mode,
+                trace_format,
+                trace_shared_prefix_ratio,
+                trace_num_prefix_groups,
+                record_per_request,
+                max_sim_time_ms,
+                sla,
+            )
+        }
+        (OfflineTraceReplayEngines::Disaggregated(config), Some(max_in_flight)) => {
+            simulate_concurrency_file_disagg_with_router_mode_and_format(
+                config,
+                router_config,
+                prefill_load_estimator,
+                trace_path,
+                trace_block_size,
+                max_in_flight,
+                router_mode,
+                trace_format,
+                trace_shared_prefix_ratio,
+                trace_num_prefix_groups,
+                record_per_request,
+                max_sim_time_ms,
+                sla,
+            )
+        }
+        (OfflineTraceReplayEngines::Disaggregated(config), None) => {
+            simulate_trace_file_disagg_with_router_mode_and_format(
+                config,
+                router_config,
+                prefill_load_estimator,
+                trace_path,
+                trace_block_size,
+                arrival_speedup_ratio,
+                router_mode,
+                trace_format,
+                trace_shared_prefix_ratio,
+                trace_num_prefix_groups,
+                record_per_request,
+                max_sim_time_ms,
+                sla,
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_loaded_dynamo_request_trace(
+    engines: OfflineTraceReplayEngines,
+    trace: DynamoRequestTrace,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    replay_concurrency: Option<usize>,
+    router_mode: ReplayRouterMode,
+    arrival_speedup_ratio: f64,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    match trace {
+        DynamoRequestTrace::Standard(trace) => match (engines, replay_concurrency) {
+            (OfflineTraceReplayEngines::Aggregated { args, num_workers }, Some(max_in_flight)) => {
+                simulate_concurrency_workload_with_router_mode_and_options(
+                    args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    max_in_flight,
+                    num_workers,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    sla,
+                )
+            }
+            (OfflineTraceReplayEngines::Aggregated { args, num_workers }, None) => {
+                simulate_loaded_trace_with_router_mode_and_options(
+                    args,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    num_workers,
+                    arrival_speedup_ratio,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    sla,
+                )
+            }
+            (OfflineTraceReplayEngines::Disaggregated(config), Some(max_in_flight)) => {
+                simulate_concurrency_workload_disagg_with_router_mode_and_options(
+                    config,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    max_in_flight,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    sla,
+                )
+            }
+            (OfflineTraceReplayEngines::Disaggregated(config), None) => {
+                simulate_loaded_trace_disagg_with_router_mode_and_options(
+                    config,
+                    router_config,
+                    prefill_load_estimator,
+                    trace,
+                    arrival_speedup_ratio,
+                    router_mode,
+                    record_per_request,
+                    max_sim_time_ms,
+                    sla,
+                )
+            }
+        },
+        DynamoRequestTrace::Agentic(trace) => {
+            if replay_concurrency.is_some() {
+                bail!("agentic Dynamo request traces are not supported with replay_concurrency");
+            }
+            let OfflineTraceReplayEngines::Aggregated { args, num_workers } = engines else {
+                bail!("agentic Dynamo request traces are not supported for disaggregated replay");
+            };
+            let trace = trace
+                .normalize_starts()
+                .speed_up_timing(arrival_speedup_ratio)?;
+            simulate_agentic_trace_workload_with_router_mode(
+                args,
+                router_config,
+                prefill_load_estimator,
+                trace,
+                num_workers,
+                router_mode,
+                sla,
+            )
         }
     }
 }
@@ -1416,6 +1675,49 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
+
+    #[test]
+    fn canonical_offline_trace_harness_runs_the_selected_dispatch() {
+        let mut file = NamedTempFile::new().unwrap();
+        for _ in 0..32 {
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "timestamp": 0.0,
+                    "input_length": 8,
+                    "output_length": 2,
+                    "hash_ids": [1]
+                })
+            )
+            .unwrap();
+        }
+        let config = || OfflineTraceReplayConfig {
+            engines: OfflineTraceReplayEngines::Aggregated {
+                args: MockEngineArgs::default(),
+                num_workers: 1,
+            },
+            router_config: None,
+            prefill_load_estimator: None,
+            trace_files: vec![file.path().to_path_buf()],
+            trace_block_size: Some(8),
+            replay_concurrency: Some(4),
+            router_mode: ReplayRouterMode::RoundRobin,
+            arrival_speedup_ratio: 1.0,
+            trace_format: TraceFileFormat::Mooncake,
+            trace_shared_prefix_ratio: 0.0,
+            trace_num_prefix_groups: 0,
+            record_per_request: false,
+            max_sim_time_ms: None,
+            sla: SlaThresholds::default(),
+        };
+
+        let report = simulate_offline_trace_files(config()).unwrap();
+
+        assert_eq!(report.request_counts.num_requests, 32);
+        assert_eq!(report.request_counts.completed_requests, 32);
+        assert!(report.throughput.wall_time_ms > 0.0);
+    }
 
     #[test]
     fn one_worker_sglang_impossible_request_returns_dead_end_error() {

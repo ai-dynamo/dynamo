@@ -68,12 +68,12 @@ impl EngineComponent {
     }
 
     /// Add a new worker, returning its stable ID.
-    pub(in crate::replay::offline) fn add_worker(&mut self) -> usize {
+    pub(in crate::replay::offline) fn add_worker(&mut self) -> anyhow::Result<usize> {
         let id = self.next_id;
         self.next_id += 1;
-        let worker = OfflineWorkerState::new(id, self.args.clone(), self.capture_kv_events);
+        let worker = OfflineWorkerState::new(id, self.args.clone(), self.capture_kv_events)?;
         self.workers.insert(id, worker);
-        id
+        Ok(id)
     }
 
     /// Mark a worker for removal. Round-robin routing skips marked workers;
@@ -118,7 +118,7 @@ impl EngineComponent {
     pub(in crate::replay::offline) fn apply_target_count(
         &mut self,
         target: usize,
-    ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    ) -> anyhow::Result<(Vec<usize>, Vec<usize>, Vec<usize>)> {
         let active_ids = self.active_worker_ids();
         let effective = active_ids.len() + self.pending_startup.len();
         let mut added = Vec::new();
@@ -127,7 +127,7 @@ impl EngineComponent {
         if target > effective {
             let has_startup_delay = self.startup_time_ms().is_some();
             for _ in 0..(target - effective) {
-                let id = self.add_worker();
+                let id = self.add_worker()?;
                 if has_startup_delay {
                     self.pending_startup.insert(id);
                 }
@@ -159,7 +159,7 @@ impl EngineComponent {
 
         // Clean up any workers that have already fully drained.
         let removed = self.try_remove_drained();
-        (added, newly_marked, removed)
+        Ok((added, newly_marked, removed))
     }
 
     /// Return stable IDs of all active workers — excludes both pending removal
@@ -414,7 +414,7 @@ mod tests {
             ..MockEngineArgs::default()
         };
         let workers: Vec<_> = (0..num_workers)
-            .map(|i| OfflineWorkerState::new(i, args.clone(), false))
+            .map(|i| OfflineWorkerState::new(i, args.clone(), false).unwrap())
             .collect();
         let mut engine = EngineComponent::new(
             SimulationWorkerStage::Aggregated,
@@ -447,7 +447,7 @@ mod tests {
         EngineComponent::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
-            vec![OfflineWorkerState::new(0, args, false)],
+            vec![OfflineWorkerState::new(0, args, false).unwrap()],
         )
     }
 
@@ -472,7 +472,7 @@ mod tests {
             EngineComponent::new(
                 SimulationWorkerStage::Decode,
                 EnginePassMode::Visible,
-                vec![OfflineWorkerState::new(0, args, true)],
+                vec![OfflineWorkerState::new(0, args, true).unwrap()],
             )
         };
         let request = |uuid| DirectRequest {
@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn test_apply_target_count_scale_up_with_startup() {
         let mut engine = engine_with_startup(2, Some(5.0));
-        let (added, newly_marked, _) = engine.apply_target_count(4);
+        let (added, newly_marked, _) = engine.apply_target_count(4).unwrap();
 
         assert_eq!(added.len(), 2);
         assert!(newly_marked.is_empty());
@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn test_apply_target_count_scale_up_without_startup() {
         let mut engine = engine_with_startup(2, None);
-        let (added, newly_marked, _) = engine.apply_target_count(4);
+        let (added, newly_marked, _) = engine.apply_target_count(4).unwrap();
 
         assert_eq!(added.len(), 2);
         assert!(newly_marked.is_empty());
@@ -531,18 +531,18 @@ mod tests {
         let mut engine = engine_with_startup(2, Some(5.0));
 
         // Scale up to 4 — adds 2 in pending_startup.
-        engine.apply_target_count(4);
+        engine.apply_target_count(4).unwrap();
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 4);
 
         // Scale down to 3 — should cancel 1 startup worker, not mark any active.
-        let (_added, newly_marked, _) = engine.apply_target_count(3);
+        let (_added, newly_marked, _) = engine.apply_target_count(3).unwrap();
         assert!(newly_marked.is_empty());
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 3); // 2 active + 1 still starting
 
         // Scale down to 2 — should cancel the remaining startup worker.
-        let (_added, newly_marked, _) = engine.apply_target_count(2);
+        let (_added, newly_marked, _) = engine.apply_target_count(2).unwrap();
         assert!(newly_marked.is_empty());
         assert_eq!(engine.active_worker_ids().len(), 2);
         assert_eq!(engine.worker_count(), 2);
@@ -553,10 +553,10 @@ mod tests {
         let mut engine = engine_with_startup(3, Some(5.0));
 
         // Scale up to 5 — adds 2 in pending_startup.
-        engine.apply_target_count(5);
+        engine.apply_target_count(5).unwrap();
 
         // Scale down to 1 — should cancel 2 startup, mark 2 active.
-        let (_added, newly_marked, _) = engine.apply_target_count(1);
+        let (_added, newly_marked, _) = engine.apply_target_count(1).unwrap();
         assert_eq!(newly_marked.len(), 2);
         assert_eq!(engine.active_worker_ids().len(), 1);
     }
@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn test_mark_worker_ready_activates_pending() {
         let mut engine = engine_with_startup(1, Some(5.0));
-        let (added, _, _) = engine.apply_target_count(2);
+        let (added, _, _) = engine.apply_target_count(2).unwrap();
         let new_id = added[0];
 
         assert_eq!(engine.active_worker_ids().len(), 1);
@@ -657,11 +657,11 @@ mod tests {
     #[test]
     fn test_mark_worker_ready_returns_false_for_cancelled() {
         let mut engine = engine_with_startup(1, Some(5.0));
-        let (added, _, _) = engine.apply_target_count(2);
+        let (added, _, _) = engine.apply_target_count(2).unwrap();
         let new_id = added[0];
 
         // Cancel by scaling back down.
-        engine.apply_target_count(1);
+        engine.apply_target_count(1).unwrap();
         // Worker was removed from pending_startup and workers map.
         assert!(!engine.mark_worker_ready(new_id));
     }
@@ -690,7 +690,7 @@ mod tests {
             .worker_type(WorkerType::Decode)
             .build()
             .unwrap();
-        let worker = OfflineWorkerState::new(0, args.clone(), false);
+        let worker = OfflineWorkerState::new(0, args.clone(), false).unwrap();
         let mut engine = EngineComponent::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
@@ -736,7 +736,7 @@ mod tests {
         ));
         assert!(effects.lifecycle_events.is_empty());
 
-        let (_, newly_marked, _) = engine.apply_target_count(0);
+        let (_, newly_marked, _) = engine.apply_target_count(0).unwrap();
         assert_eq!(newly_marked, vec![0]);
         assert!(engine.active_worker_ids().is_empty());
         assert_eq!(engine.worker_count(), 1);
@@ -777,7 +777,7 @@ mod tests {
             .bandwidth_g1_to_g2_gbps(Some(1.0))
             .build()
             .unwrap();
-        let worker = OfflineWorkerState::new(0, args, true);
+        let worker = OfflineWorkerState::new(0, args, true).unwrap();
         let mut engine = EngineComponent::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,

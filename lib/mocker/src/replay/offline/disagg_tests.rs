@@ -1042,6 +1042,50 @@ fn test_cancellation_during_transfer_ignores_retired_completion_event() {
 }
 
 #[test]
+fn test_steppable_kv_cancellation_drains_inflight_prefill() {
+    let args = MockEngineArgs::default().normalized().unwrap();
+    let config = OfflineDisaggReplayConfig {
+        prefill_args: args.clone(),
+        decode_args: args,
+        num_prefill_workers: 1,
+        num_decode_workers: 1,
+    };
+    let mut runtime = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        VecDeque::new(),
+        ReplayMode::Concurrency {
+            max_in_flight: usize::MAX,
+        },
+        ReplayRouterMode::KvRouter,
+    )
+    .unwrap()
+    .with_per_request_records(true);
+    let uuid = runtime.submit_dynamic(request(1, 16, 4, 0.0)).unwrap();
+
+    runtime.step_dynamic_until(0.0).unwrap();
+    runtime.advance_now_ms(0.000_001);
+    let terminal = runtime.cancel_dynamic(uuid).unwrap().unwrap();
+    assert_eq!(
+        terminal.terminal_status,
+        Some(ReplayTerminalStatus::Canceled)
+    );
+
+    for _ in 0..100 {
+        if runtime.is_workload_done() {
+            break;
+        }
+        let next = runtime.next_timestamp().unwrap_or_else(|| runtime.now_ms());
+        runtime.step_dynamic_until(next).unwrap();
+    }
+    assert!(runtime.is_workload_done(), "canceled runtime did not drain");
+    let records = runtime.collector.per_request_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].terminal_status, ReplayTerminalStatus::Canceled);
+}
+
+#[test]
 fn test_source_first_handoff_waits_for_decode_scale_up() {
     let config = disagg_config();
     let uuid = Uuid::from_u128(1);

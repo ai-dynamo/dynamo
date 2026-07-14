@@ -34,10 +34,11 @@ use crate::common::handoff::{
 use crate::common::protocols::{
     DirectRequest, EngineType, ForwardPassSnapshot, MockEngineArgs, OutputSignal,
 };
+use crate::loadgen::steppable::{EngineEvent, StepOutcome, SteppableReplay, event_from_signal};
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus,
-    SlaThresholds, TraceCollector,
+    SlaThresholds, TraceCollector, TraceSimulationReport,
 };
 use crate::scheduler::{
     AdmissionEvent, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
@@ -304,6 +305,19 @@ pub(in crate::replay) struct DisaggRuntime {
     /// otherwise the buffers grow unbounded (one entry per worker pass) for the
     /// whole run with no reader (the memory leak this gating fixes).
     collect_fpm: bool,
+    /// Per-step per-request events for the steppable co-simulation seam.
+    step_events: Vec<EngineEvent>,
+    /// Steppable PUSH-path delta-cycle. When set, `step_dynamic_until` splits the
+    /// drain so that a terminal decode completion which frees a concurrency slot
+    /// yields to the caller (surfacing the terminal event) BEFORE the freed
+    /// pipeline is driven, letting an external `SlotPool`-gated driver submit the
+    /// replacement at the completion instant T so its prefill is batched at T —
+    /// matching `run()`'s in-drain `release_ready_arrivals` admission. Left
+    /// `false` on the `run()` (pull) path, whose behavior is unchanged.
+    defer_drive: bool,
+    /// Delta-cycle state: a completion phase freed a slot and yielded at `now_ms`;
+    /// the next step at the same instant must run the drive/commit phase.
+    drive_pending: bool,
 }
 
 impl DisaggRuntime {
@@ -407,32 +421,34 @@ impl DisaggRuntime {
         };
 
         let prefill_capture_kv = prefill_router.is_some();
+        let prefill_workers = (0..config.num_prefill_workers)
+            .map(|worker_idx| {
+                super::state::OfflineWorkerState::new(
+                    worker_idx,
+                    config.prefill_args.clone(),
+                    prefill_capture_kv,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut prefill_engine = EngineComponent::new(
             SimulationWorkerStage::Prefill,
             EnginePassMode::Hidden,
-            (0..config.num_prefill_workers)
-                .map(|worker_idx| {
-                    super::state::OfflineWorkerState::new(
-                        worker_idx,
-                        config.prefill_args.clone(),
-                        prefill_capture_kv,
-                    )
-                })
-                .collect(),
+            prefill_workers,
         );
         prefill_engine.set_scaling_args(config.prefill_args.clone(), prefill_capture_kv);
+        let decode_workers = (0..config.num_decode_workers)
+            .map(|worker_idx| {
+                super::state::OfflineWorkerState::new(
+                    worker_idx,
+                    config.decode_args.clone(),
+                    capture_conformance,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut decode_engine = EngineComponent::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
-            (0..config.num_decode_workers)
-                .map(|worker_idx| {
-                    super::state::OfflineWorkerState::new(
-                        worker_idx,
-                        config.decode_args.clone(),
-                        capture_conformance,
-                    )
-                })
-                .collect(),
+            decode_workers,
         );
         decode_engine.set_scaling_args(config.decode_args.clone(), capture_conformance);
 
@@ -446,6 +462,9 @@ impl DisaggRuntime {
 
         Ok(Self {
             now_ms: 0.0,
+            step_events: Vec::new(),
+            defer_drive: false,
+            drive_pending: false,
             next_prefill_worker_idx: 0,
             next_decode_worker_idx: 0,
             next_event_seq: 0,
@@ -454,8 +473,8 @@ impl DisaggRuntime {
             decode_engine,
             prefill_router,
             decode_router,
-            requests: HashMap::new(),
-            requests_by_handoff: HashMap::new(),
+            requests: HashMap::default(),
+            requests_by_handoff: HashMap::default(),
             handoff_order,
             prefill_block_size: config.prefill_args.block_size,
             decode_block_size: config.decode_args.block_size,
@@ -1023,6 +1042,9 @@ impl DisaggRuntime {
                     transfer_timing,
                 } => {
                     let uuid = self.uuid_for_handoff(handoff_id)?;
+                    if self.collector.terminal_status(uuid).is_some() {
+                        continue;
+                    }
                     if uuid != request_id {
                         bail!("source lifecycle request ID does not match its handoff");
                     }
@@ -1048,6 +1070,9 @@ impl DisaggRuntime {
                     transferable_prompt_tokens,
                 } => {
                     let uuid = self.uuid_for_handoff(handoff_id)?;
+                    if self.collector.terminal_status(uuid).is_some() {
+                        continue;
+                    }
                     if uuid != request_id {
                         bail!("destination lifecycle request ID does not match its handoff");
                     }
@@ -1158,18 +1183,26 @@ impl DisaggRuntime {
                 self.retire_completed_request(uuid)?;
             }
             Some(HandoffCompletion::Canceled) => {
-                self.collector
-                    .on_terminal(uuid, ReplayTerminalStatus::Canceled);
+                let terminal_status = self
+                    .collector
+                    .terminal_status(uuid)
+                    .unwrap_or(ReplayTerminalStatus::Canceled);
+                self.collector.on_terminal(uuid, terminal_status);
                 self.cancel_prefill_route(uuid)?;
                 self.cancel_decode_route(uuid)?;
-                self.finish_logical_request(uuid, true)?;
+                self.finish_logical_request(uuid, true, terminal_status)?;
             }
             None => bail!("handoff completed without a terminal coordinator outcome"),
         }
         Ok(())
     }
 
-    fn finish_logical_request(&mut self, uuid: Uuid, remove_actions: bool) -> Result<()> {
+    fn finish_logical_request(
+        &mut self,
+        uuid: Uuid,
+        remove_actions: bool,
+        terminal_status: ReplayTerminalStatus,
+    ) -> Result<()> {
         let transfer_was_pending = {
             let state = self.state_mut(uuid)?;
             if !state.counted_in_flight || state.phase == DisaggPhase::Done {
@@ -1193,7 +1226,8 @@ impl DisaggRuntime {
         if remove_actions {
             self.action_queues.remove(uuid);
         }
-        self.admission.on_request_completed(uuid, self.now_ms)?;
+        self.admission
+            .on_request_resolved(uuid, self.now_ms, terminal_status)?;
         self.progress.inc_completed();
         #[cfg(test)]
         {
@@ -1313,6 +1347,12 @@ impl DisaggRuntime {
 
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
     fn next_timestamp(&mut self) -> Option<f64> {
+        // A deferred delta-cycle drive is pending at the current instant: the
+        // caller must re-step here to run the commit phase before logical time
+        // may advance. Report `now` so the driver does not skip past it.
+        if self.drive_pending {
+            return Some(self.now_ms);
+        }
         let next_event_ms = self.events.peek().map(|event| event.at_ms);
         let next = choose_next_timestamp(self.admission.next_ready_time_ms(), next_event_ms);
         #[cfg(feature = "kvbm-offload")]
@@ -1446,7 +1486,7 @@ impl DisaggRuntime {
             ReplayTerminalStatus::Completed
         };
         self.collector.on_terminal(signal.uuid, terminal_status);
-        self.finish_logical_request(signal.uuid, false)?;
+        self.finish_logical_request(signal.uuid, false, terminal_status)?;
         self.dispatch_decode_admissions(admissions)?;
         Ok(())
     }
@@ -1462,6 +1502,17 @@ impl DisaggRuntime {
     ) -> Result<()> {
         self.apply_prefill_router_events(kv_events)?;
         for signal in output_signals {
+            if self.collector.terminal_status(signal.uuid).is_some() {
+                continue;
+            }
+            // Prefill executes as a hidden pass: its token is scheduler-internal,
+            // not a client-visible output and is deliberately not sent to the
+            // native collector. Only decode signals carry observable tokens and
+            // the real completion. A prefill rejection is terminal.
+            let terminal_status = (signal.completed && signal.rejected)
+                .then_some(ReplayTerminalStatus::Rejected);
+            self.step_events
+                .push(EngineEvent::new(signal.uuid, None, terminal_status));
             self.process_prefill_signal(signal)?;
         }
         self.process_lifecycle_events(lifecycle_events)?;
@@ -1483,6 +1534,10 @@ impl DisaggRuntime {
         self.traffic
             .on_accept_length_sample(accept_length_output_tokens, accept_length_decode_forwards);
         for signal in output_signals {
+            if self.collector.terminal_status(signal.uuid).is_some() {
+                continue;
+            }
+            self.step_events.push(event_from_signal(&signal));
             self.process_decode_signal(signal)?;
         }
         self.process_lifecycle_events(lifecycle_events)?;
@@ -1960,7 +2015,8 @@ impl DisaggRuntime {
         target_decode: usize,
     ) -> Result<()> {
         // -- prefill --
-        let (added, newly_marked, removed) = self.prefill_engine.apply_target_count(target_prefill);
+        let (added, newly_marked, removed) =
+            self.prefill_engine.apply_target_count(target_prefill)?;
         let prefill_delay = self.prefill_engine.startup_time_ms();
         for &id in &added {
             match prefill_delay {
@@ -1996,7 +2052,8 @@ impl DisaggRuntime {
         }
 
         // -- decode --
-        let (added, newly_marked, removed) = self.decode_engine.apply_target_count(target_decode);
+        let (added, newly_marked, removed) =
+            self.decode_engine.apply_target_count(target_decode)?;
         let decode_delay = self.decode_engine.startup_time_ms();
         for &id in &added {
             match decode_delay {
@@ -2224,6 +2281,303 @@ fn derive_decode_router_config(
     config.router_track_prefill_tokens = false;
     config.router_prefill_load_model = dynamo_kv_router::config::RouterPrefillLoadModel::None;
     config
+}
+
+impl DisaggRuntime {
+    /// Admit a request dynamically at the current runtime time (steppable seam).
+    fn submit_dynamic(&mut self, req: DirectRequest) -> anyhow::Result<Uuid> {
+        let now = self.now_ms;
+        self.on_external_arrival(req, now, None, None)
+    }
+
+    fn cancel_dynamic(&mut self, uuid: Uuid) -> anyhow::Result<Option<EngineEvent>> {
+        if self.collector.terminal_status(uuid).is_some() {
+            return Ok(None);
+        }
+        let Some(state) = self.requests.get(&uuid) else {
+            return Ok(None);
+        };
+        if !state.counted_in_flight || state.phase == DisaggPhase::Done {
+            return Ok(None);
+        }
+        let handoff_id = state.handoff_id;
+        self.apply_handoff_fact(uuid, HandoffFact::Canceled { handoff_id })?;
+        self.drive_pending_actions()?;
+        Ok(Some(EngineEvent::terminal(
+            uuid,
+            ReplayTerminalStatus::Canceled,
+        )))
+    }
+
+    /// Advance one logical timestamp of work; returns (end_ms, per-request events).
+    /// Drains the current timestamp first (driving dynamically-submitted
+    /// requests), then advances to the next scheduled event only if idle.
+    fn step_dynamic_until(&mut self, until_ms: f64) -> anyhow::Result<(f64, Vec<EngineEvent>)> {
+        if until_ms.is_nan() || until_ms < self.now_ms {
+            anyhow::bail!(
+                "disaggregated step deadline {until_ms}ms precedes runtime time {}ms",
+                self.now_ms
+            );
+        }
+        if self.defer_drive {
+            return self.step_dynamic_until_deferred(until_ms);
+        }
+        self.drain_current_timestamp()?;
+        if self.step_events.is_empty()
+            && let Some(next_ms) = self.next_timestamp()
+        {
+            if next_ms <= until_ms {
+                self.advance_now_ms(next_ms);
+                self.drain_current_timestamp()?;
+            } else if until_ms.is_finite() {
+                self.advance_now_ms(until_ms);
+            }
+        }
+        Ok((self.now_ms, std::mem::take(&mut self.step_events)))
+    }
+
+    /// Completion-only slice of [`drain_current_timestamp`]: process every worker
+    /// completion (plus stale-transfer pruning and, under `kvbm-offload`, offload
+    /// ticks) ready at the current instant, looping to a fixpoint, but never
+    /// admit arrivals, complete transfers, or drive workers. Used by the
+    /// steppable PUSH-path delta-cycle so a terminal decode completion surfaces
+    /// its event before the freed pipeline is driven.
+    fn drain_completions(&mut self) -> anyhow::Result<()> {
+        loop {
+            #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
+            let mut changed = self.prune_stale_transfer_events();
+            #[cfg(feature = "kvbm-offload")]
+            {
+                changed |= self.tick_offload_engines()?;
+            }
+            changed |= self.apply_worker_completions()?;
+            if !changed {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// EVALUATE half of the steppable PUSH-path delta-cycle. Drain worker
+    /// completions at the current instant without admitting or driving. If a
+    /// terminal decode completion freed a concurrency slot, arm `drive_pending`
+    /// and return `true` so the caller yields the terminal event before the freed
+    /// pipeline is committed — letting an external `SlotPool`-gated driver submit
+    /// the replacement at this same instant so its prefill is batched now,
+    /// matching `run()`'s in-drain `release_ready_arrivals` admission. Otherwise
+    /// run the full drain (transfers + release + drive) here and return `false`.
+    fn evaluate_completions_and_maybe_defer(&mut self) -> anyhow::Result<bool> {
+        let before_in_flight = self.cluster_in_flight();
+        self.drain_completions()?;
+        if self.cluster_in_flight() < before_in_flight {
+            self.drive_pending = true;
+            return Ok(true);
+        }
+        self.drain_current_timestamp()?;
+        Ok(false)
+    }
+
+    /// Steppable PUSH-path variant of [`step_dynamic_until`] that splits the drain
+    /// into an EVALUATE (completions) and a COMMIT (transfers + release + drive)
+    /// half around a caller yield, so a freed slot's replacement — submitted at
+    /// the completion instant — has its prefill driven at that instant rather than
+    /// one step late. Used for **every** router mode on the steppable path
+    /// (`defer_drive` is set unconditionally by the steppable constructors).
+    ///
+    /// # Why this is the correct pattern (and the atomic drain is not)
+    ///
+    /// This is the classic hardware-DES *delta cycle*: an evaluate/update split
+    /// where the reaction to same-instant events is computed but the next-batch
+    /// schedule is not committed until every same-`T` admission has settled.
+    ///  * SystemC's kernel runs "a delta cycle [as] an evaluation phase and an
+    ///    update phase", looping delta cycles at the same simulation time until
+    ///    no delta activity remains before advancing time (Doulos, "Primitive
+    ///    Channels and the Kernel":
+    ///    <https://www.doulos.com/knowhow/systemc/systemc-tutorial/primitive-channels-and-the-kernel/>).
+    ///  * VHDL's deferred current-vs-next signal update is what makes results
+    ///    order-independent: "because updates are deferred and applied together
+    ///    at each delta step rather than in arbitrary execution order, results
+    ///    are repeatable" (VHDLwhiz, "Delta cycles explained":
+    ///    <https://vhdlwhiz.com/delta-cycles-explained/>).
+    ///  * Formally the instant's semantics is a fixed point: a component "reacts
+    ///    (possibly more than once) to available input events until no more new
+    ///    events are generated at the same time" (Ptolemy II Timed SR,
+    ///    Compositionality Analysis:
+    ///    <https://ptolemy.berkeley.edu/projects/summaries/05/compositionalityAnalysis.html>).
+    ///
+    /// `run()`'s `drain_current_timestamp` is already that fixpoint — its
+    /// admission queue (`release_ready_arrivals`) drains *inside* the loop, so it
+    /// keeps the atomic drain. The steppable seam's admission arrives *externally*
+    /// (an `SlotPool`-gated driver submits one replacement per observed terminal),
+    /// so the atomic single-pass drain would commit the freed pipeline before the
+    /// replacement exists — landing it one step late. The delta-cycle split
+    /// yields the terminal first, lets the driver submit at `T`, then COMMITs, so
+    /// the external push path reproduces `run()`'s in-drain admission exactly.
+    /// This holds for KV routing too: the router's admission queue is empty at a
+    /// completion, so the freed slot is filled by the driver's post-yield submit,
+    /// admitted on arrival and driven at `T` — as round-robin does.
+    fn step_dynamic_until_deferred(
+        &mut self,
+        until_ms: f64,
+    ) -> anyhow::Result<(f64, Vec<EngineEvent>)> {
+        if self.drive_pending {
+            self.drive_pending = false;
+            self.drain_current_timestamp()?;
+        } else if self.evaluate_completions_and_maybe_defer()? {
+            return Ok((self.now_ms, std::mem::take(&mut self.step_events)));
+        }
+
+        if self.step_events.is_empty()
+            && let Some(next_ms) = self.next_timestamp()
+        {
+            if next_ms <= until_ms {
+                self.advance_now_ms(next_ms);
+                if self.evaluate_completions_and_maybe_defer()? {
+                    return Ok((self.now_ms, std::mem::take(&mut self.step_events)));
+                }
+            } else if until_ms.is_finite() {
+                self.advance_now_ms(until_ms);
+            }
+        }
+        Ok((self.now_ms, std::mem::take(&mut self.step_events)))
+    }
+
+    fn step_dynamic(&mut self) -> anyhow::Result<(f64, Vec<EngineEvent>)> {
+        self.step_dynamic_until(f64::INFINITY)
+    }
+
+    fn take_report_dynamic(&mut self, wall_ms: f64) -> TraceSimulationReport {
+        std::mem::take(&mut self.collector)
+            .finish()
+            .with_wall_time_ms(wall_ms)
+    }
+}
+
+/// Disaggregated prefill/decode topology as a [`SteppableReplay`].
+pub struct SteppableDisagg {
+    rt: DisaggRuntime,
+}
+
+impl SteppableDisagg {
+    /// Build a disaggregated runtime with `prefill_workers` prefill engines and
+    /// `decode_workers` decode engines behind `router_mode`.
+    pub fn new(
+        prefill_args: MockEngineArgs,
+        decode_args: MockEngineArgs,
+        prefill_workers: usize,
+        decode_workers: usize,
+        router_mode: ReplayRouterMode,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_router_config(
+            prefill_args,
+            decode_args,
+            prefill_workers,
+            decode_workers,
+            router_mode,
+            None,
+            None,
+        )
+    }
+
+    /// Build a disaggregated runtime with the complete replay router
+    /// configuration and optional prefill-load estimator used by canonical
+    /// DynoSim replay.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_router_config(
+        prefill_args: MockEngineArgs,
+        decode_args: MockEngineArgs,
+        prefill_workers: usize,
+        decode_workers: usize,
+        router_mode: ReplayRouterMode,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    ) -> anyhow::Result<Self> {
+        let config = OfflineDisaggReplayConfig {
+            prefill_args,
+            decode_args,
+            num_prefill_workers: prefill_workers.max(1),
+            num_decode_workers: decode_workers.max(1),
+        };
+        let mut rt = DisaggRuntime::new(
+            &config,
+            router_config,
+            prefill_load_estimator,
+            VecDeque::new(),
+            ReplayMode::Concurrency {
+                max_in_flight: usize::MAX,
+            },
+            router_mode,
+        )?;
+        // Steppable replay uses the delta-cycle split so a freed slot's
+        // externally-submitted replacement has its prefill driven at the
+        // completion instant, byte-matching `run()`'s in-drain admission. This
+        // holds for both routing modes: under an external `SlotPool` that submits
+        // one replacement per observed terminal, the KV router's own admission
+        // queue is empty when a request completes, so the freed slot is filled by
+        // the caller's post-yield submission which the router admits on arrival
+        // and COMMIT drives now — exactly as round-robin does.
+        rt.defer_drive = true;
+        Ok(SteppableDisagg { rt })
+    }
+
+    /// Toggle per-request record capture.
+    pub fn set_capture_per_request(&mut self, capture: bool) {
+        self.rt.collector.set_capture_per_request(capture);
+    }
+}
+
+impl SteppableReplay for SteppableDisagg {
+    fn now_ms(&self) -> f64 {
+        self.rt.now_ms
+    }
+    fn advance_now_ms(&mut self, now_ms: f64) {
+        self.rt.advance_now_ms(now_ms);
+    }
+    fn submit(&mut self, req: DirectRequest) -> anyhow::Result<Uuid> {
+        self.rt.submit_dynamic(req)
+    }
+    fn cancel(&mut self, uuid: Uuid) -> anyhow::Result<Option<EngineEvent>> {
+        self.rt.cancel_dynamic(uuid)
+    }
+    fn set_capture_per_request(&mut self, capture: bool) {
+        self.rt.collector.set_capture_per_request(capture);
+    }
+    fn set_sla_thresholds(&mut self, sla: SlaThresholds) {
+        self.rt.collector.set_sla_thresholds(sla);
+    }
+    fn step(&mut self) -> anyhow::Result<StepOutcome> {
+        let (end_ms, events) = self.rt.step_dynamic()?;
+        Ok(StepOutcome { end_ms, events })
+    }
+    fn step_until(&mut self, until_ms: f64) -> anyhow::Result<StepOutcome> {
+        let (end_ms, events) = self.rt.step_dynamic_until(until_ms)?;
+        Ok(StepOutcome { end_ms, events })
+    }
+    fn is_idle(&self) -> bool {
+        self.rt.is_workload_done()
+    }
+    fn in_flight(&self) -> usize {
+        self.rt.cluster_in_flight()
+    }
+    fn take_report(&mut self, wall_ms: f64) -> TraceSimulationReport {
+        self.rt.take_report_dynamic(wall_ms)
+    }
+
+    fn next_event_ms(&mut self) -> Option<f64> {
+        self.rt.next_timestamp()
+    }
+
+    fn request_latencies(&self, uuid: Uuid) -> Option<(f64, f64)> {
+        self.rt.collector.request_latencies(uuid)
+    }
+
+    fn request_admission(&self, uuid: Uuid) -> Option<(f64, usize)> {
+        self.rt.collector.request_admission(uuid)
+    }
+
+    fn actual_output_length(&self, uuid: Uuid) -> Option<usize> {
+        self.rt.collector.actual_output_length(uuid)
+    }
 }
 
 #[cfg(test)]

@@ -344,6 +344,9 @@ struct TraceRequestStats {
     /// single-shot request lists.
     session_id: Option<String>,
     turn_index: Option<usize>,
+    /// Terminal classification is retained even when per-request export is
+    /// disabled so canceled/failed partial streams never become completions.
+    terminal_status: Option<ReplayTerminalStatus>,
     detail: Option<Box<PerRequestDetail>>,
 }
 
@@ -480,6 +483,8 @@ impl SlaThresholds {
     }
 }
 
+/// Accumulates per-request measurement events (arrival, admit, tokens,
+/// terminal) and produces a [`TraceSimulationReport`].
 #[derive(Debug, Default)]
 pub(crate) struct TraceCollector {
     requests: FxHashMap<Uuid, TraceRequestStats>,
@@ -604,6 +609,7 @@ impl TraceCollector {
                 session_id: None,
                 turn_index: None,
                 first_admission_reused_input_tokens: 0,
+                terminal_status: None,
                 detail: self
                     .capture_per_request
                     .then(|| Box::new(PerRequestDetail::default())),
@@ -738,8 +744,11 @@ impl TraceCollector {
     }
 
     pub(crate) fn on_terminal(&mut self, uuid: Uuid, status: ReplayTerminalStatus) {
-        if let Some(detail) = self.detail_mut(uuid) {
-            detail.terminal_status.get_or_insert(status);
+        if let Some(stats) = self.requests.get_mut(&uuid) {
+            stats.terminal_status.get_or_insert(status);
+            if let Some(detail) = stats.detail.as_deref_mut() {
+                detail.terminal_status.get_or_insert(status);
+            }
         }
     }
 
@@ -751,7 +760,9 @@ impl TraceCollector {
     }
 
     pub(crate) fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
-        if let Some(stats) = self.requests.get_mut(&uuid) {
+        if let Some(stats) = self.requests.get_mut(&uuid)
+            && stats.terminal_status.is_none()
+        {
             stats.token_times_ms.push(token_time_ms);
         }
     }
@@ -765,10 +776,25 @@ impl TraceCollector {
         Some((ttft_ms, mean_itl_ms))
     }
 
+    /// Return the first scheduler admission time and first-admission prefix
+    /// reuse for an externally observed request once admission has occurred.
+    pub(crate) fn request_admission(&self, uuid: Uuid) -> Option<(f64, usize)> {
+        let stats = self.requests.get(&uuid)?;
+        Some((
+            stats.first_admit_ms?,
+            stats.first_admission_reused_input_tokens,
+        ))
+    }
+
     pub(crate) fn actual_output_length(&self, uuid: Uuid) -> Option<usize> {
         self.requests
             .get(&uuid)
             .map(TraceRequestStats::actual_output_length)
+    }
+
+    /// Return the first terminal classification recorded for `uuid`.
+    pub(crate) fn terminal_status(&self, uuid: Uuid) -> Option<ReplayTerminalStatus> {
+        self.requests.get(&uuid)?.terminal_status
     }
 
     pub(crate) fn finish(self) -> TraceSimulationReport {
@@ -807,6 +833,9 @@ impl TraceCollector {
         let mut goodput_output_tokens = 0usize;
 
         for stats in requests.values() {
+            if stats.terminal_status != Some(ReplayTerminalStatus::Completed) {
+                continue;
+            }
             if stats.first_admit_ms.is_none() {
                 continue;
             }
@@ -934,7 +963,7 @@ impl TraceCollector {
             let Some(detail) = stats.detail.as_deref() else {
                 continue;
             };
-            let Some(terminal_status) = detail.terminal_status else {
+            let Some(terminal_status) = stats.terminal_status else {
                 continue;
             };
             let first_token_ms = stats.first_token_ms();
@@ -1240,6 +1269,7 @@ mod tests {
         collector.on_decode_assigned(uuid, 0);
         collector.on_token(uuid, 50.0);
         collector.on_token(uuid, 60.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         assert!(collector.requests[&uuid].detail.is_none());
 
@@ -1265,6 +1295,7 @@ mod tests {
         for &t in token_times_ms {
             collector.on_token(uuid, t);
         }
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
     }
 
     /// Goodput classifies a request "good" using aiperf's average ITL,
@@ -1475,6 +1506,7 @@ mod tests {
         collector.on_admit(uuid, 1.0, 0);
         collector.on_admit(uuid, 2.0, 80);
         collector.on_token(uuid, 3.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
 

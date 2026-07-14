@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::common::protocols::OutputSignal;
-use crate::replay::{TraceCollector, TraceSimulationReport};
+use crate::replay::{ReplayTerminalStatus, TraceCollector, TraceSimulationReport};
 use crate::scheduler::AdmissionEvent;
 
 use super::ReplayRouter;
@@ -47,6 +47,13 @@ async fn process_output_signal(
     if !output.completed || !state.mark_completed_once() {
         return;
     }
+
+    let terminal_status = if output.rejected {
+        ReplayTerminalStatus::Rejected
+    } else {
+        ReplayTerminalStatus::Completed
+    };
+    collector.on_terminal(output.uuid, terminal_status);
 
     tracing::debug!(uuid = %output.uuid, "replay_diag: demux on_complete start");
     match router.on_complete(output.uuid).await {
