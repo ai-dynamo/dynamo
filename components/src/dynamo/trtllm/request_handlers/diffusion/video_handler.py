@@ -27,6 +27,7 @@ from dynamo.common.utils.video_utils import encode_video
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
+from dynamo.trtllm.request_handlers.diffusion.video_convert import to_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -248,13 +249,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
 
             # Encode media based on what the pipeline returned
             if output.video is not None:
-                # MediaOutput.video is (B, T, H, W, C) uint8 since TRT-LLM rc9;
-                # squeeze the batch dim to get (T, H, W, C) for MP4 encoding.
-                video = output.video
-                assert (
-                    video.ndim == 5 and video.shape[0] == 1
-                ), f"Expected video shape (1, T, H, W, C), got {video.shape}"
-                frames_np = video[0].cpu().numpy()
+                # VisualGenOutput.video is (1, T, H, W, C) uint8 since TRT-LLM
+                # rc9; the backend converter squeezes the batch dim and moves
+                # the frames to host memory as canonical (T, H, W, 3) uint8.
+                frames_np = to_canonical(output.video)
                 logger.info(
                     f"Request {request_id}: encoding video output "
                     f"(shape={frames_np.shape}) to MP4 at {fps} fps"

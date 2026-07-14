@@ -248,10 +248,12 @@ def encode_to_video_bytes(
 # ---------------------------------------------------------------------------
 # Unified video encoding
 #
-# A single shared entry point (``encode_video``) that all backends can call.
-# It absorbs the three different backend output shapes via a thin conversion
-# layer, then dispatches to one of two encode paths (see design doc
-# docs/design/unified_video_encoder.md):
+# A single shared entry point (``encode_video``) that all backends call with a
+# canonical frame array -- ``np.ndarray (T, H, W, 3) uint8`` RGB. Each backend
+# owns a ``to_canonical()`` converter (next to its handler) that maps its native
+# output into this format, composed from the canonical-domain primitives below
+# (``ensure_uint8_rgb`` / ``pil_frames_to_array`` / ``drop_alpha``). The encoder
+# validates the canonical contract on entry and dispatches to one of two paths:
 #
 #   * imageio -> ffmpeg (NVENC)  -- preserves the existing NVIDIA behavior.
 #   * ffmpeg CLI (raw pipe)      -- new hardware (XPU) / codecs that imageio's
@@ -311,9 +313,7 @@ def _running_on_xpu() -> bool:
         return False
 
 
-def _resolve_ffmpeg_encoder(
-    container: str, codec: str | None, hw_accel: str
-) -> str:
+def _resolve_ffmpeg_encoder(container: str, codec: str | None, hw_accel: str) -> str:
     """Map (container, logical codec, hw path) to an ffmpeg encoder name.
 
     A codec value that is already an ffmpeg encoder name passes through.
@@ -323,49 +323,58 @@ def _resolve_ffmpeg_encoder(
     return table.get(codec, codec)
 
 
-def to_canonical_frames(frames) -> np.ndarray:
-    """Thin conversion layer: normalize any backend's raw video output.
+def drop_alpha(frames: np.ndarray) -> np.ndarray:
+    """Drop a trailing alpha channel (RGBA -> RGB) when present."""
+    if frames.shape[-1] == 4:
+        return frames[..., :3]
+    return frames
 
-    Accepts the three shapes that the backends produce and returns a canonical
-    array of shape ``(num_frames, height, width, 3)``, dtype ``uint8``, RGB:
 
-      * ``torch.Tensor`` ``(1, T, H, W, C)`` or ``(T, H, W, C)`` (TRT-LLM)
-      * ``np.ndarray`` ``(1, T, H, W, C)`` / ``(T, H, W, C)``
-      * ``list`` holding a single 5-D / 4-D array (vLLM ``stage_output.images``)
-      * ``list[PIL.Image | np.ndarray]`` (SGLang)
+def ensure_uint8_rgb(frames: np.ndarray) -> np.ndarray:
+    """Normalize an RGB frame array to contiguous ``(T, H, W, 3) uint8``.
+
+    Drops a trailing alpha channel and scales floating-point values in
+    ``[0, 1]`` up to ``[0, 255]``. Channel order and axis layout are assumed to
+    be RGB / ``(T, H, W, C)`` already; this operates purely in the canonical
+    domain and carries no backend-specific knowledge.
     """
-    # torch.Tensor -> numpy (duck-typed to avoid importing torch here).
-    if hasattr(frames, "detach") and hasattr(frames, "cpu"):
-        frames = frames.detach().cpu().numpy()
+    frames = drop_alpha(frames)
+    if np.issubdtype(frames.dtype, np.floating):
+        frames = np.clip(frames * 255.0, 0, 255).round()
+    return np.ascontiguousarray(frames, dtype=np.uint8)
 
-    # Unwrap a single-element list that holds a full-video array/tensor.
-    if isinstance(frames, (list, tuple)) and len(frames) == 1:
-        inner = frames[0]
-        if hasattr(inner, "detach") and hasattr(inner, "cpu"):
-            inner = inner.detach().cpu().numpy()
-        if isinstance(inner, np.ndarray) and inner.ndim >= 4:
-            frames = inner
 
-    if isinstance(frames, np.ndarray):
-        arr = frames[0] if frames.ndim == 5 else frames
-    else:
-        per_frame = []
-        for frame in frames:
-            if isinstance(frame, np.ndarray):
-                per_frame.append(frame)
-            else:
-                # PIL Image (or anything convertible via numpy).
-                per_frame.append(np.array(frame.convert("RGB")))
-        arr = np.stack(per_frame, axis=0)
+def pil_frames_to_array(frames) -> np.ndarray:
+    """Stack a list of per-frame images into a single ``(T, H, W, C)`` array.
 
-    # Drop an alpha channel if present.
-    if arr.shape[-1] == 4:
-        arr = arr[..., :3]
+    Each element may be a ``PIL.Image`` or an ``np.ndarray``; PIL images are
+    converted to RGB numpy arrays first.
+    """
+    per_frame = []
+    for frame in frames:
+        if isinstance(frame, np.ndarray):
+            per_frame.append(frame)
+        else:
+            per_frame.append(np.array(frame.convert("RGB")))
+    return np.stack(per_frame, axis=0)
 
-    if np.issubdtype(arr.dtype, np.floating):
-        arr = np.clip(arr * 255.0, 0, 255).round()
 
-    return np.ascontiguousarray(arr, dtype=np.uint8)
+def _validate_canonical_frames(frames) -> None:
+    """Validate the canonical encoder input contract.
+
+    Raises ``ValueError`` unless ``frames`` is an ``np.ndarray`` of shape
+    ``(T, H, W, 3)`` with dtype ``uint8``.
+    """
+    if not isinstance(frames, np.ndarray):
+        raise ValueError(
+            "encode_video expects canonical frames as np.ndarray (T, H, W, 3) "
+            f"uint8; got {type(frames).__name__}. Convert backend output with "
+            "the backend's to_canonical() first."
+        )
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError(f"encode_video expects shape (T, H, W, 3); got {frames.shape}")
+    if frames.dtype != np.uint8:
+        raise ValueError(f"encode_video expects dtype uint8; got {frames.dtype}")
 
 
 def _encode_video_imageio(
@@ -426,11 +435,16 @@ def _encode_video_ffmpeg_cli(
         if hw_accel == "xpu":
             cmd += ["-vaapi_device", device]
         cmd += [
-            "-f", "rawvideo",
-            "-pix_fmt", "rgb24",
-            "-s", f"{width}x{height}",
-            "-r", str(fps),
-            "-i", "-",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{width}x{height}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
         ]
         if hw_accel == "xpu":
             cmd += ["-vf", "format=nv12,hwupload"]
@@ -469,7 +483,7 @@ def _encode_video_ffmpeg_cli(
 
 
 def encode_video(
-    frames,
+    frames: np.ndarray,
     fps: int = DEFAULT_VIDEO_FPS,
     *,
     container: str | None = None,
@@ -477,14 +491,18 @@ def encode_video(
     hw_accel: str | None = None,
     device: str | None = None,
 ) -> bytes:
-    """Unified video encoder: canonicalize frames and encode to video bytes.
+    """Unified video encoder: encode canonical frames to video bytes.
+
+    ``frames`` must already be in the canonical format -- an ``np.ndarray`` of
+    shape ``(T, H, W, 3)``, dtype ``uint8``, RGB. Each backend converts its
+    native output with its own ``to_canonical()`` before calling this.
 
     Any explicit argument overrides its ``DYN_VIDEO_*`` environment variable,
     which in turn overrides platform auto-detection. Dispatches to the imageio
     NVENC path on NVIDIA, or the ffmpeg-CLI path for XPU / CPU.
 
     Args:
-        frames: Raw backend output (see ``to_canonical_frames``).
+        frames: Canonical ``np.ndarray (T, H, W, 3) uint8`` RGB frames.
         fps: Frames per second for the output video.
         container: ``mp4`` / ``webm`` (env: ``DYN_VIDEO_CONTAINER``).
         codec: Logical codec ``h264`` / ``hevc`` / ``vp9`` (env: ``DYN_VIDEO_CODEC``).
@@ -493,17 +511,21 @@ def encode_video(
 
     Returns:
         Encoded video as bytes.
+
+    Raises:
+        ValueError: If ``frames`` is not the canonical ``(T, H, W, 3) uint8`` array.
     """
+    _validate_canonical_frames(frames)
+
     container = (container or _video_container()).lower()
     codec = codec.lower() if codec else _video_codec()
     hw_accel = (hw_accel or _video_hw_accel()).lower()
     if hw_accel == "auto":
         hw_accel = "xpu" if _running_on_xpu() else "nvenc"
 
-    canonical = to_canonical_frames(frames)
     logger.info(
         "Encoding %d frames -> %s (hw=%s codec=%s) at %d fps",
-        len(canonical),
+        len(frames),
         container,
         hw_accel,
         codec or "default",
@@ -511,7 +533,7 @@ def encode_video(
     )
 
     if hw_accel == "nvenc":
-        return _encode_video_imageio(canonical, fps, container, codec)
+        return _encode_video_imageio(frames, fps, container, codec)
 
     device = device or _video_device()
-    return _encode_video_ffmpeg_cli(canonical, fps, container, codec, hw_accel, device)
+    return _encode_video_ffmpeg_cli(frames, fps, container, codec, hw_accel, device)

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 
@@ -721,7 +722,7 @@ class TestVideoHandlerConcurrency:
             requests = [self._make_request() for _ in range(3)]
 
             with patch(
-                "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
+                "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_video",
                 return_value=b"fake_mp4_bytes",
             ), patch(
                 "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
@@ -793,7 +794,7 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_video",
             return_value=b"fake_mp4",
         ), patch(
             "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
@@ -825,7 +826,7 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_video",
             return_value=b"fake_mp4_bytes",
         ):
             results = []
@@ -857,7 +858,7 @@ class TestVideoHandlerResponseFormats:
         }
 
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_video",
             return_value=b"fake_mp4",
         ), patch(
             "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
@@ -939,7 +940,7 @@ class TestVideoHandlerOutputFormat:
         """Omitting output_format defaults to mp4."""
         handler = self._make_handler()
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_video",
             return_value=b"bytes",
         ) as mock_enc, patch(
             "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
@@ -950,14 +951,14 @@ class TestVideoHandlerOutputFormat:
         assert results[0]["status"] == "completed"
         mock_enc.assert_called_once()
         _, kwargs = mock_enc.call_args
-        assert kwargs["output_format"] == "mp4"
+        assert kwargs["container"] == "mp4"
 
     @pytest.mark.asyncio
     async def test_url_response_has_output_format_in_video_data(self):
         """URL-mode response includes output_format='mp4' in VideoData."""
         handler = self._make_handler()
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_video",
             return_value=b"bytes",
         ), patch(
             "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
@@ -974,7 +975,7 @@ class TestVideoHandlerOutputFormat:
         """Base64-mode response includes output_format='mp4' in VideoData."""
         handler = self._make_handler()
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_video",
             return_value=b"bytes",
         ):
             results = await self._run(
@@ -984,11 +985,11 @@ class TestVideoHandlerOutputFormat:
         assert results[0]["data"][0]["output_format"] == "mp4"
 
     @pytest.mark.asyncio
-    async def test_encode_called_with_output_format_kwarg(self):
-        """encode_to_video_bytes is always called with output_format='mp4'."""
+    async def test_encode_called_with_container_kwarg(self):
+        """encode_video is always called with container='mp4'."""
         handler = self._make_handler()
         with patch(
-            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_to_video_bytes",
+            "dynamo.trtllm.request_handlers.diffusion.video_handler.encode_video",
             return_value=b"bytes",
         ) as mock_enc, patch(
             "dynamo.trtllm.request_handlers.diffusion.video_handler.upload_to_fs",
@@ -998,5 +999,27 @@ class TestVideoHandlerOutputFormat:
 
         mock_enc.assert_called_once()
         _, kwargs = mock_enc.call_args
-        assert "output_format" in kwargs
-        assert kwargs["output_format"] == "mp4"
+        assert "container" in kwargs
+        assert kwargs["container"] == "mp4"
+
+
+# =============================================================================
+# Part 8: to_canonical() converter (backend -> canonical frames)
+# =============================================================================
+
+
+class TestTrtllmToCanonical:
+    """to_canonical() maps VisualGenOutput.video to canonical frames losslessly."""
+
+    def test_roundtrip_is_bit_exact(self):
+        from dynamo.trtllm.request_handlers.diffusion.video_convert import to_canonical
+
+        # Distinctive per-pixel values catch axis / channel-order bugs.
+        truth = np.arange(2 * 4 * 5 * 3, dtype=np.uint8).reshape(2, 4, 5, 3)
+        native = torch.from_numpy(truth)[None]  # (1, T, H, W, C)
+
+        out = to_canonical(native)
+
+        assert out.dtype == np.uint8
+        assert out.shape == truth.shape
+        assert np.array_equal(out, truth)

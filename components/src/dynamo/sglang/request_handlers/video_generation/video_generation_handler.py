@@ -22,6 +22,7 @@ from dynamo.sglang.protocol import (
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
+from dynamo.sglang.request_handlers.video_generation.video_convert import to_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -254,8 +255,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         if not frames:
             raise RuntimeError("DiffGenerator returned no frames")
 
-        # Convert frames to video bytes via the shared unified encoder.
-        video_bytes = await asyncio.to_thread(encode_video, frames, fps)
+        # Convert to canonical frames, then encode via the shared unified encoder.
+        canonical = to_canonical(frames)
+        video_bytes = await asyncio.to_thread(encode_video, canonical, fps)
         return video_bytes
 
     def _parse_size(self, size_str: str) -> tuple[int, int]:
