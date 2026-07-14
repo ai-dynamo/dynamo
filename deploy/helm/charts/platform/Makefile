@@ -71,7 +71,13 @@ charts-prep: ## Package operator subchart for local testing
 
 .PHONY: verify-operator-chart-crds
 verify-operator-chart-crds: ## Verify operator CRDs are managed from the image, not the Helm chart
-	@if helm show crds components/operator | grep -q .; then \
+	@tmp="$$(mktemp)"; \
+	trap 'rm -f "$$tmp"' EXIT; \
+	if ! helm show crds components/operator >"$$tmp"; then \
+		echo "ERROR: failed to inspect operator chart CRDs"; \
+		exit 1; \
+	fi; \
+	if grep -q . "$$tmp"; then \
 		echo "ERROR: operator CRDs must be managed by crd-apply from the operator image, not bundled in the Helm chart"; \
 		exit 1; \
 	fi
