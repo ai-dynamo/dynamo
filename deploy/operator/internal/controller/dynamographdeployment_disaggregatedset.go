@@ -208,6 +208,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 	if reason != "" {
 		return ReconcileResult{}, fmt.Errorf("failed to select DisaggregatedSet roles: %s", reason)
 	}
+	if err := applyDisaggregatedSetCheckpointStartupPolicies(dynamoComponentsDeployments, checkpointInfos); err != nil {
+		return ReconcileResult{}, err
+	}
 
 	desiredDS, err := r.generateDisaggregatedSet(ctx, dynamoDeployment, dynamoComponentsDeployments, selection)
 	if err != nil {
@@ -260,6 +263,18 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 	return r.checkResourcesReadiness(resources), nil
 }
 
+func applyDisaggregatedSetCheckpointStartupPolicies(
+	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) error {
+	for _, componentName := range sortedDCDKeys(dcds) {
+		if err := applyDCDCheckpointStartupPolicy(dcds[componentName], checkpointInfos[componentName]); err != nil {
+			return fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", componentName, err)
+		}
+	}
+	return nil
+}
+
 func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetNonSelectedDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -272,9 +287,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetNonSelectedDC
 		dcd := dcds[componentName]
 		if _, selected := selection.componentToRole[componentName]; selected {
 			continue
-		}
-		if err := applyDCDCheckpointStartupPolicy(dcd, checkpointInfos[componentName]); err != nil {
-			return nil, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", componentName, err)
 		}
 		if err := r.preserveExistingDCDBackendFramework(ctx, dcd); err != nil {
 			return nil, fmt.Errorf("failed to preserve existing DynamoComponentDeployment backendFramework: %w", err)

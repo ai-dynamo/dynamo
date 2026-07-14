@@ -22,7 +22,9 @@ import (
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	disaggregatedsetutils "sigs.k8s.io/lws/pkg/utils/disaggregatedset"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -120,6 +122,32 @@ func TestCheckDisaggregatedSetReadiness(t *testing.T) {
 	}
 	ready, _, _ = checkDisaggregatedSetReadiness(ds, selection)
 	require.True(t, ready)
+}
+
+func TestApplyDisaggregatedSetCheckpointStartupPoliciesIncludesSelectedRoles(t *testing.T) {
+	dcds := map[string]*nvidiacomv1beta1.DynamoComponentDeployment{
+		"prefill": {
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Replicas: ptr.To(int32(2))},
+			},
+		},
+		"decode": {
+			Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Replicas: ptr.To(int32(2))},
+			},
+		},
+	}
+	checkpointInfos := map[string]*checkpoint.CheckpointInfo{
+		"prefill": {
+			Enabled:       true,
+			Ready:         false,
+			StartupPolicy: nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+		},
+	}
+
+	require.NoError(t, applyDisaggregatedSetCheckpointStartupPolicies(dcds, checkpointInfos))
+	require.Equal(t, int32(0), ptr.Deref(dcds["prefill"].Spec.Replicas, -1))
+	require.Equal(t, int32(2), ptr.Deref(dcds["decode"].Spec.Replicas, -1))
 }
 
 func TestCheckDisaggregatedSetReadinessFallsBackToTargetRevisionChildLWS(t *testing.T) {
