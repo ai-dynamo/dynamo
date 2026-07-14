@@ -23,7 +23,7 @@ If you see a CuDNN version mismatch error on startup (`cuDNN frontend 1.8.1 requ
 
 Diffusion Language Models generate text through iterative refinement rather than autoregressive token-by-token generation. The model starts with masked tokens and progressively replaces them with predictions, refining low-confidence tokens each step.
 
-LLM diffusion is auto-detected: when `--dllm-algorithm` is set, the worker automatically uses `DiffusionWorkerHandler` without needing a separate flag. For the upstream configuration reference, see the [SGLang Diffusion LLM server arguments](https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/server_arguments.md#diffusion-llm).
+LLM diffusion is auto-detected: when `--dllm-algorithm` is set, the worker automatically uses `DiffusionWorkerHandler` without needing a separate flag. For the upstream configuration reference, see the [SGLang Diffusion LLM server arguments](https://docs.sglang.io/docs/advanced_features/server_arguments#diffusion-llm).
 
 ### Launch
 
@@ -112,4 +112,4 @@ curl http://localhost:8000/v1/videos \
 
 - **[Examples](sglang-examples.md)**: Launch scripts for all deployment patterns
 - **[Reference Guide](sglang-reference-guide.md)**: Worker types and argument reference
-- **[SGLang Diffusion LLM server arguments (upstream)](https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/server_arguments.md#diffusion-llm)**: SGLang Diffusion LLM configuration reference
+- **[SGLang Diffusion LLM server arguments (upstream)](https://docs.sglang.io/docs/advanced_features/server_arguments#diffusion-llm)**: SGLang Diffusion LLM configuration reference
