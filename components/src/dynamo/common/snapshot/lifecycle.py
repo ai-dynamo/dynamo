@@ -114,8 +114,6 @@ def configure_snapshot_capture_env() -> None:
         )
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
 
-    os.environ.setdefault("NCCL_P2P_DISABLE", "0")
-
     nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
     if nccl_nvls_enable and nccl_nvls_enable != "0":
         logger.warning(
