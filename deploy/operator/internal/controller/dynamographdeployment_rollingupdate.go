@@ -1058,6 +1058,7 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 	rollingUpdateCtx dynamo.RollingUpdateContext,
 ) (map[string]nvidiacomv1beta1.ComponentReplicaStatus, error) {
 	oldStatuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus)
+	oldDCDsByComponent := make(map[string][]nvidiacomv1beta1.DynamoComponentDeployment)
 
 	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, rollingUpdateCtx.NewWorkerHash)
 	if err != nil {
@@ -1072,22 +1073,73 @@ func (r *DynamoGraphDeploymentReconciler) aggregateOldWorkerComponentStatuses(
 		if dcd.Status.Component == nil {
 			continue
 		}
-		existing, found := oldStatuses[componentName]
-		if !found {
-			status := *dcd.Status.Component
-			status.ComponentNames = componentReplicaResourceNames(dcd.Status.Component, dcd.Name)
-			oldStatuses[componentName] = status
-		} else {
-			// Accumulate across multiple old DCDs
-			existing.Replicas += dcd.Status.Component.Replicas
-			existing.ReadyReplicas = addOptionalInt32(existing.ReadyReplicas, dcd.Status.Component.ReadyReplicas)
-			existing.AvailableReplicas = addOptionalInt32(existing.AvailableReplicas, dcd.Status.Component.AvailableReplicas)
-			existing.ComponentNames = append(existing.ComponentNames, componentReplicaResourceNames(dcd.Status.Component, dcd.Name)...)
-			oldStatuses[componentName] = existing
-		}
+		oldDCDsByComponent[componentName] = append(oldDCDsByComponent[componentName], dcd)
+	}
+
+	for componentName, dcds := range oldDCDsByComponent {
+		sortOldWorkerDCDsNewestFirst(dcds)
+		status := aggregateOldWorkerDCDStatuses(dcds)
+		status.RuntimeNamespace = selectOldWorkerRuntimeNamespace(
+			dcds,
+			rollingUpdateCtx.OldWorkerReplicaTargetsByDCD,
+		)
+		oldStatuses[componentName] = status
 	}
 
 	return oldStatuses, nil
+}
+
+func sortOldWorkerDCDsNewestFirst(dcds []nvidiacomv1beta1.DynamoComponentDeployment) {
+	sort.Slice(dcds, func(i, j int) bool {
+		if dcds[i].CreationTimestamp.Time.Equal(dcds[j].CreationTimestamp.Time) {
+			return dcds[i].Name > dcds[j].Name
+		}
+		return dcds[i].CreationTimestamp.Time.After(dcds[j].CreationTimestamp.Time)
+	})
+}
+
+func aggregateOldWorkerDCDStatuses(
+	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
+) nvidiacomv1beta1.ComponentReplicaStatus {
+	var status nvidiacomv1beta1.ComponentReplicaStatus
+	for i, dcd := range dcds {
+		componentStatus := dcd.Status.Component
+		if i == 0 {
+			status = *componentStatus
+			status.ComponentNames = componentReplicaResourceNames(componentStatus, dcd.Name)
+			status.RuntimeNamespace = ""
+			continue
+		}
+
+		status.Replicas += componentStatus.Replicas
+		status.ReadyReplicas = addOptionalInt32(status.ReadyReplicas, componentStatus.ReadyReplicas)
+		status.AvailableReplicas = addOptionalInt32(status.AvailableReplicas, componentStatus.AvailableReplicas)
+		status.ComponentNames = append(status.ComponentNames, componentReplicaResourceNames(componentStatus, dcd.Name)...)
+	}
+	return status
+}
+
+func selectOldWorkerRuntimeNamespace(
+	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
+	replicaTargets map[string]int32,
+) string {
+	for _, dcd := range dcds {
+		if replicaTargets[dcd.Name] > 0 {
+			return oldWorkerRuntimeNamespace(dcd)
+		}
+	}
+
+	if len(dcds) == 0 {
+		return ""
+	}
+	return oldWorkerRuntimeNamespace(dcds[0])
+}
+
+func oldWorkerRuntimeNamespace(dcd nvidiacomv1beta1.DynamoComponentDeployment) string {
+	if dcd.Status.Component != nil && dcd.Status.Component.RuntimeNamespace != "" {
+		return dcd.Status.Component.RuntimeNamespace
+	}
+	return dynamo.GetDCDRuntimeNamespace(&dcd)
 }
 
 // resolveRollingUpdateParams reads the deployment strategy annotations from a component spec
@@ -1226,7 +1278,14 @@ func mergeWorkerComponentStatuses(
 	for componentName, oldStatus := range oldWorkerStatuses {
 		newStatus, exists := componentStatuses[componentName]
 		if !exists {
+			oldStatus.UpdatedReplicas = 0
+			componentStatuses[componentName] = oldStatus
 			continue
+		}
+
+		if oldStatus.RuntimeNamespace != "" {
+			// Keep routing consumers on the old active worker namespace until rollout cutover.
+			newStatus.RuntimeNamespace = oldStatus.RuntimeNamespace
 		}
 
 		// Build sorted ComponentNames from old and new DCD names.
