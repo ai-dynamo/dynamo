@@ -156,7 +156,51 @@ class VideoLoader:
         if metadata is None:
             raise ValueError("Decoded video metadata is required")
 
-        return np.ascontiguousarray(frames), metadata
+        return np.ascontiguousarray(frames), self._normalize_frontend_metadata(
+            metadata, len(frames)
+        )
+
+    @staticmethod
+    def _normalize_frontend_metadata(
+        metadata: Dict[str, Any], frame_count: int
+    ) -> Dict[str, Any]:
+        """Convert Rust decoder metadata to vLLM's video metadata contract."""
+        if "frames_indices" in metadata:
+            return metadata
+
+        rust_metadata = metadata.get("Video", metadata)
+        try:
+            source_fps = float(rust_metadata["source_fps"])
+            source_duration = float(rust_metadata["source_duration"])
+            sampled_timestamps = rust_metadata["sampled_timestamps"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Decoded video metadata does not match the Dynamo frontend format"
+            ) from exc
+
+        if source_fps <= 0 or source_duration <= 0:
+            raise ValueError("Decoded video source fps and duration must be positive")
+        if (
+            not isinstance(sampled_timestamps, list)
+            or len(sampled_timestamps) != frame_count
+        ):
+            raise ValueError(
+                "Decoded video timestamp count must match the transferred frame count"
+            )
+
+        frame_indices = [
+            max(0, int(round(float(timestamp) * source_fps)))
+            for timestamp in sampled_timestamps
+        ]
+        total_num_frames = max(frame_count, int(round(source_duration * source_fps)))
+        return {
+            "fps": source_fps,
+            "duration": source_duration,
+            "frames_indices": frame_indices,
+            "total_num_frames": total_num_frames,
+            "video_backend": "dynamo_frontend",
+            "do_sample_frames": False,
+        }
 
     async def load_video_batch(
         self,

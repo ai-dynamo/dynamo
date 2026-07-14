@@ -13,6 +13,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.utils.media_decoder import enable_frontend_video_decoding
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -76,6 +77,7 @@ def _build_media_decoder_and_fetcher():
     """
     media_decoder = MediaDecoder()
     media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+    enable_frontend_video_decoding(media_decoder)
 
     media_fetcher = MediaFetcher()
     media_fetcher.timeout_ms(30000)
@@ -128,7 +130,7 @@ async def _register_model_with_runtime_config(
             output_type = ModelType.Chat
 
     # Configure the Rust frontend's media decoder so it ships pre-decoded
-    # images via NIXL RDMA instead of forwarding raw URLs / base64 to us.
+    # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None
     media_fetcher = None
     if getattr(dynamo_args, "frontend_decoding", False):

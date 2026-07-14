@@ -16,6 +16,7 @@ from tests.serve.common import (
     run_prefill_drain_deployment,
     run_serve_deployment,
 )
+from tests.serve.conftest import MULTIMODAL_VIDEO_URL
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
@@ -539,6 +540,46 @@ sglang_configs = {
                 ],
                 repeat_count=1,
                 expected_response=["guitar", "tablet", "draw"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
+    "video_agg_fd_qwen": SGLangConfig(
+        name="video_agg_fd_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(10.0),
+            pytest.mark.requested_sglang_kv_tokens(8736),
+            pytest.mark.timeout(390),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        env={
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            "DYN_MM_VIDEO_NUM_FRAMES": "4",
+        },
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": MULTIMODAL_VIDEO_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["red", "static", "still"],
                 temperature=0.0,
                 max_tokens=100,
             )

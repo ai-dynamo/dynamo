@@ -30,6 +30,7 @@ from dynamo.common.snapshot.restore_context import (
     refresh_snapshot_restore_config,
 )
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
+from dynamo.common.utils.media_decoder import enable_frontend_video_decoding
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
@@ -749,14 +750,14 @@ async def register_vllm_model(
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 
-    # Configure media decoder for frontend image decoding when enabled
-    # This enables frontend to decode images and transfer via NIXL RDMA
+    # Configure media decoders for frontend decoding when enabled.
+    # Decoded media is transferred to the backend via NIXL RDMA.
     media_decoder = None
     media_fetcher = None
     if config.frontend_decoding:
         media_decoder = MediaDecoder()
         media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
-        # media_decoder.enable_video({})
+        enable_frontend_video_decoding(media_decoder)
 
         media_fetcher = MediaFetcher()
         media_fetcher.timeout_ms(30000)

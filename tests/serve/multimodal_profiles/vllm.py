@@ -98,7 +98,21 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+                env={
+                    "DYN_MM_ALLOW_INTERNAL": "1",
+                    "DYN_MM_VIDEO_NUM_FRAMES": "4",
+                },
+                tests=[
+                    MmCase(payload=make_video_payload(["red", "static", "still"])),
+                    MmCase(
+                        suffix="frontend_decoding",
+                        payload=make_video_payload(
+                            ["red", "static", "still"], frontend_decoding=True
+                        ),
+                        extra_script_args=["--frontend-decoding"],
+                        marks=[pytest.mark.post_merge],
+                    ),
+                ],
             ),
             # Post_merge MM-routing coverage for the Qwen3-VL family — the
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
