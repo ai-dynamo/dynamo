@@ -100,6 +100,7 @@ enum AdmissionCommand {
 #[derive(Debug, Clone, Copy)]
 struct TrackedAdmission {
     ticket: AdmissionTicket,
+    queue_class_index: Option<usize>,
     worker: Option<WorkerWithDpRank>,
     dispatched: bool,
     generation: Option<LifecycleGeneration>,
@@ -861,7 +862,7 @@ impl<
         let decay_now = Instant::now();
         // Synthetic and explicit selections avoid cache work. Family classification
         // samples overlap once and reuses it if the request enters queue storage.
-        let (class_index, mut snapshot) = if let Some(class_index) = self
+        let (admission_class_index, mut snapshot) = if let Some(class_index) = self
             .profile
             .direct_class_index(request.policy_class.as_deref())
         {
@@ -874,6 +875,7 @@ impl<
                 .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
             (class_index, Some(snapshot))
         };
+        let mut queue_class_index = admission_class_index;
 
         if let Some(request_id) = request.mode.admission_request_id()
             && self.tracked_admissions.contains_key(request_id)
@@ -885,7 +887,7 @@ impl<
         }
 
         let mut admission = if request.mode.admission_request_id().is_some()
-            && self.admission.has_strategy(class_index)
+            && self.admission.has_strategy(admission_class_index)
         {
             let allowed_worker_ids = request.allowed_worker_ids.clone();
             let pinned_worker = request.pinned_worker;
@@ -917,7 +919,7 @@ impl<
             });
             self.admission
                 .admit(
-                    class_index,
+                    admission_class_index,
                     request.session_id.as_deref(),
                     request.isl_tokens,
                     worker_eligibility,
@@ -945,18 +947,21 @@ impl<
                         return (self.abort_admission(request_admission.ticket), false);
                     }
                     if matches!(placement, WorkerPlacement::Exact(_)) {
-                        // Classification stays in the family selected above; queue cost and
-                        // accounting follow the strategy's exact worker.
-                        snapshot = None;
+                        let exact_snapshot = self.snapshot_for(&request);
+                        queue_class_index = self.profile.resolve_class_index(
+                            request.policy_class.as_deref(),
+                            exact_snapshot.uncached_tokens,
+                        );
+                        snapshot = Some(exact_snapshot);
                     }
                 }
                 AdmissionDecision::Defer => deferred = true,
             }
         }
 
-        let class = self.profile.class(class_index);
+        let class = self.profile.class(queue_class_index);
         let should_queue = deferred
-            || self.should_queue(class_index, class, || {
+            || self.should_queue(queue_class_index, class, || {
                 self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
             });
         if !should_queue {
@@ -997,7 +1002,7 @@ impl<
         let worker_count = self.workers_with_configs.borrow().len();
         let enqueue = match deferred_id {
             Some(admission_id) => self.pending.enqueue_deferred(
-                class_index,
+                queue_class_index,
                 worker_count,
                 snapshot,
                 arrival_offset,
@@ -1007,7 +1012,7 @@ impl<
                 queued,
             ),
             None => self.pending.enqueue(
-                class_index,
+                queue_class_index,
                 worker_count,
                 snapshot,
                 arrival_offset,
@@ -1031,6 +1036,7 @@ impl<
                 request_id,
                 TrackedAdmission {
                     ticket,
+                    queue_class_index: Some(queue_class_index),
                     worker: None,
                     dispatched: false,
                     generation: lifecycle_generation,
@@ -1040,7 +1046,7 @@ impl<
         self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
         self.pending_isl_tokens
             .fetch_add(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
-        self.add_class_counters(class_index, snapshot);
+        self.add_class_counters(queue_class_index, snapshot);
         (false, true)
     }
 
@@ -1093,6 +1099,7 @@ impl<
         }
 
         let mut made_ready = false;
+        let mut removed_ready_head = false;
         let mut ready_by_class: HashMap<usize, FxHashSet<_>> = HashMap::new();
         let mut unmanaged_request_ids = HashSet::new();
         for cleanup in dirty {
@@ -1125,14 +1132,17 @@ impl<
             }
 
             self.tracked_admissions.remove(request_id);
+            let queue_class_index = tracked
+                .queue_class_index
+                .expect("queued admission must retain its physical class");
             if let Some(entry) = self
                 .pending
-                .remove_deferred(tracked.ticket.class_index, tracked.ticket.id)
+                .remove_deferred(queue_class_index, tracked.ticket.id)
             {
                 self.subtract_pending_counters(entry.class_index(), entry.snapshot());
             } else {
                 ready_by_class
-                    .entry(tracked.ticket.class_index)
+                    .entry(queue_class_index)
                     .or_default()
                     .insert(tracked.ticket.id);
             }
@@ -1142,61 +1152,56 @@ impl<
         // One heap rebuild per affected class keeps cancellation storms O(classes * queue),
         // while counters are released in the same actor turn as the lifecycle event.
         for (class_index, tickets) in ready_by_class {
-            let removed = self.pending.take_if_in_class(class_index, |queued| {
-                queued
-                    .admission
-                    .as_ref()
-                    .is_some_and(|admission| tickets.contains(&admission.ticket.id))
-            });
+            let (removed, class_head_removed) =
+                self.pending.take_if_in_class(class_index, |queued| {
+                    queued
+                        .admission
+                        .as_ref()
+                        .is_some_and(|admission| tickets.contains(&admission.ticket.id))
+                });
             debug_assert_eq!(removed.len(), tickets.len());
+            removed_ready_head |= class_head_removed;
             for entry in removed {
                 self.subtract_pending_counters(class_index, entry.snapshot());
             }
         }
         if !unmanaged_request_ids.is_empty() {
             for class_index in 0..self.profile.classes().len() {
-                let removed = self.pending.take_if_in_class(class_index, |queued| {
-                    queued
-                        .request
-                        .mode
-                        .tracked_request_id()
-                        .is_some_and(|request_id| unmanaged_request_ids.contains(request_id))
-                });
-                made_ready |= !removed.is_empty();
+                let (removed, class_head_removed) =
+                    self.pending.take_if_in_class(class_index, |queued| {
+                        queued
+                            .request
+                            .mode
+                            .tracked_request_id()
+                            .is_some_and(|request_id| unmanaged_request_ids.contains(request_id))
+                    });
+                removed_ready_head |= class_head_removed;
                 for entry in removed {
                     self.subtract_pending_counters(class_index, entry.snapshot());
                 }
             }
         }
-        made_ready
+        made_ready || (removed_ready_head && self.has_dispatchable_ready_head())
+    }
+
+    fn has_dispatchable_ready_head(&self) -> bool {
+        let active_tokens = self.slots.active_tokens(Instant::now());
+        let configs = self.workers_with_configs.borrow();
+        self.pending.any_ready_head(|_, class, queued| {
+            !Self::all_workers_prefill_busy_with(
+                &active_tokens,
+                &configs,
+                class,
+                queued.request.eligibility(),
+            )
+        })
     }
 
     fn handle_finished(&mut self, request_id: &str, outcome: RequestOutcome) -> bool {
         let Some(tracked) = self.tracked_admissions.remove(request_id) else {
             return false;
         };
-        if tracked.worker.is_none() {
-            if let Some(entry) = self
-                .pending
-                .remove_deferred(tracked.ticket.class_index, tracked.ticket.id)
-            {
-                self.subtract_pending_counters(entry.class_index(), entry.snapshot());
-            } else {
-                let removed = self
-                    .pending
-                    .take_if_in_class(tracked.ticket.class_index, |queued| {
-                        queued.request.mode.tracked_request_id() == Some(request_id)
-                    });
-                debug_assert_eq!(
-                    removed.len(),
-                    1,
-                    "pending admission must have one queue entry"
-                );
-                for entry in removed {
-                    self.subtract_pending_counters(entry.class_index(), entry.snapshot());
-                }
-            }
-        }
+        debug_assert!(tracked.worker.is_some());
         self.finish_admission(tracked.ticket, outcome)
     }
 
@@ -1255,17 +1260,45 @@ impl<
                                 let workers = self.workers_with_configs.borrow();
                                 Some((
                                     Self::snapshot_for_with(&queued.request, &workers),
+                                    queued
+                                        .enqueue_at
+                                        .duration_since(self.start_time)
+                                        .as_secs_f64(),
                                     queued.request.priority_jump,
                                 ))
                             } else {
                                 None
                             };
-                        Ok((effective_placement, replacement))
+                        let target_class_index = replacement.as_ref().map_or(
+                            class_action.class_index,
+                            |(snapshot, _, _)| {
+                                self.profile.resolve_class_index(
+                                    queued.request.policy_class.as_deref(),
+                                    snapshot.uncached_tokens,
+                                )
+                            },
+                        );
+                        let request_id =
+                            (target_class_index != class_action.class_index).then(|| {
+                                queued
+                                    .request
+                                    .mode
+                                    .tracked_request_id()
+                                    .expect("admitted request is tracked")
+                                    .to_owned()
+                            });
+                        Ok((
+                            effective_placement,
+                            target_class_index,
+                            replacement,
+                            request_id,
+                        ))
                     }
                 }
             };
 
-            let (effective_placement, replacement) = match prepared {
+            let (effective_placement, target_class_index, replacement, request_id) = match prepared
+            {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     let Some(entry) = self.pending.remove_deferred(class_action.class_index, id)
@@ -1286,19 +1319,30 @@ impl<
                 }
             };
 
-            let new_snapshot = replacement.map(|(snapshot, _)| snapshot);
+            let new_snapshot = replacement.map(|(snapshot, _, _)| snapshot);
             if let Some(old_snapshot) = self.pending.make_ready(
                 class_action.class_index,
+                target_class_index,
                 id,
                 effective_placement,
                 replacement,
             ) {
                 if let Some(new_snapshot) = new_snapshot {
-                    self.replace_pending_snapshot_counters(
-                        class_action.class_index,
-                        old_snapshot,
-                        new_snapshot,
-                    );
+                    if class_action.class_index == target_class_index {
+                        self.replace_pending_snapshot_counters(
+                            class_action.class_index,
+                            old_snapshot,
+                            new_snapshot,
+                        );
+                    } else {
+                        self.subtract_class_counters(class_action.class_index, old_snapshot);
+                        self.add_class_counters(target_class_index, new_snapshot);
+                        let tracked = self
+                            .tracked_admissions
+                            .get_mut(request_id.as_deref().expect("reclassified request ID"))
+                            .expect("reclassified admission must be tracked");
+                        tracked.queue_class_index = Some(target_class_index);
+                    }
                 }
                 made_ready = true;
             } else {
@@ -1353,7 +1397,7 @@ impl<
     }
 
     async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
-        if self.pending.pending_count() == 0 {
+        if !self.pending.has_ready() {
             return;
         }
 
@@ -1543,12 +1587,14 @@ impl<
                 let request_id = admission_key.expect("admitted request has a lifecycle key");
                 if let Some(tracked) = self.tracked_admissions.get_mut(&request_id) {
                     debug_assert_eq!(tracked.ticket, admission.ticket);
+                    tracked.queue_class_index = None;
                     tracked.worker = Some(selection.worker);
                 } else {
                     self.tracked_admissions.insert(
                         request_id,
                         TrackedAdmission {
                             ticket: admission.ticket,
+                            queue_class_index: None,
                             worker: Some(selection.worker),
                             dispatched: false,
                             generation: admission.generation,
@@ -3030,13 +3076,20 @@ policy_classes:
 default_policy_family: agents
 uncached_isl_buckets:
   - min_tokens: 0
-    bucket: all
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
 policy_classes:
-  - name: agents
+  - name: agents_cached
     policy_family: agents
-    cache_bucket: all
+    cache_bucket: cached
     queue_admission:
       type: session_aware
+    prefill_busy_threshold: 0
+    quantum: 1
+  - name: agents_uncached
+    policy_family: agents
+    cache_bucket: uncached
     prefill_busy_threshold: 0
     quantum: 1
 "#,
@@ -3044,7 +3097,7 @@ policy_classes:
         let worker = WorkerWithDpRank::new(0, 0);
         let (queue, slots) = make_queue_with_profile_and_admission_strategy(
             profile,
-            "agents",
+            "agents_cached",
             Box::new(ExactReadyGate(worker)),
             2,
         );
@@ -3061,6 +3114,8 @@ policy_classes:
         let lease = enqueue_with_lease(&queue, request).await;
 
         assert_eq!(queue.class_queue_stats(0).unwrap().pending_cached_tokens, 0);
+        assert_eq!(queue.class_queue_stats(0).unwrap().pending_count, 0);
+        assert_eq!(queue.class_queue_stats(1).unwrap().pending_count, 1);
         slots
             .free(&"family-exact-blocker".to_owned(), decay_now())
             .unwrap();
@@ -3103,6 +3158,73 @@ policy_classes:
 
         slots
             .free(&"exact-cost-blocker".to_owned(), decay_now())
+            .unwrap();
+        queue.update().await;
+        assert_eq!(response.await.unwrap().unwrap().best_worker, worker);
+        drop(lease);
+        queue.update().await;
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn deferred_exact_make_ready_reclassifies_physical_queue() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: agents
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
+policy_classes:
+  - name: agents_cached
+    policy_family: agents
+    cache_bucket: cached
+    queue_admission:
+      type: session_aware
+    prefill_busy_threshold: 0
+    quantum: 1
+  - name: agents_uncached
+    policy_family: agents
+    cache_bucket: uncached
+    prefill_busy_threshold: 0
+    quantum: 1
+"#,
+        );
+        let state = Arc::new(StdMutex::new(GateState::default()));
+        let worker = WorkerWithDpRank::new(0, 0);
+        let (queue, slots) = make_queue_with_profile_and_admission_strategy(
+            profile,
+            "agents_cached",
+            Box::new(ReconcileGate {
+                state: Arc::clone(&state),
+            }),
+            2,
+        );
+        let (mut blocker, blocker_response) = make_request("reclassify-blocker", 64);
+        blocker.pinned_worker = Some(worker);
+        queue.enqueue(blocker).await;
+        blocker_response.await.unwrap().unwrap();
+
+        let (mut request, response) = make_admission_request("reclassify-deferred", 64);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(WorkerWithDpRank::new(1, 0), 64);
+        let lease = enqueue_with_lease(&queue, request).await;
+        assert_eq!(queue.class_queue_stats(0).unwrap().pending_count, 1);
+        assert_eq!(
+            queue.class_queue_stats(0).unwrap().pending_cached_tokens,
+            64
+        );
+
+        queue.reconcile().await;
+        assert_eq!(queue.class_queue_stats(0).unwrap().pending_count, 0);
+        assert_eq!(queue.class_queue_stats(1).unwrap().pending_count, 1);
+        assert_eq!(queue.class_queue_stats(1).unwrap().pending_cached_tokens, 0);
+
+        slots
+            .free(&"reclassify-blocker".to_owned(), decay_now())
             .unwrap();
         queue.update().await;
         assert_eq!(response.await.unwrap().unwrap().best_worker, worker);
@@ -3159,6 +3281,45 @@ policy_classes:
             .collect()
         );
         slots.free(&"blocker".to_owned(), decay_now()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_ready_head_redrives_newly_exposed_request() {
+        let state = Arc::new(StdMutex::new(GateState::default()));
+        let (queue, slots) =
+            make_queue_with_admission_strategy_and_workers(Box::new(ReadyGate { state }), 2);
+        let worker_0 = WorkerWithDpRank::new(0, 0);
+        let (mut blocker, blocker_response) = make_request("redrive-blocker", 64);
+        blocker.pinned_worker = Some(worker_0);
+        queue.enqueue(blocker).await;
+        blocker_response.await.unwrap().unwrap();
+
+        let (mut cancelled, cancelled_response) = make_admission_request("redrive-cancelled", 64);
+        cancelled.policy_class = Some("agents".to_owned());
+        cancelled.allowed_worker_ids = Some(HashSet::from([0]));
+        let cancelled_lease = enqueue_with_lease(&queue, cancelled).await;
+
+        let (mut exposed, exposed_response) = make_admission_request("redrive-exposed", 64);
+        exposed.policy_class = Some("agents".to_owned());
+        exposed.allowed_worker_ids = Some(HashSet::from([1]));
+        let exposed_lease = enqueue_with_lease(&queue, exposed).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        drop(cancelled_response);
+        drop(cancelled_lease);
+        let selected = tokio::time::timeout(Duration::from_secs(1), exposed_response)
+            .await
+            .expect("cancellation did not redrive the exposed request")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.best_worker, WorkerWithDpRank::new(1, 0));
+
+        drop(exposed_lease);
+        queue.update().await;
+        slots
+            .free(&"redrive-blocker".to_owned(), decay_now())
+            .unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test]

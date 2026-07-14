@@ -362,10 +362,14 @@ impl KvPushRouter {
                         };
                         failed |= response_item_failed(&item);
                         guard.on_item(&item).await;
-                        if !failed && response_item_completed(&item) {
+                        let completed_terminal = !failed && response_item_completed(&item);
+                        if completed_terminal {
                             guard.mark_completed_terminal();
                         }
                         yield item;
+                        if completed_terminal {
+                            break true;
+                        }
                     }
                 }
             };

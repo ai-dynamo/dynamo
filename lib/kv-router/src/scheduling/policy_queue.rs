@@ -460,6 +460,27 @@ impl<T> PolicyQueue<T> {
         self.pending_count
     }
 
+    pub(crate) fn has_ready(&self) -> bool {
+        self.classes.iter().any(|class| !class.ready_is_empty())
+    }
+
+    pub(crate) fn any_ready_head(
+        &self,
+        mut predicate: impl FnMut(usize, &PolicyClassConfig, &T) -> bool,
+    ) -> bool {
+        self.classes.iter().enumerate().any(|(class_index, class)| {
+            class
+                .pending
+                .peek()
+                .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
+                || class.ready_by_worker.values().any(|ready| {
+                    ready
+                        .peek()
+                        .is_some_and(|entry| predicate(class_index, &class.config, entry.payload()))
+                })
+        })
+    }
+
     pub fn class_count(&self) -> usize {
         self.classes.len()
     }
@@ -590,25 +611,52 @@ impl<T> PolicyQueue<T> {
 
     pub(crate) fn make_ready(
         &mut self,
-        class_index: usize,
+        source_class_index: usize,
+        target_class_index: usize,
         admission_id: AdmissionId,
         placement: WorkerPlacement,
-        replacement_snapshot: Option<(QueueSnapshot, f64)>,
+        replacement_snapshot: Option<(QueueSnapshot, f64, f64)>,
     ) -> Option<QueueSnapshot> {
-        let class = &mut self.classes[class_index];
-        let mut entry = class.deferred.remove(&admission_id)?;
-        let old_snapshot = entry.snapshot;
-        if let Some((snapshot, priority_jump)) = replacement_snapshot {
-            subtract_stats(&mut class.stats, old_snapshot);
-            add_stats(&mut class.stats, snapshot);
-            if class.config.queue_policy == RouterQueuePolicy::Wspt {
-                entry.priority.policy_score = OrderedFloat(
-                    (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64,
-                );
+        if source_class_index == target_class_index {
+            let class = &mut self.classes[source_class_index];
+            let mut entry = class.deferred.remove(&admission_id)?;
+            let old_snapshot = entry.snapshot;
+            if let Some((snapshot, arrival_offset_secs, priority_jump)) = replacement_snapshot {
+                subtract_stats(&mut class.stats, old_snapshot);
+                add_stats(&mut class.stats, snapshot);
+                entry.priority.policy_score = OrderedFloat(queue_policy_score(
+                    class.config.queue_policy,
+                    snapshot,
+                    arrival_offset_secs,
+                    priority_jump,
+                ));
+                entry.snapshot = snapshot;
             }
-            entry.snapshot = snapshot;
-        };
-        class.push_ready(placement, entry);
+            class.push_ready(placement, entry);
+            return Some(old_snapshot);
+        }
+
+        let source = &mut self.classes[source_class_index];
+        let mut entry = source.deferred.remove(&admission_id)?;
+        let old_snapshot = entry.snapshot;
+        subtract_stats(&mut source.stats, old_snapshot);
+        if source.ready_is_empty() {
+            source.deficit = 0;
+        }
+
+        let (snapshot, arrival_offset_secs, priority_jump) = replacement_snapshot
+            .expect("cross-class exact placement must replace the queue snapshot");
+        entry.class_index = target_class_index;
+        entry.snapshot = snapshot;
+        let target = &mut self.classes[target_class_index];
+        entry.priority.policy_score = OrderedFloat(queue_policy_score(
+            target.config.queue_policy,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+        ));
+        add_stats(&mut target.stats, snapshot);
+        target.push_ready(placement, entry);
         Some(old_snapshot)
     }
 
@@ -644,7 +692,7 @@ impl<T> PolicyQueue<T> {
     ) -> Vec<PolicyQueueEntry<T>> {
         let mut removed = Vec::new();
         for class_index in 0..self.classes.len() {
-            removed.extend(self.take_if_in_class(class_index, &mut predicate));
+            removed.extend(self.take_if_in_class(class_index, &mut predicate).0);
         }
         removed
     }
@@ -653,7 +701,7 @@ impl<T> PolicyQueue<T> {
         &mut self,
         class_index: usize,
         mut predicate: impl FnMut(&T) -> bool,
-    ) -> Vec<PolicyQueueEntry<T>> {
+    ) -> (Vec<PolicyQueueEntry<T>>, bool) {
         let class = &mut self.classes[class_index];
         let remove_sequences: FxHashSet<u64> = class
             .entries()
@@ -661,11 +709,21 @@ impl<T> PolicyQueue<T> {
             .map(|entry| entry.enqueue_seq)
             .collect();
         if remove_sequences.is_empty() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
 
+        let removed_ready_head = class
+            .pending
+            .peek()
+            .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
+            || class.ready_by_worker.values().any(|ready| {
+                ready
+                    .peek()
+                    .is_some_and(|entry| remove_sequences.contains(&entry.enqueue_seq))
+            });
+
         let mut removed = Vec::new();
-        let mut retained = BinaryHeap::with_capacity(class.pending.len());
+        let mut retained = Vec::with_capacity(class.pending.len());
         for entry in class.pending.drain() {
             if remove_sequences.contains(&entry.enqueue_seq) {
                 removed.push(entry);
@@ -673,7 +731,7 @@ impl<T> PolicyQueue<T> {
                 retained.push(entry);
             }
         }
-        class.pending = retained;
+        class.pending = BinaryHeap::from(retained);
 
         removed.extend(
             class
@@ -683,7 +741,7 @@ impl<T> PolicyQueue<T> {
         );
 
         class.ready_by_worker.retain(|_, ready| {
-            let mut retained = BinaryHeap::with_capacity(ready.len());
+            let mut retained = Vec::with_capacity(ready.len());
             for entry in ready.drain() {
                 if remove_sequences.contains(&entry.enqueue_seq) {
                     removed.push(entry);
@@ -691,7 +749,7 @@ impl<T> PolicyQueue<T> {
                     retained.push(entry);
                 }
             }
-            *ready = retained;
+            *ready = BinaryHeap::from(retained);
             !ready.is_empty()
         });
         class.rebuild_worker_heads();
@@ -703,7 +761,7 @@ impl<T> PolicyQueue<T> {
         if class.ready_is_empty() {
             class.deficit = 0;
         }
-        removed
+        (removed, removed_ready_head)
     }
 
     /// Runs one DRR ring pass over dispatchable class heads. If no head has
@@ -849,13 +907,8 @@ fn make_entry<T>(
     enqueue_seq: u64,
     payload: T,
 ) -> PolicyQueueEntry<T> {
-    let policy_score = match queue_policy {
-        RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
-        RouterQueuePolicy::Wspt => {
-            (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
-        }
-        RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
-    };
+    let policy_score =
+        queue_policy_score(queue_policy, snapshot, arrival_offset_secs, priority_jump);
     PolicyQueueEntry {
         class_index,
         priority: QueuePriority {
@@ -865,6 +918,21 @@ fn make_entry<T>(
         enqueue_seq,
         snapshot,
         payload,
+    }
+}
+
+fn queue_policy_score(
+    queue_policy: RouterQueuePolicy,
+    snapshot: QueueSnapshot,
+    arrival_offset_secs: f64,
+    priority_jump: f64,
+) -> f64 {
+    match queue_policy {
+        RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
+        RouterQueuePolicy::Wspt => {
+            (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
+        }
+        RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
     }
 }
 
@@ -985,7 +1053,7 @@ policy_classes:
 
         assert!(
             queue
-                .make_ready(0, deferred_id, WorkerPlacement::Any, None)
+                .make_ready(0, 0, deferred_id, WorkerPlacement::Any, None)
                 .is_some()
         );
         assert_eq!(
@@ -1043,9 +1111,10 @@ policy_classes:
         queue
             .make_ready(
                 0,
+                0,
                 deferred_id,
                 WorkerPlacement::Any,
-                Some((QueueSnapshot::new(100, 0), 0.0)),
+                Some((QueueSnapshot::new(100, 0), 0.0, 0.0)),
             )
             .unwrap();
 
@@ -1053,6 +1122,85 @@ policy_classes:
             queue.pop_next(|_, _, _| true).unwrap().into_payload(),
             "ready"
         );
+    }
+
+    #[test]
+    fn exact_make_ready_moves_entry_and_accounting_to_target_class() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: agents
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: cached
+  - min_tokens: 32
+    bucket: uncached
+policy_classes:
+  - name: agents_cached
+    policy_family: agents
+    cache_bucket: cached
+    queue_policy: fcfs
+    queue_admission:
+      type: session_aware
+    quantum: 1000
+  - name: agents_uncached
+    policy_family: agents
+    cache_bucket: uncached
+    queue_policy: wspt
+    quantum: 1000
+"#,
+        ));
+        let deferred_id = AdmissionId::new(1);
+        queue
+            .enqueue_deferred(
+                0,
+                1,
+                QueueSnapshot::new(100, 99),
+                0.0,
+                0.0,
+                0,
+                deferred_id,
+                "migrated",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                1,
+                1,
+                QueueSnapshot::new(10, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "ready",
+            )
+            .unwrap();
+
+        queue
+            .make_ready(
+                0,
+                1,
+                deferred_id,
+                WorkerPlacement::Any,
+                Some((QueueSnapshot::new(100, 0), 0.0, 0.0)),
+            )
+            .unwrap();
+
+        assert_eq!(queue.class_stats(0), PolicyQueueStats::default());
+        assert_eq!(
+            queue.class_stats(1),
+            PolicyQueueStats {
+                requests: 2,
+                raw_isl_tokens: 110,
+                cached_tokens: 0,
+            }
+        );
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "ready"
+        );
+        let migrated = queue.pop_next(|_, _, _| true).unwrap();
+        assert_eq!(migrated.class_index(), 1);
+        assert_eq!(migrated.into_payload(), "migrated");
     }
 
     #[test]
