@@ -4,11 +4,11 @@
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use anyhow::Result;
+pub use dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
 use dynamo_kv_router::{
     KvSchedulerError, PrefillLoadEstimator, SharedKvCache,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{KvRouterError, RoutingDecisionHashes},
-    protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, DpRank, LocalBlockHash, PrefillLoadHint, RouterEvent,
         RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,

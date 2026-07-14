@@ -18,7 +18,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::backend::ExecutionContext;
-use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
+use crate::kv_router::{
+    KV_EVENT_SUBJECT,
+    publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher},
+};
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use anyhow::{Context, Result, bail};
@@ -40,6 +43,7 @@ use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::{
     component::Component,
     engine::AsyncEngineContextProvider,
@@ -510,6 +514,46 @@ impl MockEngine {
         let mut senders = Vec::with_capacity(args.dp_size as usize);
         let mut command_senders = Vec::with_capacity(args.dp_size as usize);
         let mut handoff_session_permits = Vec::with_capacity(args.dp_size as usize);
+        let shared_event_publisher = match component {
+            Some(comp) if args.enable_local_indexer => {
+                match EventPublisher::for_component(comp, KV_EVENT_SUBJECT).await {
+                    Ok(publisher) => Some(Arc::new(publisher)),
+                    Err(e) => {
+                        tracing::error!("Failed to create shared KV event publisher: {e}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let build_kv_event_publisher = |comp: &Component,
+                                        source_config: Option<KvEventSourceConfig>,
+                                        dp_rank: u32|
+         -> Result<KvEventPublisher> {
+            if args.enable_local_indexer {
+                let event_publisher = shared_event_publisher
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("shared KV event publisher unavailable"))?;
+                KvEventPublisher::new_with_shared_event_publisher(
+                    comp.clone(),
+                    args.block_size as u32,
+                    source_config,
+                    args.enable_local_indexer,
+                    dp_rank,
+                    None,
+                    event_publisher,
+                )
+            } else {
+                KvEventPublisher::new_with_local_indexer(
+                    comp.clone(),
+                    args.block_size as u32,
+                    source_config,
+                    args.enable_local_indexer,
+                    dp_rank,
+                    None,
+                )
+            }
+        };
 
         for (dp_rank, fpm_publisher) in (0..args.dp_size).zip(fpm_sinks) {
             let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<OutputSignal>>();
@@ -535,14 +579,7 @@ impl MockEngine {
                                 topic: String::new(),
                                 image_token_id: None,
                             });
-                            match KvEventPublisher::new_with_local_indexer(
-                                comp.clone(),
-                                args.block_size as u32,
-                                source_config,
-                                args.enable_local_indexer,
-                                dp_rank,
-                                None,
-                            ) {
+                            match build_kv_event_publisher(comp, source_config, dp_rank) {
                                 Ok(publisher) => (
                                     KvEventPublishers::new(
                                         None,
@@ -566,31 +603,22 @@ impl MockEngine {
                         }
                     }
                 }
-                Some(comp) => {
-                    match KvEventPublisher::new_with_local_indexer(
-                        comp.clone(),
-                        args.block_size as u32,
-                        None,
-                        args.enable_local_indexer,
-                        dp_rank,
-                        None,
-                    ) {
-                        Ok(publisher) => (
-                            KvEventPublishers::new(
-                                Some(Arc::new(KvEventSinkAdapter(publisher))
-                                    as Arc<dyn KvCacheEventSink>),
-                                None,
-                            ),
+                Some(comp) => match build_kv_event_publisher(comp, None, dp_rank) {
+                    Ok(publisher) => (
+                        KvEventPublishers::new(
+                            Some(Arc::new(KvEventSinkAdapter(publisher))
+                                as Arc<dyn KvCacheEventSink>),
                             None,
                         ),
-                        Err(e) => {
-                            tracing::error!(
-                                "Failed to create KV event publisher for dp_rank {dp_rank}: {e}"
-                            );
-                            (KvEventPublishers::default(), None)
-                        }
+                        None,
+                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to create KV event publisher for dp_rank {dp_rank}: {e}"
+                        );
+                        (KvEventPublishers::default(), None)
                     }
-                }
+                },
                 None => (KvEventPublishers::default(), None),
             };
 
@@ -636,7 +664,7 @@ impl MockEngine {
 
             self.scheduler_tasks.spawn(async move {
                 // Keep the relay publisher alive for the lifetime of this task.
-                // Dropping it would cancel its background ZMQ→NATS relay tasks.
+                // Dropping it would cancel its background ZMQ/event-plane relay tasks.
                 let _relay_publisher = relay_publisher;
 
                 loop {
