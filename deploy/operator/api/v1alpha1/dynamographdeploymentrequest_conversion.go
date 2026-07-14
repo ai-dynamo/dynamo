@@ -17,10 +17,8 @@
 
 // Conversion between v1alpha1 and v1beta1 DynamoGraphDeploymentRequest (DGDR).
 //
-// v1beta1 is the hub. New writes use sparse nvidia.com/dgdr-spec and
-// nvidia.com/dgdr-status annotations exclusively. Read-only compatibility for
-// legacy Dynamo 1.0/1.1 annotations is isolated in
-// dynamographdeploymentrequest_legacy_read.go.
+// v1beta1 is the hub. Sparse nvidia.com/dgdr-spec and nvidia.com/dgdr-status
+// annotations preserve fields that the target version cannot represent.
 //
 // Live source fields are authoritative. Preservation annotations are old-value
 // caches only for fields the live source version cannot represent.
@@ -129,7 +127,6 @@ func restoreDGDRHubAnnotations(obj metav1.Object) (*v1beta1.DynamoGraphDeploymen
 			restoredStatus = &status
 		}
 	}
-	restoredStatus = restoreDGDRLegacyHubStatus(obj, restoredStatus)
 	return restoredSpec, restoredStatus
 }
 
@@ -141,20 +138,9 @@ func restoreDGDRSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentReque
 			restoredSpec = &spec
 		}
 	}
-	if restoredSpec == nil {
-		if spec := restoreDGDRLegacySpokeSpec(obj); !dgdrAlphaSpecSaveIsZero(spec) {
-			restoredSpec = spec
-		}
-	}
 	if raw, ok := getAnnFromObj(obj, annDGDRStatus); ok && raw != "" {
 		if status, ok := restoreDGDRSpokeStatus(raw); ok {
 			restoredStatus = &status
-		}
-	}
-	if restoredStatus == nil {
-		status := restoreDGDRLegacySpokeStatus(obj)
-		if !dgdrAlphaStatusSaveIsZero(status) {
-			restoredStatus = status
 		}
 	}
 	return restoredSpec, restoredStatus
@@ -164,7 +150,6 @@ func scrubDGDRInternalAnnotations(obj metav1.Object) {
 	for _, key := range []string{annDGDRSpec, annDGDRStatus} {
 		delAnnFromObj(obj, key)
 	}
-	scrubDGDRLegacyAnnotations(obj)
 }
 
 func saveDGDRSpokeAnnotations(specSave *DynamoGraphDeploymentRequestSpec, statusSave *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequest) error {
@@ -1081,21 +1066,6 @@ func dgdrAlphaRestoredStateMatchesLiveDGD(state DGDRState, deployment *Deploymen
 		return dgdName == ""
 	}
 	return deployment.Name == dgdName
-}
-
-func isValidDGDRRequestState(state DGDRState) bool {
-	switch state {
-	case DGDRStateInitializing,
-		DGDRStatePending,
-		DGDRStateProfiling,
-		DGDRStateDeploying,
-		DGDRStateReady,
-		DGDRStateDeploymentDeleted,
-		DGDRStateFailed:
-		return true
-	default:
-		return false
-	}
 }
 
 // dgdrStateToPhase maps v1alpha1 state strings to v1beta1 DGDRPhase.

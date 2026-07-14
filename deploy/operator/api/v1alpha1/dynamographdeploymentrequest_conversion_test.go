@@ -545,22 +545,6 @@ func TestStripDGDRTypedProfilingConfig(t *testing.T) {
 	}
 }
 
-func assertProfilingConfigBlobHas(t *testing.T, raw *apiextensionsv1.JSON, want map[string]any) {
-	t.Helper()
-	if raw == nil {
-		t.Fatal("profiling config is nil")
-	}
-	var got map[string]any
-	if err := json.Unmarshal(raw.Raw, &got); err != nil {
-		t.Fatalf("unmarshal profiling config: %v", err)
-	}
-	for key, wantValue := range want {
-		if diff := cmp.Diff(wantValue, got[key]); diff != "" {
-			t.Fatalf("profiling config %q mismatch (-want +got):\n%s", key, diff)
-		}
-	}
-}
-
 func mustDGDRJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	data, err := json.Marshal(v)
