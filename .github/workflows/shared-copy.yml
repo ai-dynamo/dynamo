@@ -24,6 +24,11 @@ on:
         required: false
         type: string
         default: ''
+      image_tag_suffix:
+        description: 'Suffix appended to the SHA-keyed image tag. Empty preserves existing tags.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -66,6 +71,7 @@ jobs:
               IMAGE_TAG="${IMAGE_TAG}-cuda${CUDA_MAJOR}"
             fi
           fi
+          IMAGE_TAG="${IMAGE_TAG}${{ inputs.image_tag_suffix }}"
 
           echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
       - name: Copy image to target registry
