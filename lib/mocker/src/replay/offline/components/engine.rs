@@ -25,6 +25,8 @@ pub(in crate::replay::offline) struct EngineComponent {
     pass_mode: EnginePassMode,
     /// Workers keyed by stable ID (monotonic, never reused).
     workers: BTreeMap<usize, OfflineWorkerState>,
+    /// Ready workers, ordered by the same stable ID used by `workers`.
+    ready_workers: BTreeSet<usize>,
     /// Counter for generating the next stable worker ID.
     next_id: usize,
     /// Workers marked for removal — skipped by round-robin, removed when drained.
@@ -45,10 +47,15 @@ impl EngineComponent {
     ) -> Self {
         let count = workers.len();
         let map: BTreeMap<usize, OfflineWorkerState> = workers.into_iter().enumerate().collect();
+        let ready_workers = map
+            .iter()
+            .filter_map(|(&worker_id, worker)| worker.is_ready().then_some(worker_id))
+            .collect();
         Self {
             stage,
             pass_mode,
             workers: map,
+            ready_workers,
             next_id: count,
             pending_removal: BTreeSet::new(),
             pending_startup: BTreeSet::new(),
@@ -67,12 +74,53 @@ impl EngineComponent {
         self.capture_kv_events = capture_kv_events;
     }
 
+    fn refresh_ready(&mut self, worker_id: usize) {
+        let is_ready = self
+            .workers
+            .get(&worker_id)
+            .is_some_and(OfflineWorkerState::is_ready);
+        if is_ready {
+            self.ready_workers.insert(worker_id);
+        } else {
+            self.ready_workers.remove(&worker_id);
+        }
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.ready_workers.contains(&worker_id),
+            is_ready,
+            "offline replay ready-worker index diverged for worker {worker_id}"
+        );
+        #[cfg(test)]
+        self.assert_ready_index();
+    }
+
+    #[cfg(test)]
+    fn assert_ready_index(&self) {
+        assert!(
+            self.workers.iter().all(
+                |(&worker_id, worker)| self.ready_workers.contains(&worker_id) == worker.is_ready()
+            ),
+            "offline replay ready-worker index diverged from worker state"
+        );
+        assert!(
+            self.ready_workers
+                .iter()
+                .all(|worker_id| self.workers.contains_key(worker_id)),
+            "offline replay ready-worker index contains an unknown worker"
+        );
+    }
+
+    pub(in crate::replay::offline) fn has_ready(&self) -> bool {
+        !self.ready_workers.is_empty()
+    }
+
     /// Add a new worker, returning its stable ID.
     pub(in crate::replay::offline) fn add_worker(&mut self) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         let worker = OfflineWorkerState::new(id, self.args.clone(), self.capture_kv_events);
         self.workers.insert(id, worker);
+        self.refresh_ready(id);
         id
     }
 
@@ -101,7 +149,10 @@ impl EngineComponent {
         });
         for &id in &removed {
             self.workers.remove(&id);
+            self.ready_workers.remove(&id);
         }
+        #[cfg(test)]
+        self.assert_ready_index();
         removed
     }
 
@@ -147,6 +198,7 @@ impl EngineComponent {
             for &id in &to_cancel {
                 self.pending_startup.remove(&id);
                 self.workers.remove(&id);
+                self.ready_workers.remove(&id);
             }
 
             // Mark active workers for removal if more excess remains.
@@ -190,7 +242,10 @@ impl EngineComponent {
     /// was actually pending startup (and is now active), `false` if the worker
     /// was already cancelled or unknown (stale event).
     pub(in crate::replay::offline) fn mark_worker_ready(&mut self, worker_id: usize) -> bool {
-        self.pending_startup.remove(&worker_id) && self.workers.contains_key(&worker_id)
+        let marked_ready =
+            self.pending_startup.remove(&worker_id) && self.workers.contains_key(&worker_id);
+        self.refresh_ready(worker_id);
+        marked_ready
     }
 
     pub(in crate::replay::offline) fn dispatch(
@@ -203,6 +258,7 @@ impl EngineComponent {
             .get_mut(&worker_id)
             .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
         worker.receive_request(request);
+        self.refresh_ready(worker_id);
         Ok(())
     }
 
@@ -211,11 +267,13 @@ impl EngineComponent {
         worker_id: usize,
         command: SchedulerCommand,
     ) -> anyhow::Result<SchedulerCommandEffects> {
-        let worker = self
+        let result = self
             .workers
             .get_mut(&worker_id)
-            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?;
-        worker.apply_command(command)
+            .ok_or_else(|| anyhow::anyhow!("offline replay selected unknown worker {worker_id}"))?
+            .apply_command(command);
+        self.refresh_ready(worker_id);
+        result
     }
 
     pub(in crate::replay::offline) fn worker_is_busy(
@@ -234,16 +292,29 @@ impl EngineComponent {
         now_ms: f64,
         mut collector: Option<&mut TraceCollector>,
     ) -> anyhow::Result<EngineEffects> {
-        for (&worker_id, worker) in self.workers.iter_mut() {
-            if !worker.is_ready() {
+        if self.pass_mode == EnginePassMode::Visible && collector.is_none() && self.has_ready() {
+            bail!("offline replay visible engine pass requires a collector");
+        }
+
+        // Effect-free zero-duration passes must not prevent a later ready
+        // worker from running, but retrying one immediately would tight-spin.
+        // Withhold them for this attempt and restore them before returning.
+        let mut stalled_workers = Vec::new();
+        while let Some(worker_id) = self.ready_workers.pop_first() {
+            let Some(worker) = self.workers.get_mut(&worker_id) else {
+                debug_assert!(
+                    false,
+                    "ready-worker index referenced unknown worker {worker_id}"
+                );
                 continue;
-            }
+            };
+            debug_assert!(worker.is_ready());
 
             let executed = match self.pass_mode {
                 EnginePassMode::Visible => {
-                    let Some(collector) = collector.as_deref_mut() else {
-                        bail!("offline replay visible engine pass requires a collector");
-                    };
+                    let collector = collector
+                        .as_deref_mut()
+                        .expect("visible pass collector checked before ready-worker selection");
                     worker.execute_pass(collector, now_ms)
                 }
                 EnginePassMode::Hidden => worker.execute_hidden_pass(now_ms),
@@ -294,9 +365,16 @@ impl EngineComponent {
                         .iter()
                         .any(|(_, snapshot)| fpm_has_scheduled_work(snapshot));
                 if !made_progress {
+                    if worker.is_ready() {
+                        stalled_workers.push(worker_id);
+                    }
                     continue;
                 }
                 effects.immediate_completions.push(payload);
+                for stalled_id in stalled_workers {
+                    self.ready_workers.insert(stalled_id);
+                }
+                self.refresh_ready(worker_id);
                 return Ok(effects);
             }
 
@@ -307,9 +385,18 @@ impl EngineComponent {
                     at_ms: executed.end_ms,
                     payload,
                 });
+            for stalled_id in stalled_workers {
+                self.ready_workers.insert(stalled_id);
+            }
+            self.refresh_ready(worker_id);
             return Ok(effects);
         }
 
+        for worker_id in stalled_workers {
+            self.ready_workers.insert(worker_id);
+        }
+        #[cfg(test)]
+        self.assert_ready_index();
         Ok(EngineEffects::default())
     }
 
@@ -324,11 +411,9 @@ impl EngineComponent {
                 payload.stage
             );
         }
-        let worker = self.workers.get_mut(&payload.worker_idx).ok_or_else(|| {
-            anyhow::anyhow!(
-                "offline replay completion for unknown worker {}",
-                payload.worker_idx
-            )
+        let worker_id = payload.worker_idx;
+        let worker = self.workers.get_mut(&worker_id).ok_or_else(|| {
+            anyhow::anyhow!("offline replay completion for unknown worker {}", worker_id)
         })?;
         worker.mark_idle();
         worker.mark_completed(payload.completed_requests);
@@ -337,6 +422,7 @@ impl EngineComponent {
             .lifecycle_events
             .extend(worker.retry_pending_destinations());
         payload.kv_events.extend(worker.drain_kv_events());
+        self.refresh_ready(worker_id);
         Ok(payload)
     }
 
@@ -372,18 +458,44 @@ impl EngineComponent {
             kv_events: Vec::new(),
             lifecycle_events: Vec::new(),
         };
-        for worker in self.workers.values_mut() {
+        let (workers, ready_workers) = (&mut self.workers, &mut self.ready_workers);
+        for (&worker_id, worker) in workers.iter_mut() {
             let worker_effects = if worker.is_busy() {
                 worker.tick_offload_transport_only(now_ms)
             } else {
                 worker.tick_offload_only(now_ms)
             };
+            if worker.is_ready() {
+                ready_workers.insert(worker_id);
+            } else {
+                ready_workers.remove(&worker_id);
+            }
             effects.kv_events.extend(worker_effects.kv_events);
             effects
                 .lifecycle_events
                 .extend(worker_effects.lifecycle_events);
         }
+        #[cfg(test)]
+        self.assert_ready_index();
         effects
+    }
+
+    #[cfg(all(test, feature = "kvbm-offload"))]
+    fn mark_worker_idle_for_test(&mut self, worker_id: usize) {
+        self.workers
+            .get_mut(&worker_id)
+            .expect("test worker must exist")
+            .mark_idle();
+        self.refresh_ready(worker_id);
+    }
+
+    #[cfg(all(test, feature = "kvbm-offload"))]
+    fn mark_worker_busy_for_test(&mut self, worker_id: usize) {
+        self.workers
+            .get_mut(&worker_id)
+            .expect("test worker must exist")
+            .mark_busy();
+        self.refresh_ready(worker_id);
     }
 
     #[cfg(test)]
@@ -432,6 +544,88 @@ mod tests {
         }
         assert_eq!(effects.scheduled_completions.len(), 1);
         effects.scheduled_completions.pop().unwrap().payload
+    }
+
+    #[test]
+    fn ready_worker_set_takes_stable_lowest_id_across_holes() {
+        let mut ready = BTreeSet::new();
+        assert!(ready.is_empty());
+        assert!(ready.insert(130));
+        assert!(ready.insert(64));
+        assert!(ready.insert(3));
+        assert!(!ready.insert(64));
+        assert!(ready.contains(&130));
+        assert!(ready.remove(&64));
+        assert!(!ready.remove(&64));
+        assert_eq!(ready.pop_first(), Some(3));
+        assert_eq!(ready.pop_first(), Some(130));
+        assert_eq!(ready.pop_first(), None);
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn ready_index_preserves_worker_order() {
+        let mut engine = engine_with_startup(2, None);
+        for worker_id in 0..2 {
+            engine
+                .dispatch(
+                    worker_id,
+                    DirectRequest {
+                        tokens: vec![worker_id as u32 + 1; 4],
+                        max_output_tokens: 1,
+                        uuid: Some(Uuid::from_u128(worker_id as u128 + 1)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let mut collector = TraceCollector::default();
+        let first = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        assert_eq!(take_only_completion(first).worker_idx, 0);
+        let second = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        assert_eq!(take_only_completion(second).worker_idx, 1);
+    }
+
+    #[test]
+    fn stalled_worker_does_not_hide_later_productive_worker() {
+        let stalled_args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(16)
+            .max_num_batched_tokens(Some(4))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(false)
+            .worker_type(WorkerType::Decode)
+            .build()
+            .unwrap();
+        let productive_args = MockEngineArgs {
+            enable_chunked_prefill: true,
+            ..stalled_args.clone()
+        };
+        let mut engine = EngineComponent::new(
+            SimulationWorkerStage::Decode,
+            EnginePassMode::Visible,
+            vec![
+                OfflineWorkerState::new(0, stalled_args, false),
+                OfflineWorkerState::new(1, productive_args, false),
+            ],
+        );
+        for worker_id in 0..2 {
+            engine
+                .dispatch(
+                    worker_id,
+                    DirectRequest {
+                        tokens: vec![1; 8],
+                        max_output_tokens: 1,
+                        uuid: Some(Uuid::from_u128(worker_id as u128 + 10)),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let mut collector = TraceCollector::default();
+        let effects = engine.drive_ready(0.0, Some(&mut collector)).unwrap();
+        assert_eq!(take_only_completion(effects).worker_idx, 1);
+        assert!(engine.ready_workers.contains(&0));
     }
 
     fn decode_engine_with_chunking(enable_chunked_prefill: bool) -> EngineComponent {
@@ -814,7 +1008,7 @@ mod tests {
         });
         // Model a reservation attempt at the t=0 boundary, before the GPU
         // compute interval becomes externally busy.
-        engine.workers.get_mut(&0).unwrap().mark_idle();
+        engine.mark_worker_idle_for_test(0);
 
         let handoff_id = HandoffId::from(Uuid::from_u128(102));
         let reserve = engine
@@ -837,7 +1031,7 @@ mod tests {
             .expect("reservation eviction should start G1 to G2 DMA");
         assert!((deadline - 20.0).abs() < 0.01);
 
-        engine.workers.get_mut(&0).unwrap().mark_busy();
+        engine.mark_worker_busy_for_test(0);
         assert_eq!(engine.earliest_offload_deadline(), Some(deadline));
         let transport = engine.tick_offload_engines(deadline);
         assert!(transport.lifecycle_events.is_empty());

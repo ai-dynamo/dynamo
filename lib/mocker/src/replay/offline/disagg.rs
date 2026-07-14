@@ -1537,15 +1537,15 @@ impl DisaggRuntime {
 
     /// Drain transfer completions scheduled for the current logical timestamp.
     fn apply_transfer_completions(&mut self) -> Result<bool> {
-        let mut changed = false;
+        let mut consumed = false;
         while let Some(handoff_id) = pop_ready_transfer_complete(&mut self.events, self.now_ms) {
+            consumed = true;
             let Some(uuid) = self.requests_by_handoff.get(&handoff_id).copied() else {
                 continue;
             };
             self.apply_handoff_fact(uuid, HandoffFact::TransferCompleted { handoff_id })?;
-            changed = true;
         }
-        Ok(changed)
+        Ok(consumed)
     }
 
     /// Release every admission made ready by the shared admission queue.
@@ -1576,30 +1576,32 @@ impl DisaggRuntime {
 
     /// Start passes on every idle prefill worker that can make progress at the current timestamp.
     fn drive_prefill_workers(&mut self) -> Result<bool> {
-        let mut changed = false;
-        loop {
+        let mut requires_restart = false;
+        while self.prefill_engine.has_ready() {
             let effects = self.prefill_engine.drive_ready(self.now_ms, None)?;
             if effects.is_empty() {
-                return Ok(changed);
+                return Ok(requires_restart);
             }
-            changed = true;
+            requires_restart |= !effects.immediate_completions.is_empty();
             self.handle_prefill_engine_effects(effects)?;
         }
+        Ok(requires_restart)
     }
 
     /// Start passes on every idle decode worker that can make progress at the current timestamp.
     fn drive_decode_workers(&mut self) -> Result<bool> {
-        let mut changed = false;
-        loop {
+        let mut requires_restart = false;
+        while self.decode_engine.has_ready() {
             let effects = self
                 .decode_engine
                 .drive_ready(self.now_ms, Some(&mut self.collector))?;
             if effects.is_empty() {
-                return Ok(changed);
+                return Ok(requires_restart);
             }
-            changed = true;
+            requires_restart |= !effects.immediate_completions.is_empty();
             self.handle_decode_engine_effects(effects)?;
         }
+        Ok(requires_restart)
     }
 
     fn handle_prefill_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
@@ -1694,8 +1696,9 @@ impl DisaggRuntime {
 
     /// Activate workers whose startup period has elapsed at the current timestamp.
     fn apply_worker_ready_events(&mut self) -> Result<bool> {
-        let mut changed = false;
+        let mut consumed = false;
         while let Some((stage, worker_id)) = pop_ready_worker_ready(&mut self.events, self.now_ms) {
+            consumed = true;
             match stage {
                 SimulationWorkerStage::Prefill => {
                     if self.prefill_engine.mark_worker_ready(worker_id) {
@@ -1705,7 +1708,6 @@ impl DisaggRuntime {
                             self.dispatch_prefill_admissions(effects.admissions)?;
                         }
                         self.wake_worker_waiters(SimulationWorkerStage::Prefill);
-                        changed = true;
                     }
                 }
                 SimulationWorkerStage::Decode => {
@@ -1716,7 +1718,6 @@ impl DisaggRuntime {
                             self.dispatch_decode_admissions(effects.admissions)?;
                         }
                         self.wake_worker_waiters(SimulationWorkerStage::Decode);
-                        changed = true;
                     }
                 }
                 SimulationWorkerStage::Aggregated => {
@@ -1724,50 +1725,79 @@ impl DisaggRuntime {
                 }
             }
         }
-        Ok(changed)
+        Ok(consumed)
     }
 
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> Result<()> {
         loop {
-            #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
-            let mut changed = self.prune_stale_transfer_events();
+            self.prune_stale_transfer_events();
             #[cfg(feature = "kvbm-offload")]
             {
-                changed |= self.tick_offload_engines()?;
+                self.tick_offload_engines()?;
+                // A scheduled completion can make a worker idle after the
+                // opening tick, so promote newly available KVBM work before
+                // the later action and drive phases run. Any deeper transport
+                // chain must expose its next completion through
+                // earliest_offload_deadline(); the outer scheduler will then
+                // revisit that deadline without restarting every replay phase.
+                if self.apply_worker_completions()? {
+                    self.tick_offload_engines()?;
+                }
             }
-            changed |= self.apply_worker_completions()?;
-            changed |= self.apply_worker_ready_events()?;
-            changed |= self.apply_transfer_completions()?;
-            changed |= self.release_ready_arrivals()?;
-            changed |= self.drive_pending_actions()?;
-            changed |= self.drive_prefill_workers()?;
-            changed |= self.drive_decode_workers()?;
+            #[cfg(not(feature = "kvbm-offload"))]
+            self.apply_worker_completions()?;
+            let worker_ready_event = self.apply_worker_ready_events()?;
+            let transfer_completion = self.apply_transfer_completions()?;
+            self.release_ready_arrivals()?;
+            let pending_action_applied = self.drive_pending_actions()?;
+            let prefill_immediate_completion = self.drive_prefill_workers()?;
+            let decode_immediate_completion = self.drive_decode_workers()?;
+            let immediate_completion = prefill_immediate_completion || decode_immediate_completion;
             let removed_prefill = self.prefill_engine.try_remove_drained();
             if let Some(router) = self.prefill_router.as_mut() {
                 for worker_id in &removed_prefill {
                     router.finalize_worker_removal(*worker_id)?;
                 }
             }
-            changed |= !removed_prefill.is_empty();
             let removed_decode = self.decode_engine.try_remove_drained();
             if let Some(router) = self.decode_router.as_mut() {
                 for worker_id in &removed_decode {
                     router.finalize_worker_removal(*worker_id)?;
                 }
             }
-            changed |= !removed_decode.is_empty();
             // Planner ticks fire LAST so the planner observes a fully settled
             // timestamp (matching the old advance-then-tick ordering). Any scaling
             // it applies is picked up by the next loop iteration.
-            if self.planner_hook.is_some() {
-                changed |= self.apply_planner_ticks()?;
-            }
+            let planner_tick = self.planner_hook.is_some() && self.apply_planner_ticks()?;
+            // Lifecycle processing above can retire a transfer after the opening
+            // prune. Remove the now-stale event directly instead of restarting
+            // every phase solely for cleanup.
+            let stale_transfer_pruned = self.prune_stale_transfer_events();
+            // A later phase can uncover an earlier-phase event at the same
+            // timestamp because each pop helper only consumes the heap head
+            // when its event kind matches. Settle that event here instead of
+            // relying on the outer scheduler to advance by zero and re-enter.
+            let later_phase_changed = worker_ready_event
+                || transfer_completion
+                || pending_action_applied
+                || stale_transfer_pruned;
+            let current_event_pending = later_phase_changed
+                && self
+                    .events
+                    .peek()
+                    .is_some_and(|event| event.at_ms == self.now_ms);
 
-            if !changed {
+            if !immediate_completion && !planner_tick && !current_event_pending {
                 break;
             }
         }
+        debug_assert!(
+            self.events
+                .peek()
+                .is_none_or(|event| event.at_ms != self.now_ms),
+            "disaggregated replay left an event at the settled timestamp"
+        );
         Ok(())
     }
 
@@ -2224,6 +2254,92 @@ fn derive_decode_router_config(
     config.router_track_prefill_tokens = false;
     config.router_prefill_load_model = dynamo_kv_router::config::RouterPrefillLoadModel::None;
     config
+}
+
+#[cfg(test)]
+mod phase_loop_tests {
+    use super::super::events::SimulationEventKind;
+    use super::*;
+    use crate::common::protocols::WorkerType;
+
+    fn args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .enable_prefix_caching(false)
+            .enable_chunked_prefill(true)
+            .speedup_ratio(1.0)
+            .decode_speedup_ratio(1.0)
+            .worker_type(worker_type)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn drain_current_timestamp_settles_interleaved_event_kinds() {
+        let config = OfflineDisaggReplayConfig {
+            prefill_args: args(WorkerType::Prefill),
+            decode_args: args(WorkerType::Decode),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        };
+        let mut runtime = DisaggRuntime::new(
+            &config,
+            None,
+            None,
+            VecDeque::from([DirectRequest {
+                tokens: vec![1; 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(9_200)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            }]),
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        // Reserve sequence zero for a later-phase event that will sort ahead
+        // of the prefill completion produced by the first pass.
+        runtime.next_event_seq = 1;
+        runtime.drain_current_timestamp().unwrap();
+        let completion_ms = runtime
+            .events
+            .peek()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    SimulationEventKind::WorkerCompletion {
+                        stage: SimulationWorkerStage::Prefill,
+                        ..
+                    }
+                )
+            })
+            .expect("initial prefill pass must schedule a worker completion")
+            .at_ms;
+        assert!(completion_ms > runtime.now_ms);
+
+        runtime.events.push(SimulationEvent {
+            at_ms: completion_ms,
+            seq_no: 0,
+            kind: SimulationEventKind::WorkerReady {
+                stage: SimulationWorkerStage::Prefill,
+                worker_id: usize::MAX,
+            },
+        });
+        runtime.advance_now_ms(completion_ms);
+        runtime.drain_current_timestamp().unwrap();
+
+        assert!(
+            runtime
+                .events
+                .peek()
+                .is_none_or(|event| event.at_ms != completion_ms),
+            "drain must consume the completion uncovered by WorkerReady"
+        );
+    }
 }
 
 #[cfg(test)]

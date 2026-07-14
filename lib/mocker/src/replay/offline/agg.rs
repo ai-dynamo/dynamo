@@ -650,17 +650,18 @@ impl AggRuntime {
 
     /// Start passes on every idle worker that can make progress at the current timestamp.
     fn drive_ready_workers(&mut self) -> anyhow::Result<bool> {
-        let mut changed = false;
-        loop {
+        let mut requires_restart = false;
+        while self.engine.has_ready() {
             let effects = self
                 .engine
                 .drive_ready(self.now_ms, Some(&mut self.collector))?;
             if effects.is_empty() {
-                return Ok(changed);
+                return Ok(requires_restart);
             }
-            changed = true;
+            requires_restart |= !effects.immediate_completions.is_empty();
             self.handle_engine_effects(effects)?;
         }
+        Ok(requires_restart)
     }
 
     fn handle_engine_effects(&mut self, effects: EngineEffects) -> anyhow::Result<()> {
@@ -692,55 +693,76 @@ impl AggRuntime {
 
     /// Activate workers whose startup period has elapsed at the current timestamp.
     fn apply_worker_ready_events(&mut self) -> anyhow::Result<bool> {
-        let mut changed = false;
+        let mut consumed = false;
         while let Some((stage, worker_id)) = pop_ready_worker_ready(&mut self.events, self.now_ms) {
+            consumed = true;
             debug_assert_eq!(stage, SimulationWorkerStage::Aggregated);
-            if self.engine.mark_worker_ready(worker_id) {
-                if let Some(router) = self.router.as_mut() {
-                    router.add_worker(worker_id)?;
-                    // Drain any requests that were queued while all workers
-                    // were busy — the new worker may have capacity for them.
-                    let effects = router.try_drain_pending(self.now_ms)?;
-                    self.dispatch_router_admissions(effects.admissions)?;
-                }
-                changed = true;
+            if self.engine.mark_worker_ready(worker_id)
+                && let Some(router) = self.router.as_mut()
+            {
+                router.add_worker(worker_id)?;
+                // Drain any requests that were queued while all workers
+                // were busy — the new worker may have capacity for them.
+                let effects = router.try_drain_pending(self.now_ms)?;
+                self.dispatch_router_admissions(effects.admissions)?;
             }
             // If mark_worker_ready returned false the worker was cancelled
             // during startup (scale-down) — the stale event is silently ignored.
         }
-        Ok(changed)
+        Ok(consumed)
     }
 
     /// Repeatedly process all work that becomes possible without advancing logical time.
     fn drain_current_timestamp(&mut self) -> anyhow::Result<()> {
         loop {
-            #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
-            let mut changed = false;
             #[cfg(feature = "kvbm-offload")]
             {
-                changed |= self.tick_offload_engines()?;
+                self.tick_offload_engines()?;
+                // A scheduled completion can make a worker idle after the
+                // opening tick, so give KVBM one same-timestamp promotion
+                // chance. Any deeper transport chain must expose its next
+                // completion through earliest_offload_deadline(); the outer
+                // scheduler will then revisit that deadline rather than
+                // restarting every replay phase for each tick effect.
+                if self.apply_worker_completions()? {
+                    self.tick_offload_engines()?;
+                }
             }
-            changed |= self.apply_worker_completions()?;
-            changed |= self.apply_worker_ready_events()?;
-            changed |= self.release_ready_arrivals()?;
-            changed |= self.drive_ready_workers()?;
+            #[cfg(not(feature = "kvbm-offload"))]
+            self.apply_worker_completions()?;
+            let worker_ready_event = self.apply_worker_ready_events()?;
+            self.release_ready_arrivals()?;
+            let immediate_completion = self.drive_ready_workers()?;
             let removed = self.engine.try_remove_drained();
             if let Some(router) = self.router.as_mut() {
                 for worker_id in &removed {
                     router.finalize_worker_removal(*worker_id)?;
                 }
             }
-            changed |= !removed.is_empty();
             // Planner ticks fire LAST so the planner observes a fully settled
             // timestamp; any scaling it applies is picked up by the next iteration.
-            if self.planner_hook.is_some() {
-                changed |= self.apply_planner_ticks()?;
-            }
+            let planner_tick = self.planner_hook.is_some() && self.apply_planner_ticks()?;
+            // A later phase can uncover an earlier-phase event at the same
+            // timestamp because each pop helper only consumes the heap head
+            // when its event kind matches. Settle that event here instead of
+            // relying on the outer scheduler to advance by zero and re-enter.
+            let current_event_pending = worker_ready_event
+                && self
+                    .events
+                    .peek()
+                    .is_some_and(|event| event.at_ms == self.now_ms);
 
-            if !changed {
+            if !immediate_completion && !planner_tick && !current_event_pending {
                 break;
             }
         }
+
+        debug_assert!(
+            self.events
+                .peek()
+                .is_none_or(|event| event.at_ms != self.now_ms),
+            "aggregated replay left an event at the settled timestamp"
+        );
 
         Ok(())
     }
@@ -1099,6 +1121,67 @@ mod tests {
             }));
         }
         builder.build().unwrap()
+    }
+
+    #[test]
+    fn drain_current_timestamp_settles_interleaved_event_kinds() {
+        let pending = normalize_trace_requests(
+            vec![DirectRequest {
+                tokens: vec![1; 8],
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(9_100)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            }],
+            1.0,
+        )
+        .unwrap();
+        let mut runtime = AggRuntime::new(
+            &parity_args(EngineType::Vllm),
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        // Reserve sequence zero for a later-phase event that will sort ahead
+        // of the worker completion produced by the first pass.
+        runtime.next_event_seq = 1;
+        runtime.drain_current_timestamp().unwrap();
+        let completion_ms = runtime
+            .events
+            .peek()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    super::super::events::SimulationEventKind::WorkerCompletion { .. }
+                )
+            })
+            .expect("initial pass must schedule a worker completion")
+            .at_ms;
+        assert!(completion_ms > runtime.now_ms);
+
+        runtime.events.push(SimulationEvent {
+            at_ms: completion_ms,
+            seq_no: 0,
+            kind: super::super::events::SimulationEventKind::WorkerReady {
+                stage: SimulationWorkerStage::Aggregated,
+                worker_id: usize::MAX,
+            },
+        });
+        runtime.advance_now_ms(completion_ms);
+        runtime.drain_current_timestamp().unwrap();
+
+        assert!(
+            runtime
+                .events
+                .peek()
+                .is_none_or(|event| event.at_ms != completion_ms),
+            "drain must consume the completion uncovered by WorkerReady"
+        );
     }
 
     fn parity_requests() -> Vec<DirectRequest> {
