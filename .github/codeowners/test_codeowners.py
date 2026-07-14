@@ -1,12 +1,15 @@
 """Unit tests for the shared codeowners matching + resolution module.
 
-These pin down two pieces of the CODEOWNERS pipeline that previously had no
-tests and three subtly-different in-tree copies:
+These pin down the CODEOWNERS pipeline's shared semantics and deterministic
+policy-only emission:
 
   - `match(pattern, path)` -- canonical CODEOWNERS-style matcher used by build
     coverage, emit routing, and who_owns lookups.
   - `minimal_cover(file_team, catch_all)` -- the recursive min-cost cover that
-    turns a per-file owner map into the smallest set of last-match base rules.
+    turns a per-file owner map into the smallest set of last-match base rules
+    for legacy callers (the emitter no longer uses it).
+  - `compute_resolution(spec)` + `_render_codeowners(...)` -- pure policy
+    resolution, explicit precedence, and byte-identical output across trees.
 
 If either drifts, the tests catch it before the generated CODEOWNERS goes wrong.
 """
@@ -29,6 +32,7 @@ from codeowners_match import (  # noqa: E402
     compute_resolution,
     match,
     minimal_cover,
+    parse_codeowners,
     resolve_owners,
 )
 from emit_codeowners import (  # noqa: E402
@@ -290,7 +294,7 @@ class TestComputeResolution:
             ],
             "advisory": [],
             "classify": {
-                "keyword_rules": [{"match": "kvbm", "area": "kvbm"}],
+                "keyword_rules": [],
                 "filetype_rules": [
                     {"pattern": "*.md", "coowner": "docs", "advisory": True},
                 ],
@@ -314,16 +318,21 @@ class TestComputeResolution:
         docs = next(a for a in model.areas if a.label == "docs")
         assert "docs/" in docs.path_globs
 
-    def test_no_auto_classify_at_emit_time(self) -> None:
-        # Old behavior: a `keyword_rules` entry with `area:` promoted an
-        # unmatched dir into that area at emit time by walking the tree.
-        # That tree walk was the source of the base-branch race, so the
-        # resolver drops it -- authors must now materialize the equivalent
-        # as an explicit ``path_globs`` entry.
-        model = compute_resolution(self._spec())
-        kvbm = next(a for a in model.areas if a.label == "kvbm")
-        assert kvbm.path_globs == []
-        assert model.auto_classified == []
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"match": "kvbm", "area": "kvbm"},
+            {"match": "metrics", "coowner": "docs"},
+        ],
+    )
+    def test_legacy_keyword_rules_are_rejected(self, rule: dict) -> None:
+        # Keyword auto-classification/co-ownership required a live tree.
+        # Reject stale configuration instead of silently pretending it still
+        # affects the pure policy resolver.
+        spec = self._spec()
+        spec["classify"]["keyword_rules"] = [rule]
+        with pytest.raises(SystemExit, match="keyword_rules is no longer supported"):
+            compute_resolution(spec)
 
     def test_resolution_ignores_tree_argument(self) -> None:
         # Two trees that differ only under an already-owned prefix must
@@ -378,6 +387,21 @@ class TestComputeResolution:
         assert fs.glob == "Dockerfile"
         assert fs.owners == ["docs"]
 
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"coowner": "docs", "advisory": False},
+            {"pattern": "Dockerfile", "advisory": False},
+        ],
+    )
+    def test_blocking_filetype_rule_requires_pattern_and_coowner(
+        self, rule: dict
+    ) -> None:
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [rule]
+        with pytest.raises(SystemExit, match="missing 'pattern' or 'coowner'"):
+            compute_resolution(spec)
+
     def test_filetype_rule_covers_files_at_any_depth(self) -> None:
         # The strict coverage gate relies on ``unmatched_paths`` -- a
         # blocking filetype pattern must count as coverage for any file
@@ -402,20 +426,6 @@ class TestComputeResolution:
         model = compute_resolution(spec)
         assert model.filetype_shared == []
         assert [r["pattern"] for r in model.filetype_advisory] == ["*.md"]
-
-    def test_keyword_coowner_rules_are_ignored_at_emit_time(self) -> None:
-        # Old behavior: a keyword rule with `coowner` scanned every tree
-        # directory and emitted a `[enclosing_area, coowner]` shared row.
-        # That is exactly the tree walk we removed; the resolver now
-        # silently drops keyword_rules at emit time. Authors declare the
-        # equivalent explicitly in ``shared`` when they want it.
-        spec = self._spec()
-        spec["classify"]["keyword_rules"].append(
-            {"match": "metrics", "coowner": "docs"}
-        )
-        model = compute_resolution(spec)
-        assert model.keyword_coowned == []
-        assert not any(s["glob"].endswith("metrics/") for s in model.shared)
 
     def test_explicit_shared_entry_still_wins(self) -> None:
         # Hand-declared shared: entries are still emitted verbatim; they
@@ -448,8 +458,7 @@ class TestEmissionIsTreeIndependent:
 
     def _spec(self) -> dict:
         # Realistic-shaped spec: nested area overrides + shared + a
-        # blocking filetype rule + advisory-only filetype rule + one
-        # keyword rule (which must be ignored at emit time).
+        # blocking filetype rule + advisory-only filetype rule.
         return {
             "meta": {"catch_all": "@root"},
             "areas": [
@@ -479,9 +488,7 @@ class TestEmissionIsTreeIndependent:
             ],
             "advisory": [],
             "classify": {
-                # Would previously auto-promote unmatched dirs and pull the
-                # enclosing area into Dockerfile lines -- both tree-walks.
-                "keyword_rules": [{"match": "metrics", "coowner": "docs"}],
+                "keyword_rules": [],
                 "filetype_rules": [
                     {"pattern": "Dockerfile", "coowner": "ops", "advisory": False},
                     {"pattern": "*.md", "coowner": "docs", "advisory": True},
@@ -489,8 +496,8 @@ class TestEmissionIsTreeIndependent:
             },
         }
 
-    def _render(self, spec: dict) -> str:
-        model = compute_resolution(spec)
+    def _render(self, spec: dict, tree: list[str] | None = None) -> str:
+        model = compute_resolution(spec, tree)
         lines, _ = _render_codeowners(model, group=True, external=[])
         return "\n".join(lines) + "\n"
 
@@ -520,6 +527,7 @@ class TestEmissionIsTreeIndependent:
         assert compute_resolution(spec, base_tree) == compute_resolution(
             spec, mutated_tree
         )
+        assert self._render(spec, base_tree) == self._render(spec, mutated_tree)
 
     def test_delete_or_move_under_owned_prefix_does_not_change_output(
         self,
@@ -569,7 +577,9 @@ class TestEmissionIsTreeIndependent:
         # And the emitted body is byte-identical: the render path never
         # reads the tree, so the three "runs" produce the same file even
         # though the underlying trees differ wildly.
-        assert self._render(spec) == self._render(spec)
+        rendered = self._render(spec, base_tree)
+        assert rendered == self._render(spec, deleted_tree)
+        assert rendered == self._render(spec, moved_tree)
 
     def test_emitter_has_no_tree_parameter(self) -> None:
         # Guard against a future regression re-introducing the tree walk:
@@ -577,9 +587,9 @@ class TestEmissionIsTreeIndependent:
         import inspect
 
         sig = inspect.signature(_render_codeowners)
-        assert "tree" not in sig.parameters, (
-            "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
-        )
+        assert (
+            "tree" not in sig.parameters
+        ), "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
         sig_base = inspect.signature(compute_resolution)
         # tree is still accepted (backward-compat) but must default to None
         # so callers that omit it get pure behavior for free.
@@ -607,6 +617,35 @@ class TestEmissionIsTreeIndependent:
         lines, _ = _render_codeowners(model, group=True, external=[])
         # sanity: we actually rendered something
         assert any(ln.startswith("/lib/") for ln in lines)
+
+    def test_explicit_path_rules_win_over_filetype_defaults(self) -> None:
+        spec = self._spec()
+        spec["areas"].append(
+            {
+                "label": "xpu",
+                "github_team": "@xpu",
+                "path_globs": ["lib/llm/Dockerfile"],
+            }
+        )
+        spec["shared"].append({"glob": "lib/llm/shared/", "owners": ["runtime", "xpu"]})
+
+        rules = parse_codeowners(self._render(spec))
+        assert resolve_owners(rules, "other/Dockerfile") == ["@ops"]
+        assert resolve_owners(rules, "lib/llm/Dockerfile") == ["@xpu"]
+        assert resolve_owners(rules, "lib/llm/shared/Dockerfile") == [
+            "@runtime",
+            "@xpu",
+        ]
+
+    def test_overlapping_filetype_rules_preserve_declaration_order(self) -> None:
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "*Dockerfile*", "coowner": "ops", "advisory": False},
+            {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
+        ]
+
+        rules = parse_codeowners(self._render(spec))
+        assert resolve_owners(rules, "nested/Dockerfile") == ["@docs"]
 
 
 # ------------------------------------------------------------------

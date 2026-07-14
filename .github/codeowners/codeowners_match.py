@@ -74,9 +74,9 @@ class SharedSpec(TypedDict):
 class FiletypeRule(TypedDict, total=False):
     """Filetype-level rule (``classify.filetype_rules`` entry).
 
-    ``pattern`` is the single source of truth for the glob; ``coowner`` names
-    the area that joins the enclosing owner; ``advisory: true`` routes the
-    rule to the non-blocking advisory file instead of CODEOWNERS.
+    ``pattern`` is the single source of truth for the glob; ``coowner`` is the
+    legacy key naming the file-type default owner. ``advisory: true`` routes
+    the rule to the non-blocking advisory file instead of CODEOWNERS.
     """
 
     pattern: str
@@ -86,7 +86,7 @@ class FiletypeRule(TypedDict, total=False):
 
 @dataclass
 class ResolvedArea:
-    """An area after auto-classify has expanded its ``path_globs``."""
+    """An area with normalized, explicitly declared ``path_globs``."""
 
     label: str
     github_team: str
@@ -95,7 +95,7 @@ class ResolvedArea:
 
 @dataclass
 class FiletypeShared:
-    """File-type co-ownership row (file glob + ordered owner labels)."""
+    """File-type ownership default (file glob + ordered owner labels)."""
 
     glob: str
     owners: list[str]
@@ -116,8 +116,6 @@ class ResolvedModel:
     advisory: list[SharedSpec]
     filetype_shared: list[FiletypeShared]
     filetype_advisory: list[FiletypeRule]
-    auto_classified: list[tuple[str, str]] = field(default_factory=list)
-    keyword_coowned: list[SharedSpec] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
 
     def label_to_team(self) -> dict[str, str]:
@@ -290,14 +288,15 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
     * ``advisory``    -- passed through as declared.
     * ``classify.filetype_rules`` -- each blocking rule becomes one stable
       row with the coowner as the sole owner (a single ``*Dockerfile*``
-      line owns every Dockerfile via last-match at any depth). Advisory
-      rules go to the advisory-reviewers file.
-    * ``classify.keyword_rules`` -- ignored at emit time. Auto-promotion of
+      line owns every Dockerfile at any depth unless a later explicit path
+      override or shared rule applies). Advisory rules go to the
+      advisory-reviewers file.
+    * ``classify.keyword_rules`` -- no longer supported. Auto-promotion of
       unmatched dirs into an area, and keyword-level co-ownership, both
       required walking the live tree -- pure poison for a stable output.
-      Authors materialize the equivalent as explicit ``path_globs`` /
-      ``shared`` entries in ``areas.yaml``; the strict coverage gate
-      catches any new directory that slipped through.
+      A non-empty legacy block is rejected so dead policy cannot silently
+      appear effective; authors use explicit ``path_globs`` / ``shared``
+      entries instead.
     """
     if tree is not None:
         # Deprecated argument: accepted for legacy callers, ignored so
@@ -307,6 +306,12 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
     catch_all = spec.get("meta", {}).get("catch_all", "")
     raw_areas = spec.get("areas", [])
     classify = spec.get("classify", {}) or {}
+    keyword_rules = classify.get("keyword_rules", []) or []
+    if keyword_rules:
+        raise SystemExit(
+            "areas.yaml: classify.keyword_rules is no longer supported; "
+            "use explicit area path_globs or shared entries"
+        )
     filetype_rules: list[FiletypeRule] = classify.get("filetype_rules", []) or []
 
     spec_shared: list[SharedSpec] = spec.get("shared", []) or []
@@ -332,7 +337,10 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         pattern = rule.get("pattern")
         coowner = rule.get("coowner")
         if not pattern or not coowner:
-            continue
+            raise SystemExit(
+                f"areas.yaml: filetype_rules entry {rule!r} missing "
+                "'pattern' or 'coowner'"
+            )
         filetype_shared.append(FiletypeShared(glob=pattern, owners=[coowner]))
 
     filetype_advisory = [r for r in filetype_rules if r.get("advisory")]
@@ -344,8 +352,6 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
         advisory=spec.get("advisory", []) or [],
         filetype_shared=filetype_shared,
         filetype_advisory=filetype_advisory,
-        auto_classified=[],
-        keyword_coowned=[],
         meta=dict(spec.get("meta", {})),
     )
 

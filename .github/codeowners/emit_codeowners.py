@@ -4,8 +4,9 @@ GitHub CODEOWNERS is last-match-wins. The base tier is emitted by rendering
 each area's declared ``path_globs`` verbatim as anchored rules, grouped per
 area for readability, with cross-area carve-outs (a glob that lexically nests
 under another area's dir glob) pulled into a trailing override section.
-Shared co-ownership and file-type co-ownership are emitted LAST so they win
-over the base rules they refine.
+File-type rules are defaults over the base tier. Explicit path overrides and
+shared co-ownership are emitted after them so declarations for a specific path
+remain effective.
 
 Emission is a PURE FUNCTION of the policy inputs (``areas.yaml`` and
 ``external_contributors.yaml``): the repository tree is NEVER read at emit
@@ -260,13 +261,12 @@ def _render_codeowners(
     # Filetype patterns emit UNANCHORED (bare ``*Dockerfile*`` matches by
     # basename at any depth under GitHub CODEOWNERS rules). Anchoring them
     # would silently narrow ``*Dockerfile*`` to only match root-level files.
-    ft_rules = sorted(
-        (
-            (fs.glob, _owners_str(label_to_team, fs.owners))
-            for fs in model.filetype_shared
-        ),
-        key=lambda r: (len(r[0]), r[0]),
-    )
+    # Preserve declaration order: overlapping filetype patterns also use
+    # CODEOWNERS last-match-wins semantics, so a later YAML rule is an
+    # intentional refinement of an earlier one.
+    ft_rules = [
+        (fs.glob, _owners_str(label_to_team, fs.owners)) for fs in model.filetype_shared
+    ]
 
     teams = sorted(
         {a.github_team for a in model.areas}
@@ -334,11 +334,19 @@ def _render_codeowners(
             lines += ["", f"# === {lbl} ==="]
             lines += [fmt(p, deco(t)) for p, t in rules]
 
+    if ft_rules:
+        lines += [
+            "",
+            "# --- File-type ownership defaults: unanchored patterns at any depth. ---",
+            "# Explicit path overrides and shared rules below take precedence.",
+        ]
+        lines += [fmt(p, deco(t)) for p, t in ft_rules]
+
     if overrides:
         lines += [
             "",
             "# === Path overrides: a subsystem nested inside another area's tree.",
-            "# More specific, so they win via last-match over the area globs above. ===",
+            "# More specific, so they win via last-match over area and file-type rules. ===",
         ]
         lines += [fmt(p, deco(t)) for p, t in overrides]
 
@@ -348,12 +356,6 @@ def _render_codeowners(
             "# --- Shared ownership: multi-team (any one approves; wins via last-match) ---",
         ]
         lines += [fmt(p, deco(t)) for p, t in shared_rules]
-    if ft_rules:
-        lines += [
-            "",
-            "# --- File-type ownership: unanchored patterns (wins via last-match at any depth) ---",
-        ]
-        lines += [fmt(p, deco(t)) for p, t in ft_rules]
 
     stats = {
         "base": len(base_rules),

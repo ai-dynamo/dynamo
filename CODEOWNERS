@@ -466,8 +466,12 @@
 # === xpu  (@ai-dynamo/dynamo-xpu-codeowners) ===
 /dev/docker-observability-xpu.yml                                            @ai-dynamo/dynamo-xpu-codeowners
 
+# --- File-type ownership defaults: unanchored patterns at any depth. ---
+# Explicit path overrides and shared rules below take precedence.
+*Dockerfile*                                                                 @ai-dynamo/dynamo-ops-codeowners
+
 # === Path overrides: a subsystem nested inside another area's tree.
-# More specific, so they win via last-match over the area globs above. ===
+# More specific, so they win via last-match over area and file-type rules. ===
 /tests/rl/                                                                   @ai-dynamo/dynamo-rl-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-operator-codeowners
 /tests/router/                                                               @ai-dynamo/dynamo-router-codeowners
@@ -713,6 +717,3 @@
 /components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/mocker/utils/planner_profiler_perf_data_converter.py  @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners
 /tests/fault_tolerance/hardware/fault_injection_service/api_service/main.py  @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
-
-# --- File-type ownership: unanchored patterns (wins via last-match at any depth) ---
-*Dockerfile*                                                                 @ai-dynamo/dynamo-ops-codeowners
