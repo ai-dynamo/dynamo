@@ -56,7 +56,7 @@ The Dynamo Dark aesthetic ships in two families. They share the palette above bu
 
 | Role | Spec |
 |---|---|
-| Title | 18 px, ALL CAPS, weight 600, `letter-spacing: 0.08em`, `text-transform: uppercase`, color `#ffffff` |
+| Title | 18 px, ALL CAPS, weight 700, `letter-spacing: 0.08em`, `text-transform: uppercase`, color `#ffffff` |
 | Subtitle | 12 px, weight 400, color `#cdcdcd` |
 | Body sans | `'NVIDIA Sans', Arial, Helvetica, sans-serif`, weight 400, sizes 11–15 px |
 | Mono | `'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace`, weight 400, sizes 10–13 px |

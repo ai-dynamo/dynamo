@@ -1,6 +1,15 @@
 ---
 name: blog-figures
 description: Design and produce blog figures in the Dynamo Dark aesthetic. Picks the right pathway (Python+Plotly, D2, hand-crafted SVG, dynamo-svg manifest, or HTML+CSS to PNG) for each task, enforces palette and typography from the canonical design tokens, and runs a mandatory render-and-critique loop. Defaults to the Digital Twin family (also called DynoSim) for hero and section-anchor figures, with flash-indexer as the compact-data alternate. Use when creating any figure, diagram, hero image, chart, or technical illustration for a Dynamo blog post, when starting a new blog post that needs a tools/ directory, or when the user mentions blog figure, blog diagram, dynamo blog figure, hero image, or technical illustration.
+license: Apache-2.0
+metadata:
+  author: NVIDIA
+  tags:
+    - dynamo
+    - blog
+    - figures
+    - design-system
+    - visualization
 ---
 
 # Blog Figures

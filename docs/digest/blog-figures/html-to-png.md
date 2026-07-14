@@ -70,7 +70,7 @@ Single-file HTML. CSS variables mirror the canonical [`design_tokens.yaml`](../f
 
   h1 {
     font-size: 18px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     margin: 0 0 24px 0;
