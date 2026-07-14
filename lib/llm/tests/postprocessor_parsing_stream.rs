@@ -2085,6 +2085,95 @@ async fn tool_choice_minimax_m3_required_prompt_injected_bare_json_recovers() {
     );
 }
 
+#[tokio::test]
+async fn tool_choice_minimax_m2_required_keeps_reasoning_before_tool_xml() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let tool_call = "<minimax:tool_call>\
+<invoke name=\"get_weather\"><parameter name=\"location\">San Francisco</parameter></invoke>\
+</minimax:tool_call>";
+    let input_stream = stream::iter(
+        vec![
+            mock_content_chunk("I should call weather."),
+            mock_content_chunk("</think>"),
+            mock_content_chunk(tool_call),
+            mock_final_chunk(),
+        ]
+        .into_iter()
+        .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "MiniMax M2 required + reasoning boundary + XML tool call";
+    assert_eq!(reasoning, "I should call weather.");
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+}
+
+#[tokio::test]
+async fn tool_choice_minimax_m2_required_bare_json_bypasses_reasoning() {
+    let bare_json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(bare_json), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "MiniMax M2 required + bare guided JSON";
+    assert!(reasoning.is_empty());
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+}
+
+#[tokio::test]
+async fn tool_choice_minimax_m2_required_thinking_disabled_keeps_tool_xml() {
+    let preprocessor = build_preprocessor(Some("minimax_m2"), Some("minimax_m2"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"thinking": false})).unwrap());
+    let tool_call = "<minimax:tool_call>\
+<invoke name=\"get_weather\"><parameter name=\"location\">San Francisco</parameter></invoke>\
+</minimax:tool_call>";
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(tool_call), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        finish_reasons,
+    } = drain_stream(output_stream).await;
+
+    let case = "MiniMax M2 required + thinking=false + XML tool call";
+    assert!(reasoning.is_empty());
+    assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    assert!(finish_reasons.contains(&FinishReason::ToolCalls));
+}
+
 /// Exercises the experimental parsers-v2 gate end-to-end. `tool_choice=Auto` + a v2
 /// family (`qwen3_coder`) is the only combination the gate routes to
 /// `tool_parser_v2::apply_stream`; `required`/`named` (above) always stay on the v1
