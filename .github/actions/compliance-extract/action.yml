@@ -57,6 +57,35 @@ inputs:
     description: 'SCCACHE region (= aws_default_region the build passed). See sccache_bucket.'
     required: false
     default: ''
+  diff_base_sha:
+    description: |
+      Commit SHA of the baseline build to diff this build's OSRB CSV against
+      (resolved by container/compliance/resolve_diff_base.py in the caller).
+      Empty means "no baseline" — the diff step then writes a baseline_unavailable
+      marker instead of a real diff. resolve_diff_base.py also supplies the exact
+      artifact id used to fetch the prior build's CSV.
+    required: false
+    default: ''
+  diff_base_label:
+    description: 'Human label for the diff baseline (from resolve_diff_base.py); shown in the baseline_unavailable marker row when the baseline can''t be fetched.'
+    required: false
+    default: ''
+  diff_base_artifact_id:
+    description: 'Exact GitHub Actions artifact id resolved by resolve_diff_base.py.'
+    required: false
+    default: ''
+  diff_base_run_id:
+    description: 'Workflow run id that generated the baseline artifact; used for the link in BASELINE.md.'
+    required: false
+    default: ''
+  gh_token:
+    description: |
+      Token with `actions: read` used to download the baseline compliance
+      artifact from its (different) workflow run. Pass
+      secrets.GITHUB_TOKEN. When empty, the diff step skips the fetch and emits a
+      baseline_unavailable marker.
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -144,6 +173,133 @@ runs:
         fi
         echo "Named OSRB files for ${IMG} @ ${SHA8}:"
         find /tmp/compliance -name 'osrb-*' -print
+
+    # Download the baseline build's compliance artifact so we can diff against
+    # it. The resolver supplies the exact artifact id and generating run id, so
+    # this step downloads directly without searching the artifact list again.
+    # Any miss (expired retention, never built, no token) leaves
+    # /tmp/compliance-base empty — the diff step then writes a
+    # baseline_unavailable marker rather than failing the build.
+    - name: Fetch baseline compliance artifact
+      id: fetch-baseline
+      if: ${{ inputs.diff_base_artifact_id != '' && inputs.gh_token != '' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+        REPO: ${{ github.repository }}
+        ARTIFACT_ID: ${{ inputs.diff_base_artifact_id }}
+        BASE_RUN_ID: ${{ inputs.diff_base_run_id }}
+      run: |
+        set -euo pipefail
+        ARCHIVE="${RUNNER_TEMP}/compliance-baseline-${ARTIFACT_ID}.zip"
+        mkdir -p /tmp/compliance-base
+        if [ -n "${BASE_RUN_ID}" ]; then
+          echo "baseline_run_id=${BASE_RUN_ID}" >> "$GITHUB_OUTPUT"
+        fi
+        if gh api -X GET "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}/zip" \
+          > "${ARCHIVE}" && unzip -q "${ARCHIVE}" -d /tmp/compliance-base; then
+          echo "Downloaded baseline artifact ${ARTIFACT_ID}."
+          echo "baseline_available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "Baseline download failed; diff will mark it unavailable."
+          echo "baseline_available=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Emit osrb-<image>-<arch>-<sha8>.diff.csv next to each full CSV, comparing
+    # this build against the baseline, plus a self-describing baseline/ folder
+    # (metadata + a copy of the baseline CSV) so the archive documents exactly
+    # what the diff was taken against. Always runs so a diff file (real or a
+    # baseline_unavailable marker) always ships. The base CSV, if present, lives
+    # under /tmp/compliance-base/linux_<arch>/ with a different sha8 (matched by
+    # glob per arch).
+    - name: Compute OSRB diff
+      if: always()
+      shell: bash
+      env:
+        REPO: ${{ github.repository }}
+        BASE_SHA: ${{ inputs.diff_base_sha }}
+        BASE_LABEL: ${{ inputs.diff_base_label }}
+        BASE_RUN_ID: ${{ steps.fetch-baseline.outputs.baseline_run_id }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+
+        # Write baseline/ (metadata + baseline CSV copy) into an arch dir.
+        # $1 = arch dir, $2 = baseline CSV path ('' when unavailable).
+        write_baseline_folder() {
+          local dir="$1/baseline" base_csv="$2"
+          mkdir -p "${dir}"
+          {
+            echo "# OSRB diff baseline"
+            echo
+            echo "The \`*.diff.csv\` next to this folder compares this build's OSRB"
+            echo "dependency CSV against the baseline described below."
+            echo
+            echo "## How the baseline is chosen (by build context)"
+            echo "- PR targeting \`main\` -> PR merge-base (or nearest earlier commit with an artifact)"
+            echo "- Post-merge on \`main\` -> the previous commit on \`main\`"
+            echo "- PR / post-merge on \`release/*\` -> highest release tag \`vX.Y.Z\` strictly older than the current version (semver first, later publish date breaks same-version ties)"
+            echo "- Nightly -> the previous successful scheduled nightly run (manual runs excluded)"
+            echo
+            echo "## This build's baseline"
+            echo "- Label: ${BASE_LABEL:-(none)}"
+            if [ -n "${BASE_SHA}" ]; then
+              echo "- Baseline commit SHA: \`${BASE_SHA}\`"
+              echo "- Commit: https://github.com/${REPO}/commit/${BASE_SHA}"
+            else
+              echo "- Baseline commit SHA: (none — no baseline was available)"
+            fi
+            if [ -n "${BASE_RUN_ID:-}" ] && [ "${BASE_RUN_ID}" != "null" ]; then
+              echo "- Generating workflow run: https://github.com/${REPO}/actions/runs/${BASE_RUN_ID}"
+            fi
+            if [ -n "${base_csv}" ]; then
+              echo "- Baseline CSV (copied into this folder): \`$(basename "${base_csv}")\`"
+            else
+              echo "- Baseline CSV: unavailable (expired artifact, first build of the line, or no prior run)"
+            fi
+          } > "${dir}/BASELINE.md"
+          if [ -n "${base_csv}" ]; then cp "${base_csv}" "${dir}/"; fi
+          echo "Wrote baseline folder: ${dir}"
+        }
+
+        diff_one() {  # $1 = current CSV, $2 = arch dir name (e.g. linux_amd64)
+          local cur="$1" arch_dir="$2"
+          local out="${cur%.csv}.diff.csv"
+          local base_csv="" base_arg=()
+          # Pick the baseline's full CSV, skipping its own *.diff.csv sibling
+          # (baseline artifacts now ship a diff too, and osrb-*.csv would match it).
+          for cand in /tmp/compliance-base/"${arch_dir}"/osrb-*.csv; do
+            [ -f "${cand}" ] || continue
+            case "${cand}" in *.diff.csv) continue;; esac
+            base_csv="${cand}"
+            base_arg=(--base "${base_csv}")
+            break
+          done
+          python3 container/compliance/diff_osrb_csv.py \
+            --current "${cur}" \
+            "${base_arg[@]}" \
+            --baseline-label "${BASE_LABEL}" \
+            --output "${out}"
+          echo "Wrote diff: ${out}"
+          write_baseline_folder "$(dirname "${cur}")" "${base_csv}"
+        }
+        found=0
+        for d in /tmp/compliance/linux_*; do
+          [ -d "$d" ] || continue
+          for cur in "$d"/osrb-*.csv; do
+            [ -f "$cur" ] || continue
+            case "$cur" in *.diff.csv) continue;; esac
+            found=1
+            diff_one "$cur" "$(basename "$d")"
+          done
+        done
+        if [ "${found}" -eq 0 ]; then  # single-platform: files directly under dest
+          for cur in /tmp/compliance/osrb-*.csv; do
+            [ -f "$cur" ] || continue
+            case "$cur" in *.diff.csv) continue;; esac
+            diff_one "$cur" "."
+          done
+        fi
 
     # /sources/ — reproducible tarball of source archives for everything we
     # ship on top of the FROM base. Bigger than legal/sboms (typically

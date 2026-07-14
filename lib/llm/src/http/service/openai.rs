@@ -1434,6 +1434,17 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        // Classify only this event's error, not its causes. An inner invalid
+        // argument must not override an outer unavailable or internal error.
+        let invalid_argument = event.error.as_ref().filter(|error| {
+            matches!(
+                error.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        });
+
         // Extract error string: prefer DynamoError field, fallback to legacy comment.
         // Use message() instead of to_string() for DynamoError to avoid prefixing
         // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
@@ -1457,14 +1468,34 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 .unwrap_or_else(|| "Unknown error".to_string())
         };
 
-        // Try to parse as error JSON to extract status code
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
-            let code = error_payload
-                .code
-                .and_then(|c| StatusCode::from_u16(c).ok())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(error_str);
+        // Parse the status-bearing node's own message. The diagnostic string
+        // above includes its causes and therefore is not necessarily JSON.
+        let status_message = event
+            .error
+            .as_ref()
+            .map(|error| error.message())
+            .unwrap_or(&error_str);
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message) {
+            // Preserve explicit HTTP-like statuses (for example 415); Python
+            // 4xx exceptions share the Backend(InvalidArgument) category.
+            let code = match error_payload.code {
+                Some(code) => {
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+                None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
+                None => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            let message = error_payload
+                .message
+                .unwrap_or_else(|| status_message.to_string());
             return Some((message, code));
+        }
+
+        if let Some(invalid_argument) = invalid_argument {
+            return Some((
+                invalid_argument.message().to_string(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
 
         return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
@@ -4584,6 +4615,42 @@ mod tests {
                     .message
                     .contains("Backend service unavailable")
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_backend_error_with_typed_invalid_argument() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        for error_type in [
+            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
+        ] {
+            let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(error_type)
+                        .message("unsupported JSON schema keyword")
+                        .build(),
+                ),
+            };
+
+            let result = check_for_backend_error(stream::iter(vec![error_event])).await;
+
+            let error_response = match result {
+                Err(error_response) => error_response,
+                Ok(_) => panic!("typed invalid argument must fail"),
+            };
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
+            assert_eq!(error_response.1.error_type, "Bad Request");
+            assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
         }
     }
 

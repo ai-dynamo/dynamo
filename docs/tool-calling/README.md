@@ -54,7 +54,8 @@ parser exists for this format.
 | Parser Name | Models | Upstream name | Notes |
 |---|---|---|---|
 | `kimi_k2` | Kimi K2 Instruct/Thinking, Kimi K2.5 | | Pair with `--dyn-reasoning-parser kimi` or `kimi_k25` |
-| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax` | XML `<minimax:tool_call>` |
+| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax_m2` | XML `<minimax:tool_call>` |
+| `minimax_m3` | MiniMax M3 | vLLM: `minimax_m3` | MiniMax namespace-token XML |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseekv4` | DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4` |
 | `deepseek_v3` | DeepSeek V3, DeepSeek R1-0528+ | SGLang: `deepseekv3` | Special Unicode markers |
 | `deepseek_v3_1` | DeepSeek V3.1 | Dynamo-only | JSON separators |

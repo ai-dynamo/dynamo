@@ -36,6 +36,8 @@ jobs:
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
       efa: ${{ steps.changes.outputs.efa }}
+      base_ref: ${{ steps.changes.outputs.base_ref }}
+      merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     steps:
       - name: Checkout code
@@ -296,6 +298,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   vllm-dev-build:
@@ -334,6 +348,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   sglang-dev-build:
@@ -365,6 +391,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   trtllm-dev-build:
@@ -397,6 +435,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   sglang-efa-build:
@@ -414,6 +464,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   trtllm-efa-build:
@@ -431,6 +493,18 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # OSRB CSV diff baseline: the target branch selects the rule, while the
+      # merge-base pins PR->main diffs to the PR's fork point.
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+    # actions: read lets the build download a prior run's baseline compliance
+    # artifact to diff against (a reusable workflow's token can't exceed the
+    # caller's). Missing -> the diff soft-degrades, build stays green.
+    permissions:
+      contents: read
+      actions: read
     secrets: inherit
 
   planner-build:
