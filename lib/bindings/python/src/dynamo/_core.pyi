@@ -254,8 +254,10 @@ class TransportType:
     not a stable parse target.
     """
 
-    kind: str
-    address: str
+    @property
+    def kind(self) -> str: ...
+    @property
+    def address(self) -> str: ...
 
 class Instance:
     """
@@ -264,13 +266,20 @@ class Instance:
     ``"namespace/component/endpoint/instance_id"``.
     """
 
-    instance_id: int
-    namespace: str
-    component: str
-    endpoint: str
-    transport: TransportType
-    device_type: Optional[str]
-    """Device type, e.g. "cpu" or "cuda", or None if unspecified."""
+    @property
+    def instance_id(self) -> int: ...
+    @property
+    def namespace(self) -> str: ...
+    @property
+    def component(self) -> str: ...
+    @property
+    def endpoint(self) -> str: ...
+    @property
+    def transport(self) -> TransportType: ...
+    @property
+    def device_type(self) -> Optional[str]:
+        """Device type, e.g. "cpu" or "cuda", or None if unspecified."""
+        ...
 
 class Client:
     """
