@@ -24,6 +24,9 @@ tabs:
   recipes:
     display-name: Recipes
     icon: flask
+  proposals:
+    display-name: Proposals
+    icon: file-lines
 
 navigation:
   - tab: docs
@@ -663,3 +666,19 @@ navigation:
       - page: Llama-3.3-70B FP8
         path: recipes/llama-3-3-70b.mdx
         slug: llama-3-3-70b
+
+  - tab: proposals
+    layout:
+      # ==================== Dynamo Enhancement Proposals ====================
+      # Hybrid DEP home: markdown DEPs live in docs/proposals/, rendered here
+      # with a status banner and a giscus discussion widget. See the Overview
+      # page for the end-to-end workflow. Add new DEPs as pages below.
+      - page: Overview
+        path: proposals/README.mdx
+        slug: overview
+      - page: DEP Template
+        path: proposals/TEMPLATE.mdx
+        slug: template
+      - page: "DEP-0000: Example Proposal"
+        path: proposals/0000-example-dep.mdx
+        slug: 0000-example-dep
