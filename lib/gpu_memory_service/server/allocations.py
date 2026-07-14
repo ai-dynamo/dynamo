@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Server-side CUDA allocation store."""
+"""Server-side VMM allocation store.
+
+Uses the ``VMMDevice`` abstraction from ``common.vmm`` so that future
+non-CUDA device types can plug in without touching this file.
+
+"""
 
 from __future__ import annotations
 
@@ -13,15 +18,8 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from uuid import uuid4
 
-from gpu_memory_service.common.cuda_utils import (
-    align_to_granularity,
-    cuda_ensure_initialized,
-    cumem_create_tolerate_oom,
-    cumem_export_to_shareable_handle,
-    cumem_get_allocation_granularity,
-    cumem_release,
-    device_memory_info,
-)
+from gpu_memory_service.common.utils import align_to_granularity
+from gpu_memory_service.common.vmm import get_vmm
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +60,16 @@ class GMSAllocationManager:
             )
 
         self._device = device
+        self._vmm = get_vmm()
         self._allocations: dict[str, AllocationInfo] = {}
         self._next_layout_slot = 0
-        cuda_ensure_initialized()
-        self._granularity = cumem_get_allocation_granularity(device)
+        self._vmm.ensure_initialized()
+        self._granularity = self._vmm.get_allocation_granularity(device)
         self._allocation_retry_interval = allocation_retry_interval
         self._allocation_retry_timeout = allocation_retry_timeout
         logger.info(
-            "GMSAllocationManager initialized: device=%d, granularity=%d, "
-            "alloc_retry_interval=%.3f, alloc_retry_timeout=%s",
+            "GMSAllocationManager initialized: device=%d, "
+            "granularity=%d, alloc_retry_interval=%.3f, alloc_retry_timeout=%s",
             device,
             self._granularity,
             self._allocation_retry_interval,
@@ -108,7 +107,9 @@ class GMSAllocationManager:
                     "RW client disconnected during allocation retry"
                 )
 
-            allocated, handle = cumem_create_tolerate_oom(aligned_size, self._device)
+            allocated, handle = self._vmm.create_tolerate_oom(
+                aligned_size, self._device
+            )
             if allocated:
                 break
 
@@ -130,7 +131,7 @@ class GMSAllocationManager:
             # rather than silent.
             free_b, total_b = -1, -1
             try:
-                free_b, total_b = device_memory_info(self._device)
+                free_b, total_b = self._vmm.device_memory_info(self._device)
             except Exception:
                 logger.debug(
                     "NVML memory info failed for device %d",
@@ -150,7 +151,7 @@ class GMSAllocationManager:
             )
             await asyncio.sleep(self._allocation_retry_interval)
 
-        export_fd = int(cumem_export_to_shareable_handle(int(handle)))
+        export_fd = int(self._vmm.export_to_shareable_handle(int(handle)))
         info = AllocationInfo(
             allocation_id=str(uuid4()),
             size=size,
@@ -182,7 +183,7 @@ class GMSAllocationManager:
         if info is None:
             return False
         os.close(info.export_fd)
-        cumem_release(info.handle)
+        self._vmm.release(info.handle)
         self._allocations.pop(allocation_id, None)
         logger.debug("Freed allocation: %s", allocation_id)
         return True
@@ -192,7 +193,7 @@ class GMSAllocationManager:
         for allocation_id in allocation_ids:
             info = self._allocations[allocation_id]
             os.close(info.export_fd)
-            cumem_release(info.handle)
+            self._vmm.release(info.handle)
             self._allocations.pop(allocation_id, None)
         if allocation_ids:
             logger.info("Cleared %d allocations", len(allocation_ids))

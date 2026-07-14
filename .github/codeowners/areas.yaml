@@ -425,7 +425,7 @@ areas:
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
-  - components/src/dynamo/common/utils/snapshot.py
+  - components/src/dynamo/common/snapshot/
   - deploy/helm/charts/snapshot/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/

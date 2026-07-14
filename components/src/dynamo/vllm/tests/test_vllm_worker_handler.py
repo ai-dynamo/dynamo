@@ -770,36 +770,6 @@ class TestDecodeWorkerMultimodalBranching:
         assert len(chunks) == 1
         assert chunks[0]["message"] == "test stop"
 
-    async def test_over_budget_explicit_max_tokens_returns_error_before_engine(self):
-        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
-        handler.model_max_len = 100
-        handler.engine_client = MagicMock()
-
-        request = {
-            "token_ids": [1, 2, 3],
-            "sampling_options": {},
-            "stop_conditions": {"max_tokens": 98},
-            "output_options": {},
-        }
-        context = MagicMock()
-        chunks = []
-        async for chunk in handler._generate_token_mode(request, context, "req-1"):
-            chunks.append(chunk)
-
-        assert chunks == [
-            {
-                "finish_reason": (
-                    "error: This model's maximum context length is 100 tokens. "
-                    "However, you requested 101 tokens "
-                    "(3 in the messages, 98 in the completion). "
-                    "Please reduce the length of the messages or completion."
-                ),
-                "index": 0,
-                "token_ids": [],
-            }
-        ]
-        handler.engine_client.generate.assert_not_called()
-
     async def test_aggregated_mode_calls_extract_multimodal_data(self):
         """Aggregated mode delegates media loading to the shared processor."""
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")

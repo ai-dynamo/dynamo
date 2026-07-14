@@ -72,11 +72,11 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.14",
+    "sglang[diffusion]==0.5.15",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
     "blake3>=1.0.0,<2.0.0",
-    "nixl[cu13]>=1.0.0,<1.1.0",
+    "nixl[cu13]==1.3.0",
     "cupy-cuda12x>=13.0.0",
 ]
 

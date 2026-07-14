@@ -528,6 +528,24 @@ async def test_custom_jinja_template_env_var_expansion(monkeypatch, mock_sglang_
     )
 
 
+@pytest.mark.asyncio
+async def test_multiple_served_model_names_register_primary_and_aliases(
+    mock_sglang_cli,
+):
+    """SGLang packed served names split into primary + Dynamo aliases."""
+    mock_sglang_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--served-model-name",
+        "primary,alias-one alias-two",
+    )
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.served_model_name == "primary"
+    assert config.dynamo_args.served_model_aliases == ["alias-one", "alias-two"]
+
+
 # --- Tool Call Parser Validation Tests ---
 
 

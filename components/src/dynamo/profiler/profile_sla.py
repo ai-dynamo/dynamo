@@ -465,6 +465,8 @@ async def run_profile(
                     purpose=DGDMaterializationPurpose.INTERPOLATION,
                     override=dgd_override,
                     tolerations=job_tolerations,
+                    runtime_backend=resolved_backend,
+                    model_name_or_path=resolve_model_path(dgdr),
                 )
                 await run_interpolation(
                     dgdr,
