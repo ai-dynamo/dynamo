@@ -78,14 +78,16 @@ class EngineGenerateRequest:
     @classmethod
     def from_request(cls, request: dict[str, Any]) -> Optional["EngineGenerateRequest"]:
         sglang_tito = payload(request)
-        return cls(sglang_tito) if sglang_tito is not None else None
+        if sglang_tito is None:
+            return None
+        engine_request = cls(sglang_tito)
+        engine_request._validate_request_fields()
+        return engine_request
 
     def build_sampling_params(self) -> dict[str, Any]:
-        self._validate_request_fields()
         return _build_sampling_params(self.sglang_tito)
 
     def build_logprob_kwargs(self) -> dict[str, Any]:
-        self._validate_request_fields()
         return _build_logprob_kwargs(self.sglang_tito)
 
     def _validate_request_fields(self) -> None:

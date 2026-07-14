@@ -385,7 +385,11 @@ class SglangLLMEngine(LLMEngine):
         assert self.engine is not None, "Engine not initialized"
 
         engine_request = EngineGenerateRequest.from_request(request)
-        sampling_params = self._build_sampling_params(request)
+        sampling_params = (
+            engine_request.build_sampling_params()
+            if engine_request is not None
+            else self._build_sampling_params(request)
+        )
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
         priority_kwargs = {}

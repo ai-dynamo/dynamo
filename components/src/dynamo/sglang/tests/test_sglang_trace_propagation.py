@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from dynamo.common.constants import DisaggregationMode
+from dynamo.sglang.engine_generate import EngineGenerateRequest
 
 # Guard the engine import directly: package metadata can be present without
 # submodules, and native-lib loads (e.g., libcuda.so.1) raise `ImportError`
@@ -133,3 +135,37 @@ async def test_forwards_routing_priority_when_present():
     )
 
     assert captured["priority"] == 7
+
+
+async def test_engine_generate_adapter_is_parsed_once(monkeypatch):
+    expected_sampling_params = object()
+    adapter = SimpleNamespace(
+        build_sampling_params=Mock(return_value=expected_sampling_params),
+        build_logprob_kwargs=Mock(return_value={}),
+    )
+    parse_request = Mock(return_value=adapter)
+    monkeypatch.setattr(
+        EngineGenerateRequest, "from_request", parse_request
+    )
+
+    captured = {}
+
+    async def fake_async_generate(**kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    engine = _make_engine(fake_async_generate, enable_trace=False)
+    engine._build_sampling_params = lambda request: pytest.fail(
+        "engine-native generate reparsed the request through the fallback helper"
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "extra_args": {"sglang_tito": {"sampling_params": {}}},
+    }
+
+    await _drain(engine, _FakeContext(), request)
+
+    parse_request.assert_called_once_with(request)
+    adapter.build_sampling_params.assert_called_once_with()
+    adapter.build_logprob_kwargs.assert_called_once_with()
+    assert captured["sampling_params"] is expected_sampling_params
