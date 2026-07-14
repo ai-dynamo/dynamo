@@ -5460,8 +5460,7 @@ dependencies = [
 [[package]]
 name = "modelexpress-client"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7de62490b58d9862482a2cf223c3aeceaadd01d46ac996d99b4b6a75af204d21"
+source = "git+https://github.com/rushilbhat/modelexpress?rev=46e4633a33a9a9183bda97ee5bb3411dd4992d7c#46e4633a33a9a9183bda97ee5bb3411dd4992d7c"
 dependencies = [
  "anyhow",
  "clap",
@@ -5482,20 +5481,22 @@ dependencies = [
 [[package]]
 name = "modelexpress-common"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44ec153f868d45d5d48129dd2f1e24755e93f74d6f9f423094a3b784fa6a88cc"
+source = "git+https://github.com/rushilbhat/modelexpress?rev=46e4633a33a9a9183bda97ee5bb3411dd4992d7c#46e4633a33a9a9183bda97ee5bb3411dd4992d7c"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "clap",
  "config",
+ "futures",
  "hf-hub 0.4.3",
  "jiff",
  "prost 0.13.5",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tonic 0.13.1",
