@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the serial dynamo.vllm.multimodal_utils.async_vision_encoder.
+"""Unit tests for dynamo.vllm.multimodal_utils.async_vision_encoder.
 
-Pin the serial-glue contract: build / forward / close run on one actor thread;
-encode returns one tensor per raw; the preprocess barrier fails a request
-atomically (no GPU work) if any image's preprocess fails; concurrent encodes are
-**not** coalesced (one forward_batch call each — the batched version's job, added
-later); load fails fast on a build error or a missing/invalid image_token_id.
+Pin the glue contract: build / forward / close run on one actor thread; encode
+returns one tensor per raw; the preprocess barrier fails a request atomically
+(no GPU work) if any image's preprocess fails; load fails fast on a build error or
+a missing/invalid hardcoded image_token_id and reaps its thread.
 """
 
-import asyncio
 import threading
 
 import pytest
@@ -32,8 +30,9 @@ pytestmark = [
 
 
 class _FakeBackend(VisionEncoderBackend):
-    """A CPU-only fake backend; records its threads and forward-call boundaries."""
+    """A CPU-only fake backend; records its threads."""
 
+    max_batch_cost = 8
     image_token_id = 151655
     # This fake overrides preprocess, so opt into the off-loop pool (the default
     # is 0 ⇒ no pool); the passthrough path is covered by its own test below.
@@ -47,7 +46,6 @@ class _FakeBackend(VisionEncoderBackend):
         self.close_calls = 0
         self.model_id = None
         self.forward_threads: list[int] = []
-        self.forward_calls: list[list] = []  # one entry per forward_batch call
 
     def build(self, model_id):
         self.build_thread = threading.get_ident()
@@ -60,7 +58,6 @@ class _FakeBackend(VisionEncoderBackend):
 
     def forward_batch(self, items, target_bucket=None):
         self.forward_threads.append(threading.get_ident())
-        self.forward_calls.append(list(items))
         return [torch.full((2, 4), float(len(str(it)))) for it in items]
 
     def close(self):
@@ -87,7 +84,7 @@ async def test_preprocess_barrier_fails_atomically_with_no_gpu_work():
     try:
         with pytest.raises(ValueError, match="bad input"):
             await enc.encode(["good", "bad"])
-        assert be.forward_calls == []  # nothing ran
+        assert be.forward_threads == []  # nothing was submitted
     finally:
         enc.shutdown()
 
@@ -101,20 +98,6 @@ async def test_build_and_forward_share_one_non_main_thread():
         assert be.build_thread is not None
         assert set(be.forward_threads) == {be.build_thread}
         assert be.build_thread != threading.get_ident()
-    finally:
-        enc.shutdown()
-
-
-async def test_concurrent_encodes_are_not_coalesced():
-    """Serial glue: each encode runs its own forward_batch — no cross-request
-    batching (that is the batched version's job, added in a later PR)."""
-    be = _FakeBackend()
-    enc = AsyncVisionEncoder(be)
-    enc.load("m")
-    try:
-        await asyncio.gather(enc.encode(["a"]), enc.encode(["b"]), enc.encode(["c"]))
-        assert len(be.forward_calls) == 3
-        assert all(len(call) == 1 for call in be.forward_calls)
     finally:
         enc.shutdown()
 
@@ -161,7 +144,7 @@ def test_shutdown_runs_backend_close_on_actor_thread():
     enc.load("m")
     enc.shutdown()
     assert be.closed is True
-    assert be.close_thread == be.build_thread
+    assert be.close_thread == be.build_thread  # close on the actor thread
 
 
 def test_shutdown_is_idempotent():
@@ -171,7 +154,7 @@ def test_shutdown_is_idempotent():
     enc.shutdown()
     enc.shutdown()
     assert be.close_calls == 1
-    assert enc._actor is None
+    assert enc._batcher is None
     assert enc._pool is None
 
 
@@ -183,18 +166,18 @@ def test_load_fails_fast_on_build_error_and_reaps_threads():
     enc = AsyncVisionEncoder(_BadBuild())
     with pytest.raises(RuntimeError, match="build failed"):
         enc.load("m")
-    assert enc._actor is None
+    assert enc._batcher is None
     assert enc._pool is None
 
 
 def test_load_fails_fast_on_missing_image_token_id():
     class _NoTokenId(_FakeBackend):
-        image_token_id = None
+        image_token_id = None  # author forgot to hardcode it
 
     enc = AsyncVisionEncoder(_NoTokenId())
     with pytest.raises(ValueError, match="image_token_id"):
         enc.load("m")
-    assert enc._actor is None
+    assert enc._batcher is None
     assert enc._pool is None
 
 
@@ -220,8 +203,8 @@ class _PassthroughBackend(VisionEncoderBackend):
 
 
 async def test_passthrough_skips_preprocess_when_no_pool():
-    """With no pool (preprocess_concurrency=0) the preprocess phase is skipped
-    entirely and raws go straight to forward_batch — no barrier, no pool thread."""
+    """With no pool (preprocess_concurrency=0) preprocess is skipped and raws go
+    straight to the batcher → forward_batch, no barrier, no pool thread."""
     be = _PassthroughBackend()
     # Instance-level boom (invisible to the class-override check) proves the
     # phase is never entered, not merely run through an identity hook.
@@ -234,7 +217,11 @@ async def test_passthrough_skips_preprocess_when_no_pool():
         assert enc._pool is None  # no pool created
         out = await enc.encode(["a", "bb"])
         assert len(out) == 2
-        assert be.forward_calls == [["a", "bb"]]  # raws passed straight through
+        assert all(t.shape == (2, 4) for t in out)
+        # Passthrough must hand the raws themselves to forward_batch, unchanged
+        # and in order. A single request may span multiple micro-batches, so
+        # flatten the recorded calls rather than requiring one forward call.
+        assert [item for batch in be.forward_calls for item in batch] == ["a", "bb"]
     finally:
         enc.shutdown()
 
@@ -269,3 +256,17 @@ def test_driver_override_to_zero_with_overriding_backend_raises():
 def test_preprocess_concurrency_rejects_negative():
     with pytest.raises(ValueError, match="preprocess_concurrency"):
         AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=-1)
+
+
+def test_load_bad_batch_cost_fails_without_spawning_pool():
+    """A backend whose max_batch_cost the batcher rejects fails load() cleanly: the
+    batcher ctor raises before the preprocess pool is ever spawned (nothing to reap)."""
+
+    class _BadBudget(_FakeBackend):
+        max_batch_cost = 0  # ThreadedMicroBatcher requires >= 1 → ctor raises
+
+    enc = AsyncVisionEncoder(_BadBudget())
+    with pytest.raises(ValueError, match="max_batch_cost"):
+        enc.load("m")
+    assert enc._pool is None
+    assert enc._batcher is None
