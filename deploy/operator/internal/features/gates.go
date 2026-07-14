@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	resourcev1 "k8s.io/api/resource/v1"
@@ -201,14 +202,11 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		}
 	}
 
-	log.FromContext(ctx).Info("Resolved operator feature gates",
-		"grove", gates.Grove,
-		"lws", gates.LWS,
-		"volcano-scheduler", gates.VolcanoScheduler,
-		"kai-scheduler", gates.KaiScheduler,
-		"dra", gates.DRA,
-		"istio", gates.Istio,
-	)
+	logValues := make([]any, 0, 2*len(allNames))
+	for _, name := range allNames {
+		logValues = append(logValues, string(name), gates.Enabled(name))
+	}
+	log.FromContext(ctx).Info("Resolved operator feature gates", logValues...)
 	return gates, nil
 }
 
@@ -313,28 +311,14 @@ func apiGroupServesVersion(apiGroups *metav1.APIGroupList, groupName, version st
 
 // Enabled reports whether name is enabled.
 func (g Gates) Enabled(name Name) bool {
-	switch name {
-	case GMSSnapshot:
-		return g.GMSSnapshot
-	case Checkpoint:
-		return g.Checkpoint
-	case Grove:
-		return g.Grove
-	case LWS:
-		return g.LWS
-	case KaiScheduler:
-		return g.KaiScheduler
-	case VolcanoScheduler:
-		return g.VolcanoScheduler
-	case DRA:
-		return g.DRA
-	case Istio:
-		return g.Istio
-	case GPUDiscovery:
-		return g.GPUDiscovery
-	default:
-		panic(fmt.Sprintf("unknown feature gate %q", name))
+	value := reflect.ValueOf(g)
+	typeOfGates := value.Type()
+	for i := 0; i < value.NumField(); i++ {
+		if typeOfGates.Field(i).Tag.Get("json") == string(name) {
+			return value.Field(i).Bool()
+		}
 	}
+	panic(fmt.Sprintf("unknown feature gate %q", name))
 }
 
 type gateContextKey struct{}
