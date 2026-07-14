@@ -33,10 +33,10 @@ on:
         type: string
         default: ''
       rc_round:
-        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created. Default 7.'
+        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created. Default 8.'
         required: false
         type: string
-        default: '7'
+        default: '8'
       containers:
         description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,snapshot.'
         required: false
@@ -100,7 +100,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
           SOURCE_REF: ${{ inputs.source_ref || 'main' }}
           RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
-          RC_ROUND: ${{ inputs.rc_round || '7' }}
+          RC_ROUND: ${{ inputs.rc_round || '8' }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
@@ -344,7 +344,7 @@ jobs:
         # A dry run sets up the branch/bump only — don't consume an rc.
         if: ${{ !inputs.dry_run }}
         env:
-          RC_ROUND: ${{ inputs.rc_round || '7' }}
+          RC_ROUND: ${{ inputs.rc_round || '8' }}
         run: |
           set -euo pipefail
           # Internal staging registries (crates/helm/wheels) are immutable, so each

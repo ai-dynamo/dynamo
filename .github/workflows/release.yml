@@ -282,7 +282,7 @@ jobs:
             #   helm + crate (SemVer):   ${SEMVER_BASE}-rcN  where .devN/.postN become a
             #                            -devN/-postN pre-release (e.g. 0.1.0-rc0, 0.1.0-post3-rc0)
             #   wheel: clean version, disambiguated by the rcN upload subpath.
-            # Passed through from on-demand-release.yml's rc_number INPUT (default rc7;
+            # Passed through from on-demand-release.yml's rc_number INPUT (default rc8;
             # NO GitHub tag is created). Require it (don't default to 0) so a broken
             # hand-off fails loud instead of silently colliding on rc0.
             RC_NUM="${INPUT_RC_NUMBER}"
