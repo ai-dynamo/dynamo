@@ -80,36 +80,19 @@ In order: `#4a7500`, `#0a4a80`, `#9a7800`, `#005a40`, `#555555`, `#3a1050`, `#7a
 
 ## Typography
 
-Two canonical families. **Pick one per blog and hold the line.** Mixing families inside one blog reads as two unrelated projects stapled together.
-
-### Family 1 — Flash-Indexer (compact data-dashboard scale)
+**One family — Dynamo Dark.** Two typefaces, straight from `design_tokens.yaml`: the body sans and the aligned mono. Never a third.
 
 | Role | Family | Size (px) | Weight | Transform | Letter-Spacing |
 |---|---|---|---|---|---|
-| Title | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 18 | 700 | uppercase | 0.08em |
-| Heading | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 14 | 600 | uppercase | 0.05em |
-| Label | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 12 | 400 | none | 0 |
-| Annotation | `'NVIDIA Sans', Arial, Helvetica, sans-serif` | 10 | 400 | none | 0 |
-| Code / ticks / numbers | `'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace` | 10-12 | 400 | none | 0 |
+| Title | `Arial, Helvetica, sans-serif` | 18 | 700 | uppercase | 0.08em |
+| Heading | `Arial, Helvetica, sans-serif` | 14 | 600 | uppercase | 0.05em |
+| Label | `Arial, Helvetica, sans-serif` | 12 | 400 | none | 0 |
+| Annotation | `Arial, Helvetica, sans-serif` | 10 | 400 | none | 0 |
+| Code / ticks / numbers | `'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace` | 10-13 | 400 | none | 0 |
 
-Use for inline body-prose charts, dense data dashboards, heatmaps, and any figure that needs to pack many marks per inch. Canonical exemplars at [docs/digest/flash-indexer/images/](../flash-indexer/images/).
+The title is 18 px at inline / body scale. For a full-width hero figure, scale the title up to 24–42 px but keep weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`, and the sans stack — size is the only lever. A hero may carry a one-line subtitle beneath the title in `text.muted` (`#767676`) at 12–14 px, weight 400, sentence case: the title carries the takeaway, the subtitle carries the qualifier (config, units, model).
 
-### Family 2 — Mocker (display-scale headline figures)
-
-| Role | Family | Size (px) | Weight | Transform | Color |
-|---|---|---|---|---|---|
-| Title | `Geist, Inter, 'Helvetica Neue', Arial, sans-serif` | 42 | 300 | none (sentence case) | `#ffffff` |
-| Subtitle | `Geist, Inter, 'Helvetica Neue', Arial, sans-serif` | 22 | 300 | none | `#767676` |
-| Label | `Geist, Inter, 'Helvetica Neue', Arial, sans-serif` | 13 | 300 | none | `#cdcdcd` |
-| Annotation | `Geist, Inter, 'Helvetica Neue', Arial, sans-serif` | 11 | 300 | none | `#cdcdcd` |
-| Code / ticks / numbers | `'Geist Mono', 'JetBrains Mono', 'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace` | 11-13 | 400 | none | varies |
-| Callout-card label (in floating annotation boxes) | `Geist, Inter, 'Helvetica Neue', Arial, sans-serif` | 13-14 | 700 | none | `#ffffff` |
-
-Sentence-case titles only (capitalize first word + proper nouns). The takeaway clause lives in the subtitle after an em-dash: "Hardware spec / config / model — narrative takeaway with the punchline." Bold is reserved for callout-card labels.
-
-Use for hero figures, headline artifacts, and any figure that anchors a full page width. Canonical exemplars at [docs/digest/dynosim/](../dynosim/).
-
-**Family rules.** Two families per figure, never three. The body sans + the aligned mono. Within one blog, every figure stays in the same family.
+Use the same treatment for every figure — dense dashboards and heatmaps (compact exemplars: [docs/digest/flash-indexer/images/](../flash-indexer/images/)) and full-width heroes (exemplar: [docs/digest/dynosim/](../dynosim/)) alike. Never switch fonts or weights between figures in a blog.
 
 ## Borders and Spacing
 
@@ -167,7 +150,7 @@ The same pattern applies to other accents if you find them too dim against black
 
 When a horizontal pipeline diagram needs to communicate "when in time" each stage runs (pre-deployment, runtime, feedback), add small uppercase **phase tags** above the relevant boxes in the stage's accent color:
 
-- Font: Helvetica Neue Light, 11 pt, weight bold (`<b>...</b>`)
+- Font: `Arial, Helvetica, sans-serif`, 11 px, weight 700 (`<b>...</b>`)
 - Case: ALL CAPS (`text.upper()`)
 - Color: same as the box's accent (binds the tag visually to its stage)
 - Position: ~30-40 px above the box top edge
@@ -292,11 +275,11 @@ Each entry: **stupid version → corrected version**.
 
 ### Typography
 
-- **Mixed font families inside one figure.** → Two families maximum: one body sans + one aligned mono, from the same family (flash-indexer OR mocker — see typography section). Never a third.
-- **Mixed families across figures in the same blog.** → Pick the family at the blog level, not the figure level. One blog renders in one family, end to end.
-- **Comic Sans, Impact, or any decorative font.** → Only the two canonical families.
-- **Title that hedges or asks a question.** ("Performance Overview", "How Fast Is It?") → Title is the takeaway in declarative form. ("Concurrent Indexer Wins by 40x" for flash-indexer ALL-CAPS, or "Snapshot restore collapses cold start" sentence-case + em-dash subtitle for mocker.)
-- **ALL CAPS title in a mocker-family blog, or sentence-case 42px in a flash-indexer blog.** → Cross-family contamination. Each family has its own headline grammar; do not borrow.
+- **Mixed font families inside one figure.** → Two typefaces maximum: the body sans + the aligned mono from the Dynamo Dark tokens (see typography section). Never a third.
+- **A second type family.** → One family, blog-wide. Do not introduce Helvetica Neue, Geist, a display serif, or any font outside the token stack.
+- **Comic Sans, Impact, or any decorative font.** → Only the two canonical typefaces.
+- **Title that hedges or asks a question.** ("Performance Overview", "How Fast Is It?") → Title is the takeaway in declarative ALL-CAPS form ("Concurrent Indexer Wins by 40x").
+- **Sentence-case or light-weight titles.** → Titles are ALL-CAPS, weight 700, `letter-spacing: 0.08em`. The takeaway can extend into a muted subtitle, but the title itself always carries the token treatment.
 
 ### Visual Effects
 
@@ -316,12 +299,13 @@ Each entry: **stupid version → corrected version**.
 
 ### Reference
 
-When in doubt, open one of:
+When in doubt, open one of these exemplars — all render in the one Dynamo Dark family:
 
-**Flash-indexer family** (compact data-dashboard scale, 18 px ALL-CAPS title):
+**Compact charts and diagrams** (dense, inline / body scale):
 - [docs/digest/flash-indexer/images/](../flash-indexer/images/) — six figures across all four implemented pathways.
 - [docs/digest/agentic-inference/two-gates.svg](../agentic-inference/two-gates.svg) — exemplar hand-crafted SVG.
 - [docs/digest/agentic-inference/protocol-stack.svg](../agentic-inference/protocol-stack.svg) — exemplar layered SVG with custom dividers.
 
-**Mocker family** (display-scale headline figures, 42 px sentence-case title + em-dash subtitle):
-- [docs/digest/dynosim/](../dynosim/) — nine DynoSim figures (hero + benchmark sweeps + planner studies + KV router comparison). `fig-1-hero-config-space.svg` is the canonical hero pattern; `fig-5-planner-load-interval.svg` is the canonical single-chart pattern.
+**Display-scale / hero:**
+- [docs/digest/dynosim/dynosim-hero.png](../dynosim/dynosim-hero.png) — hero figure at full page width.
+- [docs/digest/dynosim/dynosim-pareto-frontier.md](../dynosim/dynosim-pareto-frontier.md) — Pareto-frontier write-up (cost / latency comparison pattern).

@@ -153,7 +153,7 @@ fig.add_annotation(
     x=72, y=1080, xref="x", yref="y",
     text="What GPUs sample in days, DynoSim sweeps in minutes.",
     showarrow=False,
-    font=dict(family=sans, size=18, color=text_muted, weight=300),
+    font=dict(family=sans, size=18, color=text_muted, weight=400),
 )
 ```
 
@@ -187,8 +187,8 @@ fig.add_annotation(
     xref="x4", yref="y4",
     xanchor="right", yanchor="middle", xshift=-6,
     text="~50 ms", showarrow=False,
-    font=dict(family="Helvetica Neue, HelveticaNeue, sans-serif",
-              size=11, color="#ffffff", weight=300),
+    font=dict(family="Arial, Helvetica, sans-serif",
+              size=11, color="#ffffff", weight=400),
 )
 ```
 
@@ -300,21 +300,18 @@ When the title carries the takeaway, the **subtitle carries the qualifier** — 
 
 **Typography spec:**
 
-| Role | Family | Size | Weight | Color |
-|---|---|---|---|---|
-| Title | Helvetica Neue Light | 42 | 300 | `text.primary` |
-| Subtitle | Helvetica Neue Light | 22 | 300 | `text.muted` |
+| Role | Family | Size | Weight | Transform | Color |
+|---|---|---|---|---|---|
+| Title | `Arial, Helvetica, sans-serif` | 24–42 (hero) | 700 | uppercase | `text.primary` |
+| Subtitle | `Arial, Helvetica, sans-serif` | 14–18 | 400 | sentence case | `text.muted` |
 
-Light weight (300) is the Dynamo-blog convention for the mocker / digital-twin figure stack; it pairs better with the dark background than Arial Bold. Use the family fallback `"Helvetica Neue, HelveticaNeue, sans-serif"` so the figure renders correctly on systems without Helvetica Neue installed.
+The title uses the canonical token treatment (weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`) scaled up for a hero; the subtitle drops to a muted, sentence-case qualifier. Use the token sans stack `"Arial, Helvetica, sans-serif"` so the figure renders identically everywhere.
 
 **Vertical spacing.** Subtitle top sits **~5 px below the title's bottom edge**. Earlier guidance said 15-20 px below the baseline; in practice that read as a gap, not a stack. Plotly's title bbox is taller than the raw font size (weight-300 with internal padding adds ~8px below the rendered descender), so 5 px below the rendered bottom is what reads as "one block, two lines" on dark backgrounds.
 
-**Title and subtitle casing.** Two title patterns, two casing rules:
+**Title and subtitle casing.** The title is ALL-CAPS (the token `transform: uppercase`), carrying the takeaway in as few words as possible ("KV-AWARE ROUTING LIFTS THE THROUGHPUT FRONTIER"). Keep it short — uppercase runs long fast.
 
-- **Noun-phrase or short labeled title** ("DynoSim: Simulating the Final Frontier", "Four-Window Fidelity Check"): **Title Case**.
-- **Full-sentence headline carrying a verdict** ("KV-aware routing cuts TTFT and lifts the throughput frontier"): **sentence case** — Title-Casing a sentence reads as shouting.
-
-Subtitle is always sentence case. Proper nouns (DynoSim, Planner, KVBM, Router, NVIDIA) stay capitalized in every position. When in doubt: if you'd write it as a chapter heading → Title Case; if you'd write it as a tweet → sentence case.
+The subtitle is sentence case, in muted text. Proper nouns (DynoSim, Planner, KVBM, Router, NVIDIA) stay capitalized in every position. The subtitle carries the qualifier the uppercase title cannot: config, units, model, or the numeric result.
 
 **Horizontal alignment.** Subtitle's left edge sits at the figure's `x=0.02` mark, matching the title's `x=0.02`. This is the **alignment trap**:
 
@@ -344,12 +341,12 @@ So the subtitle annotation gets `x=-0.049, xref="paper"` to line up under the ti
 
 ```
 title_top_px      = (1 - title_y_container) * figure_height
-title_bottom_px   = title_top_px + (title_font_size * 0.80)   # empirical bbox, weight 300
+title_bottom_px   = title_top_px + (title_font_size * 0.80)   # empirical bbox, weight 700
 subtitle_top_px   = title_bottom_px + 5
 paper_y           = 1 + (margin_t - subtitle_top_px) / plot_height
 ```
 
-The `* 0.80` constant comes from measuring the rendered Helvetica Neue Light title at 42pt; the visible bbox is shorter than the line-height of 42 * 1.2 = 50px because Plotly anchors `yanchor="top"` near the cap-height line rather than the EM-box top. Tune empirically per figure: render at 2x, measure the gap, adjust.
+The `* 0.80` constant comes from measuring the rendered Arial title at 42 px; the visible bbox is shorter than the line-height of 42 * 1.2 = 50px because Plotly anchors `yanchor="top"` near the cap-height line rather than the EM-box top. Tune empirically per figure and font weight: render at 2x, measure the gap, adjust.
 
 Worked example (`height=620`, `margin_t=130`, plot height = 420, title at container `y=0.96`, title font 42):
 
@@ -362,7 +359,7 @@ paper_y        = 1 + (130 - 63.4) / 420 = 1.158
 
 Use `xref="paper"`, `yref="paper"`, `xanchor="left"`, `yanchor="top"` on the annotation.
 
-**Reference implementation:** `gen_fig_6_tuning_loop.py` and `gen_fig_5_decision_cascade.py` in the mocker blog stack. Both compute the paper coords in code comments so the formula stays auditable.
+**Reference implementation:** a hero figure's generator script should compute these paper coords in code comments so the formula stays auditable.
 
 ### Subtitle Content
 
@@ -388,18 +385,18 @@ The subtitle is the qualifier, not a paraphrase of the title. Aim for **8-12 wor
 
 ### Subtitles in Hand-Crafted SVG Figures
 
-For SVG-pathway figures (e.g., `gen_fig_2_architecture.py`), the typography rules are identical (22pt Helvetica Neue Light, weight 300, `text.muted`, 8-12 words), but the positioning math differs because SVG uses pixel coords directly and `<text>` defaults to a baseline-anchored render.
+For SVG-pathway figures, the typography rules are identical (Arial sans subtitle, 14–18 px, weight 400, `text.muted`, 8-12 words), but the positioning math differs because SVG uses pixel coords directly and `<text>` defaults to a baseline-anchored render.
 
 ```python
 text(
     0.02 * W, 92,          # x=0.02 of figure width; y=92 px from top
     "Engine cores, Router, Planner — one simulated clock, one harness.",
-    family="Helvetica Neue, HelveticaNeue, sans-serif",
-    size=22, weight="300", color=TEXT_MUTED, anchor="start",
+    family="Arial, Helvetica, sans-serif",
+    size=18, weight="400", color=TEXT_MUTED, anchor="start",
 )
 ```
 
-With `dominant-baseline="middle"` on the SVG text element, the y coordinate is the *vertical center* of the text. For a 42pt title centered at `y=60` and a 22pt subtitle centered ~30 px below it: subtitle `y` ≈ 90-95.
+With `dominant-baseline="middle"` on the SVG text element, the y coordinate is the *vertical center* of the text. For a 42 px title centered at `y=60` and an 18 px subtitle centered ~30 px below it: subtitle `y` ≈ 90-95.
 
 Tune empirically per figure: render at 2x, measure the gap, adjust. The rule is the visible gap (15-20 px between title baseline and subtitle cap-top), not the y coordinate.
 
