@@ -531,6 +531,7 @@ def _prepare_planner_replay(
                 aic_session = create_session(
                     backend_name=aic_backend,
                     system=ref_args.aic_system,
+                    systems_path=ref_args.aic_systems_path,
                     model_path=ref_args.aic_model_path,
                     tp_size=ref_args.aic_tp_size or 1,
                     backend_version=ref_args.aic_backend_version,
