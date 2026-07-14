@@ -139,6 +139,21 @@ fn get_frame_timestamp(frame: &ffmpeg_next::frame::Video, time_base: Rational) -
     }
 }
 
+fn get_sample_timestamp(
+    config: &VideoDecoder,
+    frame: &ffmpeg_next::frame::Video,
+    time_base: Rational,
+) -> Result<Option<f64>> {
+    match get_frame_timestamp(frame, time_base) {
+        Ok(timestamp) => Ok(Some(timestamp)),
+        Err(error) if config.strict => Err(error.context("FFmpeg frame timestamp error")),
+        Err(error) => {
+            tracing::debug!(%error, "Skipping video frame without a usable timestamp");
+            Ok(None)
+        }
+    }
+}
+
 fn handle_sample_error(
     config: &VideoDecoder,
     target_index: &mut usize,
@@ -267,9 +282,13 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
         loop {
             match decoder.receive_frame(&mut decoded_frame) {
                 Ok(()) => {
-                    let timestamp = match get_frame_timestamp(&decoded_frame, decoder_time_base) {
-                        Ok(timestamp) => timestamp,
-                        Err(_) => continue,
+                    let timestamp = match get_sample_timestamp(
+                        config,
+                        &decoded_frame,
+                        decoder_time_base,
+                    )? {
+                        Some(timestamp) => timestamp,
+                        None => continue,
                     };
                     if timestamp < target_times[*target_index].as_secs() as f64 {
                         continue;
@@ -576,6 +595,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("FFmpeg RGB conversion error"), "{error}");
+    }
+
+    #[test]
+    fn test_timestamp_error_respects_strict_mode() {
+        let frame = ffmpeg_next::frame::Video::empty();
+        let time_base = Rational::new(1, 1);
+        let decoder = |strict| VideoDecoder {
+            strict,
+            ..Default::default()
+        };
+
+        assert!(
+            get_sample_timestamp(&decoder(false), &frame, time_base)
+                .unwrap()
+                .is_none()
+        );
+
+        let error = get_sample_timestamp(&decoder(true), &frame, time_base)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("FFmpeg frame timestamp error"), "{error}");
     }
 
     #[rstest]
