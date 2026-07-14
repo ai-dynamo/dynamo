@@ -15,9 +15,10 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
-        RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
-        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
+        CacheHitEstimates, FencedWorkerProvider, OverlapAnalysis, OverloadedWorkerProvider,
+        RequestLifecycleLease, RequestProgressUpdater, ScheduleMode, ScheduleRequest,
+        TieredOverlapRefresher, effective_prefill_tokens,
+        overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
 use dynamo_runtime::{
@@ -281,6 +282,12 @@ where
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        // DIS-2404: fenced (dead) workers, populated by the worker monitor on
+        // discovery removal and read at selection to reject them everywhere.
+        let client_for_fence = client.clone();
+        let fenced_worker_provider: FencedWorkerProvider =
+            Arc::new(move || client_for_fence.fenced_instance_ids());
+
         let scheduler = KvScheduler::start(
             endpoint.clone(),
             block_size,
@@ -290,6 +297,7 @@ where
             prefill_load_estimator.clone(),
             overlap_scores_refresh,
             Some(overloaded_worker_provider),
+            Some(fenced_worker_provider),
             model_name.as_deref(),
             worker_type,
             cancellation_token.child_token(),
