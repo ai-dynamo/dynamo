@@ -18,6 +18,10 @@ on:
 
 permissions:
   contents: read
+  # Lets the build jobs' compliance-extract download a PRIOR run's baseline
+  # compliance artifact (cross-run) to diff the OSRB CSV against. A reusable
+  # workflow's token can't exceed the caller's, so this must be granted here.
+  actions: read
 
 jobs:
   # ============================================================================
@@ -187,6 +191,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
@@ -225,6 +233,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
@@ -244,6 +256,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
@@ -282,6 +298,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
@@ -301,6 +321,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
@@ -339,6 +363,10 @@ jobs:
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
       build_timeout_minutes: 120
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
@@ -591,7 +619,7 @@ jobs:
     uses: ./.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
-      pytest_markers: '(pre_merge or post_merge) and vllm and xpu_1'
+      pytest_markers: '(pre_merge or post_merge) and vllm'
 
   # ============================================================================
   # IMAGE COMPLIANCE
@@ -743,6 +771,33 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  snapshot-placeholder-trtllm:
+    name: TRTLLM Snapshot Placeholder
+    needs: [trtllm-copy-to-acr]
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-trtllm-placeholder
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime
+
   trtllm-dev-copy-to-acr:
     name: trtllm-dev # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-dev-build]
@@ -884,6 +939,33 @@ jobs:
         checkpoint_enabled: 'true'
         checkpoint_storage_size: 64Gi
 
+  deploy-operator-checkpoint-trtllm:
+    name: TRTLLM DynamoCheckpoint Operator Setup
+    needs: [operator]
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Setup vCluster and operator
+      id: setup
+      uses: ./.github/actions/setup-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
+        vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+        hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        checkpoint_enabled: 'true'
+        checkpoint_storage_size: 64Gi
+
   deploy-snapshot-agent-checkpoint-vllm:
     name: vLLM DynamoCheckpoint Snapshot Agent Setup
     needs: [deploy-operator-checkpoint-vllm, snapshot-agent]
@@ -969,6 +1051,52 @@ jobs:
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Install snapshot-agent
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  deploy-snapshot-agent-checkpoint-trtllm:
+    name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
+    needs: [deploy-operator-checkpoint-trtllm, snapshot-agent]
+    if: |
+      github.event_name != 'workflow_dispatch' &&
+      needs.deploy-operator-checkpoint-trtllm.result == 'success' &&
+      needs.snapshot-agent.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
       - name: Install snapshot-agent
         uses: ./.github/actions/setup-snapshot-agent
         with:
@@ -1104,6 +1232,70 @@ jobs:
             --checkpoint-backend=sglang
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
 
+  deploy-test-checkpoint-trtllm:
+    name: TRTLLM DynamoCheckpoint Deploy Test
+    needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      needs.deploy-snapshot-agent-checkpoint-trtllm.result == 'success' &&
+      needs.snapshot-placeholder-trtllm.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
+      - name: Install snapshot-agent (rerun bootstrap)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+      - name: Run DynamoCheckpoint Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
+          framework: checkpoint
+          profile: dgd_restore
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-placeholder
+          test_name: checkpoint_dgd_restore_trtllm
+          test_file: tests/deploy/test_dynamocheckpoint.py
+          extra_pytest_args: >-
+            -m dynamocheckpoint
+            --checkpoint-backend=trtllm
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+
   deploy-cleanup:
     if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
@@ -1144,6 +1336,19 @@ jobs:
       with:
         vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
+
+  deploy-cleanup-checkpoint-trtllm:
+    name: TRTLLM DynamoCheckpoint Cleanup
+    if: always() && github.event_name != 'workflow_dispatch'
+    needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, deploy-test-checkpoint-trtllm]
+    runs-on: prod-deploy-tester-v1
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Teardown vCluster
+      uses: ./.github/actions/teardown-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
+        vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
 
   # ============================================================================
   # GAIE DEPLOY TEST
@@ -1215,17 +1420,22 @@ jobs:
       - deploy-test-trtllm
       - deploy-operator-checkpoint-vllm
       - deploy-operator-checkpoint-sglang
+      - deploy-operator-checkpoint-trtllm
       - deploy-snapshot-agent-checkpoint-vllm
       - deploy-snapshot-agent-checkpoint-sglang
+      - deploy-snapshot-agent-checkpoint-trtllm
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
+      - snapshot-placeholder-trtllm
       - frontend-copy-to-acr
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
+      - deploy-test-checkpoint-trtllm
       - deploy-test-gaie
       - deploy-cleanup
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
+      - deploy-cleanup-checkpoint-trtllm
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -1240,7 +1450,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-agent, snapshot-placeholder-vllm, snapshot-placeholder-sglang, power-agent, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-agent, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1260,6 +1470,9 @@ jobs:
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [ deploy-status-check ]
+    permissions:
+      contents: read
+      actions: read   # grant the reusable notifier read access to list this run's jobs
     uses: ./.github/workflows/notify-slack.yml
     with:
       pipeline_name: Post-Merge

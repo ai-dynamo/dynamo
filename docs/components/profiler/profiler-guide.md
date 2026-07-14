@@ -167,7 +167,8 @@ The profiler enforces these rules at startup:
 | `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Allowed for planner. The perf model starts from native AIC when available or waits for enough live FPM observations. |
 | `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Allowed for planner. The Rust shim falls back to observed-FPM regression when native AIC estimates are unavailable. |
 | `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
-| SLA unachievable | Warning logged, SLA updated to best achievable value. |
+| All AIC rapid experiments return no SLA-feasible configuration | Profiling fails and no DGD is generated. SLA targets are not relaxed automatically. |
+| A real-GPU thorough sweep returns results, but none meet the SLA | Warning logged and the closest measured configuration is selected. |
 | Load-match needs more GPUs than available | Warning logged. |
 
 ## Support Matrix
@@ -281,10 +282,13 @@ python -m dynamo.profiler --config /path/to/dgdr-spec.yaml
 `go install` writes the binary to `GOBIN`, or to `$(go env GOPATH)/bin` when
 `GOBIN` is unset. Add that directory to `PATH` if needed. Alternatively, set
 `DYNAMO_DGD_APPLY_OVERRIDES_BIN` to the binary's absolute path. The profiler
-does not download the binary at runtime.
+does not download the binary at runtime. Runs without `overrides.dgd` do not
+require the helper.
 
 Use a binary from the same Dynamo release as the profiler. The profiler checks
 the binary protocol before applying an override and rejects incompatible versions.
+For supported DGD versions and merge behavior, see
+[Generated DGD Overrides](../../kubernetes/dgdr.md#generated-dgd-overrides).
 
 Registry credentials are namespace-scoped. The operator chart's
 `imagePullSecrets` pull the operator Pod only. A profiling Job that needs
@@ -686,7 +690,13 @@ View traces using Chrome's `chrome://tracing`, [Perfetto UI](https://ui.perfetto
 
 ### SLA Cannot Be Met
 
-The profiler logs a warning and updates the SLA to the best achievable value. To improve results:
+The behavior depends on the search strategy:
+
+- With `searchStrategy: rapid`, profiling fails when all AIC experiments return no SLA-feasible configuration. The profiler does not relax the SLA or generate a DGD.
+- With `searchStrategy: thorough`, the profiler selects the closest measured configuration and logs a warning when the sweep produces results but none meet the SLA. Profiling fails if the sweep produces no usable results.
+
+To improve results:
+
 - Relax SLA targets (increase TTFT/ITL)
 - Add more GPU resources
 - Try a different backend

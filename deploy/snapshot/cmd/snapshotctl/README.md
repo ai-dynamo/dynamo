@@ -8,13 +8,42 @@ DynamoCheckpoint CR -> operator -> snapshot-agent
 ```
 
 Use `snapshotctl` when you want to exercise checkpoint or restore behavior
-directly from a worker pod manifest without going through the operator.
+directly from a worker pod manifest.
 
 ## Requirements
+
+### checkpoint
 
 - the snapshot Helm chart must already be installed in the target namespace
 - a `snapshot-agent` DaemonSet must be running in that namespace
 - the namespace must already have the checkpoint PVC mounted by the agent
+- the snapshot operator (`PodSnapshotReconciler`) must be installed in the cluster
+
+`snapshotctl checkpoint` creates a `PodSnapshot` CR, which the operator's
+`PodSnapshotReconciler` resolves into a `PodSnapshotContent` work order. The
+node agent then performs the CRIU capture. Both the operator and the agent are
+required; neither can be skipped.
+
+The caller must have the following RBAC permissions in the target namespace:
+
+- `create`, `get`, `list`, `watch` on `podsnapshots` (nvidia.com)
+- `get`, `list` on `pods`
+
+### restore
+
+- the snapshot Helm chart must already be installed in the target namespace
+- a `snapshot-agent` DaemonSet must be running in that namespace
+- the namespace must already have the checkpoint PVC mounted by the agent
+
+`snapshotctl restore` does not require the operator. The agent handles restore
+directly from pod annotations.
+
+## PodSnapshot lifecycle
+
+`snapshotctl checkpoint` leaves the `PodSnapshot` CR in place as the capture
+record after the checkpoint completes. It is not deleted automatically. A
+`--cleanup` flag to remove it after a successful capture is planned as future
+work.
 
 ## Manifest requirements
 
