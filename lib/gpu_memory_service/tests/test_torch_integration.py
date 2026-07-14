@@ -47,7 +47,11 @@ from gpu_memory_service.client.torch.module import (
     rebind_nonparameter_tensors,
     register_module_tensors,
 )
-from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
+from gpu_memory_service.client.torch.tensor import (
+    _storage_from_pointer,
+    _tensor_from_pointer,
+    _tensor_from_storage,
+)
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.vmm import _reset_vmm_singleton
 from gpu_memory_service.integrations.common.utils import prepare_gms_write
@@ -518,6 +522,115 @@ def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     _assert_exact_tensor_equal(expected, torch.relu((gms_tensor + 7.0).square()))
 
     reader.close()
+
+
+def test_shared_interior_storages_survive_import_and_remap(running_gms):
+    writer = GMSClientMemoryManager(running_gms, device=0)
+    writer.connect(RequestedLockType.RW)
+    allocation_va = writer.create_mapping(size=4096, tag="weights")
+    allocation_id = writer.mappings[allocation_va].allocation_id
+
+    data_storage = _storage_from_pointer(allocation_va + 128, 32, 0)
+    view_storage = _storage_from_pointer(allocation_va + 256, 48, 0)
+    data_tensor = _tensor_from_storage(data_storage, [8], [1], torch.float32)
+    view_tensor = _tensor_from_storage(view_storage, [12], [1], torch.float32)
+    data_tensor.copy_(torch.arange(8, device="cuda", dtype=torch.float32))
+    view_tensor.copy_(torch.arange(12, device="cuda", dtype=torch.float32) + 20)
+
+    writer_model = torch.nn.Module()
+    writer_model.register_parameter(
+        "data_weight", torch.nn.Parameter(data_tensor, requires_grad=True)
+    )
+    writer_model.data_alias = writer_model.data_weight.data
+    writer_model.register_parameter(
+        "view_weight", torch.nn.Parameter(view_tensor, requires_grad=False)
+    )
+    writer_model.strided = writer_model.view_weight[2:10:2]
+    writer_model.transposed = writer_model.view_weight.reshape(3, 4).T
+    register_module_tensors(writer, writer_model)
+    assert writer.commit()
+    del writer_model, data_tensor, view_tensor, data_storage, view_storage
+    writer.close()
+
+    reader_model = torch.nn.Module()
+    reader_model.register_parameter(
+        "data_weight",
+        torch.nn.Parameter(torch.zeros(8, device="cuda"), requires_grad=True),
+    )
+    reader_model.data_alias = reader_model.data_weight.data
+    reader_model.register_parameter(
+        "view_weight",
+        torch.nn.Parameter(torch.zeros(12, device="cuda"), requires_grad=False),
+    )
+    reader_model.strided = reader_model.view_weight[2:10:2]
+    reader_model.transposed = reader_model.view_weight.reshape(3, 4).T
+    identities = {
+        name: getattr(reader_model, name)
+        for name in (
+            "data_weight",
+            "data_alias",
+            "view_weight",
+            "strided",
+            "transposed",
+        )
+    }
+
+    with GMSClientMemoryManager(running_gms, device=0) as reader:
+        reader.connect(RequestedLockType.RO)
+        real_create_mapping = reader.create_mapping
+        real_get_handle_info = reader.get_handle_info
+        mapping_calls = []
+        info_calls = []
+
+        def create_mapping(*, allocation_id=None, size=0, tag="default"):
+            mapping_calls.append((allocation_id, size))
+            return real_create_mapping(allocation_id, size, tag)
+
+        def get_handle_info(requested_allocation_id):
+            info_calls.append(requested_allocation_id)
+            return real_get_handle_info(requested_allocation_id)
+
+        reader.create_mapping = create_mapping
+        reader.get_handle_info = get_handle_info
+        materialize_module_from_gms(reader, reader_model, device_index=0)
+
+        assert mapping_calls == [(allocation_id, 0)]
+        assert info_calls == [allocation_id]
+        assert all(
+            getattr(reader_model, name) is tensor for name, tensor in identities.items()
+        )
+        assert reader_model.data_weight is not reader_model.data_alias
+        assert (
+            reader_model.data_weight.untyped_storage()._cdata
+            == reader_model.data_alias.untyped_storage()._cdata
+        )
+        assert (
+            reader_model.view_weight.untyped_storage()._cdata
+            == reader_model.strided.untyped_storage()._cdata
+            == reader_model.transposed.untyped_storage()._cdata
+        )
+        reader_va = next(iter(reader.mappings))
+        assert reader_model.data_weight.data_ptr() == reader_va + 128
+        assert reader_model.strided.storage_offset() == 2
+        assert reader_model.transposed.stride() == (1, 4)
+
+        reader.unmap_all_vas()
+        reader.abort()
+        reader.connect(RequestedLockType.RO)
+        reader.remap_all_vas()
+        torch.testing.assert_close(
+            reader_model.data_alias,
+            torch.arange(8, device="cuda", dtype=torch.float32),
+        )
+        torch.testing.assert_close(
+            reader_model.strided,
+            torch.tensor([22, 24, 26, 28], device="cuda", dtype=torch.float32),
+        )
+        torch.testing.assert_close(
+            reader_model.transposed,
+            (torch.arange(12, device="cuda", dtype=torch.float32) + 20).reshape(3, 4).T,
+        )
+        del reader_model
 
 
 def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
