@@ -1367,6 +1367,21 @@ impl Client {
         self.router.client.instance_ids()
     }
 
+    /// Get a snapshot of the current instances' TCP transport addresses,
+    /// as a dict of instance id -> "host:port/.../<endpoint>".
+    /// Non-TCP transports (e.g. NATS) are skipped.
+    fn instance_tcp_addresses(&self) -> std::collections::HashMap<u64, String> {
+        self.router
+            .client
+            .instances()
+            .into_iter()
+            .filter_map(|instance| match instance.transport {
+                rs::component::TransportType::Tcp(addr) => Some((instance.instance_id, addr)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Wait for an instance to be available for work.
     /// Replaces wait_for_endpoints.
     fn wait_for_instances<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {

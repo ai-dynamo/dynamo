@@ -61,6 +61,16 @@ async def request_plane_client(runtime):
     client = await endpoint.client()
     await client.wait_for_instances()
 
+    # instance_tcp_addresses() only includes instances whose transport is TCP,
+    # so an instance may be absent from the dict on other request planes
+    # (e.g. NATS). Only assert on the entries that are present: they must be a
+    # subset of instance_ids() and each address must be a "host:port/..."
+    # string. On the TCP request plane every instance has one.
+    tcp_addresses = client.instance_tcp_addresses()
+    assert set(tcp_addresses) <= set(client.instance_ids())
+    for address in tcp_addresses.values():
+        assert ":" in address
+
     yield client
 
     server_task.cancel()

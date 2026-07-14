@@ -262,6 +262,14 @@ class Client:
         """
         ...
 
+    def instance_tcp_addresses(self) -> Dict[int, str]:
+        """
+        Get a snapshot of the current instances' TCP transport addresses,
+        as a dict of instance id -> "host:port/.../<endpoint>".
+        Non-TCP transports (e.g. NATS) are skipped.
+        """
+        ...
+
     async def wait_for_instances(self) -> List[int]:
         """
         Wait for instances to be available for work and return their IDs.
