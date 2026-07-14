@@ -281,8 +281,8 @@ def _send_request_get_overlap(
 
 
 @pytest.mark.pre_merge
-@pytest.mark.profiled_vram_gib(20.0)
-@pytest.mark.requested_trtllm_vram_gib(20.0)
+@pytest.mark.profiled_vram_gib(18.0)
+@pytest.mark.requested_trtllm_vram_gib(16.0)
 @pytest.mark.timeout(1800)
 def test_trtllm_mm_overlap_all(start_trtllm_mm_services, predownload_models):
     """Run all TRT-LLM MM overlap scenarios under one worker startup."""
