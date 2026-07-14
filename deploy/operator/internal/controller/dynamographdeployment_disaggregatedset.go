@@ -247,7 +247,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetResources(
 	resources = append(resources, syncedDSResource)
 
 	nonSelectedResources, err := r.reconcileDisaggregatedSetNonSelectedDCDs(
-		ctx, dynamoDeployment, dynamoComponentsDeployments, selection, checkpointInfos,
+		ctx, dynamoDeployment, dynamoComponentsDeployments, selection,
 	)
 	if err != nil {
 		return ReconcileResult{}, err
@@ -280,7 +280,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDisaggregatedSetNonSelectedDC
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	selection disaggregatedSetSelection,
-	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) ([]Resource, error) {
 	resources := []Resource{}
 	for _, componentName := range sortedDCDKeys(dcds) {
