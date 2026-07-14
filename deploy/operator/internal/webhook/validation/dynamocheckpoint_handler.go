@@ -24,6 +24,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,7 +51,7 @@ func (h *DynamoCheckpointHandler) ValidateCreate(ctx context.Context, obj runtim
 		return nil, err
 	}
 	logger.Info("validate create", "name", ckpt.Name, "namespace", ckpt.Namespace)
-	return nil, validateDynamoCheckpointGMSSnapshot(ckpt)
+	return nil, validateDynamoCheckpointGMSSnapshot(ctx, ckpt)
 }
 
 func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
@@ -63,7 +64,7 @@ func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, ne
 	if !ckpt.DeletionTimestamp.IsZero() {
 		return nil, nil
 	}
-	return nil, validateDynamoCheckpointGMSSnapshot(ckpt)
+	return nil, validateDynamoCheckpointGMSSnapshot(ctx, ckpt)
 }
 
 func (h *DynamoCheckpointHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
@@ -75,8 +76,9 @@ func (h *DynamoCheckpointHandler) ValidateDelete(ctx context.Context, obj runtim
 	return nil, nil
 }
 
-func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager) error {
-	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
+	validator := internalwebhook.ValidatorWithGate(h, gate)
+	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoCheckpoint)
 	webhook := admission.
 		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoCheckpoint{}, observedValidator).
@@ -85,9 +87,9 @@ func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager) error
 	return nil
 }
 
-func validateDynamoCheckpointGMSSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+func validateDynamoCheckpointGMSSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
 	// A DynamoCheckpoint is itself a Snapshot resource; service specs pass checkpoint.enabled instead.
-	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService); err != nil {
+	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, features.GateFromContext(ctx)); err != nil {
 		return err
 	}
 	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {

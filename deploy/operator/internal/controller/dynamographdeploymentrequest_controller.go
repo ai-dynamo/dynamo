@@ -55,6 +55,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
@@ -405,10 +406,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) GetRecorder() record.EventRecor
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryEnabled() bool {
-	if r == nil || r.Config == nil || r.Config.GPU.DiscoveryEnabled == nil {
-		return true
+	if r == nil {
+		return features.Defaults().Enabled(features.GPUDiscovery)
 	}
-	return *r.Config.GPU.DiscoveryEnabled
+	return r.RuntimeConfig.Enabled(features.GPUDiscovery)
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryReader() (client.Reader, bool) {

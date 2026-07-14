@@ -24,6 +24,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -47,7 +48,6 @@ const (
 type DynamoGraphDeploymentHandler struct {
 	mgr               manager.Manager
 	operatorPrincipal string
-	groveEnabled      bool
 }
 
 // dynamoGraphDeploymentV1Alpha1Handler keeps the previous endpoint available
@@ -61,12 +61,10 @@ type dynamoGraphDeploymentV1Alpha1Handler struct {
 // mgr must not be nil.
 // operatorPrincipal is the full Kubernetes SA username of the operator, used to authorize
 // replica changes on scaling-adapter-enabled components (#7656).
-// groveEnabled reflects the operator's runtime Grove configuration.
-func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string, groveEnabled bool) *DynamoGraphDeploymentHandler {
+func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal string) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
 		mgr:               mgr,
 		operatorPrincipal: operatorPrincipal,
-		groveEnabled:      groveEnabled,
 	}
 }
 
@@ -94,7 +92,7 @@ func (h *DynamoGraphDeploymentHandler) validateCreate(
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	return validator.Validate(ctx, deployment)
 }
 
@@ -133,7 +131,7 @@ func (h *DynamoGraphDeploymentHandler) validateUpdate(
 	}
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidator(h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	warnings, err := validator.Validate(ctx, newDeployment)
 	if err != nil {
 		return warnings, err
@@ -195,12 +193,13 @@ func (h *DynamoGraphDeploymentHandler) validateDelete(
 // RegisterWithManager registers the webhook with the manager.
 // The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic
 // and ObservedValidator to add metrics collection.
-func (h *DynamoGraphDeploymentHandler) RegisterWithManager(mgr manager.Manager) error {
+func (h *DynamoGraphDeploymentHandler) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
 	h.registerWithManager(
 		mgr,
 		&nvidiacomv1beta1.DynamoGraphDeployment{},
 		dynamoGraphDeploymentV1Beta1WebhookPath,
 		h,
+		gate,
 	)
 
 	// TODO(1.5): Remove the v1alpha1 endpoint and handler after 1.3 is no longer
@@ -211,6 +210,7 @@ func (h *DynamoGraphDeploymentHandler) RegisterWithManager(mgr manager.Manager) 
 		&nvidiacomv1alpha1.DynamoGraphDeployment{},
 		dynamoGraphDeploymentV1Alpha1WebhookPath,
 		alphaHandler,
+		gate,
 	)
 	return nil
 }
@@ -220,8 +220,10 @@ func (h *DynamoGraphDeploymentHandler) registerWithManager(
 	object runtime.Object,
 	path string,
 	validator admission.CustomValidator,
+	gate features.Gate,
 ) {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
+	validator = internalwebhook.ValidatorWithGate(validator, gate)
 	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
 
 	// Wrap with metrics collection

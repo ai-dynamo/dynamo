@@ -36,6 +36,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/imdario/mergo"
@@ -1021,7 +1022,7 @@ func GenerateEPPDestinationRule(serviceName, namespace string, meshConfig config
 		},
 	}
 
-	if !meshConfig.IsEnabled() || meshConfig.Istio == nil {
+	if configv1alpha1.ServiceMeshProvider(meshConfig.Provider) != configv1alpha1.ServiceMeshProviderIstio || meshConfig.Istio == nil {
 		return dr
 	}
 
@@ -1434,11 +1435,9 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 func applyCheckpointProbeCadence(
 	container *corev1.Container,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
 	checkpointInfo *checkpoint.CheckpointInfo,
 ) {
-	if operatorConfig.Checkpoint.Enabled &&
-		checkpointInfo != nil &&
+	if checkpointInfo != nil &&
 		checkpointInfo.Enabled &&
 		checkpointInfo.Ready &&
 		IsWorkerComponent(string(component.ComponentType)) {
@@ -1532,7 +1531,7 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
-	applyCheckpointProbeCadence(&container, component, operatorConfig, checkpointInfo)
+	applyCheckpointProbeCadence(&container, component, checkpointInfo)
 
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
@@ -2158,12 +2157,13 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
-	shouldUseAdmissionRestore := p.operatorConfig.Checkpoint.Enabled &&
+	checkpointEnabled := p.runtimeConfig.Enabled(features.Checkpoint)
+	shouldUseAdmissionRestore := checkpointEnabled &&
 		p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
 		(p.checkpointInfo.StartupPolicy == "" ||
 			p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyImmediate)
-	if p.operatorConfig.Checkpoint.Enabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
+	if checkpointEnabled && p.r.Role != RoleGMS && !shouldUseAdmissionRestore {
 		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
 			p.ctx, p.kubeClient, p.dynamoDeployment.Namespace, podSpec, p.checkpointInfo,
 			p.operatorConfig.Checkpoint.Storage,
@@ -2330,10 +2330,10 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 }
 
 func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]string, runtimeConfig *controller_common.RuntimeConfig) (string, error) {
-	if runtimeConfig.GroveEnabled && runtimeConfig.KaiSchedulerEnabled && runtimeConfig.VolcanoSchedulerEnabled {
+	if runtimeConfig.Enabled(features.Grove) && runtimeConfig.Enabled(features.KaiScheduler) && runtimeConfig.Enabled(features.VolcanoScheduler) {
 		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
 	}
-	if !runtimeConfig.GroveEnabled || !runtimeConfig.KaiSchedulerEnabled {
+	if !runtimeConfig.Enabled(features.Grove) || !runtimeConfig.Enabled(features.KaiScheduler) {
 		return "", nil
 	}
 

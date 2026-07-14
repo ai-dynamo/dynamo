@@ -18,36 +18,32 @@
 package validation
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // DynamoGraphDeploymentRequestValidator validates DynamoGraphDeploymentRequest resources.
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentRequestValidator struct {
-	request               *nvidiacomv1beta1.DynamoGraphDeploymentRequest
-	isClusterWideOperator bool
-	gpuDiscoveryEnabled   bool
+	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest
 }
 
 // NewDynamoGraphDeploymentRequestValidator creates a new validator for DynamoGraphDeploymentRequest.
-// isClusterWide indicates whether the operator has cluster-wide permissions.
-// gpuDiscoveryEnabled indicates whether Helm provisioned node read access for the operator.
-func NewDynamoGraphDeploymentRequestValidator(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest, isClusterWide bool, gpuDiscoveryEnabled bool) *DynamoGraphDeploymentRequestValidator {
+func NewDynamoGraphDeploymentRequestValidator(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) *DynamoGraphDeploymentRequestValidator {
 	return &DynamoGraphDeploymentRequestValidator{
-		request:               request,
-		isClusterWideOperator: isClusterWide,
-		gpuDiscoveryEnabled:   gpuDiscoveryEnabled,
+		request: request,
 	}
 }
 
 // Validate performs stateless validation on the DynamoGraphDeploymentRequest.
 // Returns warnings and error.
-func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, error) {
+func (v *DynamoGraphDeploymentRequestValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	var err error
 
 	// Disallow searchStrategy: thorough with backend: auto.
@@ -68,7 +64,7 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate() (admission.Warnings, 
 	}
 
 	// Validate GPU hardware information is available (last, so other errors are collected first).
-	if gpuErr := v.validateGPUHardwareInfo(); gpuErr != nil {
+	if gpuErr := v.validateGPUHardwareInfo(ctx); gpuErr != nil {
 		err = errors.Join(err, gpuErr)
 	}
 
@@ -97,7 +93,7 @@ func (v *DynamoGraphDeploymentRequestValidator) validateSLA() error {
 // validateGPUHardwareInfo ensures GPU hardware information will be available for profiling.
 // Returns an error at admission time if GPU discovery is disabled and no manual hardware config is provided.
 // Also validates consistency of GPU range fields.
-func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error {
+func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo(ctx context.Context) error {
 	// Check if manual hardware config is provided via typed spec.hardware fields.
 	var hasManualHardwareConfig bool
 	if hw := v.request.Spec.Hardware; hw != nil {
@@ -108,9 +104,7 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo() error 
 		return nil
 	}
 
-	// No manual hardware config provided. Cluster-wide operators always have GPU discovery via node
-	// permissions. Namespace-scoped operators rely on Helm-provisioned GPU discovery (gpuDiscovery.enabled).
-	if v.isClusterWideOperator || v.gpuDiscoveryEnabled {
+	if features.GateFromContext(ctx).Enabled(features.GPUDiscovery) {
 		return nil
 	}
 
