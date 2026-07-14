@@ -7,6 +7,7 @@ import sys
 from dynamo._core import run_sglang_sidecar
 from dynamo.runtime.logging import configure_dynamo_logging
 
+
 def main(argv: list[str] | None = None) -> None:
     configure_dynamo_logging(service_name="dynamo.sglang_sidecar")
     run_sglang_sidecar(sys.argv[1:] if argv is None else argv)
