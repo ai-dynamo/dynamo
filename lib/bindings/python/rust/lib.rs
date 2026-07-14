@@ -744,8 +744,8 @@ struct Client {
 /// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp") and its
 /// `address`; the address format is transport-specific and not a stable parse
 /// target.
-#[pyclass]
-#[derive(Clone)]
+#[pyclass(eq, hash, frozen)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct TransportType {
     inner: rs::component::TransportType,
 }
@@ -776,8 +776,8 @@ impl TransportType {
 
 /// A read-only view of a single registered instance of an endpoint, wrapping a
 /// snapshot of the runtime `Instance`.
-#[pyclass]
-#[derive(Clone)]
+#[pyclass(eq, frozen)]
+#[derive(Clone, PartialEq, Eq)]
 struct Instance {
     inner: rs::component::Instance,
 }

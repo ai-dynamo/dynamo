@@ -68,11 +68,13 @@ async def request_plane_client(runtime):
         # with a "host:port/..." address.
         instances = client.instances()
         assert {i.instance_id for i in instances} == set(client.instance_ids())
+        # On the TCP request plane every instance exposes the identity fields of
+        # the served endpoint plus a populated "tcp" transport address.
         for instance in instances:
-            assert instance.transport.kind in ("tcp", "nats_tcp")
-            assert instance.transport.address
+            assert instance.namespace == "direct-python-msgpack"
+            assert instance.component == "backend"
             assert instance.endpoint == "generate"
-        for instance in instances:
+            assert instance.device_type in (None, "cpu", "cuda")
             assert instance.transport.kind == "tcp"
             assert ":" in instance.transport.address
 
