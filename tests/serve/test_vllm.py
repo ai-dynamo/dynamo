@@ -174,10 +174,11 @@ vllm_configs = {
             # and only the base cfg.model is auto-registered, so the draft repo
             # can't be resolved offline without this.
             pytest.mark.model("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
-            # No profiled_vram_gib: the base model is gated on HF, so it can't be
-            # profiled locally without a token. Not guessed — runs in the
-            # sequential GPU stage; profile the real peak in a CI env that has
-            # meta-llama access.
+            # Profiled with a 1 GiB KV cap (peak ~18.6 GiB: 8B weights + EAGLE3
+            # draft + capped KV). The byte cap (build_vllm_gpu_mem_args) makes
+            # this GPU-size-independent, so it fits the 24 GiB parallel stage.
+            pytest.mark.profiled_vram_gib(20.0),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_073_741_824),
             pytest.mark.timeout(900),
             # Temporarily pre_merge to validate in PR CI; will flip to nightly once green.
             pytest.mark.pre_merge,

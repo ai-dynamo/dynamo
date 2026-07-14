@@ -6,6 +6,12 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"  # build_vllm_gpu_mem_args
+
+# When the serve test sets requested_vllm_kv_cache_bytes, this emits a
+# --kv-cache-memory-bytes cap so VRAM is bounded (GPU-size-independent) and the
+# test can run in the VRAM-aware parallel stage. Empty for manual runs.
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 
 MODEL="meta-llama/Meta-Llama-3.1-8B-Instruct"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -21,7 +27,6 @@ python -m dynamo.frontend --http-port="$HTTP_PORT" &
 # 2. Speculative Main Worker
 # ---------------------------
 # This runs the main model with EAGLE as the draft model for speculative decoding
-# TODO: use build_vllm_gpu_mem_args to measure VRAM instead of hardcoded fractions
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
     --model "$MODEL" \
@@ -32,7 +37,7 @@ CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
         "num_speculative_tokens": 2,
         "method": "eagle3"
     }' \
-    --gpu-memory-utilization 0.8 "$@" &
+    --gpu-memory-utilization 0.8 $GPU_MEM_ARGS "$@" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
