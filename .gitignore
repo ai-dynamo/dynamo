@@ -171,3 +171,7 @@ lib/llm/tests/data/sample-models/models--*/
 
 # Local git worktrees
 .worktrees/
+
+# DEP preview probe artifacts (headless browser screenshots + captured HTML)
+.dep-preview/
+pg.html

@@ -21,16 +21,14 @@ subtitle: "Copy this file to docs/proposals/NNNN-your-feature.mdx and fill it in
 import { DepMetadata } from "@/components/DepMetadata";
 import { GiscusComments } from "@/components/GiscusComments";
 
-> [!WARNING]
-> **Status: Draft.** This proposal is under active discussion and is not an accepted decision. Update this banner whenever the status changes. See the [status banner convention](./README.mdx#status-banner-convention).
-
-{/* Metadata card. Valid status values: Draft | Under Review | Approved |
-    Replaced | Deferred | Rejected. Once your draft PR exists, add pr={NUMBER}
-    to surface a "View PR" action; fill trackingIssue / discussionsTo URLs. */}
+{/* Metadata card. The status pill (Draft / Under Review / Approved / Replaced
+    / Deferred / Rejected) satisfies the "status prominently at the top" REQ.
+    Once your draft PR exists, add pr={NUMBER} to surface a "View PR" action;
+    fill trackingIssue / discussionsTo URLs. Do not repeat the front-matter
+    `title` here — Fern already renders it as the page H1 above the card. */}
 
 <DepMetadata
   dep="NNNN"
-  title="[Your feature]"
   status="Draft"
   category="Architecture"
   authors="[Name/Team]"

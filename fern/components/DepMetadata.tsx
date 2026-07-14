@@ -15,9 +15,17 @@
  */
 
 interface DepMetadataProps {
-  /** DEP number, e.g. "0000". */
-  dep: string | number;
-  /** Proposal title (without the "DEP-NNNN:" prefix). */
+  /**
+   * DEP number, e.g. "0000". Optional; when omitted, the card leads with the
+   * eyebrow + status pill (the page-title H1 from the front-matter already
+   * conveys the DEP number).
+   */
+  dep?: string | number;
+  /**
+   * Proposal title. Rarely needed: Fern renders the front-matter `title` as
+   * the page H1 above the card. Only pass this if you deliberately want the
+   * title repeated inside the card as an H2 (usually you don't).
+   */
   title?: string;
   /** Lifecycle status: Draft | Proposed | Under Review | Accepted | Replaced | Deferred | Rejected. */
   status: string;
@@ -100,7 +108,6 @@ export function DepMetadata({
   const push = (label: string, value?: string) => {
     if (value && value.trim()) fields.push({ label, value });
   };
-  push("DEP", String(dep));
   push("Category", category);
   push("Authors", authors);
   push("Sponsor", sponsor);
@@ -114,11 +121,10 @@ export function DepMetadata({
       <style dangerouslySetInnerHTML={{ __html: DEP_META_CSS }} />
       <div className="dep-meta-top">
         <div>
-          <p className="dep-meta-eyebrow">Dynamo Enhancement Proposal</p>
-          <h2 className="dep-meta-title">
-            DEP-{dep}
-            {title ? `: ${title}` : ""}
-          </h2>
+          <p className="dep-meta-eyebrow">
+            Dynamo Enhancement Proposal{dep ? ` \u00B7 DEP-${dep}` : ""}
+          </p>
+          {title ? <h2 className="dep-meta-title">{title}</h2> : null}
         </div>
         <span className={`dep-meta-pill dep-meta-pill--${variant}`}>{status}</span>
       </div>
