@@ -27,39 +27,30 @@ type Name string
 
 const (
 	// GMSSnapshot enables the temporary GMS + Snapshot integration.
-	// Introduced by @galletas1712 in v1.2.0 (PR #8829); experimental and disabled by default.
 	GMSSnapshot Name = "gmsSnapshot"
 
 	// Checkpoint enables checkpoint creation and restore.
-	// Introduced by @julienmancuso in v1.0.0 (PR #4978); experimental and disabled by default.
 	Checkpoint Name = "checkpoint"
 
 	// Grove enables Grove-backed workload orchestration.
-	// Introduced by @julienmancuso in v0.4.0 (PR #2012); auto-enabled when its API is available; no formal lifecycle state.
 	Grove Name = "grove"
 
 	// LWS enables LeaderWorkerSet-backed workload orchestration.
-	// Introduced by @nvrohanv in v0.3.0 (PR #998); auto-enabled when its APIs are available; no formal lifecycle state.
 	LWS Name = "lws"
 
 	// KaiScheduler enables Kai Scheduler integration.
-	// Introduced by @julienmancuso in v0.5.0 (PR #2755); auto-enabled when its API is available; no formal lifecycle state.
 	KaiScheduler Name = "kaiScheduler"
 
 	// VolcanoScheduler enables Volcano scheduling for Grove workloads.
-	// Introduced by @xianlubird after the v1.3 branch cut (PR #8225); experimental and disabled by default.
 	VolcanoScheduler Name = "volcanoScheduler"
 
 	// DRA enables Dynamic Resource Allocation using resource.k8s.io/v1.
-	// Introduced by @mohammedabdulwahhab in v1.1.0 (PR #8148); experimental and auto-enabled when its API is available.
 	DRA Name = "dra"
 
 	// Istio enables Istio DestinationRule reconciliation.
-	// Introduced by @cmdy in v1.3.0 (PR #10773); auto-enabled for the Istio provider when its API is available.
 	Istio Name = "istio"
 
 	// GPUDiscovery enables automatic GPU hardware discovery.
-	// Introduced by @hhzhang16 in v1.0.0 (PR #6224); enabled by default since v1.0.0; no formal lifecycle state.
 	GPUDiscovery Name = "gpuDiscovery"
 )
 
@@ -69,6 +60,99 @@ const GMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
 // Gate reports whether operator features are enabled.
 type Gate interface {
 	Enabled(Name) bool
+}
+
+// Stage is the lifecycle stage of a feature gate.
+type Stage string
+
+const (
+	StageExperimental Stage = "experimental"
+	StageBeta         Stage = "beta"
+	StageGA           Stage = "ga"
+)
+
+// Definition describes the ownership, lifecycle, and default of a feature gate.
+type Definition struct {
+	Owner        string
+	Stage        Stage
+	Since        string
+	Default      bool
+	DefaultSince string
+}
+
+var definitions = map[Name]Definition{
+	GMSSnapshot: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      false,
+		DefaultSince: "",
+	},
+	Checkpoint: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      false,
+		DefaultSince: "",
+	},
+	Grove: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      false,
+		DefaultSince: "",
+	},
+	LWS: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      false,
+		DefaultSince: "",
+	},
+	KaiScheduler: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      false,
+		DefaultSince: "",
+	},
+	VolcanoScheduler: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      false,
+		DefaultSince: "",
+	},
+	DRA: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      false,
+		DefaultSince: "",
+	},
+	Istio: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      false,
+		DefaultSince: "",
+	},
+	GPUDiscovery: {
+		Owner:        "",
+		Stage:        "",
+		Since:        "",
+		Default:      true,
+		DefaultSince: "",
+	},
+}
+
+// DefinitionFor returns the metadata for name.
+func DefinitionFor(name Name) Definition {
+	definition, ok := definitions[name]
+	if !ok {
+		panic(fmt.Sprintf("unknown feature gate %q", name))
+	}
+	return definition
 }
 
 // Gates is the complete set of operator feature gates.
@@ -86,7 +170,17 @@ type Gates struct {
 
 // Defaults returns the default feature gates.
 func Defaults() Gates {
-	return Gates{GPUDiscovery: true}
+	return Gates{
+		GMSSnapshot:      DefinitionFor(GMSSnapshot).Default,
+		Checkpoint:       DefinitionFor(Checkpoint).Default,
+		Grove:            DefinitionFor(Grove).Default,
+		LWS:              DefinitionFor(LWS).Default,
+		KaiScheduler:     DefinitionFor(KaiScheduler).Default,
+		VolcanoScheduler: DefinitionFor(VolcanoScheduler).Default,
+		DRA:              DefinitionFor(DRA).Default,
+		Istio:            DefinitionFor(Istio).Default,
+		GPUDiscovery:     DefinitionFor(GPUDiscovery).Default,
+	}
 }
 
 func fromEnvironment() Gates {
