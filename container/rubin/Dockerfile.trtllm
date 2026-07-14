@@ -202,7 +202,7 @@ RUN --mount=type=secret,id=gitlab_user \
     --mount=type=secret,id=gitlab_token \
     GITLAB_USERNAME=$(cat /run/secrets/gitlab_user) && \
     GITLAB_TOKEN=$(cat /run/secrets/gitlab_token) && \
-    git clone --depth 1 --branch ${DYNAMO_REF} https://${GITLAB_USERNAME}:${GITLAB_TOKEN}@https://gitlab-master.nvidia.com/mlpinf/mlperf-inference.git /opt/mlperf-inference && \
+    git clone --depth 1 --branch ${MLPERF_REF} https://${GITLAB_USERNAME}:${GITLAB_TOKEN}@gitlab-master.nvidia.com/mlpinf/mlperf-inference.git /opt/mlperf-inference
 WORKDIR /opt/mlperf-inference/closed/NVIDIA
 RUN pip install ".[llm]"
 
