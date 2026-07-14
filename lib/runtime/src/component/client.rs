@@ -463,6 +463,12 @@ pub struct Client {
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
     reconcile_interval: Duration,
+    /// DIS-2404: workers fenced on death/deregistration. Independent of the
+    /// routing snapshot — read only by the KV-router's `RoutingEligibility` to
+    /// reject dead workers on every path (availability overrides cache affinity)
+    /// while the candidate watch catches up, and to break a sticky session
+    /// affinity bound to a now-dead worker. Cleared when the same id re-registers.
+    fenced_instances: Arc<std::sync::RwLock<HashSet<u64>>>,
 }
 
 impl Client {
@@ -501,6 +507,7 @@ impl Client {
             instance_source: instance_source.clone(),
             routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
             reconcile_interval,
+            fenced_instances: Arc::new(std::sync::RwLock::new(HashSet::new())),
         };
         client.monitor_instance_source();
         Ok(client)
@@ -606,6 +613,44 @@ impl Client {
 
     pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
         self.routing_instances.overloaded_ids()
+    }
+
+    /// DIS-2404: fence workers that were just removed from discovery (dead /
+    /// deregistered). A fenced worker is rejected by the KV-router on every
+    /// eligibility path — unlike overload, it is not ignored by cache-affinity.
+    pub fn fence_instances_removed(&self, removed_instance_ids: &[u64]) {
+        if removed_instance_ids.is_empty() {
+            return;
+        }
+        let mut fenced = self.fenced_instances.write().unwrap();
+        fenced.extend(removed_instance_ids.iter().copied());
+    }
+
+    /// Clear the fence for instances that are present again. A re-registered
+    /// worker is a fresh generation, so its prior fence no longer applies.
+    pub fn unfence_present_instances(&self, present_instance_ids: &[u64]) {
+        if present_instance_ids.is_empty() {
+            return;
+        }
+        // Cheap read-guarded fast path: nothing fenced, nothing to clear.
+        if self.fenced_instances.read().unwrap().is_empty() {
+            return;
+        }
+        let mut fenced = self.fenced_instances.write().unwrap();
+        for id in present_instance_ids {
+            fenced.remove(id);
+        }
+    }
+
+    /// Snapshot of currently fenced workers, or `None` when empty (matching the
+    /// overloaded-set convention so selection can skip the check cheaply).
+    pub fn fenced_instance_ids(&self) -> Option<HashSet<u64>> {
+        let fenced = self.fenced_instances.read().unwrap();
+        if fenced.is_empty() {
+            None
+        } else {
+            Some(fenced.clone())
+        }
     }
 
     /// Monitor the key-value instance source and update instance_avail.
