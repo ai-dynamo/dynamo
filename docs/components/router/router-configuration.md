@@ -108,9 +108,12 @@ For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` t
 
 Session affinity is disabled by default. On the frontend, set
 `--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
-a value from `1` through `31536000` to enable it, then send
-`X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
-without the TTL option provides session identity but does not enable router affinity.
+a value from `1` through `31536000` to enable it. The affinity header defaults to
+`X-Dynamo-Session-ID`; set `--router-session-header-key` or
+`DYN_ROUTER_SESSION_HEADER_KEY` to use another HTTP header, then send that header on
+related requests to keep them on one worker. For example,
+`--router-session-header-key X-Customer-Session` selects `X-Customer-Session`.
+Supplying the selected header without the TTL option does not enable router affinity.
 
 The first successfully dispatched request binds the session ID to its selected
 worker and, when available, data-parallel rank. Later requests exact-dispatch to
@@ -128,10 +131,10 @@ If the bound worker disappears, Dynamo invalidates the binding so a subsequent
 selection can bind an available worker. Router restart clears all bindings. Bindings
 are not shared between frontend replicas. In a multi-frontend deployment, configure
 the ingress or load balancer to consistently route a session to one frontend. Hash
-the raw session header received at ingress, not Dynamo's normalized internal
-`session_id`: canonical clients send `X-Dynamo-Session-ID`, while agent-native
-clients use the corresponding header listed in [Session IDs](../../agents/session-ids.md).
-Agent-native identity is normalized only after the request reaches the frontend.
+the configured raw session header received at ingress, not Dynamo's normalized internal
+`session_id`. A custom affinity header affects routing only; it does not become
+agent-session metadata. The default `X-Dynamo-Session-ID` retains its existing agent-session
+normalization described in [Session IDs](../../agents/session-ids.md).
 
 Direct mode still requires the phase-appropriate explicit worker ID on every
 affinity request. The stored binding validates that target but does not supply a
@@ -141,7 +144,8 @@ created.
 
 Session affinity does not create a backend session or send lifecycle RPCs. There is
 no explicit unbind; idle expiry removes only router-local state. The same session
-ID is available to tracing and other explicitly configured consumers.
+header controls router-local affinity. When using a custom header, send the canonical
+session headers separately if tracing or agent features need session identity.
 
 ### AIC Prefill Load Model
 

@@ -181,7 +181,9 @@ async fn handler_anthropic_messages(
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
-    if let Some(session_affinity) = session_affinity_from_headers(&headers) {
+    if let Some(session_affinity) =
+        session_affinity_from_headers(&headers, state.session_affinity_header_name())
+    {
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     let context = request.context();

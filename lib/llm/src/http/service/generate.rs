@@ -341,11 +341,15 @@ async fn handler_generate(
     };
 
     let request_id = request_context.request_id;
-    let context: Context<PreprocessedRequest> =
-        match context_from_headers(preprocessed, request_id.clone(), &headers) {
-            Ok(context) => context,
-            Err(response) => return response.into_response(),
-        };
+    let context: Context<PreprocessedRequest> = match context_from_headers(
+        preprocessed,
+        request_id.clone(),
+        &headers,
+        state.session_affinity_header_name(),
+    ) {
+        Ok(context) => context,
+        Err(response) => return response.into_response(),
+    };
     let engine_context = context.context();
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),

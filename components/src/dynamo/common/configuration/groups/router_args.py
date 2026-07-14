@@ -16,6 +16,7 @@ import argparse
 import logging
 import math
 import os
+import re
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -35,7 +36,11 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
     "session_affinity_ttl_secs",
+    "session_affinity_header_key",
 )
+
+_DEFAULT_SESSION_AFFINITY_HEADER_KEY = "x-dynamo-session-id"
+_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 _ENFORCE_DISAGG_DEPRECATION = (
     "--enforce-disagg and DYN_ENFORCE_DISAGG are deprecated and ignored; "
@@ -62,6 +67,15 @@ class _IgnoredAdmissionControlAction(argparse.Action):
         logger.warning(_ADMISSION_CONTROL_FLAG_REMOVAL_WARNING)
 
 
+def http_header_name(value: str) -> str:
+    """Validate an HTTP header field name accepted by the frontend."""
+    if not _HTTP_HEADER_NAME_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "--router-session-header-key must be a valid HTTP header name"
+        )
+    return value
+
+
 class RouterConfigBase(ConfigBase):
     """Mixin carrying the shared router configuration fields."""
 
@@ -69,6 +83,7 @@ class RouterConfigBase(ConfigBase):
     min_initial_workers: int
     enforce_disagg: bool
     session_affinity_ttl_secs: Optional[int]
+    session_affinity_header_key: str
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -201,6 +216,18 @@ class RouterArgGroup(ArgGroup):
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+        )
+        add_argument(
+            g,
+            flag_name="--router-session-header-key",
+            env_var="DYN_ROUTER_SESSION_HEADER_KEY",
+            default=_DEFAULT_SESSION_AFFINITY_HEADER_KEY,
+            help=(
+                "HTTP header used as the router-local session-affinity key. "
+                "Defaults to X-Dynamo-Session-ID."
+            ),
+            arg_type=http_header_name,
+            dest="session_affinity_header_key",
         )
         add_negatable_bool_argument(
             g,
