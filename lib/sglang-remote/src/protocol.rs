@@ -160,7 +160,9 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {
-        return Err(client::invalid_arg("n must be 1 for the SGLang sidecar"));
+        return Err(client::invalid_arg(
+            "n must be 1 for the SGLang remote backend",
+        ));
     }
     if request.sampling_options.best_of.unwrap_or(1) != 1 {
         return Err(client::invalid_arg(

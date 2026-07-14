@@ -187,7 +187,7 @@
 /lib/llm/src/grpc.rs                                                                          @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http.rs                                                                          @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/lora.rs                                                                          @ai-dynamo/dynamo-frontend-codeowners
-/lib/sglang-sidecar/                                                                          @ai-dynamo/dynamo-backend-sglang-codeowners
+/lib/sglang-remote/                                                                           @ai-dynamo/dynamo-backend-sglang-codeowners
 /lib/bindings/python/                                                                         @ai-dynamo/dynamo-runtime-codeowners
 /lib/vllm-rs-backend/                                                                         @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/observability/                                                                        @ai-dynamo/dynamo-observability-codeowners
