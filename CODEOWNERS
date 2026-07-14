@@ -238,6 +238,7 @@
 /dev/observability/prometheus-xpu.yml                                                         @ai-dynamo/dynamo-xpu-codeowners
 /dev/observability/xpu-alert-rules.yml                                                        @ai-dynamo/dynamo-xpu-codeowners
 /dev/observability/xpu_smi_exporter.py                                                        @ai-dynamo/dynamo-xpu-codeowners
+/components/src/dynamo/common/snapshot/                                                       @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/tests/test_reasoning_parser.rs                                                       @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/common/protocols/                                                      @ai-dynamo/dynamo-frontend-codeowners
 /deploy/operator/internal/observability/                                                      @ai-dynamo/dynamo-observability-codeowners

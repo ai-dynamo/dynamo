@@ -24,7 +24,7 @@ use super::{
     TraceSimulationReport,
 };
 use crate::common::protocols::MockEngineArgs;
-use crate::loadgen::Trace;
+use crate::loadgen::{Trace, WorkloadDriver};
 
 #[allow(clippy::large_enum_variant)]
 enum RuntimeKind {
@@ -46,6 +46,19 @@ fn replay_mode(max_in_flight: Option<usize>) -> Result<ReplayMode> {
         Some(0) => anyhow::bail!("max_in_flight must be at least 1"),
         Some(max_in_flight) => Ok(ReplayMode::Concurrency { max_in_flight }),
         None => Ok(ReplayMode::Trace),
+    }
+}
+
+fn workload_driver(
+    trace: Trace,
+    engine_block_size: usize,
+    mode: ReplayMode,
+) -> Result<WorkloadDriver> {
+    match mode {
+        ReplayMode::Concurrency { max_in_flight } => {
+            trace.into_concurrency_driver_with_block_size(engine_block_size, max_in_flight)
+        }
+        ReplayMode::Trace => trace.into_trace_driver_with_block_size(engine_block_size),
     }
 }
 
@@ -86,13 +99,14 @@ impl PlannerReplayHandle {
         sla: SlaThresholds,
     ) -> Result<Self> {
         let args = args.normalized()?;
+        let mode = replay_mode(max_in_flight)?;
         let runtime = AggRuntime::new_workload(
             &args,
             router_config,
             prefill_load_estimator,
-            trace.into_trace_driver_with_block_size(args.block_size)?,
+            workload_driver(trace, args.block_size, mode)?,
             num_workers,
-            replay_mode(max_in_flight)?,
+            mode,
             router_mode,
         )?
         .with_sla_thresholds(sla);
@@ -148,12 +162,13 @@ impl PlannerReplayHandle {
         sla: SlaThresholds,
     ) -> Result<Self> {
         let config = config.normalized()?;
+        let mode = replay_mode(max_in_flight)?;
         let runtime = DisaggRuntime::new_workload(
             &config,
             router_config,
             prefill_load_estimator,
-            trace.into_trace_driver_with_block_size(config.decode_args.block_size)?,
-            replay_mode(max_in_flight)?,
+            workload_driver(trace, config.prefill_args.block_size, mode)?,
+            mode,
             router_mode,
         )?
         .with_sla_thresholds(sla);
@@ -213,10 +228,10 @@ impl PlannerReplayHandle {
 #[cfg(test)]
 mod tests {
     use super::PlannerReplayHandle;
-    use crate::common::protocols::MockEngineArgs;
+    use crate::common::protocols::{MockEngineArgs, WorkerType};
     use crate::loadgen::{ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace};
     use crate::replay::NoopPlannerHook;
-    use crate::replay::{ReplayRouterMode, SlaThresholds};
+    use crate::replay::{OfflineDisaggReplayConfig, ReplayRouterMode, SlaThresholds};
 
     const NUM_SESSIONS: usize = 8;
 
@@ -256,24 +271,75 @@ mod tests {
     }
 
     #[test]
-    fn from_trace_closed_loop_completes_all_requests() {
-        // Burst arrivals + an in-flight cap -> closed-loop: trace timestamps are
-        // ignored and at most `max_in_flight` run at once, but every request still
-        // completes. This is the planner + concurrency path that was previously
-        // unreachable (the handle hard-coded ReplayMode::Trace).
-        let handle = PlannerReplayHandle::from_trace(
-            small_args(),
-            None,
-            None,
-            synthetic_trace(ArrivalSpec::Burst),
-            1,
-            Some(2),
-            ReplayRouterMode::RoundRobin,
-            SlaThresholds::default(),
-        )
-        .unwrap();
-        let report = handle.run(Box::new(NoopPlannerHook)).unwrap();
-        assert_eq!(report.request_counts.completed_requests, NUM_SESSIONS);
+    fn from_trace_closed_loop_honors_concurrency_cap() {
+        let run = |max_in_flight| {
+            PlannerReplayHandle::from_trace(
+                small_args(),
+                None,
+                None,
+                synthetic_trace(ArrivalSpec::Burst),
+                1,
+                Some(max_in_flight),
+                ReplayRouterMode::RoundRobin,
+                SlaThresholds::default(),
+            )
+            .unwrap()
+            .run(Box::new(NoopPlannerHook))
+            .unwrap()
+        };
+
+        let serial = run(1);
+        let concurrent = run(NUM_SESSIONS);
+
+        assert_eq!(serial.request_counts.completed_requests, NUM_SESSIONS);
+        assert_eq!(concurrent.request_counts.completed_requests, NUM_SESSIONS);
+        assert!(
+            serial.throughput.duration_ms > concurrent.throughput.duration_ms,
+            "cap=1 should serialize requests: serial={}ms concurrent={}ms",
+            serial.throughput.duration_ms,
+            concurrent.throughput.duration_ms,
+        );
+    }
+
+    #[test]
+    fn from_trace_disagg_closed_loop_honors_concurrency_cap() {
+        let run = |max_in_flight| {
+            PlannerReplayHandle::from_trace_disagg(
+                OfflineDisaggReplayConfig {
+                    prefill_args: MockEngineArgs {
+                        worker_type: WorkerType::Prefill,
+                        ..small_args()
+                    },
+                    decode_args: MockEngineArgs {
+                        worker_type: WorkerType::Decode,
+                        ..small_args()
+                    },
+                    num_prefill_workers: 1,
+                    num_decode_workers: 1,
+                },
+                None,
+                None,
+                synthetic_trace(ArrivalSpec::Burst),
+                Some(max_in_flight),
+                ReplayRouterMode::RoundRobin,
+                SlaThresholds::default(),
+            )
+            .unwrap()
+            .run(Box::new(NoopPlannerHook))
+            .unwrap()
+        };
+
+        let serial = run(1);
+        let concurrent = run(NUM_SESSIONS);
+
+        assert_eq!(serial.request_counts.completed_requests, NUM_SESSIONS);
+        assert_eq!(concurrent.request_counts.completed_requests, NUM_SESSIONS);
+        assert!(
+            serial.throughput.duration_ms > concurrent.throughput.duration_ms,
+            "cap=1 should serialize requests: serial={}ms concurrent={}ms",
+            serial.throughput.duration_ms,
+            concurrent.throughput.duration_ms,
+        );
     }
 
     #[test]

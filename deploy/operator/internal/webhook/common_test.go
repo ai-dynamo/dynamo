@@ -6,10 +6,60 @@
 package webhook
 
 import (
+	"context"
 	"testing"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
+
+type testExcludedNamespaces map[string]bool
+
+func (e testExcludedNamespaces) Contains(namespace string) bool {
+	return e[namespace]
+}
+
+type countingDefaulter struct {
+	calls int
+}
+
+func (d *countingDefaulter) Default(context.Context, runtime.Object) error {
+	d.calls++
+	return nil
+}
+
+func TestLeaseAwareDefaulter(t *testing.T) {
+	defaulter := &countingDefaulter{}
+	wrapped := NewLeaseAwareDefaulter(defaulter, testExcludedNamespaces{"claimed": true})
+
+	if err := wrapped.Default(context.Background(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "claimed"},
+	}); err != nil {
+		t.Fatalf("defaulting excluded namespace: %v", err)
+	}
+	if defaulter.calls != 0 {
+		t.Fatalf("excluded namespace called defaulter %d times, want 0", defaulter.calls)
+	}
+
+	if err := wrapped.Default(context.Background(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "unclaimed"},
+	}); err != nil {
+		t.Fatalf("defaulting unclaimed namespace: %v", err)
+	}
+	if defaulter.calls != 1 {
+		t.Fatalf("unclaimed namespace called defaulter %d times, want 1", defaulter.calls)
+	}
+}
+
+func TestLeaseAwareDefaulterWithoutChecker(t *testing.T) {
+	defaulter := &countingDefaulter{}
+	wrapped := NewLeaseAwareDefaulter(defaulter, nil)
+	if wrapped != defaulter {
+		t.Fatal("defaulter without a checker should be returned unchanged")
+	}
+}
 
 func TestCanModifyDGDReplicas(t *testing.T) {
 	tests := []struct {

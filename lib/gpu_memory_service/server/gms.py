@@ -79,7 +79,10 @@ class GMS:
         self._events: deque[GMSRuntimeEvent] = deque(maxlen=self._MAX_EVENTS)
         self._metadata: dict[str, MetadataEntry] = {}
         self._memory_layout_hash = ""
-        logger.info("GMS initialized: device=%d", device)
+        logger.info(
+            "GMS initialized: device=%d",
+            device,
+        )
 
     @property
     def state(self) -> ServerState:

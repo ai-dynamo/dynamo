@@ -43,6 +43,12 @@ from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.constants import DisaggregationMode
+from dynamo.trtllm.conversation_affinity import (
+    CONVERSATION_PARAMS_AVAILABLE,
+    conversation_params_for,
+    engine_conversation_affinity_enabled,
+    session_id_from_request,
+)
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
@@ -256,6 +262,10 @@ class HandlerBase(BaseGenerativeHandler):
         self.publisher = config.publisher
         self.metrics_collector = config.metrics_collector
         self.disaggregation_mode = config.disaggregation_mode
+        # Engine-owned conversation-affinity ADP routing gate; resolved lazily on first
+        # request (engine may not be initialized at handler construction). See
+        # conversation_affinity.py. None = not yet resolved.
+        self._conversation_affinity: Optional[bool] = None
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -623,12 +633,19 @@ class HandlerBase(BaseGenerativeHandler):
         # Serialize first_gen_log_probs for the Rust transport layer.
         DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
 
+        # Text-only decode requests already carry the original token_ids.
+        # Prompt metadata is only needed to avoid reprocessing multimodal input.
+        if not self._request_has_multimodal(request) and not any(
+            key in request for key in ("_epd_processed_prompt", "_epd_prompt_token_ids")
+        ):
+            return params_dict
+
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response
         # Note: max_tokens is already handled by Rust frontend's PrefillRouter
         prefill_metadata = {}
 
-        # ALWAYS pack prompt info for DECODE to skip re-processing
+        # Pack prompt info for DECODE to skip re-processing
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         # Use processed_input['prompt'] (from process_openai_request) which is the actual
         # multimodal prompt used by TRT-LLM, not res.prompt which might be raw
@@ -1096,11 +1113,33 @@ class HandlerBase(BaseGenerativeHandler):
         # Build trace headers for distributed tracing
         trace_headers = context.trace_headers()
 
+        # Resolve the engine-owned conversation-affinity gate once (lazily; the engine is
+        # initialized by first request). When on, the engine's ConversationAwareADPRouter
+        # picks the attention-DP rank from the conversation id, so we must NOT force a rank.
+        if self._conversation_affinity is None:
+            self._conversation_affinity = engine_conversation_affinity_enabled(
+                self.engine.llm
+            )
+            if self._conversation_affinity and not CONVERSATION_PARAMS_AVAILABLE:
+                raise RuntimeError(
+                    "attention_dp_config.kv_cache_routing_conversation_affinity is enabled but "
+                    "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                    "release newer than 1.3.0rc20)."
+                )
+        conv_affinity = self._conversation_affinity
+
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
         dp_rank = routing.get("dp_rank") if routing else None
+        conversation_params = None
         scheduling_params = None
-        if dp_rank is not None:
+        if conv_affinity:
+            # Let the engine pick the rank from the conversation id (agent_context.session_id);
+            # do NOT force a rank (an explicit rank is honored before affinity and bypasses it).
+            conversation_params = conversation_params_for(
+                session_id_from_request(request)
+            )
+        elif dp_rank is not None:
             scheduling_params = SchedulingParams(
                 attention_dp_rank=dp_rank,
                 attention_dp_relax=False,  # Strict routing - use the rank dynamo router selected
@@ -1115,6 +1154,11 @@ class HandlerBase(BaseGenerativeHandler):
 
         try:
             # NEW: Updated engine call to include multimodal data
+            # Only pass conversation_params in affinity mode — older TRT-LLM builds'
+            # generate_async does not accept the keyword.
+            conv_kwargs = (
+                {"conversation_params": conversation_params} if conv_affinity else {}
+            )
             generation_result = self.engine.llm.generate_async(
                 inputs=processed_input,  # Use the correctly extracted inputs
                 sampling_params=sampling_params,
@@ -1122,6 +1166,7 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
+                **conv_kwargs,
                 priority=priority,
                 cache_salt=cache_salt,
             )

@@ -18,6 +18,7 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
+from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
@@ -635,6 +636,76 @@ class TestMultimodalGuard:
         assert result["multi_modal_data"] is None
 
 
+class TestPrefillPromptMetadata:
+    """Tests for prompt metadata in the legacy prefill handoff."""
+
+    def _make_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.multimodal_processor = MagicMock()
+        config.shutdown_event = None
+        return _ConcreteHandler(config)
+
+    def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
+        params = DisaggregatedParams(request_type="context_only")
+        output = MagicMock(disaggregated_params=params)
+        result = MagicMock(prompt=prompt, prompt_token_ids=prompt_token_ids)
+
+        return self._make_handler()._encode_and_pack_disaggregated_params(
+            output,
+            params,
+            request,
+            result,
+            processed_input,
+        )
+
+    def test_text_only_prefill_omits_prompt_metadata(self):
+        result = self._pack_metadata(
+            request={"token_ids": [1, 2, 3]},
+            processed_input=[1, 2, 3],
+            prompt="text prompt",
+            prompt_token_ids=[1, 2, 3],
+        )
+
+        assert "_epd_metadata" not in result
+
+    def test_multimodal_prefill_preserves_prompt_metadata(self):
+        result = self._pack_metadata(
+            request={
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "http://example.com/image.jpg"}]
+                },
+            },
+            processed_input={"prompt": "describe image"},
+            prompt="raw prompt",
+            prompt_token_ids=[1, 2, 3],
+        )
+
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt": "describe image",
+            "_prefill_prompt_token_ids": [1, 2, 3],
+        }
+
+    def test_epd_prefill_preserves_encoder_metadata(self):
+        result = self._pack_metadata(
+            request={
+                "token_ids": [1, 2, 3],
+                "_epd_processed_prompt": "encoder prompt",
+                "_epd_prompt_token_ids": [1, 2, 3],
+            },
+            processed_input={"prompt": "encoder prompt"},
+            prompt="engine prompt",
+            prompt_token_ids=[4, 5, 6],
+        )
+
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt": "encoder prompt",
+            "_prefill_prompt_token_ids": [4, 5, 6],
+            "_epd_processed_prompt": "engine prompt",
+            "_epd_prompt_token_ids": [4, 5, 6],
+        }
+
+
 class TestDisaggRequestId:
     """Tests for disagg_request_id population in _setup_disaggregated_params_for_mode."""
 
@@ -824,3 +895,183 @@ class TestHealthCheckPriority:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["cache_salt"] == "tenant-a"
+
+
+class _FakeConversationParams:
+    """Stand-in for tensorrt_llm.llmapi.ConversationParams. Only ``conversation_id``
+    is read back by the assertions."""
+
+    def __init__(self, conversation_id):
+        self.conversation_id = conversation_id
+
+
+class TestConversationAffinity:
+    """Verify generate_locally's conversation-affinity branching on the legacy path.
+
+    When engine-owned conversation-affinity ADP routing is enabled, the handler
+    must (a) NOT force ``attention_dp_rank`` and (b) forward the frontend's
+    ``agent_context.session_id`` as ``ConversationParams`` to
+    ``generate_async``. When disabled, the router's ``dp_rank`` still drives
+    ``SchedulingParams`` as before.
+    """
+
+    def _make_handler(self, *, conversation_affinity: bool) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        handler = _ConcreteHandler(config)
+        handler.publisher = None
+        handler.multimodal_processor = None
+        handler.additional_metrics = None
+        handler.max_seq_len = None
+        handler.default_sampling_params = MockSamplingParams()
+        # Pre-resolve the gate so the lazy path in _generate_locally_impl is a
+        # no-op — the branching under test happens downstream.
+        handler._conversation_affinity = conversation_affinity
+        return handler
+
+    def _make_mock_generation_result(self):
+        output = MagicMock()
+        output.token_ids = [42]
+        output.finish_reason = "stop"
+        output.stop_reason = None
+        output.request_perf_metrics = None
+
+        res = MagicMock()
+        res.outputs = [output]
+        res.finished = True
+
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def mock_aiter(self_mock):
+            yield res
+
+        generation_result.__aiter__ = mock_aiter
+        return generation_result
+
+    def _make_context(self):
+        context = MagicMock()
+        never_resolve = asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.return_value = never_resolve
+        context.id.return_value = "conv-affinity-test"
+        return context
+
+    async def _drive(self, handler, request):
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert len(chunks) > 0
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        return kwargs
+
+    @pytest.mark.asyncio
+    async def test_affinity_off_forwards_router_dp_rank(self):
+        """affinity=False + router dp_rank → SchedulingParams with that rank."""
+        handler = self._make_handler(conversation_affinity=False)
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+            },
+        )
+        scheduling_params = kwargs["scheduling_params"]
+        assert scheduling_params is not None
+        assert scheduling_params.attention_dp_rank == 3
+        assert scheduling_params.attention_dp_relax is False
+        assert "conversation_params" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_affinity_off_no_rank_leaves_scheduling_params_none(self):
+        """affinity=False + no router rank → scheduling_params=None, no conv kwarg."""
+        handler = self._make_handler(conversation_affinity=False)
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        assert "conversation_params" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_with_session_id_suppresses_rank(self, monkeypatch):
+        """affinity=True + session id → scheduling_params=None + ConversationParams."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(conversation_affinity=True)
+        # Router still stamps a rank; affinity mode must ignore it — an explicit
+        # rank would bypass the engine's ConversationAwareADPRouter.
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-42:agent-0"},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-42:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_without_session_id_passes_none_conversation_params(
+        self, monkeypatch
+    ):
+        """affinity=True + no session id → scheduling_params=None,
+        conversation_params kwarg present with value None (no-id balancing)."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(conversation_affinity=True)
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        assert "conversation_params" in kwargs
+        assert kwargs["conversation_params"] is None
+
+    @pytest.mark.asyncio
+    async def test_lazy_resolution_raises_when_api_missing(self, monkeypatch):
+        """Startup gate: engine has affinity ON but ConversationParams API is
+        missing → RuntimeError on first request, before generate_async is called."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        # Trigger the lazy path with an engine config that enables affinity.
+        handler._conversation_affinity = None
+        handler.engine.llm.args.attention_dp_config = {
+            "kv_cache_routing_conversation_affinity": True
+        }
+        handler.engine.llm.generate_async = MagicMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {"temperature": 0.7},
+        }
+        with pytest.raises(RuntimeError, match="ConversationParams API"):
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+        handler.engine.llm.generate_async.assert_not_called()

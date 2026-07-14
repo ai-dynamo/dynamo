@@ -66,6 +66,8 @@ def _make_engine(generate_async) -> TrtllmLLMEngine:
     engine._no_inflight_requests = asyncio.Event()
     engine._no_inflight_requests.set()
     engine._reject_new_requests = False
+    # Match __init__ default; generate_locally reads this before dispatch.
+    engine._conversation_affinity = False
     # Single-rank default: validate_global_dp_rank(None, 0, 1, ...) -> None,
     # so scheduling_params stays None and never touches a real SchedulingParams.
     engine._attention_dp_size = 1
