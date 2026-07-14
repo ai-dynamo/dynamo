@@ -6,9 +6,9 @@ title: Distributed Runtime
 
 ## Overview
 
-Dynamo's `DistributedRuntime` is the core infrastructure in the framework that enables distributed communication and coordination between different Dynamo components. It is implemented in Rust (`/lib/runtime`) and exposed to other programming languages via bindings (i.e., Python bindings can be found in `/lib/bindings/python`). The runtime supports multiple discovery backends (Kubernetes-native or etcd) and request planes (TCP, HTTP, or NATS). `DistributedRuntime` follows a hierarchical structure:
+Dynamo's `DistributedRuntime` is the core infrastructure in the framework that enables distributed communication and coordination between different Dynamo components. It is implemented in Rust (`/lib/runtime`) and exposed to other programming languages via bindings (i.e., Python bindings can be found in `/lib/bindings/python`). The runtime supports multiple discovery backends (Kubernetes-native or etcd) and request planes (TCP or NATS). `DistributedRuntime` follows a hierarchical structure:
 
-- `DistributedRuntime`: This is the highest level object that exposes the distributed runtime interface. It manages connections to discovery backends (K8s API or etcd) and optional messaging (NATS for KV events), and handles lifecycle with cancellation tokens.
+- `DistributedRuntime`: This is the highest level object that exposes the distributed runtime interface. It manages connections to discovery backends (K8s API or etcd), the event plane (ZMQ by default or NATS Core by explicit opt-in), and handles lifecycle with cancellation tokens.
 - `Namespace`: A `Namespace` is a logical grouping of components that isolate between different model deployments.
 - `Component`: A `Component` is a discoverable object within a `Namespace` that represents a logical unit of workers.
 - `Endpoint`: An `Endpoint` is a network-accessible service that provides a specific service or function.
@@ -53,7 +53,9 @@ When using Kubernetes discovery, the KV store backend automatically switches to 
 - `DistributedRuntime`: When a `DistributedRuntime` object is created, it establishes connections based on the discovery backend:
     - **Kubernetes mode**: Uses K8s API for service registration via DynamoWorkerMetadata CRD. No external dependencies required.
     - **KV Store mode**: Connects to etcd for service discovery. Creates a primary lease with a background keep-alive task. All objects registered under this `DistributedRuntime` use this lease_id to maintain their lifecycle.
-    - **NATS** (optional): Used for KV event messaging when using KV-aware routing. Can be disabled via `--no-router-kv-events`, which enables prediction-based routing without event persistence.
+    - **Event Plane**: ZMQ is the default for KV event messaging with every discovery backend.
+      Set `DYN_EVENT_PLANE=nats` to opt into NATS Core. The frontend can use
+      `--no-router-kv-events` for prediction-based routing without consuming worker events.
     - **Request Plane**: TCP by default. Can be configured to use HTTP or NATS via `DYN_REQUEST_PLANE` environment variable.
 - `Namespace`: `Namespace`s are primarily a logical grouping mechanism. They provide the root path for all components under this `Namespace`.
 - `Component`: When a `Component` object is created, it registers a service in the internal registry of the `DistributedRuntime`, which tracks all services and endpoints.
@@ -70,7 +72,7 @@ Dynamo uses a `Client` object to call an endpoint. When a `Client` is created, i
 
 The watcher continuously updates the `Client` with information about available `Endpoint`s.
 
-The user can decide which load balancing strategy to use when calling the `Endpoint` from the `Client`, which is done in [push_router.rs](https://github.com/ai-dynamo/dynamo/tree/main/lib/runtime/src/pipeline/network/egress/push_router.rs). Dynamo supports three load balancing strategies:
+The user can decide which load balancing strategy to use when calling the `Endpoint` from the `Client`, which is done in [push_router.rs](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/pipeline/network/egress/push_router.rs). Dynamo supports three load balancing strategies:
 
 - `random`: randomly select an endpoint to hit
 - `round_robin`: select endpoints in round-robin order
@@ -79,7 +81,6 @@ The user can decide which load balancing strategy to use when calling the `Endpo
 After selecting which endpoint to hit, the `Client` sends the request using the configured request plane (TCP by default). The request plane handles the actual transport:
 
 - **TCP** (default): Direct TCP connection with connection pooling
-- **HTTP**: HTTP/2-based transport
 - **NATS**: Message broker-based transport (legacy)
 
 ## Examples
@@ -88,4 +89,3 @@ We provide native rust and python (through binding) examples for basic usage of 
 
 - Rust: `/lib/runtime/examples/`
 - Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `components/src/dynamo` for full implementation details.
-

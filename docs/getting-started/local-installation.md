@@ -93,7 +93,7 @@ Dynamo components discover each other through a shared backend. Two options are 
 | Backend | When to Use | Setup |
 |---|---|---|
 | **File** | Single machine, local development | No setup -- pass `--discovery-backend file` to all components. The event plane automatically defaults to ZMQ (no NATS required). |
-| **etcd** | Multi-node, production | Requires a running etcd instance (default if no flag is specified). The event plane defaults to NATS. |
+| **etcd** | Multi-node, production | Requires a running etcd instance (default if no flag is specified). The event plane defaults to ZMQ; set `--event-plane nats` to opt into NATS Core. |
 
 This guide uses `--discovery-backend file`. For etcd setup, see [Service Discovery](../kubernetes/service-discovery.md).
 
@@ -163,11 +163,8 @@ For dependency-free local development, leave KV event publishing disabled:
 - **SGLang:** No flag needed (KV events disabled by default)
 - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-For event-driven KV routing, vLLM requires `--kv-events-config` on aggregated workers or
-disaggregated prefill workers. SGLang requires the flag on aggregated workers or on both prefill and
-decode workers in disaggregated serving. TensorRT-LLM requires `--publish-events-and-metrics`. See
-the [Router Guide](../components/router/router-guide.md#quick-start) for the complete frontend and
-worker configuration.
+For event-driven KV routing, see the [Router Quick Start](../components/router/README.md#quick-start)
+for the exact frontend and backend arguments and worker-role placement.
 
 ## Test Your Deployment
 

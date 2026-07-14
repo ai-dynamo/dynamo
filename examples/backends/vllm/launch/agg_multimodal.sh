@@ -54,9 +54,8 @@ trap dynamo_exit_trap EXIT
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 
-# Use TCP transport (instead of default NATS)
-# TCP is preferred for multimodal workloads because it overcomes:
-# - NATS default 1MB max payload limit (multimodal base64 images can exceed this)
+# Keep the default TCP request plane for multimodal payloads. The legacy NATS
+# request plane has broker payload limits that base64 media can exceed.
 export DYN_REQUEST_PLANE=tcp
 
 print_launch_banner --no-curl "Launching Aggregated Multimodal Serving" "$MODEL_NAME" "$HTTP_PORT" \

@@ -85,7 +85,7 @@ subtitle: Definitions of core Dynamo terms covering disaggregated serving, KV ca
 
 **RDMA (Remote Direct Memory Access)** - Technology that allows direct memory access between distributed systems, used for efficient KV cache transfers.
 
-**Request Plane** - The transport layer that transmits RPCs between components (frontend-to-worker or router-to-router) utilizing one of these protocols: TCP, HTTP, or NATS.
+**Request Plane** - The transport layer that transmits RPCs between components (frontend-to-worker or router-to-router) using TCP by default or the legacy NATS transport.
 
 ## S
 **SGLang** - Fast LLM inference framework with native embedding support and RadixAttention.

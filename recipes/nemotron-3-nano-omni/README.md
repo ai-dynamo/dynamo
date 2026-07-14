@@ -143,32 +143,27 @@ curl http://localhost:8000/v1/chat/completions \
 - `--dyn-tool-call-parser nemotron_nano` and
   `--dyn-reasoning-parser nemotron_nano` enable Nemotron Nano tool-call and
   reasoning parsing.
-- The frontend uses `--router-mode kv --no-kv-events`, which approximates
+- The frontend uses `--router-mode kv --no-router-kv-events`, which approximates
   KV-aware routing with prefix hashing without requiring backend KV events.
 
-## Optional: Run without NATS
+## Run Without NATS
 
-The Dynamo runtime defaults to NATS for the event plane and connects to a
-NATS server if `NATS_SERVER` is set in the environment (the operator
-auto-injects this on most clusters). On clusters without NATS — or where
-you'd rather avoid the dependency — you can run on TCP request plane + ZMQ
-event plane only. Add to both Frontend and VllmWorker:
+This recipe uses the default TCP request plane and ZMQ event plane, so it does not require NATS.
+When the operator is configured with a NATS address, it injects `NATS_SERVER`, and the runtime opens
+a NATS connection because the server was explicitly configured. To suppress that connection on a
+cluster without NATS, unset `NATS_SERVER` before starting the Frontend and VllmWorker:
 
 ```yaml
 mainContainer:
-  env:
-    - name: DYN_EVENT_PLANE
-      value: zmq
   command: ["/bin/bash", "-lc"]
   args:
-    # Operator-injected NATS_SERVER takes effect even when set to ""; we have
-    # to actually unset it before the runtime reads env.
+    # Remove an operator-injected NATS address before the runtime reads the environment.
     - >-
       unset NATS_SERVER &&
       exec python3 -m dynamo.frontend ...   # or dynamo.vllm
 ```
 
-The request plane defaults to TCP already, so no further flags are needed.
+No request-plane or event-plane flags are needed.
 
 ## File Layout
 

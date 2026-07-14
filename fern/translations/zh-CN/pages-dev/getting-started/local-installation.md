@@ -93,7 +93,7 @@ Dynamo 组件通过共享后端相互发现。可使用两个选项：
 | 后端 | 何时使用 | 设置 |
 |---|---|---|
 | **File** | 单机、本地开发 | 无需设置 -- 将 `--discovery-backend file` 传递给所有组件。事件平面会自动默认使用 ZMQ（无需 NATS）。 |
-| **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面默认使用 NATS。 |
+| **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定 flag，则为默认值）。事件平面默认使用 ZMQ；设置 `--event-plane nats` 可显式启用 NATS Core。 |
 
 本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](../../../../../docs/kubernetes/service-discovery.md)。
 
@@ -162,7 +162,7 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
 - **SGLang：** 无需标志（默认禁用 KV events）
 - **TensorRT-LLM：** 无需标志（默认禁用 KV events）
 
-对于事件驱动的 KV routing，vLLM 要求在 aggregated worker 或 disaggregated prefill worker 上设置 `--kv-events-config`。SGLang 要求在 aggregated worker 上设置该 flag；在 disaggregated serving 中，prefill 和 decode worker 都需要设置。TensorRT-LLM 要求设置 `--publish-events-and-metrics`。有关完整的 frontend 和 worker 配置，请参阅 [Router Guide](../../../../../docs/components/router/router-guide.md#quick-start)。
+对于事件驱动的 KV routing，请参阅 [Router Quick Start](../../../../../docs/components/router/README.md#quick-start)，了解准确的 frontend 和 backend 参数以及 worker role 配置。
 
 ## 测试你的部署
 

@@ -145,7 +145,7 @@ If any prerequisite is missing, decode-block busy detection is effectively disab
 
 Examples of missing prerequisites:
 
-- Frontend was launched without `--router-mode kv`; the NATS/event client path used for worker load metrics is not initialized, so `active_decode_blocks` updates are not consumed and the threshold is ignored.
+- Frontend was launched without `--router-mode kv`; the event subscriber used for worker load metrics is not initialized, so `active_decode_blocks` updates are not consumed and the threshold is ignored.
 - Frontend cannot receive events because worker-load subscription is unavailable (for example, event transport not reachable or misconfigured).
 - Workers are running in a mode/path that does not publish `active_decode_blocks` (for example, custom integrations without worker metrics publishing).
 - Output-heavy traffic is served without `--router-track-output-blocks`; only prompt/input blocks are reflected in the router's active block accounting, so generated output blocks can exhaust KV before triggering decode-block rejection.

@@ -59,7 +59,7 @@ python -m dynamo.trtllm \
     --component backend \
     --endpoint generate \
     --modality multimodal \
-    --publish-events-and-metrics &
+    --publish-kv-events &
 
 # 3. Start MM Router Worker
 python -m examples.backends.trtllm.mm_router_worker \

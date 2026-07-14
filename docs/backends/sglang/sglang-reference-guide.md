@@ -144,7 +144,6 @@ disaggregated serving, pass it to both prefill and decode workers:
 
 ```bash
 python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B \
-  --stream-interval 20 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 ```
 

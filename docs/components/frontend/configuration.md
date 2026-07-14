@@ -99,7 +99,7 @@ for migration instructions.
 |-------------|---------|---------|-------------|
 | `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd` | Service discovery: `kubernetes`, `etcd`, `file`, `mem` |
 | `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats` |
-| `--event-plane` | `DYN_EVENT_PLANE` | auto | Event publishing: `nats`, `zmq`; defaults to `zmq` for `file`/`mem` discovery and `nats` for `etcd`/`kubernetes` |
+| `--event-plane` | `DYN_EVENT_PLANE` | `zmq` | Event publishing: `zmq` (default for every discovery backend) or `nats` (NATS Core opt-in) |
 
 ## KServe gRPC
 

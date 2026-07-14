@@ -58,7 +58,7 @@ for i in $(seq 0 $((NUM_WORKERS - 1))); do
         --served-model-name "${MODEL}__internal" \
         --endpoint "dyn://${NAMESPACE}.backend.generate" \
         --modality multimodal \
-        --publish-events-and-metrics \
+        --publish-kv-events \
         --kv-block-size "$BLOCK_SIZE" \
         2>&1 | sed "s/^/[trtllm-$i] /" &
     PIDS+=($!)

@@ -145,31 +145,23 @@ kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. You can pass any SGLang
 argument supported by `python -m dynamo.sglang`.
 
-**Common SGLang flags:**
+**Common SGLang settings:**
 
 - `--model-path <model>`: Set the model to serve.
 - `--disaggregation-mode prefill|decode`: Select a disaggregated worker role.
 - `--disaggregation-transfer-backend nixl`: Transfer KV cache data through NIXL.
-- `--stream-interval 20`: Recommended starting point to reduce host-side engine and Dynamo bridge
-  overhead under load. Lower values provide finer-grained streaming updates. See the
-  [SGLang recommended stream interval](https://github.com/ai-dynamo/dynamo/blob/main/docs/backends/sglang/sglang-reference-guide.md#recommended-stream-interval).
+- The event-driven router manifest linked below sets `--stream-interval 20`. See the [SGLang recommended stream
+  interval](https://github.com/ai-dynamo/dynamo/blob/main/docs/backends/sglang/sglang-reference-guide.md#recommended-stream-interval)
+  for the host-efficiency and streaming-granularity tradeoffs.
 
 ### KV-Routed DGD Requirements
 
-An event-driven SGLang `DynamoGraphDeployment` requires configuration on both sides:
-
-1. Set `DYN_ROUTER_MODE=kv` on the Frontend service.
-2. Pass `--kv-events-config` to every KV-routed worker. In aggregated serving, add it to each
-   aggregated worker. In disaggregated serving, add it to both prefill and decode workers.
-
-   ```text
-   --stream-interval 20
-   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
-   ```
-
-Use a unique ZMQ endpoint port for workers that share a network namespace. For approximate routing
-without worker KV events, omit `--kv-events-config` and set `DYN_ROUTER_USE_KV_EVENTS=false` on the
-Frontend service. See [`agg_router.yaml`](./agg_router.yaml) for a complete manifest.
+[`agg_router.yaml`](./agg_router.yaml) is a complete event-driven example that configures both the
+Frontend and the SGLang worker. See the
+[DynamoGraphDeploymentRequest routing matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/dgdr.md#routing)
+for the canonical Kubernetes arguments, role placement, and override semantics. See the
+[Router Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/docs/components/router/README.md#quick-start)
+for approximate routing without worker events.
 
 ## Monitoring and Health
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-## This example demonstrates KV-aware routing with the --no-kv-events flag.
+## This example demonstrates KV-aware routing with the --no-router-kv-events flag.
 ## Instead of receiving KV events from workers, the router predicts cache state
 ## locally based on routing decisions with TTL-based expiration and pruning.
 ## Note: This mode does not require NATS or JetStream during dynamo platform deployment.
@@ -20,7 +20,7 @@ spec:
           - dynamo.frontend
           - --router-mode
           - kv
-          - --no-kv-events
+          - --no-router-kv-events
           command:
           - python3
           env:

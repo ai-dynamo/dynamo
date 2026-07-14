@@ -31,6 +31,7 @@ python -m dynamo.frontend \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
+    --stream-interval 20 \
     --enforce-eager \
     --disaggregation-mode decode \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
@@ -39,6 +40,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
+    --stream-interval 20 \
     --enforce-eager \
     --disaggregation-mode decode \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
@@ -50,6 +52,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=20098 \
 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
+    --stream-interval 20 \
     --enforce-eager \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
@@ -59,6 +62,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=20099 \
 CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.vllm \
     --model $MODEL \
     --block-size $BLOCK_SIZE \
+    --stream-interval 20 \
     --enforce-eager \
     --disaggregation-mode prefill \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \

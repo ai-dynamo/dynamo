@@ -83,6 +83,11 @@ rejects custom `webhook.namespaceSelector` values.
 
 ### NATS Configuration
 
+The bundled NATS chart remains enabled by default for deployments that explicitly select NATS Core
+for the event plane, the legacy NATS request plane, or deprecated durable JetStream KV events. The
+default Dynamo transports are ZMQ for events and TCP for requests, so a basic DGD or DGDR does not
+require NATS. Set `global.nats.install=false` when none of those NATS-backed features are used.
+
 For detailed NATS configuration options beyond `global.nats.install`, please refer to the official NATS Helm chart documentation:
 **[NATS Helm Chart Documentation](https://github.com/nats-io/k8s/tree/main/helm/charts/nats)**
 

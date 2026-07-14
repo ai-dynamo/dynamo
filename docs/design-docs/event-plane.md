@@ -59,6 +59,10 @@ python3 -m dynamo.vllm --event-plane zmq --model Qwen/Qwen3-0.6B
 When `DYN_EVENT_PLANE` is not set, the default is **zmq**. Set `DYN_EVENT_PLANE=nats`
 to opt into the NATS transport.
 
+The backend engine publisher and the Dynamo event plane are separate hops. vLLM and SGLang emit
+raw KV events over ZMQ to their local Dynamo worker. The worker then republishes normalized router
+events over the selected Dynamo event plane, which can be ZMQ or NATS Core.
+
 ## NATS Transport
 
 When using NATS (`DYN_EVENT_PLANE=nats`):
@@ -73,9 +77,9 @@ Example setup:
 export NATS_SERVER=nats://nats-server:4222
 export DYN_EVENT_PLANE=nats
 
-# Start workers -- explicitly enable KV event publishing
+# Start a worker -- the engine publishes locally over ZMQ, then Dynamo relays over NATS Core
 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B \
-    --kv-events-config '{"publisher":"nats","topic":"kv-events","enable_kv_cache_events":true}'
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 
 # Start frontend -- it subscribes to events from NATS automatically
 python3 -m dynamo.frontend --router-mode kv
@@ -102,9 +106,9 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B \
 python3 -m dynamo.frontend --router-mode kv
 ```
 
-## Disabling the Event Plane
+## Approximate KV Routing
 
-If you do not need KV-aware routing, you can disable the event plane entirely:
+To route by predicted cache state instead of worker KV events, disable KV event consumption:
 
 ```bash
 python3 -m dynamo.frontend --router-mode kv --no-router-kv-events
@@ -113,7 +117,7 @@ python3 -m dynamo.frontend --router-mode kv --no-router-kv-events
 With `--no-router-kv-events`:
 
 - The router falls back to prediction-based cache-aware routing (estimates cache state from routing decisions).
-- No NATS server or ZMQ sockets are needed.
+- Worker KV event publishers are not required.
 - TTL-based expiration keeps predicted state from growing stale.
 
 ## Deployment Modes
@@ -123,10 +127,11 @@ With `--no-router-kv-events`:
 Both transports work out of the box:
 
 ```bash
-# NATS (requires nats-server running)
+# NATS Core event plane (requires a NATS server)
 export NATS_SERVER=nats://localhost:4222
+export DYN_EVENT_PLANE=nats
 
-# OR ZMQ (no extra infrastructure)
+# Or use ZMQ (default, no extra infrastructure)
 export DYN_EVENT_PLANE=zmq
 ```
 

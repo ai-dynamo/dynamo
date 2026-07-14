@@ -42,4 +42,4 @@ spec:
             - Qwen/Qwen3-0.6B
             - --extra-engine-args
             - ./examples/backends/trtllm/engine_configs/qwen3/agg.yaml
-            - --publish-events-and-metrics
+            - --publish-kv-events

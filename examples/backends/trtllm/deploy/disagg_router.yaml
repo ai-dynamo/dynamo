@@ -40,7 +40,7 @@ spec:
             - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
             - --disaggregation-mode
             - prefill
-            - --publish-events-and-metrics
+            - --publish-kv-events
     decode:
       envFromSecret: hf-token-secret
       componentType: worker

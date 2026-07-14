@@ -49,7 +49,7 @@ spec:
             - /config/prefill.yaml
             - --disaggregation-mode
             - prefill
-            - --publish-events-and-metrics
+            - --publish-kv-events
             - --request-plane
             - nats
             - --kv-block-size
@@ -169,7 +169,7 @@ spec:
             - /config/decode.yaml
             - --disaggregation-mode
             - decode
-            - --publish-events-and-metrics
+            - --publish-kv-events
             - --request-plane
             - nats
             - --kv-block-size

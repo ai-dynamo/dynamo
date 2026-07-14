@@ -45,7 +45,7 @@ spec:
             - nvidia/DeepSeek-V3.2-NVFP4
             - --extra-engine-args
             - /config/aggregated.yaml
-            - --publish-events-and-metrics
+            - --publish-kv-events
             - --request-plane
             - nats
             - --kv-block-size

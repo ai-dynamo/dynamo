@@ -60,7 +60,7 @@ spec:
             - nvidia/Kimi-K2.5-NVFP4
             - --extra-engine-args
             - /config/agg.yaml
-            - --publish-events-and-metrics
+            - --publish-kv-events
             - --request-plane
             - nats
             - --kv-block-size

@@ -25,7 +25,9 @@ global:
     # -- Whether this chart should install the bundled NATS subchart.
     # When true, deploys NATS and auto-configures the operator with its address.
     # When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS.
-    # Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes).
+    # Defaults to true (since release 1.1.0) for deployments that explicitly select a NATS-backed
+    # event or request plane. The default Dynamo transports (ZMQ events and TCP requests) do not
+    # require NATS.
     install: true
 
   kai-scheduler:

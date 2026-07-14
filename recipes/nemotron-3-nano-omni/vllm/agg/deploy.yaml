@@ -50,7 +50,7 @@ spec:
             - >-
               exec python3 -m dynamo.frontend
               --router-mode kv
-              --no-kv-events
+              --no-router-kv-events
               --http-port 8000
 
     VllmWorker:

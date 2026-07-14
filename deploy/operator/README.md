@@ -88,7 +88,7 @@ Additional settings available in `tilt-settings.yaml`:
 
 ```yaml
 # Infrastructure toggles (control which components are deployed)
-enable_nats: true              # Enable NATS messaging (default: true, required for DGD/DGDR)
+enable_nats: true              # Enable optional NATS-backed transports (default: true)
 enable_etcd: false             # Enable etcd service discovery (default: false)
 enable_kai_scheduler: false    # Enable KAI GPU-aware scheduler (default: false)
 enable_grove: false            # Enable Grove orchestrator (default: false)

@@ -16,41 +16,16 @@ The router can be deployed using [Python / CLI](#python--cli-deployment), [Kuber
 
 ### Python / CLI Deployment
 
-Event-driven KV routing requires both of these steps:
+Start the Dynamo frontend with the KV router enabled:
 
-1. Start the Dynamo frontend with the KV router enabled:
+```bash
+python -m dynamo.frontend --router-mode kv --http-port 8000
+```
 
-   ```bash
-   python -m dynamo.frontend --router-mode kv --http-port 8000
-   ```
-
-2. Enable KV event publication with the configuration for your backend.
-
-   For vLLM, pass `--kv-events-config` to each aggregated worker or disaggregated prefill worker:
-
-   ```bash
-   python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
-     --stream-interval 20 \
-     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
-   ```
-
-   For SGLang, pass `--kv-events-config` to each aggregated worker. In disaggregated deployments,
-   pass it to both prefill and decode workers:
-
-   ```bash
-   python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B \
-     --stream-interval 20 \
-     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
-   ```
-
-Do not pass `--kv-events-config` to vLLM decode-only workers. Use a unique ZMQ endpoint port for
-workers that share a network namespace. TensorRT-LLM uses `--publish-events-and-metrics`. For
-approximate routing without worker events, omit the backend event flag and start the frontend with
-`--no-router-kv-events`.
-
-For host-side tuning details, see the recommended stream interval guidance for
-[vLLM](../../backends/vllm/vllm-reference-guide.md#recommended-stream-interval) and
-[SGLang](../../backends/sglang/sglang-reference-guide.md#recommended-stream-interval).
+Event-driven KV routing also requires backend event publication. See the [Router Quick
+Start](README.md#quick-start) for the exact vLLM, SGLang, and TensorRT-LLM worker arguments and role
+placement. For approximate routing without worker events, omit the backend event flag and start the
+frontend with `--no-router-kv-events`.
 
 #### CLI Arguments
 
@@ -77,62 +52,20 @@ For detailed configuration options and tuning parameters, see [Configuration and
 ### Kubernetes Deployment
 
 An event-driven `DynamoGraphDeployment` requires `DYN_ROUTER_MODE=kv` on the Frontend service and
-backend-specific worker arguments. The following example configures vLLM:
-
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-deployment
-spec:
-  services:
-    Frontend:
-      componentType: frontend
-      replicas: 1
-      envs:
-        - name: DYN_ROUTER_MODE
-          value: kv
-    VllmDecodeWorker:
-      componentType: worker
-      replicas: 2
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --stream-interval
-            - "20"
-            - --kv-events-config
-            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
-```
-
-For a SGLang worker, use the corresponding backend arguments:
-
-```yaml
-args:
-  - --model-path
-  - Qwen/Qwen3-0.6B
-  - --stream-interval
-  - "20"
-  - --kv-events-config
-  - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
-```
+backend-specific worker arguments. The [DynamoGraphDeploymentRequest guide](../../kubernetes/dgdr.md#routing)
+owns the Kubernetes argument matrix and override semantics. Runnable configurations are available
+for [vLLM aggregated](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router.yaml),
+[vLLM disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_router.yaml),
+and [SGLang aggregated](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_router.yaml)
+serving.
 
 **Key Points:**
 
 - Set `DYN_ROUTER_MODE=kv` on the **Frontend** service only.
-- Pass `--kv-events-config` to vLLM workers that perform prefill. In aggregated serving, those are
-  the aggregated workers. In disaggregated serving, those are the prefill workers only.
-- Pass `--kv-events-config` to every KV-routed SGLang worker. In disaggregated serving, those are
-  both prefill and decode workers.
-- Start with `--stream-interval 20` on vLLM and SGLang workers to reduce host-side overhead.
-- For approximate cache-state prediction, omit `--kv-events-config` and set
-  `DYN_ROUTER_USE_KV_EVENTS=false` on the Frontend service.
+- Use the [DynamoGraphDeploymentRequest routing matrix](../../kubernetes/dgdr.md#routing) to place
+  each backend's event arguments on the correct worker roles.
+- For approximate cache-state prediction, use the frontend setting and omit worker event arguments
+  as described in the [Router Quick Start](README.md#quick-start).
 
 #### Environment Variables
 
@@ -174,12 +107,12 @@ The Dynamo router can be deployed in several configurations. The table below sho
 |------|---------|---------------|-----------|----------|----------|
 | **Frontend + Round-Robin** | `python -m dynamo.frontend --router-mode round-robin` | Cycles through workers | None | Aggregated | Simplest baseline; no KV awareness |
 | **Frontend + Random** | `python -m dynamo.frontend --router-mode random` | Random worker selection | None | Aggregated | Stateless load balancing |
-| **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Aggregated | Production single-pool serving with cache reuse |
-| **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | NATS Core / JetStream / ZMQ / Approx | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
+| **Frontend + KV (Aggregated)** | `python -m dynamo.frontend --router-mode kv` | KV cache overlap + load | ZMQ / NATS Core / Approx / deprecated JetStream | Aggregated | Production single-pool serving with cache reuse |
+| **Frontend + KV (Disaggregated)** | `python -m dynamo.frontend --router-mode kv` with prefill + decode workers | KV cache overlap + load | ZMQ / NATS Core / Approx / deprecated JetStream | Disaggregated (prefill + decode pools) | Separate prefill/decode for large-scale serving |
 | **Frontend + Least-Loaded** | `python -m dynamo.frontend --router-mode least-loaded` | Fewest active connections | None | Aggregated or disaggregated fallback | Simple load-aware balancing without KV awareness |
 | **Frontend + Device-Aware Weighted** | `python -m dynamo.frontend --router-mode device-aware-weighted` | Device-aware budget + least-loaded within selected device group | None | Aggregated or disaggregated fallback | Heterogeneous fleet balancing (CPU/non-CPU); degenerates to least-loaded when only one device class is present |
 | **Frontend + Direct** | `python -m dynamo.frontend --router-mode direct` | Worker ID from request hints | None | Aggregated | External orchestrator (e.g., EPP/GAIE) selects workers |
-| **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | NATS Core / JetStream / ZMQ | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
+| **Standalone Router** | `python -m dynamo.router` | KV cache overlap + load | ZMQ / NATS Core / deprecated JetStream | Any | Routing without the HTTP frontend (multi-tier, custom pipelines) |
 
 ### Routing Modes (`--router-mode`)
 
@@ -208,15 +141,15 @@ Use `DYN_ENCODER_CUDA_TO_CPU_RATIO` to approximate the throughput ratio of a non
 
 When only one device class is present, the policy degenerates to standard least-loaded routing.
 
-### KV Event Transport Modes (within `--router-mode kv`)
+### KV Cache State Modes (within `--router-mode kv`)
 
 When using KV routing, the router needs to know what each worker has cached. There are four ways to get this information:
 
-| Event Mode | How to Enable | Description |
+| State Mode | How to Enable | Description |
 |------------|---------------|-------------|
-| **ZMQ (local indexer)** | Router default (no router flag) | Workers maintain a local indexer and publish KV events via ZMQ PUB sockets; the router recovers state by querying live workers. This is the default event plane for all backends |
+| **ZMQ (local indexer)** | Router default (no router flag) | Workers maintain a local indexer and publish KV events via ZMQ PUB sockets; the router recovers state by querying live workers. This is the default event plane for every discovery backend. |
 | **NATS Core (local indexer)** | `--event-plane nats` (or `DYN_EVENT_PLANE=nats`) | Same local-indexer model, but events flow over NATS Core instead of ZMQ. |
-| **JetStream (durable)** | `--router-durable-kv-events` (requires `--event-plane nats`) | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
+| **JetStream (durable)** | `--router-durable-kv-events` on the frontend, `--durable-kv-events` on workers, and `--event-plane nats` on every component | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
 | **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
 
 ### Aggregated vs. Disaggregated Topology

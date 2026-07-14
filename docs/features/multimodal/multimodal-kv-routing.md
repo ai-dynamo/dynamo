@@ -29,7 +29,7 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 |---------|------|-----------|-------|
 | **vLLM** | Rust frontend (default) | ✅ | Uses `llm-multimodal` crate for image-token counting + placeholder expansion. Supported models tracked below. |
 | **vLLM** | Python chat-processor (`--dyn-chat-processor vllm --router-mode kv`) | ✅ | Uses vLLM's own multimodal processor — supports any VLM that vLLM supports. |
-| **TRT-LLM** | — | ✅ | Uses dedicated MM Router Worker. Requires `--publish-events-and-metrics` on TRT-LLM workers. |
+| **TRT-LLM** | — | ✅ | Uses dedicated MM Router Worker. Requires `--publish-kv-events` on TRT-LLM workers. |
 | **SGLang** | Rust frontend (default) | ✅ (\*) | Uses `llm-multimodal` crate for image-token counting; engaged automatically when the worker reports `backend_framework="sglang"`. |
 
 (\*) The SGLang Rust-frontend path substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) matches byte-for-byte. Requires the sglang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)).

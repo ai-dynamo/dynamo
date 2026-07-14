@@ -39,7 +39,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000
+            - python3 -m dynamo.frontend --router-mode kv --no-router-kv-events --http-port 8000
     prefill:
       componentType: worker
       subComponentType: prefill

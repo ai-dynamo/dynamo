@@ -40,10 +40,11 @@ Coordination and messaging support:
 
 ### Request Plane
 - **TCP** (default): Direct TCP connections between Frontend and Workers for request/response transport.
-- **HTTP/NATS**: Alternative transports configurable via `DYN_REQUEST_PLANE`.
+- **NATS** (legacy): Brokered alternative configurable via `DYN_REQUEST_PLANE`.
 
-### NATS Connections (Optional, for KV routing)
-- **KV Events**: Cache state events for KV-aware routing (can be disabled with `--no-router-kv-events`)
+### Event Plane (for event-driven KV routing)
+- **KV Events**: Cache-state events use ZMQ by default or NATS Core when
+  `DYN_EVENT_PLANE=nats`; event consumption can be disabled with `--no-router-kv-events`.
 
 ### Planning Connections (Gold, dotted)
 - **Frontend → Planner**: Metrics collection for auto-scaling decisions
@@ -82,7 +83,7 @@ graph TD
     %% Infrastructure
     subgraph INF["<b>Infrastructure Layer</b>"]
         Discovery[("<b>Discovery</b><br/><i>Service Registry<br/>(ETCD or K8s)</i>")]
-        NATS[("<b>NATS</b><br/><i>KV Events<br/>(Optional)</i>")]
+        EventPlane[("<b>Event Plane</b><br/><i>ZMQ default<br/>NATS Core opt-in</i>")]
         Planner["<b>Planner</b><br/><i>Auto-scaling</i>"]
     end
 
@@ -140,9 +141,9 @@ graph TD
     DecodeWorker -.->|Register| Discovery
     Planner -.->|Service Discovery| Discovery
 
-    %% NATS for KV events (optional)
-    PrefillWorker -.->|KV Events| NATS
-    DecodeWorker -.->|KV Events| NATS
+    %% Event plane for KV events (worker roles vary by backend)
+    PrefillWorker -.->|KV Events| EventPlane
+    DecodeWorker -.->|KV Events| EventPlane
 
     %% Planning Connections
     Frontend -.->|Metrics| Planner
@@ -158,7 +159,7 @@ graph TD
     classDef planner fill:#f1f8e9,stroke:#558B2F,stroke-width:3px
     classDef storage fill:#e0f2f1,stroke:#00695C,stroke-width:3px
     classDef discovery fill:#fff9c4,stroke:#F9A825,stroke-width:3px
-    classDef nats fill:#ede7f6,stroke:#5E35B1,stroke-width:3px
+    classDef eventPlane fill:#ede7f6,stroke:#5E35B1,stroke-width:3px
     classDef infraLayer fill:#fff9c4,stroke:#FFC107,stroke-width:3px
     classDef workerLayer fill:#e3f2fd,stroke:#2196F3,stroke-width:3px
 
@@ -170,7 +171,7 @@ graph TD
     class Planner planner
     class PrefillKVCache,DecodeKVCache storage
     class Discovery discovery
-    class NATS nats
+    class EventPlane eventPlane
     class INF infraLayer
     class WL workerLayer
 
