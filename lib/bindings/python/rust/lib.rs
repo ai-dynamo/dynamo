@@ -560,7 +560,9 @@ fn register_model<'p>(
 
             // Register the Model Deployment Card via discovery interface
             let discovery = endpoint.inner.drt().discovery();
-            let model_suffix = lora_identifier.as_ref().map(|name| Slug::slugify(name).to_string());
+            let model_suffix = lora_identifier
+                .as_ref()
+                .map(|name| Slug::slugify(name).to_string());
             let spec = rs::discovery::DiscoverySpec::from_model_with_suffix(
                 endpoint.inner.component().namespace().name().to_string(),
                 endpoint.inner.component().name().to_string(),
