@@ -8,6 +8,20 @@ use serde::Serialize;
 use crate::protocols::BlockExtraInfo;
 
 #[derive(Debug, Deserialize)]
+pub(super) struct BlockStoredMetadata {
+    pub(super) cache_salt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(super) enum BlockStoredPositionSeven {
+    LoraName(String),
+    // SGLang emits this metadata only in its array-like positional wire form.
+    // Named/map events use the existing top-level `cache_salt` field instead.
+    Metadata(BlockStoredMetadata),
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub(super) enum KvCacheEventTrailingField {
     GroupIdx(u32),

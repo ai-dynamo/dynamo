@@ -78,6 +78,7 @@ from dynamo.sglang.capacity import (
 from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import format_zmq_endpoint
+from dynamo.sglang.request_utils import cache_salt_kwargs
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -1029,6 +1030,8 @@ class SglangLLMEngine(LLMEngine):
         request_input = self._input_param_manager.get_input_param(
             dict(request), use_tokenizer=self._use_sglang_tokenizer
         )
-        return {
+        input_param = {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
+        input_param.update(cache_salt_kwargs(self.engine, request))
+        return input_param
