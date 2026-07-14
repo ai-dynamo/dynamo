@@ -170,6 +170,10 @@ vllm_configs = {
         script_name="agg_spec_decoding.sh",
         marks=[
             pytest.mark.gpu_1,
+            # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
+            # and only the base cfg.model is auto-registered, so the draft repo
+            # can't be resolved offline without this.
+            pytest.mark.model("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
             # No profiled_vram_gib: the base model is gated on HF, so it can't be
             # profiled locally without a token. Not guessed — runs in the
             # sequential GPU stage; profile the real peak in a CI env that has
