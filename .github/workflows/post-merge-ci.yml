@@ -94,6 +94,11 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+          # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+          # release/* -> prior release tag (see resolve_diff_base.py).
+          diff_event_context: push
+          diff_current_branch: ${{ github.ref_name }}
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
 
 # ============================================================================
 # Snapshot Agent
@@ -168,7 +173,7 @@ jobs:
             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
             -f deploy/power-agent/Dockerfile deploy/power-agent
       - name: Set up Helm
-        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5.0.1
         with:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test Helm chart
@@ -383,10 +388,16 @@ jobs:
       cuda_version: '[""]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 45
+      # OSRB CSV diff baseline: post-merge context. main -> previous commit;
+      # release/* -> prior release tag (see resolve_diff_base.py).
+      diff_event_context: push
+      diff_current_branch: ${{ github.ref_name }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-dynamo-planner' || '' }}
         ${{ github.ref_name == 'main' && format('main-dynamo-planner-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   frontend-build:

@@ -89,6 +89,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
   - components/src/dynamo/sglang/
+  - components/src/dynamo/sglang_sidecar/
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
@@ -426,7 +427,7 @@ areas:
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
-  - components/src/dynamo/common/utils/snapshot.py
+  - components/src/dynamo/common/snapshot/
   - deploy/helm/charts/snapshot/
   - deploy/operator/internal/checkpoint/
   - deploy/operator/internal/gms/

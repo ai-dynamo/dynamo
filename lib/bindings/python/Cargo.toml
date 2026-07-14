@@ -49,8 +49,9 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "4.1.1" }
+dynamo-parsers = { version = "5.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
+dynamo-sglang-sidecar = { path = "../../sglang-sidecar" }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
@@ -110,6 +111,8 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
+tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [profile.profiling]
 inherits = "release"

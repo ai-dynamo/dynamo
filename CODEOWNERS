@@ -100,6 +100,7 @@
 /examples/backends/sglang/                                                   @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/                                               @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/tests/                                         @ai-dynamo/dynamo-backend-sglang-codeowners
+/components/src/dynamo/sglang_sidecar/                                       @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/request_handlers/                              @ai-dynamo/dynamo-backend-sglang-codeowners
 
 # === kv-memory  (@ai-dynamo/dynamo-kv-memory-codeowners) ===
@@ -560,6 +561,7 @@
 /dev/observability/xpu_smi_exporter.py                                       @ai-dynamo/dynamo-xpu-codeowners
 /lib/llm/src/block_manager/controller/                                       @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/kv_router/prefill_router/                                       @ai-dynamo/dynamo-router-codeowners
+/components/src/dynamo/common/snapshot/                                      @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/block_manager/connector.rs                                      @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/distributed/                                      @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/tests/test_reasoning_parser.rs                                      @ai-dynamo/dynamo-frontend-codeowners
@@ -576,7 +578,6 @@
 /lib/bindings/python/src/dynamo/nixl_connect/                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs                                @ai-dynamo/dynamo-frontend-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                               @ai-dynamo/dynamo-xpu-codeowners
-/components/src/dynamo/common/utils/snapshot.py                              @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-multimodal-codeowners
 /container/templates/sglang_xpu_framework.Dockerfile                         @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/trtllm/request_handlers/diffusion/                    @ai-dynamo/dynamo-diffusion-codeowners

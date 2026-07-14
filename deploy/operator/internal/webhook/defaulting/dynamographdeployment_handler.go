@@ -134,16 +134,18 @@ func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeploymen
 
 // RegisterWithManager registers the defaulting webhook with the manager.
 func (d *DGDDefaulter) RegisterWithManager(mgr manager.Manager) error {
+	betaDefaulter := internalwebhook.NewLeaseAwareDefaulter(d, internalwebhook.GetExcludedNamespaces())
 	betaWebhook := admission.
-		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeployment{}, d).
+		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeployment{}, betaDefaulter).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dgdV1Beta1DefaultingWebhookPath, betaWebhook)
 
 	// TODO(1.5): Remove the v1alpha1 endpoint and defaulter after 1.3 is no longer
 	// a supported upgrade or rollback target.
 	alphaDefaulter := &dgdV1Alpha1Defaulter{defaulter: d}
+	alphaDefaulterWithLease := internalwebhook.NewLeaseAwareDefaulter(alphaDefaulter, internalwebhook.GetExcludedNamespaces())
 	alphaWebhook := admission.
-		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, alphaDefaulter).
+		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, alphaDefaulterWithLease).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dgdV1Alpha1DefaultingWebhookPath, alphaWebhook)
 	return nil
