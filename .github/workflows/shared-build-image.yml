@@ -144,6 +144,29 @@ on:
         required: false
         type: string
         default: '30'
+      diff_event_context:
+        description: |
+          Where this build runs, for OSRB CSV diff-baseline selection: 'pr' for a
+          PR build (pass diff_base_branch and diff_merge_base_sha), 'push' for a
+          post-merge build. Empty disables diffing.
+        required: false
+        type: string
+        default: ''
+      diff_current_branch:
+        description: 'github.ref_name of this build (pull-request/N, main, release/X.Y.Z). Used for diff-baseline selection.'
+        required: false
+        type: string
+        default: ''
+      diff_base_branch:
+        description: 'For PR builds, the PR''s target branch (e.g. main or release/1.3.0). Empty for pushes.'
+        required: false
+        type: string
+        default: ''
+      diff_merge_base_sha:
+        description: 'For PR builds targeting main, the true merge-base SHA. Pins the diff baseline to the PR fork point.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -182,6 +205,14 @@ jobs:
     # cuda_version empty -- name: cpu, linux/amd64
     name: Build multi-arch ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
+    # contents: read for checkout; actions: read lets the compliance-extract
+    # action download a PRIOR run's baseline compliance artifact (cross-run) to
+    # diff this build's OSRB CSV against. Callers must also grant actions: read
+    # (a reusable workflow's token can't exceed the caller's) — pr.yaml and
+    # post-merge-ci.yml do. When it's not granted the diff soft-degrades.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
       test_tag_plain: ${{ steps.calculate-target-tag.outputs.test_tag_plain }}
@@ -482,10 +513,69 @@ jobs:
       # would do. Also runs in the legacy compliance_only sibling-job mode (no
       # caller sets that today; see the input note). Skipped for dev / local-dev
       # targets (those don't ship and don't go through OSRB).
+      # Resolve which prior build's OSRB CSV to diff this one against. The rules
+      # depend on where we run (PR merge-base vs post-merge main vs release branch);
+      # see container/compliance/resolve_diff_base.py. Reads the current version
+      # from pyproject.toml for the release-branch case, and deepens history by
+      # one so HEAD~1 is reachable for the main post-merge case (checkout is
+      # shallow). Best-effort: any failure leaves base_sha empty and the diff
+      # step writes a baseline_unavailable marker (never fails the build).
+      - name: Resolve diff baseline
+        id: resolve-diff-base
+        if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.diff_event_context != '' }}
+        shell: bash
+        # All workflow-context values are passed via env (never interpolated into
+        # the script body) so attacker-controllable strings like branch names
+        # can't inject shell — see zizmor "template-injection".
+        env:
+          # Used by the nightly context to query the Actions API for the previous
+          # run (needs actions: read; the caller must grant it). Harmless otherwise.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIFF_EVENT_CONTEXT: ${{ inputs.diff_event_context }}
+          DIFF_CURRENT_BRANCH: ${{ inputs.diff_current_branch }}
+          DIFF_BASE_BRANCH: ${{ inputs.diff_base_branch }}
+          DIFF_MERGE_BASE_SHA: ${{ inputs.diff_merge_base_sha }}
+          DIFF_CURRENT_SHA: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          DIFF_REPO: ${{ github.repository }}
+          DIFF_RUN_ID: ${{ github.run_id }}
+          # Container artifact prefix: lets the main-baseline walk look up
+          # compliance-<sha>-<prefix> availability per commit.
+          DIFF_ARTIFACT_PREFIX: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+        run: |
+          # The build checkout is shallow with no tags. Make the refs each
+          # baseline rule needs reachable (all best-effort; a miss just yields an
+          # empty base_sha and a baseline_unavailable diff). Depth 30 gives the
+          # first-parent baseline walks enough history to find an artifact:
+          git fetch --deepen=30 --quiet || true                                     # HEAD~N (main post-merge walk)
+          git fetch --tags --quiet || true                                          # vX.Y.Z tags (release branch)
+          if [ "${DIFF_BASE_BRANCH}" = "main" ] \
+            && [ -n "${DIFF_MERGE_BASE_SHA}" ]; then
+            git fetch --no-tags --depth=30 origin "${DIFF_MERGE_BASE_SHA}" --quiet || true # stable PR fork-point walk
+          fi
+          CURRENT_VERSION=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          python3 container/compliance/resolve_diff_base.py \
+            --event-context "${DIFF_EVENT_CONTEXT}" \
+            --current-branch "${DIFF_CURRENT_BRANCH}" \
+            --base-branch "${DIFF_BASE_BRANCH}" \
+            --merge-base-sha "${DIFF_MERGE_BASE_SHA}" \
+            --current-sha "${DIFF_CURRENT_SHA}" \
+            --current-version "${CURRENT_VERSION}" \
+            --artifact-prefix "${DIFF_ARTIFACT_PREFIX}" \
+            --repo "${DIFF_REPO}" \
+            --current-run-id "${DIFF_RUN_ID}" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Compliance extract
         if: ${{ (inputs.compliance_only || inputs.inline_compliance) && inputs.target != 'dev' && inputs.target != 'local-dev' }}
         uses: ./.github/actions/compliance-extract
         with:
+          # Diff baseline resolved above (empty when diffing is disabled or no
+          # baseline applies); gh_token lets the action fetch it cross-run.
+          diff_base_sha: ${{ steps.resolve-diff-base.outputs.base_sha }}
+          diff_base_label: ${{ steps.resolve-diff-base.outputs.base_label }}
+          diff_base_artifact_id: ${{ steps.resolve-diff-base.outputs.base_artifact_id }}
+          diff_base_run_id: ${{ steps.resolve-diff-base.outputs.base_run_id }}
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
           platform: ${{ inputs.platform }}

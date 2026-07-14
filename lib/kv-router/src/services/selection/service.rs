@@ -14,6 +14,7 @@ use crate::services::common::replica_sync::{
 
 use super::core::{SelectionCore, SelectionServiceConfig};
 use super::error::SelectionError;
+use super::pending::SelectionCacheConfig;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
@@ -26,6 +27,7 @@ pub struct SelectionServiceBuilder {
     indexer_peers: Vec<String>,
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
+    selection_cache: SelectionCacheConfig,
 }
 
 impl SelectionServiceBuilder {
@@ -36,6 +38,7 @@ impl SelectionServiceBuilder {
             indexer_peers: Vec::new(),
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
+            selection_cache: SelectionCacheConfig::default(),
         }
     }
 
@@ -55,6 +58,11 @@ impl SelectionServiceBuilder {
         self
     }
 
+    pub fn selection_cache(mut self, config: SelectionCacheConfig) -> Self {
+        self.selection_cache = config;
+        self
+    }
+
     pub async fn build(self) -> anyhow::Result<SelectionService> {
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
@@ -69,6 +77,7 @@ impl SelectionServiceBuilder {
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,
+            self.selection_cache,
         ));
 
         if !self.indexer_peers.is_empty() {
@@ -115,7 +124,8 @@ impl SelectionServiceConfig {
     pub fn service_builder(&self) -> SelectionServiceBuilder {
         let mut builder = SelectionServiceBuilder::new(self.kv_router_config.clone())
             .indexer_threads(self.threads)
-            .indexer_peers(self.indexer_peers.clone());
+            .indexer_peers(self.indexer_peers.clone())
+            .selection_cache(self.selection_cache.clone());
         if let Some(port) = self.replica_sync_port {
             builder = builder.replica_sync(port, self.replica_sync_peers.clone());
         }
@@ -168,6 +178,7 @@ impl SelectionService {
                 kv_router_config,
                 indexer_threads,
                 cancel_token.clone(),
+                SelectionCacheConfig::default(),
             )),
             peer_manager: None,
             replica_runtime: None,
@@ -241,20 +252,20 @@ impl SelectionService {
         self.core.create_reservation(req).await
     }
 
-    pub async fn prefill_complete(&self, reservation_id: &str) -> Result<(), SelectionError> {
-        self.core.prefill_complete(reservation_id).await
+    pub async fn prefill_complete(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.prefill_complete(selection_id).await
     }
 
     pub fn add_output_block(
         &self,
-        reservation_id: &str,
+        selection_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SelectionError> {
-        self.core.add_output_block(reservation_id, decay_fraction)
+        self.core.add_output_block(selection_id, decay_fraction)
     }
 
-    pub async fn free_reservation(&self, reservation_id: &str) -> Result<(), SelectionError> {
-        self.core.free_reservation(reservation_id).await
+    pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
+        self.core.free_reservation(selection_id).await
     }
 
     pub fn ready(&self) -> ReadyResponse {

@@ -3,13 +3,14 @@
 #
 # Unified Dockerfile for snapshot-agent and placeholder images.
 #
-# Build targets:
-#   docker build --platform linux/amd64 --target agent -t snapshot-agent:latest .
-#   docker build --platform linux/amd64 --target placeholder --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
+# Build targets (the `operator` build context is required — the snapshot module depends on the
+# operator module via `replace => ../operator`):
+#   docker build --platform linux/amd64 --target agent --build-context operator=../operator -t snapshot-agent:latest .
+#   docker build --platform linux/amd64 --target placeholder --build-context operator=../operator --build-arg BASE_IMAGE=<app-image> -t placeholder:latest .
 #
 # Optional targets for CI:
-#   docker build --target linter .   # Run linting
-#   docker build --target tester .   # Run tests
+#   docker build --target linter --build-context operator=../operator .   # Run linting
+#   docker build --target tester --build-context operator=../operator .   # Run tests
 
 # =============================================================================
 # Build Arguments
@@ -42,6 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
+
+# The snapshot module depends on the operator module via `replace => ../operator`, so the operator
+# module must sit at /operator (a sibling of /workspace) for `go mod download` and the Go build to
+# resolve it. Provided via the `operator` named build context (see build-deploy-component action).
+COPY --from=operator . /operator/
 
 COPY go.mod go.sum ./
 RUN go mod download

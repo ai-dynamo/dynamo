@@ -294,7 +294,7 @@ python real_data_benchmark.py --input-dataset trace.jsonl --prefix-root-multipli
 
 #### Prerequisites: tune the priority queue
 
-The router queue is enabled by default, but the default threshold is conservative. To make priority effects visible under benchmark load, use a lower `--router-queue-threshold`. A threshold of `0.0` is the most sensitive setting and queues once all eligible workers have active prefill tokens.
+The router queue is disabled by default. To make priority effects visible under benchmark load, set `--router-queue-threshold`; `0.0` is the most sensitive value and queues once all eligible workers have active prefill tokens.
 
 ```bash
 # Launch the router with a sensitive priority queue threshold.
