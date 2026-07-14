@@ -1073,6 +1073,15 @@ impl ModelWatcher {
                     namespace = %worker_namespace,
                     "Removed WorkerSet (no remaining instances in namespace)"
                 );
+                // Remove alias mirrors, but only ones this deployment owns — a
+                // declared alias that lost its reservation belongs to another model.
+                for alias in &card.aliases {
+                    if alias != &model_name && self.manager.alias_belongs_to(alias, &model_name) {
+                        self.manager.remove_worker_set(alias, &ws_key);
+                        self.manager.remove_model_if_empty(alias);
+                        self.manager.unregister_alias_if_empty(alias, &model_name);
+                    }
+                }
             }
 
             // Activator-state cleanup depends on which component just went away.
@@ -1144,6 +1153,13 @@ impl ModelWatcher {
 
         // No instances remain anywhere — remove the entire Model
         let _ = self.manager.remove_model(&model_name);
+        // Same ownership rule: only remove alias models this deployment owns.
+        for alias in &card.aliases {
+            if alias != &model_name && self.manager.alias_belongs_to(alias, &model_name) {
+                let _ = self.manager.remove_model(alias);
+                self.manager.unregister_alias_if_empty(alias, &model_name);
+            }
+        }
 
         if let Some(tx) = &self.model_update_tx {
             for model_type in ALL_MODEL_TYPES {
@@ -1349,6 +1365,20 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
+        // Fast-fail before any expensive setup when the name is already reserved
+        // as another deployment's alias (`resolve_canonical_name` returns a
+        // different, canonical name only for a reserved alias). `add_worker_set`
+        // re-checks this atomically under `reservation_lock` and is the
+        // authoritative gate; rejecting here just avoids the config download,
+        // card save, and pipeline build for a name that cannot be claimed.
+        if self.manager.resolve_canonical_name(card.name()) != card.name() {
+            tracing::error!(
+                model_name = card.name(),
+                "Refusing to register: name is reserved as an alias of another deployment"
+            );
+            return Ok(());
+        }
+
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
@@ -1444,8 +1474,20 @@ impl ModelWatcher {
             // No engine on the worker set — just lifecycle tracking so the
             // prefill router can be activated/deactivated as workers come
             // and go.
-            self.manager
-                .add_worker_set(card.name(), &ws_key, worker_set);
+            if !self
+                .manager
+                .add_worker_set(card.name(), &ws_key, worker_set)
+            {
+                tracing::error!(
+                    model_name = card.name(),
+                    "Refusing to register prefill worker: its name is reserved as an alias of \
+                     another deployment"
+                );
+                return Ok(());
+            }
+            // Mirror the prefill WorkerSet under any aliases so a disaggregated
+            // alias reports readiness like its primary (decode attaches its own).
+            self.attach_aliases(card, &ws_key);
 
             if supports_encoder_result_handoff(card) {
                 self.manager.enable_encoder_routing(card.name(), &namespace);
@@ -1910,15 +1952,80 @@ impl ModelWatcher {
             );
         }
 
-        // Add the completed WorkerSet to the Model
-        self.manager
-            .add_worker_set(card.name(), &ws_key, worker_set);
+        // Add the completed WorkerSet to the Model, then mirror it under any
+        // configured aliases so alias names resolve, list, and report readiness
+        // exactly like the primary.
+        if !self
+            .manager
+            .add_worker_set(card.name(), &ws_key, worker_set)
+        {
+            tracing::error!(
+                model_name = card.name(),
+                "Refusing to register model: its name is reserved as an alias of another deployment"
+            );
+            return Ok(());
+        }
+        self.attach_aliases(card, &ws_key);
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
         }
 
         Ok(())
+    }
+
+    /// Register `card`'s aliases against its primary name and mirror the just-
+    /// added WorkerSet under each, so an alias resolves to the primary and lists
+    /// / reports readiness identically. Shared by the aggregated/decode and the
+    /// disaggregated prefill registration paths so a disaggregated alias gets
+    /// both the decode and prefill WorkerSets (the prefill worker registers on
+    /// its own early-return path and would otherwise skip alias attachment).
+    ///
+    /// `register_alias` atomically reserves the name (rejecting a collision with a
+    /// live primary or a different primary's alias); only a successful reservation
+    /// is followed by the WorkerSet attach. The reservation holds the name against
+    /// any concurrent primary claim, so the subsequent attach cannot be refused —
+    /// a refusal would indicate a broken invariant and is only logged.
+    fn attach_aliases(&self, card: &ModelDeploymentCard, ws_key: &str) {
+        if card.aliases.is_empty() {
+            return;
+        }
+        let Some(model) = self.manager.get_model(card.name()) else {
+            tracing::warn!(
+                model_name = card.name(),
+                "Model missing right after registration; aliases not attached"
+            );
+            return;
+        };
+        let Some(ws_arc) = model.get_worker_set(ws_key) else {
+            tracing::warn!(
+                model_name = card.name(),
+                ws_key,
+                "WorkerSet missing right after registration; aliases not attached"
+            );
+            return;
+        };
+        for alias in &card.aliases {
+            if alias == card.name() {
+                continue;
+            }
+            if !self.manager.register_alias(alias, card.name()) {
+                continue;
+            }
+            tracing::info!(model_name = card.name(), alias, "Registering model alias");
+            if !self
+                .manager
+                .add_worker_set_arc(alias, ws_key, ws_arc.clone())
+            {
+                // Unreachable: register_alias reserved this name, so no concurrent
+                // primary can occupy it and the attach cannot be refused.
+                tracing::error!(
+                    model_name = card.name(),
+                    alias,
+                    "Alias reserved but WorkerSet attach was refused — invariant violated"
+                );
+            }
+        }
     }
 
     /// All the registered ModelDeploymentCard with the EndpointId they are attached to, one per instance

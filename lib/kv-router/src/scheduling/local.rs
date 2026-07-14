@@ -434,6 +434,15 @@ where
         self.slots.add_request(req, Instant::now())
     }
 
+    /// Book a request only when its worker is already registered, so a request
+    /// racing worker removal cannot lazily recreate the removed worker/rank.
+    pub async fn add_request_if_registered(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<(), SequenceError> {
+        self.slots.add_request_if_registered(req, Instant::now())
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);

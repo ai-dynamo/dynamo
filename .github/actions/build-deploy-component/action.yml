@@ -169,12 +169,14 @@ runs:
 
         # operator and snapshot both consume the named `snapshot` build context
         # (deploy/operator/Dockerfile COPYs --from=snapshot; the snapshot image
-        # IS that tree). power-agent is self-contained, so omit it there.
+        # IS that tree), and the named `operator` build context (deploy/snapshot/
+        # Dockerfile COPYs --from=operator for the `replace => ../operator` module).
+        # power-agent is self-contained, so omit both there.
         # operator additionally consumes the `compliance` context for its
         # inline license/SBOM stages (see deploy/operator/Dockerfile).
         BUILD_CONTEXT_FLAG=""
         if [[ "${{ inputs.component }}" != "power-agent" ]]; then
-          BUILD_CONTEXT_FLAG="--build-context snapshot=../snapshot"
+          BUILD_CONTEXT_FLAG="--build-context snapshot=../snapshot --build-context operator=../operator"
         fi
         if [[ "${{ inputs.component }}" == "operator" ]]; then
           BUILD_CONTEXT_FLAG="${BUILD_CONTEXT_FLAG} --build-context compliance=../../container/compliance"
