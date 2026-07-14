@@ -392,7 +392,7 @@ class KubernetesConnector(PlannerConnector):
         deployments label their single worker ``type: worker`` (the generic
         v1beta1 worker type), which does not map to the PREFILL/DECODE role;
         passing the expected worker name (e.g.
-        ``WORKER_COMPONENT_NAMES[backend].decode_worker_k8s_name``) lets the
+        ``WORKER_COMPONENT_NAMES[backend].agg_worker_k8s_name``) lets the
         resolver fall through to the explicit-name path so agg workers are
         annotated. Mirrors what ``validate_deployment`` already threads for
         the same reason. Ignored when the role matches by type (disagg).

@@ -987,8 +987,9 @@ class NativePlannerBase:
         # those must not propagate: run() wraps the tick loop in try/finally,
         # so an escaping exception would shut the engine down and exit the
         # planner. Log and skip — the next sweep retries. The catch stays
-        # narrow (not the PlannerError base) so unexpected planner errors —
-        # validation, component, model-mismatch — still surface as bugs.
+        # narrow (not the PlannerError base): component/validation errors are
+        # already swallowed by get_component_pods(); other unexpected planner
+        # subclasses still surface as bugs.
         try:
             deployment = connector.kube_api.get_graph_deployment(
                 connector.graph_deployment_name
