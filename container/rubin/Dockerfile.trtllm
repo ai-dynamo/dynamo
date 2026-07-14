@@ -67,7 +67,11 @@ RUN pip install --break-system-packages --no-cache-dir "maturin[patchelf]"
 
 # (4) Dynamo from source
 ARG DYNAMO_REF=main
-RUN git clone --depth 1 --branch ${DYNAMO_REF} https://github.com/ai-dynamo/dynamo.git /opt/dynamo
+RUN --mount=type=secret,id=gitlab_user \
+    --mount=type=secret,id=gitlab_token \
+    GITLAB_USERNAME=$(cat /run/secrets/gitlab_user) && \
+    GITLAB_TOKEN=$(cat /run/secrets/gitlab_token) && \
+    git clone --depth 1 --branch ${DYNAMO_REF} https://${GITLAB_USERNAME}:${GITLAB_TOKEN}@gitlab-master.nvidia.com/dl/ai-dynamo/dynamo.git /opt/dynamo
 WORKDIR /opt/dynamo
 
 # REQUIRED on Rubin: cudarc 0.19.3 rejects CUDA 13.4 (its allow-list stops at 13.1).
@@ -189,6 +193,19 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/libfabric/lib:${LD_LIBRARY_PATH:-}
+
+######################
+# Include MLPERF
+######################
+ARG MLPERF_REF=kmcgill/vr-dsr1
+RUN --mount=type=secret,id=gitlab_user \
+    --mount=type=secret,id=gitlab_token \
+    GITLAB_USERNAME=$(cat /run/secrets/gitlab_user) && \
+    GITLAB_TOKEN=$(cat /run/secrets/gitlab_token) && \
+    git clone --depth 1 --branch ${DYNAMO_REF} https://${GITLAB_USERNAME}:${GITLAB_TOKEN}@https://gitlab-master.nvidia.com/mlpinf/mlperf-inference.git /opt/mlperf-inference && \
+WORKDIR /opt/mlperf-inference/closed/NVIDIA
+RUN pip install ".[llm]"
+
 
 ENV DYNAMO_HOME=/opt/dynamo
 WORKDIR /workspace
