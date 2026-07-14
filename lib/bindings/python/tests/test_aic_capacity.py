@@ -331,17 +331,24 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
     import dynamo._internal.aic as aic_mod
 
     captured: dict = {}
+    database_calls: list[dict] = []
 
     class FakeModelConfig:
         def __init__(self, **kwargs):
             captured.update(kwargs)
+
+    def fake_get_database(system, backend, version, **kwargs):
+        database_calls.append(
+            {"system": system, "backend": backend, "version": version, **kwargs}
+        )
+        return object()
 
     fake_model = types.SimpleNamespace(
         model_name="m", context_ops=[], generation_ops=[], _nextn=0
     )
     fake = {
         "config": types.SimpleNamespace(ModelConfig=FakeModelConfig),
-        "get_database": lambda system, backend, version: object(),
+        "get_database": fake_get_database,
         "get_supported_databases": lambda: {},
         "get_model": lambda model_path, model_config, backend_name: fake_model,
         "get_backend": lambda backend_name: object(),
@@ -362,6 +369,7 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
         fmha_dtype="fp8",
         kv_cache_dtype="auto",  # -> omitted, ModelConfig keeps its default
         comm_dtype="fp8",
+        systems_path="/tmp/aic-systems",
     )
 
     assert captured["gemm_quant_mode"] == common.GEMMQuantMode.int4_wo
@@ -369,3 +377,34 @@ def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
     assert captured["fmha_quant_mode"] == common.FMHAQuantMode.fp8
     assert "kvcache_quant_mode" not in captured
     assert captured["comm_quant_mode"] == common.CommQuantMode.fp8
+    assert database_calls == [
+        {
+            "system": "h200_sxm",
+            "backend": "vllm",
+            "version": "0.19.0",
+            "systems_paths": "/tmp/aic-systems",
+        }
+    ]
+
+
+def test_create_session_forwards_systems_path(monkeypatch):
+    import dynamo._internal.aic as aic_mod
+
+    captured: dict = {}
+
+    def fake_session(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(aic_mod, "AicSession", fake_session)
+
+    aic_mod.create_session(
+        backend_name="vllm",
+        system="h200_sxm",
+        model_path="/models/mock",
+        tp_size=4,
+        systems_path="/tmp/aic-systems",
+    )
+
+    assert captured["kwargs"]["systems_path"] == "/tmp/aic-systems"
