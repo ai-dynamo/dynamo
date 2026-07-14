@@ -654,8 +654,8 @@ jobs:
   # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
   # extract). A compliance failure fails the build.
   #
-  # planner/frontend stay on the legacy shared-compliance scan until they
-  # migrate to the inline system.
+  # planner stays on the legacy shared-compliance scan until it migrates to
+  # the inline system.
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
@@ -664,18 +664,6 @@ jobs:
       framework: dynamo
       target: planner
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
-      cuda_version: '[""]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  frontend-compliance:
-    name: frontend # This name overlaps with other frontend jobs to group them in the UI
-    needs: [frontend-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: dynamo
-      target: frontend
-      target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
       platform: '["amd64", "arm64"]'
     secrets: inherit
