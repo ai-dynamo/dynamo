@@ -596,6 +596,78 @@ async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_suppresses_inje
     assert_eq!(content, "Done. Output: `Hello, world!`");
 }
 
+/// Kimi K2.6 can re-enter reasoning after a tool result when thinking is
+/// explicitly enabled. The rendered prompt supplies the opening `<think>`, so
+/// the completion may contain only implicit reasoning, `</think>`, and the
+/// final answer. The close marker may also be split across stream chunks.
+#[tokio::test]
+async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_with_thinking_parses_reasoning() {
+    let preprocessor = build_preprocessor(Some("kimi_k25"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "messages": [
+            {"role": "user", "content": "What is the weather in London?"},
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": "{\"location\":\"London\"}"
+                    }
+                }]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "{\"temperature\":15,\"unit\":\"celsius\",\"condition\":\"cloudy\"}"
+            }
+        ],
+        "model": "moonshotai/Kimi-K2.6",
+        "stream": true,
+        "chat_template_kwargs": {"thinking": true}
+    }))
+    .unwrap();
+
+    let input_chunks = vec![
+        mock_content_chunk("The tool returned 15°C and cloudy."),
+        mock_content_chunk("</thi"),
+        mock_content_chunk("nk>The current weather in London is 15°C and cloudy."),
+        mock_final_chunk(),
+    ];
+
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(reasoning, "The tool returned 15°C and cloudy.");
+    assert_eq!(content, "The current weather in London is 15°C and cloudy.");
+    assert!(
+        !content.contains("</think>"),
+        "literal closing tag leaked into content: {content:?}"
+    );
+}
+
 /// vLLM parity: `chat_template_kwargs={"enable_thinking": false}` disables
 /// Nemotron v3 reasoning extraction. Plain backend text should remain normal
 /// content and must not be reclassified as `reasoning_content`.

@@ -2062,22 +2062,29 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Kimi K2.5 tool-continuation turns produce the final user-facing
+        // Kimi K2.5 tool-continuation turns can produce the final user-facing
         // answer directly from the tool result. If the prompt happened to end
         // with `<think>`, starting the force-reasoning parser in reasoning mode
-        // mislabels that answer as reasoning_content. DeepSeek V4 is the
-        // opposite: its formatter can seed `<think>` for post-tool turns and
-        // the model may emit only the closing `</think>`, so preserving the
-        // injected-reasoning signal is required to avoid leaking the close tag.
+        // mislabels that marker-free answer as reasoning_content. Preserve that
+        // compatibility behavior unless the request explicitly enables thinking:
+        // Kimi K2.6 may then emit implicit reasoning followed by `</think>`, which
+        // must be parsed to avoid leaking reasoning and the close tag into content.
         let last_is_tool = matches!(
             request.inner.messages.last(),
             Some(ChatCompletionRequestMessage::Tool(_))
         );
+        let kimi_thinking_explicitly_enabled = request
+            .chat_template_args
+            .as_ref()
+            .and_then(|args| args.get("thinking"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
         let suppress_reasoning_after_tool = last_is_tool
             && matches!(
                 self.runtime_config.reasoning_parser.as_deref(),
                 Some("kimi_k25")
-            );
+            )
+            && !kimi_thinking_explicitly_enabled;
 
         // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
         // parsers inspect the stream shape before deciding whether to parse it.

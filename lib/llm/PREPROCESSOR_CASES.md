@@ -142,7 +142,7 @@ if you know the answer, fill it in.
 |---|---|---|---|---|---|
 | `harmony` (tool) / `gpt_oss` (reasoning) | **YES** | — | — | — | Channels: `<\|channel\|>analysis<\|message\|>...<\|end\|>`. gpt-oss-20B/120B. |
 | `gemma4` (tool + reasoning) | **YES** | `enable_thinking=false` | — | — | Prompt trigger: `<\|think\|>` in the system turn. Parser-visible reasoning output: `<\|channel>thought\n...<channel\|>`. |
-| `kimi_k25` (reasoning) | ? — markers are `<\|tool_calls_section_*\|>`, likely YES | `thinking=false` | — | OFF when last_is_tool (currently global) | Special-token markers in K2/K2.5/K2.6. |
+| `kimi_k25` (reasoning) | ? — markers are `<\|tool_calls_section_*\|>`, likely YES | `thinking=false` | — | OFF when `last_is_tool` unless `thinking=true` | Special-token markers in K2/K2.5/K2.6. Explicit thinking preserves post-tool reasoning parsing. |
 | `deepseek_v3` / `deepseek_v3_1` (tool + reasoning) | ? — Unicode markers (`<｜tool_calls_section_begin｜>`); likely YES | opt in with `thinking=true` | — | — | Force-reasoning aliases use shape-aware guided JSON parsing. |
 | `deepseek_v3_2` / `deepseek_v4` (DSML) | ? — DSML markers (`<｜DSML｜tool_calls>`); likely YES | `thinking=false` / `thinking_mode=chat` | — | **NEEDS ON** even when last_is_tool (V4 formatter seeds `<think>`); see #8901 | DSv3.2 / DSv4 grammar. |
 | `deepseek_r1` (reasoning) | NO (uses plain `<think>`) | `thinking=false` | — | — | DeepSeek-R1. |
@@ -179,9 +179,9 @@ if you know the answer, fill it in.
    leading reasoning marker that should become normal content? If yes,
    add an explicit strip/pass-through case and stream test coverage.
 4. PRE.3: when the previous turn is a tool call, does the model
-   re-enter reasoning (DSv4) or skip straight to answer (Kimi K2.5)?
-   Document explicitly in this table; current code uses a global gate
-   that may need to become parser-specific (see #8901).
+   re-enter reasoning (DSv4 and Kimi K2.6 with `thinking=true`) or skip
+   straight to the answer (legacy Kimi K2.5 behavior)? Document the request
+   controls and parser-specific behavior explicitly in this table.
 5. PRE.4: confirm `tool_choice = required/named` doesn't conflict with
    the parser's behavior. Add shape detection only after proving both bare-JSON
    and reasoning-boundary JSON paths.
