@@ -33,7 +33,6 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
-	// Default since: N/A
 	GMSSnapshot Name = "gmsSnapshot"
 
 	// Checkpoint enables checkpoint creation and restore.
@@ -43,7 +42,6 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
-	// Default since: N/A
 	Checkpoint Name = "checkpoint"
 
 	// Grove enables Grove-backed workload orchestration.
@@ -53,7 +51,6 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
-	// Default since: N/A
 	Grove Name = "grove"
 
 	// LWS enables LeaderWorkerSet-backed workload orchestration.
@@ -63,7 +60,6 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
-	// Default since: N/A
 	LWS Name = "lws"
 
 	// KaiScheduler enables Kai Scheduler integration.
@@ -73,7 +69,6 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
-	// Default since: N/A
 	KaiScheduler Name = "kaiScheduler"
 
 	// VolcanoScheduler enables Volcano scheduling for Grove workloads.
@@ -83,7 +78,6 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
-	// Default since: N/A
 	VolcanoScheduler Name = "volcanoScheduler"
 
 	// DRA enables Dynamic Resource Allocation using resource.k8s.io/v1.
@@ -93,7 +87,6 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
-	// Default since: N/A
 	DRA Name = "dra"
 
 	// Istio records resolved Istio DestinationRule API availability.
@@ -103,7 +96,6 @@ const (
 	// Beta since: N/A
 	// GA since: N/A
 	// Default: false
-	// Default since: N/A
 	Istio Name = "istio"
 
 	// GPUDiscovery enables automatic GPU hardware discovery.
@@ -112,8 +104,7 @@ const (
 	// Experimental since: N/A
 	// Beta since: N/A
 	// GA since: N/A
-	// Default: true
-	// Default since: N/A
+	// Default: true, since N/A
 	GPUDiscovery Name = "gpuDiscovery"
 )
 
