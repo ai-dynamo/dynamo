@@ -270,6 +270,21 @@ These apply to every figure regardless of pathway:
 
 Full chart-specific Tufte rules in [plotting.md](plotting.md). Full diagram-specific rules in [aesthetic.md](aesthetic.md).
 
+## Example Scripts
+
+Runnable generators for every pathway live in [`examples/`](examples/) — read one, run it (`cd examples && ./build.sh`), adapt it. Each renders in the correct Dynamo Dark treatment (display Helvetica title or compact Arial title, as noted).
+
+| Script | Figure |
+|---|---|
+| [`gen_fig_2_architecture.py`](examples/gen_fig_2_architecture.py) | Architecture / data-flow diagram with a squared green replay edge (display title) |
+| [`gen_fig_5_decision_cascade.py`](examples/gen_fig_5_decision_cascade.py) | Decision cascade with a green horizontal delta bracket (display title) |
+| [`gen_fig_6_tuning_loop.py`](examples/gen_fig_6_tuning_loop.py) | Tuning loop with phase tags + squared dashed feedback loop (display title) |
+| [`gen_fig_concurrency_sweep.py`](examples/gen_fig_concurrency_sweep.py) | Dual-panel concurrency sweep + Pareto curve, green vs grey (display title) |
+| [`gen_fig_throughput_bars.py`](examples/gen_fig_throughput_bars.py) | Compact bar scoreboard, single green accent (compact title) |
+| [`gen_fig_cards.py`](examples/gen_fig_cards.py) | HTML+CSS → PNG comparison cards from [`fig-cards.html`](examples/fig-cards.html) (compact title) |
+
+Prerequisites and the sample-data note are in [`examples/README.md`](examples/README.md). The DynoSim Pareto hero has a full worked generator at [`gen_hero.py`](../../digest/dynosim/tools/gen_hero.py). Example data is representative and deterministic — swap in a source of truth before shipping a real figure.
+
 ## Cross-References
 
 Sister files in this skill:

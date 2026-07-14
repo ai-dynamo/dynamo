@@ -1,0 +1,57 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Figure</title>
+<style>
+  :root {
+    /* From design_tokens.yaml -- mirror, do not invent */
+    --bg-primary: #000000;
+    --bg-surface: #1a1a1a;
+    --border-subtle: #3a3a3a;
+    --text-primary: #ffffff;
+    --text-secondary: #cdcdcd;
+    --text-muted: #767676;
+    --accent-green: #76b900;
+    --font-sans: Arial, Helvetica, sans-serif;
+    --font-mono: 'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg-primary);
+    color: var(--text-primary); font-family: var(--font-sans); font-size: 12px; }
+  .figure { width: 1200px; padding: 32px; background: var(--bg-primary);
+    box-sizing: border-box; }
+  /* Compact / chart title: Arial, weight 700, ALL-CAPS. */
+  h1 { font-size: 18px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.08em; margin: 0 0 24px 0; color: var(--text-primary); }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  .card { background: var(--bg-surface); border: 1px solid var(--border-subtle);
+    border-radius: 0; padding: 20px; }
+  .card.accent { border-color: var(--accent-green); }
+  .card .label { font-size: 11px; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+  .card .value { font-family: var(--font-mono); font-size: 26px;
+    color: var(--text-primary); }
+  .card.accent .value { color: var(--accent-green); }
+  .card p { color: var(--text-secondary); line-height: 1.5; margin: 12px 0 0 0; }
+</style>
+</head>
+<body>
+  <div class="figure">
+    <h1>Two Approaches at a Glance</h1>
+    <div class="grid">
+      <div class="card">
+        <div class="label">Naive Nested Map</div>
+        <div class="value mono">4M ops/s</div>
+        <p>Single-threaded, single-writer-single-reader. Simple, correct, slow.</p>
+      </div>
+      <div class="card accent">
+        <div class="label">Concurrent Positional Indexer</div>
+        <div class="value mono">170M ops/s</div>
+        <p>Multi-writer multi-reader with positional jump search. 40x faster.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

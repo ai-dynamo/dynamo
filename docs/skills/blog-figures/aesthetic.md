@@ -164,7 +164,7 @@ When a horizontal pipeline diagram needs to communicate "when in time" each stag
 
 Phase tags are **selective** — tag the stages that anchor the temporal story (e.g., the verification step and the feedback step), not every stage. Tagging every box is clutter; tagging only the inflection points reads as labeling.
 
-Reference implementation: `gen_fig_6_tuning_loop.py` tags `INITIAL VERIFICATION` (CPU blue) over the Cluster A/B Verify box and `FEEDBACK LOOP` (amethyst) over the Deployed + Telemetry box.
+Reference implementation: [`gen_fig_6_tuning_loop.py`](examples/gen_fig_6_tuning_loop.py) tags `INITIAL VERIFICATION` (CPU blue) over the Verify box and `FEEDBACK LOOP` (amethyst) over the Telemetry box.
 
 ### Squared Feedback Loops (Wired-Return Paths)
 
@@ -180,7 +180,7 @@ Why squared, not curved: curves read as "this is illustrative". Squared right an
 
 **Dashed stroke** distinguishes the return path from the forward arrows (which are solid). **Match the target box's accent color** (the stage receiving the feedback) so the wire visually belongs to that role.
 
-Reference: the replay edge in `gen_fig_2_architecture.py` (NV green, solid because it's the primary data path) and the calibration loop in `gen_fig_6_tuning_loop.py` (amethyst, dashed because it's a control/feedback path).
+Reference: the replay edge in [`gen_fig_2_architecture.py`](examples/gen_fig_2_architecture.py) (NV green, solid because it's the primary data path) and the calibration loop in [`gen_fig_6_tuning_loop.py`](examples/gen_fig_6_tuning_loop.py) (amethyst, dashed because it's a control/feedback path).
 
 ## D2 Class Catalog
 
