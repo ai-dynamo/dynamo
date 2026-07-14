@@ -73,9 +73,11 @@ Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature. Agen
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
-2. **GPU cluster.** At least 4 GPUs of the matching arch available on one node:
-   - **B200 variants**: 4 B200 GPUs (x86_64).
-   - **GB200 variants**: 4 GB200 GPUs (single NVL4 tray, arm64). Nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule` (the manifests carry the matching `nodeSelector` + `toleration`).
+2. **GPU cluster** of the matching arch. Each worker pod requests **4 GPUs**; totals per variant:
+   - **AGG** (`agg-b200-agentic` / `agg-h200-agentic`): **4 GPUs on one node** (x86_64).
+   - **DisAgg B200** (`disagg-b200-agentic`, 4P2D): **24 B200** — (4 prefill + 2 decode) pods × 4 GPUs, across **multiple nodes**; needs the [per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+   - **DisAgg H200** (`disagg-h200-agentic`, 4P3D): **28 H200** — (4 prefill + 3 decode) pods × 4 GPUs, across **multiple nodes**; same NIC mapping.
+   - **GB200 Day-0 variants**: 4 GB200 GPUs (single NVL4 tray, arm64). Nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule` (the manifests carry the matching `nodeSelector` + `toleration`).
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Flash`.
 
 ## Quick Start

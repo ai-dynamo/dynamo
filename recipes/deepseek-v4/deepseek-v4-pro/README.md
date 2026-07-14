@@ -71,8 +71,8 @@ Bold = recommended pick per SKU: B200 disagg wins (+6.2%); H200 AGG wins (1P3D d
 
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
 2. **GPU cluster.** Hardware depends on the variant:
-   - **B200 variants** (agentic + `vllm-agg-b200`, `sglang-agg`, `sglang-disagg-b200`): 8 B200 GPUs per worker on a single node (x86_64). TP=8 fills the box; disagg places one prefill + one decode worker.
-   - **H200 variants** (`agg-h200-agentic`, `disagg-h200-agentic`): 8 H200 GPUs per worker. The public FP8 checkpoint runs at `max_model_len=86016`.
+   - **B200 variants** (agentic + `vllm-agg-b200`, `sglang-agg`, `sglang-disagg-b200`): **8 B200 GPUs per worker** (TP=8 fills the box, x86_64). Totals: **AGG `agg-b200-agentic` = 8** (1 node); **DisAgg `disagg-b200-agentic` (1P1D) = 16** (1 prefill + 1 decode pod, across 2 nodes).
+   - **H200 variants**: **8 H200 GPUs per worker** (public FP8 checkpoint, `max_model_len=86016`). Totals: **AGG `agg-h200-agentic` = 8** (1 node — the recommended H200 pick); **DisAgg `disagg-h200-agentic` (1P3D) = 32** (1 prefill + 3 decode pods, across 4 nodes).
    - **GB200 variants** (`vllm-agg-gb200`, `vllm-disagg-gb200`, `sglang-agg-gb200`, `sglang-disagg-gb200`): **2 GB200 nodes per worker**, each 4 GPUs (one NVL4 tray), on the **same NVLink72 clique**. Label `nvidia.com/gpu.product=NVIDIA-GB200`, taint `kubernetes.io/arch=arm64:NoSchedule`, and install the **DRA / ComputeDomain controller** (`kubectl get crd | grep computedomain`) — each manifest's `ComputeDomain` CR + `resourceClaims` co-locate the pod set on one NVLink72 fabric.
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Pro`.
 

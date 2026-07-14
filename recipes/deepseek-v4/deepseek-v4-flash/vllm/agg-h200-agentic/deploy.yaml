@@ -26,8 +26,6 @@ spec:
           - name: model-cache
             mountPath: /model-cache
             readOnly: true
-        imagePullSecrets:
-        - name: nvcr-pull
         schedulerName: default-scheduler
         volumes:
         - name: model-cache
@@ -103,8 +101,6 @@ spec:
               nvidia.com/gpu: "4"
             limits:
               nvidia.com/gpu: "4"
-        imagePullSecrets:
-        - name: nvcr-pull
         schedulerName: default-scheduler
         volumes:
         - name: model-cache
