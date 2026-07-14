@@ -4,6 +4,14 @@ apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: qwen
+  annotations:
+    # Frontend runs as a sidecar in the worker pod (frontendSidecar below).
+    # Container discovery makes the worker discoverable per-container, so the
+    # sidecar frontend uses local-worker readiness: the pod reports Ready only
+    # once its colocated model is registered and routable (not just when the
+    # process is up). Under the default pod discovery this would deadlock, so
+    # the operator only enables local-worker readiness in container mode.
+    nvidia.com/dynamo-kube-discovery-mode: container
 spec:
   backendFramework: vllm
   components:

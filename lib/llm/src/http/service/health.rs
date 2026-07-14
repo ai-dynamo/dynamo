@@ -7,38 +7,26 @@ use dynamo_runtime::instances::list_all_instances;
 use serde_json::json;
 use std::sync::Arc;
 
-/// Environment variable selecting the semantics of the `/ready` endpoint.
-///
-/// Kubernetes readiness has a distinct meaning from liveness/health: "I am able
-/// to serve traffic because my dependencies are also ready". `/health` and
-/// `/live` remain process-lifecycle signals (don't kill me); `/ready` gates a
-/// pod out of a Service until it can actually serve.
+/// Selects the semantics of the `/ready` endpoint. `/health` and `/live` stay
+/// process-lifecycle signals; `/ready` means "able to serve traffic".
 pub const READINESS_MODE_ENV: &str = "DYN_FRONTEND_READINESS_MODE";
 
 /// Policy for the `/ready` readiness probe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadinessMode {
-    /// Ready as soon as the frontend process is accepting requests (not
-    /// draining/stopping). A standalone frontend deployed ahead of its workers
-    /// still reports Ready, preserving the historical `/health` readiness
-    /// behavior — just without the discovery I/O.
+    /// Ready once the process is accepting requests. Keeps a standalone frontend
+    /// deployed ahead of its workers Ready (the historical `/health` behavior).
     Process,
-    /// Ready only when the process is accepting requests **and** at least one
-    /// discovered model can serve an inference request right now (its full
-    /// worker topology is live). Used by GAIE frontend sidecars so a worker pod
-    /// is only Ready once its colocated model is actually routable, rather than
-    /// Ready while `/v1/models` is empty and every request 404s.
-    ///
-    /// Note: a sidecar frontend with container-scoped discovery only ever
-    /// discovers its colocated worker, so "any ready model" is effectively "my
-    /// local worker's model is ready". Cross-worker identity matching is not
-    /// performed here.
+    /// Ready only when the process is accepting requests AND a model has a live,
+    /// complete serving topology. Used by GAIE frontend sidecars so a worker pod
+    /// is Ready only when its colocated model is routable (with container-scoped
+    /// discovery a sidecar only sees its own worker, so "any ready model" ==
+    /// "my worker's model"; no cross-worker identity check).
     LocalWorker,
 }
 
 impl ReadinessMode {
-    /// Resolve the readiness mode from the environment, defaulting to
-    /// [`ReadinessMode::Process`] when unset or unrecognized.
+    /// Resolve the mode from the environment; defaults to `Process`.
     pub fn from_env() -> Self {
         match std::env::var(READINESS_MODE_ENV) {
             Ok(value) => Self::parse(&value),
@@ -69,11 +57,8 @@ impl ReadinessMode {
     }
 }
 
-/// Kubernetes traffic-readiness endpoint (default `/ready`).
-///
-/// Unlike `/health` (process lifecycle) and `/live` (liveness), `/ready`
-/// answers "can this frontend serve traffic right now?" The exact policy is
-/// selected by [`ReadinessMode`] via [`READINESS_MODE_ENV`].
+/// Kubernetes traffic-readiness endpoint (default `/ready`); policy set by
+/// [`ReadinessMode`] via [`READINESS_MODE_ENV`].
 pub fn ready_check_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
@@ -98,12 +83,10 @@ pub fn ready_check_router(
 async fn ready_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    // Resolved per-request: readiness probes are infrequent and an env read is
-    // cheap, and this keeps the route a plain axum handler.
+    // Read per-request: probes are infrequent and this keeps a plain handler.
     let mode = ReadinessMode::from_env();
 
-    // Draining/stopping (or otherwise not accepting requests) is never ready,
-    // regardless of mode.
+    // Draining/stopping is never ready, regardless of mode.
     if !state.is_ready() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,

@@ -64,6 +64,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
+	frontendSidecarReadinessWarning := `a frontendSidecar is configured but nvidia.com/dynamo-kube-discovery-mode is not "container"; the sidecar frontend falls back to process-mode readiness, so the worker pod can report Ready before its colocated model is routable. Set annotation nvidia.com/dynamo-kube-discovery-mode: container to enable local-worker readiness for the sidecar.`
 
 	tests := []struct {
 		name          string
@@ -281,6 +282,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Containers: []corev1.Container{{Name: "metrics"}},
 				}}
 			}),
+			wantWarnings: []string{frontendSidecarReadinessWarning},
 		},
 		{
 			name: "v1beta1 init containers must provide an image in CEL",
@@ -350,6 +352,35 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}}
 			}),
 			wantWebhookErrs: []string{`spec.components[1].frontendSidecar: Invalid value: "missing": must match a podTemplate.spec.containers name`},
+			wantWarnings:    []string{frontendSidecarReadinessWarning},
+		},
+		{
+			name: "frontendSidecar without container discovery warns about process-mode readiness",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.FrontendSidecar = k8sptr.To(consts.FrontendSidecarContainerName)
+				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: consts.MainContainerName},
+						{Name: consts.FrontendSidecarContainerName, Image: "frontend:latest"},
+					},
+				}}
+			}),
+			wantWarnings: []string{frontendSidecarReadinessWarning},
+		},
+		{
+			name: "frontendSidecar with container discovery does not warn",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{consts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}
+				worker := betaWorkerComponent(dgd)
+				worker.FrontendSidecar = k8sptr.To(consts.FrontendSidecarContainerName)
+				worker.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: consts.MainContainerName},
+						{Name: consts.FrontendSidecarContainerName, Image: "frontend:latest"},
+					},
+				}}
+			}),
 		},
 		{
 			name:       "valid v1alpha1 deployment reaches the webhook",
@@ -810,6 +841,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{`spec.services[frontend].frontendSidecar: Forbidden: cannot inject frontend sidecar: a container named "sidecar-frontend" already exists in extraPodSpec.containers`},
+			wantWarnings:    []string{frontendSidecarReadinessWarning},
 		},
 		{
 			name: "alpha GMS client container names are validated by the source schema",
