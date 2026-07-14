@@ -12051,6 +12051,22 @@ spec:
                         format: int32
                         minimum: 0
                         type: integer
+                      runtimeNamespace:
+                        description: |-
+                          RuntimeNamespace is the effective Dynamo runtime namespace for this
+                          component. Worker components may include a generation suffix; non-workers and
+                          Grove-backed workers use the base namespace. During rolling updates, worker
+                          status keeps the old active revision namespace until cutover completes.
+                        type: string
+                      scheduledReplicas:
+                        description: |-
+                          ScheduledReplicas is the number of replicas the backend scheduler has
+                          scheduled, in Dynamo component-replica units. Optional; omitted (nil)
+                          when the backend cannot derive it reliably. A nil value means "not
+                          reported", never "zero scheduled".
+                        format: int32
+                        minimum: 0
+                        type: integer
                       updatedReplicas:
                         description: |-
                           UpdatedReplicas is the number of replicas at the current/desired revision.
@@ -12702,7 +12718,11 @@ spec:
                               annotations:
                                 additionalProperties:
                                   type: string
+                                  maxLength: 262144
                                 type: object
+                                x-kubernetes-validations:
+                                  - rule: '!("nvidia.com/vllm-distributed-executor-backend" in self) || self["nvidia.com/vllm-distributed-executor-backend"].lowerAscii() in ["mp", "ray"]'
+                                    message: podTemplate backend annotation must be mp or ray, case-insensitively
                               finalizers:
                                 items:
                                   type: string
@@ -15070,6 +15090,9 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: self.name == "main" || (has(self.image) && self.image != "")
+                                      message: sidecar containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -18142,6 +18165,9 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: has(self.image) && self.image != ""
+                                      message: init containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -21241,6 +21267,29 @@ spec:
                         type: integer
                       replicas:
                         description: replicas is the total number of non-terminated replicas.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      runtimeNamespace:
+                        description: |-
+                          runtimeNamespace is the effective Dynamo runtime namespace for this
+                          component. Worker components may include a generation suffix; non-workers and
+                          Grove-backed workers use the base namespace. During rolling updates, worker
+                          status keeps the old active revision namespace until cutover completes.
+                        type: string
+                      scheduledReplicas:
+                        description: |-
+                          scheduledReplicas is the number of replicas the backend scheduler has
+                          scheduled, expressed strictly in Dynamo component-replica units (not
+                          raw backend pod counts). It is a diagnostic aid for distinguishing
+                          capacity/scheduling shortfalls from runtime readiness.
+
+                          It is optional and omitted (nil) when the active backend cannot derive
+                          it reliably in component-replica units — for example before the backing
+                          resource's status has been observed, or for backends that do not report
+                          a scheduling count. A nil value therefore means "not reported", never
+                          "zero scheduled"; consumers must not treat absence as a scheduling
+                          failure.
                         format: int32
                         minimum: 0
                         type: integer

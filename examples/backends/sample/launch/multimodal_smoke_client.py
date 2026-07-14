@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 from typing import Any
 
 from dynamo.runtime import DistributedRuntime
@@ -34,12 +35,27 @@ async def connect(runtime: DistributedRuntime, endpoint_name: str, timeout: floa
     return client
 
 
+async def _open_stream(client, request: dict[str, Any]):
+    # A worker registers in discovery a beat before its request plane is ready
+    # to route, so a generate() issued the instant wait_for_instances() returns
+    # can hit an empty routing pool and raise "No workers available". Retry
+    # briefly to ride out that startup window (bounded by the caller's timeout).
+    attempts = 20
+    for attempt in range(attempts):
+        try:
+            return await client.generate(request)
+        except Exception as exc:
+            if attempt == attempts - 1 or "No workers available" not in str(exc):
+                raise
+            await asyncio.sleep(0.25)
+
+
 async def collect(
     client, request: dict[str, Any], timeout: float
 ) -> list[dict[str, Any]]:
     chunks: list[dict[str, Any]] = []
     async with asyncio.timeout(timeout):
-        stream = await client.generate(request)
+        stream = await _open_stream(client, request)
         async for response in stream:
             if response.is_error():
                 comments = response.comments() or []
@@ -168,3 +184,12 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+    # The Rust DistributedRuntime can crash the interpreter during its final
+    # native teardown/GC on some platforms (observed as a SIGSEGV -> exit 139
+    # on aarch64 CI) even though the smoke already succeeded and main() ran
+    # runtime.shutdown() in its finally. Flush and hard-exit to skip that
+    # fragile finalization; any real failure raises out of asyncio.run() above
+    # and never reaches this line.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

@@ -11,5 +11,5 @@ pub(crate) mod zmq;
 #[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
 pub(crate) mod replica_sync;
 
-#[cfg(any(feature = "standalone-slot-tracker", feature = "standalone-selection"))]
+#[cfg(feature = "standalone-slot-tracker")]
 pub(crate) mod replica_sync_http;

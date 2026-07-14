@@ -2402,6 +2402,7 @@ dependencies = [
  "futures-util",
  "hf-hub 0.4.3",
  "indicatif 0.18.4",
+ "libc",
  "minstant",
  "rand 0.9.4",
  "reqwest 0.12.28",
@@ -2488,11 +2489,14 @@ name = "dynamo-kv-router"
 version = "1.3.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "axum 0.8.4",
  "chrono",
+ "criterion",
  "dashmap",
  "derive_builder",
+ "dynamo-kv-hashing",
  "dynamo-runtime",
  "dynamo-tokens",
  "flume 0.12.0",
@@ -2510,6 +2514,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "slotmap",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2527,7 +2532,6 @@ dependencies = [
 name = "dynamo-llm"
 version = "1.3.0"
 dependencies = [
- "aho-corasick",
  "aligned-vec",
  "anyhow",
  "approx",
@@ -2592,6 +2596,9 @@ dependencies = [
  "object_store",
  "offset-allocator",
  "oneshot",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "parking_lot",
  "prometheus",
  "prost 0.13.5",
@@ -2620,6 +2627,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
@@ -2711,11 +2719,15 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "3.0.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1d76028cd9b3d99e733427f6c9fc0e176ddd5269437f4a71492c0ec8838bb5e"
+checksum = "c18f8f6a2d325675a65beb0718940124a011e5ea25ee827df19028b965296a6c"
 dependencies = [
+ "aho-corasick",
  "anyhow",
+ "async-stream",
+ "dynamo-protocols",
+ "futures",
  "num-traits",
  "openai-harmony",
  "regex",
@@ -2729,9 +2741,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.1.11"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf3d2b9c65028a66f05b2db424d5f472b13662e7c7382c36685b884d6c8e2329"
+checksum = "b5a8fca0f27b610454cd33858b5eb01c78c24d3ace7af2728d0723713775a939"
 dependencies = [
  "anyhow",
  "dynamo-parsers",
@@ -2745,9 +2757,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "869283188c4868780a16b97e85cd017bbd1c5687ff0410c9aa1767e0c0103482"
+checksum = "3d1da866e573424e374c83d64dbf7807547054ebadcd85ddb2f9f67db06bf386"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2762,9 +2774,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "1.3.5"
+version = "1.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdad36db205c171171d03036a9cd7641f8824943a528957e26436d5c8ff04a52"
+checksum = "3472f4ee978f581bac985c4f5ebad55a9b1b4ccb025ed3e9df708efa56e83bfa"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2867,10 +2879,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sglang-sidecar"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-runtime",
+ "futures",
+ "prost 0.13.5",
+ "rand 0.9.4",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
-version = "1.3.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "801685a07cfbc87d5e3f3ed55b920707b67f31dd660c62d1b3532a651fc9d013"
+checksum = "61fb9c031ea19d99d1faf8ff304fe666eb2dbd4666fcb416af3f08ae88f5be80"
 dependencies = [
  "aho-corasick",
  "anyhow",

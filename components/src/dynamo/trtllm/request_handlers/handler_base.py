@@ -53,6 +53,7 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+from dynamo.trtllm.utils.request_utils import request_cache_salt
 
 if TYPE_CHECKING:
     # tensorrt_llm may use a different version that doesn't have MetricsCollector,
@@ -622,12 +623,19 @@ class HandlerBase(BaseGenerativeHandler):
         # Serialize first_gen_log_probs for the Rust transport layer.
         DisaggregatedParamsCodec.serialize_first_gen_log_probs(params_dict)
 
+        # Text-only decode requests already carry the original token_ids.
+        # Prompt metadata is only needed to avoid reprocessing multimodal input.
+        if not self._request_has_multimodal(request) and not any(
+            key in request for key in ("_epd_processed_prompt", "_epd_prompt_token_ids")
+        ):
+            return params_dict
+
         # Pack prefill metadata for DECODE worker optimization
         # The frontend only forwards disaggregated_params from prefill response
         # Note: max_tokens is already handled by Rust frontend's PrefillRouter
         prefill_metadata = {}
 
-        # ALWAYS pack prompt info for DECODE to skip re-processing
+        # Pack prompt info for DECODE to skip re-processing
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         # Use processed_input['prompt'] (from process_openai_request) which is the actual
         # multimodal prompt used by TRT-LLM, not res.prompt which might be raw
@@ -1110,6 +1118,7 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
+        cache_salt = request_cache_salt(request)
 
         try:
             # NEW: Updated engine call to include multimodal data
@@ -1121,6 +1130,7 @@ class HandlerBase(BaseGenerativeHandler):
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
                 priority=priority,
+                cache_salt=cache_salt,
             )
 
             # In disagg decode mode, wrap abort() to defer until first token

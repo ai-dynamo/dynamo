@@ -20,6 +20,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
+#[cfg(feature = "bench")]
+use super::WorkerObservationState;
 use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
@@ -503,6 +505,8 @@ impl SyncIndexer for LowerTierIndexer {
     ) -> anyhow::Result<()> {
         let mut worker_blocks = WorkerBlockIndex::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
+        #[cfg(feature = "bench")]
+        let mut observation = WorkerObservationState::default();
 
         while let Ok(task) = event_receiver.recv() {
             match task {
@@ -528,15 +532,40 @@ impl SyncIndexer for LowerTierIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                #[cfg(feature = "bench")]
+                WorkerTask::InstallObservation { writer, resp } => {
+                    observation.install(writer, resp);
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::ObservedEvent {
+                    event,
+                    correlation_id,
+                } => {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    observation.record(correlation_id, result.is_ok());
+                    if let Err(ref error) = result {
+                        tracing::warn!(%error, "Failed to apply lower-tier event");
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
+                }
+                #[cfg(feature = "bench")]
+                WorkerTask::SealObservation(resp) => observation.seal(resp),
+                #[cfg(feature = "bench")]
+                WorkerTask::HarvestObservation(resp) => observation.harvest(resp),
                 WorkerTask::Anchor { worker, anchor } => {
                     if let Err(error) = self.apply_anchor(worker, anchor) {
                         tracing::warn!(?error, "Failed to apply anchor");
                     }
                 }
-                WorkerTask::RemoveWorker(worker_id) => {
+                WorkerTask::RemoveWorker { worker_id, .. } => {
                     self.remove_worker(&mut worker_blocks, worker_id);
                 }
-                WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank) => {
+                WorkerTask::RemoveWorkerDpRank {
+                    worker_id, dp_rank, ..
+                } => {
                     self.remove_worker_dp_rank(&mut worker_blocks, worker_id, dp_rank);
                 }
                 WorkerTask::DumpEvents(sender) => {

@@ -234,7 +234,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_policy_config=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_policy_config=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -428,7 +428,6 @@ pub struct RouterConfig {
     active_prefill_tokens_threshold: Option<u64>,
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
-    enforce_disagg: bool,
     session_affinity_ttl_secs: Option<u64>,
 }
 
@@ -445,18 +444,32 @@ impl RouterConfig {
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
     ) -> PyResult<Self> {
+        if enforce_disagg {
+            static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+            WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    "enforce_disagg is deprecated and ignored; routing topology and readiness are determined from registered worker types"
+                );
+            });
+        }
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        RsLoadThresholdConfig {
+            active_decode_blocks_threshold,
+            active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac,
+        }
+        .validate()
+        .map_err(PyValueError::new_err)?;
         Ok(Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-            enforce_disagg,
             session_affinity_ttl_secs,
         })
     }
@@ -472,7 +485,7 @@ impl From<RouterConfig> for RsRouterConfig {
                 active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
                 active_prefill_tokens_threshold_frac: rc.active_prefill_tokens_threshold_frac,
             },
-            enforce_disagg: rc.enforce_disagg,
+            enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
         }
     }

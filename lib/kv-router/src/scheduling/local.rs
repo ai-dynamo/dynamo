@@ -254,6 +254,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id,
             overlap,
             shared_cache_hits,
         } = request;
@@ -271,6 +272,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id,
             overlap,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
@@ -415,6 +417,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id: None,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -431,16 +434,35 @@ where
         self.slots.add_request(req, Instant::now())
     }
 
+    /// Book a request only when its worker is already registered, so a request
+    /// racing worker removal cannot lazily recreate the removed worker/rank.
+    pub async fn add_request_if_registered(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<(), SequenceError> {
+        self.slots.add_request_if_registered(req, Instant::now())
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
+        let request_id = request_id.to_string();
+        let worker = self.slots.request_worker(&request_id);
         self.slots
-            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
-        self.queue.update().await;
+            .mark_prefill_completed(&request_id, Instant::now())?;
+        match worker {
+            Some(worker) => self.queue.update_worker(worker).await,
+            None => self.queue.update().await,
+        }
         Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string(), Instant::now())?;
-        self.queue.update().await;
+        let request_id = request_id.to_string();
+        let worker = self.slots.request_worker(&request_id);
+        self.slots.free(&request_id, Instant::now())?;
+        match worker {
+            Some(worker) => self.queue.update_worker(worker).await,
+            None => self.queue.update().await,
+        }
         Ok(())
     }
 
@@ -791,6 +813,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             overlap: OverlapSignals::default(),
             shared_cache_hits: None,
         }

@@ -308,6 +308,7 @@ overrides:
   # --- Misc dpkg packages with parser-miss UNKNOWN ---
   # Verified upstream license; parser couldn't extract from the copyright file shape.
   - { ecosystem: dpkg, name: openssl,           license: "Apache-2.0",       source: "OpenSSL 3.0+ relicensed to Apache-2.0; https://www.openssl.org/source/license-openssl-ssleay.txt" }
+  - { ecosystem: dpkg, name: libssl-dev,        license: "Apache-2.0",       source: "OpenSSL 3.0+ relicensed to Apache-2.0; https://www.openssl.org/source/license-openssl-ssleay.txt" }
   - { ecosystem: dpkg, name: libpcap0.8t64,     license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
   - { ecosystem: dpkg, name: libpcap0.8-dev,    license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
   - { ecosystem: dpkg, name: libpython3-stdlib, license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }

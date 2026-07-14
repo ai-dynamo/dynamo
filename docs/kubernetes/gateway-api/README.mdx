@@ -170,7 +170,6 @@ result with production-like traffic.
 | `replicas` and `podTemplate.spec.containers[].resources` | Scale or reserve capacity for EPP pods. | Keep EPP capacity aligned with gateway request volume. |
 | `DYN_MODEL_NAME` | Change the served model. | Match the worker model name. |
 | `DYN_KV_CACHE_BLOCK_SIZE` | Change the backend KV block size. | Match the backend `--block-size` value. |
-| `DYN_ENFORCE_DISAGG` | Require strict prefill/decode routing separation. | Set `"true"` only for disaggregated deployments that should fail closed when topology labels are missing. |
 | `label-filter` parameters | Change worker topology labels or component names. | Keep filter labels and values aligned with worker pod labels. |
 | `schedulingProfiles[].plugins[].weight` | Adjust how much each scorer influences endpoint selection. | Tune scorer weights deliberately; keep required filters and the picker in the profile. |
 | scorer and picker plugins | Change the routing strategy. | Treat this as advanced EPP tuning and validate with traffic. |
@@ -231,8 +230,6 @@ Update them when the worker backend changes; do not use them to tune scoring.
               value: Qwen/Qwen3-0.6B # Match the worker model name.
             - name: DYN_KV_CACHE_BLOCK_SIZE
               value: "16" # Match the worker backend's --block-size.
-            - name: DYN_ENFORCE_DISAGG
-              value: "false" # Use "true" for disaggregated fail-closed behavior.
 ```
 
 See the complete EPP examples in the source tree:

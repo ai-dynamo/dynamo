@@ -151,7 +151,7 @@ Set these values on the EPP component unless the deployment manifest says otherw
 
 | Setting | Default | Effect |
 |---|---:|---|
-| `DYN_ENFORCE_DISAGG` | `false` | When `true`, fail requests if prefill routing is unavailable. When `false`, fall back to aggregated routing until prefill workers appear. |
+| `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
 | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Controls device-local prefix-overlap credit. Higher values prefer workers with cached prompt prefixes. |
 | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY` | `0.0` | Reduces prefix-overlap credit as active prefill load rises above the least-loaded eligible worker. |
 | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scales prompt-side prefill load after cache-hit credits are applied. |
@@ -161,10 +161,9 @@ Set these values on the EPP component unless the deployment manifest says otherw
 | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Predicts output blocks during generation and decays them by progress toward expected output length. |
 | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Includes active prompt-side prefill tokens in load accounting. |
 | `DYN_ROUTER_PREDICTED_TTL_SECS` | unset | Enables predicted entries in the local indexer for this TTL when KV events are enabled. |
-| `DYN_ADMISSION_CONTROL` | `none` | Set to `token-capacity` to skip workers that exceed active decode or prefill thresholds. |
-| `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | unset | Decode worker is busy above this active-block fraction. Setting a numeric value enables token-capacity admission. |
-| `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | unset | Worker is busy above this absolute active-prefill-token count. |
-| `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | unset | Worker is busy above this fraction of `max_num_batched_tokens`. |
+| `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | unset | Decode worker is busy above this active-block fraction. Setting a numeric value independently enables this rejection check. |
+| `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | unset | Worker is busy above this absolute active-prefill-token count. Setting a numeric value independently enables this rejection check. |
+| `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | unset | Worker is busy above this fraction of `max_num_batched_tokens`. Setting a numeric value independently enables this rejection check. |
 
 For the broader router configuration surface, see
 [Router Configuration](../../components/router/router-configuration.md).

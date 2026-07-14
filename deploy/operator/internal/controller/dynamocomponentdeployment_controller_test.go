@@ -2578,6 +2578,8 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			result, err := reconciler.reconcileLeaderWorkerSetResources(ctx, dcd)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
+			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
@@ -2887,6 +2889,8 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Assert the ComponentReconcileResult
+			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
 	}
@@ -2976,6 +2980,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 		serviceReplicaStatus: &v1beta1.ComponentReplicaStatus{
 			ComponentKind:     v1beta1.ComponentKindDeployment,
 			ComponentNames:    []string{"test-component"},
+			RuntimeNamespace:  "default",
 			Replicas:          1,
 			UpdatedReplicas:   1,
 			ReadyReplicas:     ptr.To(int32(0)),
@@ -3399,4 +3404,70 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 			g.Expect(deployment.Spec.Strategy).To(gomega.Equal(tt.wantStrategy))
 		})
 	}
+}
+
+func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1beta1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "worker-no-gpu-check",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "decode",
+				ComponentType: v1beta1.ComponentTypeDecode,
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  commonconsts.MainContainerName,
+								Image: "nvcr.io/nvidia/dynamo:latest",
+								Command: []string{
+									"python3",
+								},
+								Args: []string{
+									"-m",
+									"dynamo.vllm",
+								},
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{"cpu": resource.MustParse("1")},
+									Limits:   corev1.ResourceList{"cpu": resource.MustParse("1")},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	reconciler := &DynamoComponentDeploymentReconciler{
+		Client: fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(dcd).
+			Build(),
+		Config: &configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+		},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+				return nil, nil
+			},
+		},
+	}
+
+	got, err := reconciler.generateWorkerPodTemplateSpec(
+		context.Background(),
+		generateResourceOption{dynamoComponentDeployment: dcd},
+		map[string]string{"app": "demo"},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "worker", got.Labels["role"])
+	require.Equal(t, commonconsts.MainContainerName, got.Spec.Containers[0].Name)
 }
