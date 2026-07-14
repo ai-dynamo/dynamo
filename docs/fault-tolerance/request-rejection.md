@@ -48,7 +48,7 @@ A worker is marked **busy** when **either** threshold is exceeded; requests are 
 | `--active-prefill-tokens-threshold` | int | Prefill token count threshold |
 | `--active-prefill-tokens-threshold-frac` | float | Prefill token threshold as a fraction of `max_num_batched_tokens` |
 
-Each flag has an environment-variable equivalent (`DYN_ADMISSION_CONTROL`, `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD`, `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD`) you can set in the Frontend `env:` block instead — see the [Frontend Configuration Reference](../components/frontend/configuration.md).
+Each flag has an environment-variable equivalent (`DYN_ADMISSION_CONTROL`, `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD`, `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD`) you can set in the Frontend `env:` block instead — see the [Frontend Configuration Reference](../components/frontend/frontend-config-reference.mdx).
 
 </Step>
 

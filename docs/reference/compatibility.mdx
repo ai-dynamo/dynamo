@@ -70,7 +70,10 @@ The table above is for **v1.2.0**; `v1.3.0-dev.1` follows the same CUDA matrix. 
 | **Speculative Decoding** | 🚧 | ✅ | ✅ | Backend pages |
 | **Dynamo Snapshot** | ✅ | | ✅ | [Snapshot Docs][snapshot] |
 
-## 1. vLLM Backend
+## Per-Backend Feature Support
+
+<Tabs>
+  <Tab title="vLLM">
 
 vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, KV block management, LoRA adapters, and multimodal inference including video and audio.
 
@@ -89,7 +92,8 @@ vLLM offers the broadest feature coverage in Dynamo, with full support for disag
 | **Tool Calling**          |     ✅      |                                                                                                                                              |
 | **Speculative Decoding**  |     ✅      | Eagle3 ([Source][vllm-spec])                                                                                                                 |
 
-## 2. SGLang Backend
+  </Tab>
+  <Tab title="SGLang">
 
 SGLang is optimized for high-throughput serving with fast primitives, providing robust support for disaggregated serving, KV-aware routing, and request migration.
 
@@ -108,7 +112,8 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Tool Calling**          |     ✅      |                                                                                                                                       |
 | **Speculative Decoding**  |     🚧      | Code hooks exist; no examples or docs yet                                                                                             |
 
-## 3. TensorRT-LLM Backend
+  </Tab>
+  <Tab title="TensorRT-LLM">
 
 TensorRT-LLM delivers maximum inference performance and optimization, with full KVBM integration and robust disaggregated serving support.
 
@@ -126,6 +131,9 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 | **LoRA**                  |     ✗      | Not supported                                                                                                                                                                 |
 | **Tool Calling**          |     ✅      |                                                                                                                                                                               |
 | **Speculative Decoding**  |     ✅      |                                                                                                                                                                               |
+
+  </Tab>
+</Tabs>
 
 [disagg]: ../design-docs/disagg-serving.md
 [kv-routing]: ../components/router/README.md

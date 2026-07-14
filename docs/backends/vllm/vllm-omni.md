@@ -11,6 +11,10 @@ Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com
 
 This guide assumes familiarity with deploying Dynamo with vLLM as described in the [vLLM backend guide](README.md).
 
+<Note>
+The `agg_omni_*.sh` and `disagg_omni_glm_image.sh` scripts in this guide are **single-node local launchers**: each starts `python -m dynamo.frontend` plus one or more `python -m dynamo.vllm.omni` workers directly on the host, placing stages with `CUDA_VISIBLE_DEVICES`. They are for local development and testing on a machine that has the required GPUs — they are **not** Kubernetes manifests and do not create a `DynamoGraphDeployment`. Dynamo does not currently ship prebuilt omni Kubernetes recipes. To run omni on Kubernetes, build a deployment around the same `python -m dynamo.vllm.omni` entrypoint and the flags documented in the [CLI Reference](#cli-reference).
+</Note>
+
 ### Installation
 
 Dynamo container images include vLLM-Omni pre-installed. If you are using `pip install ai-dynamo[vllm]`, vLLM-Omni is **not** included automatically because the matching release is not yet available on PyPI. Install it separately from source, pinning the vLLM-Omni release that matches your installed vLLM version (see the [vLLM-Omni releases](https://github.com/vllm-project/vllm-omni/releases) page):
@@ -114,16 +118,30 @@ The response returns a video URL or base64 data depending on `response_format` (
 
 The `/v1/videos` endpoint also accepts NVIDIA extensions via the `nvext` field for fine-grained control:
 
-| Field | Description | Default |
-|---|---|---|
-| `nvext.fps` | Frames per second | 24 |
-| `nvext.num_frames` | Number of frames (overrides `fps * seconds`) | -- |
-| `nvext.negative_prompt` | Negative prompt for guidance | -- |
-| `nvext.num_inference_steps` | Number of denoising steps | 50 |
-| `nvext.guidance_scale` | CFG guidance scale | 5.0 |
-| `nvext.seed` | Random seed for reproducibility | -- |
-| `nvext.boundary_ratio` | MoE expert switching boundary (I2V) | 0.875 |
-| `nvext.guidance_scale_2` | CFG scale for low-noise expert (I2V) | 1.0 |
+<ParamField path="nvext.fps" type="int" default="24">
+  Frames per second.
+</ParamField>
+<ParamField path="nvext.num_frames" type="int">
+  Number of frames (overrides `fps * seconds`).
+</ParamField>
+<ParamField path="nvext.negative_prompt" type="string">
+  Negative prompt for guidance.
+</ParamField>
+<ParamField path="nvext.num_inference_steps" type="int" default="50">
+  Number of denoising steps.
+</ParamField>
+<ParamField path="nvext.guidance_scale" type="float" default="5.0">
+  CFG guidance scale.
+</ParamField>
+<ParamField path="nvext.seed" type="int">
+  Random seed for reproducibility.
+</ParamField>
+<ParamField path="nvext.boundary_ratio" type="float" default="0.875">
+  MoE expert switching boundary (I2V).
+</ParamField>
+<ParamField path="nvext.guidance_scale_2" type="float" default="1.0">
+  CFG scale for low-noise expert (I2V).
+</ParamField>
 
 ## Image-to-Video
 
@@ -220,19 +238,39 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 
 The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/) API format. All TTS-specific parameters are top-level fields:
 
-| Field | Description | Default |
-|---|---|---|
-| `input` | Text to synthesize (required) | -- |
-| `model` | TTS model name | auto-detected |
-| `voice` | Speaker name (e.g., vivian, ryan). Validated against model config. | Vivian |
-| `response_format` | Audio format: wav, mp3, pcm, flac, aac, opus | wav |
-| `speed` | Speed factor (0.25-4.0) | 1.0 |
-| `task_type` | CustomVoice, VoiceDesign, or Base (Qwen3-TTS) | CustomVoice |
-| `language` | Language code. Validated against model config. | Auto |
-| `instructions` | Voice style/emotion description. Required for VoiceDesign. | -- |
-| `ref_audio` | Reference audio URL or base64 data URI. Required for Base. | -- |
-| `ref_text` | Transcript of reference audio (Base task) | -- |
-| `max_new_tokens` | Maximum tokens to generate (1-4096) | 2048 |
+<ParamField path="input" type="string" required={true}>
+  Text to synthesize.
+</ParamField>
+<ParamField path="model" type="string" default="auto-detected">
+  TTS model name.
+</ParamField>
+<ParamField path="voice" type="string" default="Vivian">
+  Speaker name (e.g., vivian, ryan). Validated against model config.
+</ParamField>
+<ParamField path="response_format" type="wav | mp3 | pcm | flac | aac | opus" default="wav">
+  Audio output format.
+</ParamField>
+<ParamField path="speed" type="float" default="1.0">
+  Speed factor (0.25–4.0).
+</ParamField>
+<ParamField path="task_type" type="CustomVoice | VoiceDesign | Base" default="CustomVoice">
+  Synthesis task type (Qwen3-TTS).
+</ParamField>
+<ParamField path="language" type="string" default="Auto">
+  Language code. Validated against model config.
+</ParamField>
+<ParamField path="instructions" type="string">
+  Voice style/emotion description. Required for VoiceDesign.
+</ParamField>
+<ParamField path="ref_audio" type="string">
+  Reference audio URL or base64 data URI. Required for Base.
+</ParamField>
+<ParamField path="ref_text" type="string">
+  Transcript of reference audio (Base task).
+</ParamField>
+<ParamField path="max_new_tokens" type="int" default="2048">
+  Maximum tokens to generate (1–4096).
+</ParamField>
 
 Available voices and languages are loaded dynamically from the model's `config.json` at startup. Non-Qwen3-TTS audio models (e.g., MiMo-Audio) use a generic text prompt and ignore TTS-specific parameters.
 
@@ -240,28 +278,66 @@ Available voices and languages are loaded dynamically from the model's `config.j
 
 The omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`.
 
-| Flag | Description |
-|---|---|
-| `--omni` | Enable the vLLM-Omni orchestrator (required for all omni workloads) |
-| `--output-modalities <modality>` | Output modality: `text`, `image`, `video`, or `audio` |
-| `--stage-configs-path <path>` | Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted) |
-| `--boundary-ratio <float>` | MoE expert switching boundary (default: 0.875) |
-| `--flow-shift <float>` | Scheduler flow_shift (5.0 for 720p, 12.0 for 480p) |
-| `--vae-use-slicing` | Enable VAE slicing for memory optimization |
-| `--vae-use-tiling` | Enable VAE tiling for memory optimization |
-| `--default-video-fps <int>` | Default frames per second for generated videos (default: 16) |
-| `--enable-layerwise-offload` | Enable layerwise offloading on DiT modules to reduce GPU memory |
-| `--layerwise-num-gpu-layers <int>` | Number of ready layers to keep on GPU during generation (default: 1) |
-| `--cache-backend <backend>` | Diffusion cache: `cache_dit` or `tea_cache` |
-| `--cache-config <json>` | Cache configuration as JSON string (overrides defaults) |
-| `--enable-cache-dit-summary` | Enable cache-dit summary logging after diffusion forward passes |
-| `--enforce-eager` | Disable torch.compile for diffusion models |
-| `--enable-cpu-offload` | Enable CPU offloading for diffusion models |
-| `--ulysses-degree <int>` | GPUs for Ulysses sequence parallelism in diffusion (default: 1) |
-| `--ring-degree <int>` | GPUs for ring sequence parallelism in diffusion (default: 1) |
-| `--cfg-parallel-size <int>` | GPUs for classifier-free guidance parallelism (1 or 2, default: 1) |
-| `--media-output-fs-url <url>` | Filesystem URL for storing generated media (default: `file:///tmp/dynamo_media`) |
-| `--media-output-http-url <url>` | Base URL for rewriting media paths in responses (optional) |
+<ParamField path="--omni" type="flag">
+  Enable the vLLM-Omni orchestrator (required for all omni workloads).
+</ParamField>
+<ParamField path="--output-modalities" type="text | image | video | audio">
+  Output modality the worker registers endpoints for.
+</ParamField>
+<ParamField path="--stage-configs-path" type="path">
+  Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted).
+</ParamField>
+<ParamField path="--boundary-ratio" type="float" default="0.875">
+  MoE expert switching boundary.
+</ParamField>
+<ParamField path="--flow-shift" type="float">
+  Scheduler flow_shift (5.0 for 720p, 12.0 for 480p).
+</ParamField>
+<ParamField path="--vae-use-slicing" type="flag">
+  Enable VAE slicing for memory optimization.
+</ParamField>
+<ParamField path="--vae-use-tiling" type="flag">
+  Enable VAE tiling for memory optimization.
+</ParamField>
+<ParamField path="--default-video-fps" type="int" default="16">
+  Default frames per second for generated videos.
+</ParamField>
+<ParamField path="--enable-layerwise-offload" type="flag">
+  Enable layerwise offloading on DiT modules to reduce GPU memory.
+</ParamField>
+<ParamField path="--layerwise-num-gpu-layers" type="int" default="1">
+  Number of ready layers to keep on GPU during generation.
+</ParamField>
+<ParamField path="--cache-backend" type="cache_dit | tea_cache">
+  Diffusion cache backend.
+</ParamField>
+<ParamField path="--cache-config" type="json">
+  Cache configuration as a JSON string (overrides defaults).
+</ParamField>
+<ParamField path="--enable-cache-dit-summary" type="flag">
+  Enable cache-dit summary logging after diffusion forward passes.
+</ParamField>
+<ParamField path="--enforce-eager" type="flag">
+  Disable torch.compile for diffusion models.
+</ParamField>
+<ParamField path="--enable-cpu-offload" type="flag">
+  Enable CPU offloading for diffusion models.
+</ParamField>
+<ParamField path="--ulysses-degree" type="int" default="1">
+  GPUs for Ulysses sequence parallelism in diffusion.
+</ParamField>
+<ParamField path="--ring-degree" type="int" default="1">
+  GPUs for ring sequence parallelism in diffusion.
+</ParamField>
+<ParamField path="--cfg-parallel-size" type="int" default="1">
+  GPUs for classifier-free guidance parallelism (1 or 2).
+</ParamField>
+<ParamField path="--media-output-fs-url" type="url" default="file:///tmp/dynamo_media">
+  Filesystem URL for storing generated media.
+</ParamField>
+<ParamField path="--media-output-http-url" type="url">
+  Base URL for rewriting media paths in responses (optional).
+</ParamField>
 
 ## Storage Configuration
 
@@ -347,11 +423,15 @@ Each stage registers independently with Dynamo's service discovery. To scale a b
 
 ### CLI Flags (Disaggregated Mode)
 
-| Flag | Description |
-|---|---|
-| `--stage-id <int>` | Run as a single-stage worker for the given stage ID. Requires `--stage-configs-path`. |
-| `--omni-router` | Run as the stage router. Requires `--stage-configs-path`. Mutually exclusive with `--stage-id`. |
-| `--stage-configs-path <path>` | Path to vLLM-Omni stage configuration YAML. |
+<ParamField path="--stage-id" type="int">
+  Run as a single-stage worker for the given stage ID. Requires `--stage-configs-path`.
+</ParamField>
+<ParamField path="--omni-router" type="flag">
+  Run as the stage router. Requires `--stage-configs-path`. Mutually exclusive with `--stage-id`.
+</ParamField>
+<ParamField path="--stage-configs-path" type="path">
+  Path to vLLM-Omni stage configuration YAML.
+</ParamField>
 
 ## Current Limitations
 

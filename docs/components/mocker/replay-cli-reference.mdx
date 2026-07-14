@@ -1,0 +1,275 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: DynoSim Replay CLI Reference
+subtitle: Flags, engine-args JSON fields, constraints, and report schema for python -m dynamo.replay.
+---
+
+`python -m dynamo.replay` runs one workload through one simulated Dynamo configuration and emits an
+AIPerf-style report. This page is the flag and schema reference. For the workflow — input formats,
+run modes, and when to use DynoSim versus AIPerf — see [DynoSim Runs](../../dynosim/runs.md); for
+searching many configurations, see [DynoSim Sweeps](../../dynosim/sweeps.md).
+
+The command reuses the mocker engine, so engine behavior is configured through JSON passed to
+`--extra-engine-args` (or the staged `--prefill-engine-args` / `--decode-engine-args`) rather than
+individual flags. For the underlying engine settings, see the
+[Mocker CLI Reference](mocker-cli-reference.mdx).
+
+`python -m dynamo.replay` requires exactly one of: a positional trace file, or all of
+`--input-tokens`, `--output-tokens`, and `--request-count`.
+
+## Workload input
+
+<ParamField path="trace_file" type="positional path" default="null">
+  Mooncake-style JSONL trace. Mutually exclusive with the synthetic-workload flags below.
+</ParamField>
+
+<ParamField path="--input-tokens" type="integer" default="null">
+  Synthetic per-request input length. Required (with `--output-tokens` and `--request-count`) when no
+  trace file is given.
+</ParamField>
+
+<ParamField path="--output-tokens" type="integer" default="null">
+  Synthetic per-request output length.
+</ParamField>
+
+<ParamField path="--request-count" type="integer" default="null">
+  Number of synthetic requests. When `--turns-per-session > 1`, this is interpreted as the number of
+  sessions, and total completed requests become `request_count * turns_per_session`.
+</ParamField>
+
+<ParamField path="--trace-format" type="string" default="mooncake">
+  Trace parser.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>mooncake</Badge> <Badge intent="note" minimal>mooncake-delta</Badge> <Badge intent="note" minimal>agentic_mooncake</Badge> <Badge intent="note" minimal>applied_compute_agentic</Badge></span>
+</ParamField>
+
+<ParamField path="--trace-block-size" type="integer" default="512">
+  How many tokens each `hash_id` in the dataset represents. Trace-file runs only; separate from the
+  engine `block_size`. Public Mooncake/toolagent traces use `512`.
+</ParamField>
+
+### Synthetic workload shaping
+
+Apply only to synthetic (non-trace) runs.
+
+<ParamField path="--arrival-interval-ms" type="float" default="null">
+  Synthetic arrival spacing between requests, in milliseconds.
+</ParamField>
+
+<ParamField path="--turns-per-session" type="integer" default="1">
+  Number of turns in each synthetic session.
+</ParamField>
+
+<ParamField path="--shared-prefix-ratio" type="float" default="0.0">
+  Fraction of prompt blocks shared inside a prefix group.
+</ParamField>
+
+<ParamField path="--num-prefix-groups" type="integer" default="0">
+  Number of shared-prefix groups. `0` disables grouping.
+</ParamField>
+
+<ParamField path="--inter-turn-delay-ms" type="float" default="0">
+  Constant delay applied after each completed turn before the next turn in the same session becomes
+  eligible.
+</ParamField>
+
+## Execution
+
+<ParamField path="--replay-mode" type="string" default="offline">
+  Offline mode drives the mocker engine core directly with no workers, NATS, etcd, or frontend.
+  Online mode launches the mock workers against the live runtime path.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>offline</Badge> <Badge intent="note" minimal>online</Badge></span>
+</ParamField>
+
+<ParamField path="--router-mode" type="string" default="round_robin">
+  Routing strategy. `kv_router` uses the shared local scheduler and an in-process KV indexer.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>round_robin</Badge> <Badge intent="note" minimal>kv_router</Badge></span>
+</ParamField>
+
+<ParamField path="--num-workers" type="integer" default="1">
+  Number of aggregated workers.
+</ParamField>
+
+<ParamField path="--num-prefill-workers" type="integer" default="null">
+  Prefill worker pool size for offline disaggregated simulation.
+</ParamField>
+
+<ParamField path="--num-decode-workers" type="integer" default="null">
+  Decode worker pool size for offline disaggregated simulation.
+</ParamField>
+
+<ParamField path="--replay-concurrency" type="integer" default="null">
+  Closed-loop concurrency cap. Ignores first-turn trace arrival timing and keeps a fixed number of
+  requests in flight. Works with both trace-file and synthetic workloads.
+</ParamField>
+
+<ParamField path="--arrival-speedup-ratio" type="float" default="1.0">
+  Compresses or stretches the trace arrival process. Affects trace timestamps, not worker compute
+  speed. Larger values make arrivals happen sooner.
+</ParamField>
+
+<ParamField path="--report-json" type="path" default="timestamped file">
+  Output report path. When omitted, writes a timestamped `dynamo_replay_report_*.json` in the current
+  working directory.
+</ParamField>
+
+## Engine and router JSON
+
+These flags take JSON strings. Engine settings such as `block_size`, `engine_type`, `dp_size`,
+`speedup_ratio`, and `decode_speedup_ratio` belong here, not as top-level flags. Unspecified fields
+fall back to `MockEngineArgs::default()` and `KvRouterConfig::default()`.
+
+<ParamField path="--extra-engine-args" type="JSON string" default="null">
+  Aggregated engine configuration. Accepts a partial JSON object.
+</ParamField>
+
+<ParamField path="--prefill-engine-args" type="JSON string" default="null">
+  Prefill worker configuration for offline disaggregated runs. Must set `worker_type: "prefill"`.
+</ParamField>
+
+<ParamField path="--decode-engine-args" type="JSON string" default="null">
+  Decode worker configuration for offline disaggregated runs. Must set `worker_type: "decode"`.
+</ParamField>
+
+<ParamField path="--router-config" type="JSON string" default="null">
+  KV-router policy tuning, for example `{"router_queue_policy":"fcfs"}` or
+  `{"router_prefill_load_model":"aic"}`. Accepts a partial JSON object.
+</ParamField>
+
+### Engine-timing AIC fields (engine-args JSON)
+
+Set inside `--extra-engine-args` (or the staged prefill/decode engine args) to drive the simulated
+worker's own timing model from AIC. This is the engine-timing AIC surface, distinct from the
+router-side `--aic-*` flags below.
+
+<ParamField path="aic_backend" type="string" default="null">
+  Backend the analytical model emulates. Enables the AIC perf model; should match `engine_type`.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
+</ParamField>
+
+<ParamField path="aic_system" type="string" default="null">
+  GPU SKU for the perf model, for example `h200_sxm`, `h100_sxm`, `b200`.
+</ParamField>
+
+<ParamField path="aic_model_path" type="string" default="null">
+  HuggingFace model identifier used by the perf model. Equivalent of `--model-path` in
+  `dynamo.mocker`.
+</ParamField>
+
+<ParamField path="aic_tp_size" type="integer" default="1">
+  Tensor-parallel size of each engine replica.
+</ParamField>
+
+<ParamField path="aic_nextn" type="integer" default="null">
+  Speculative-decode depth for AIC-backed MTP runs. In disagg, set on the decode engine args.
+</ParamField>
+
+<ParamField path="aic_nextn_accept_rates" type="string" default="null">
+  Conditional draft-token accept rates for the mocker burst sampler, for example `"1,1"` with
+  `aic_nextn=2` accepts up to three visible tokens per decode forward.
+</ParamField>
+
+<ParamField path="startup_time" type="float" default="0">
+  Simulated seconds between a planner scale-up decision and the new worker becoming active. Unset or
+  `0` means workers activate instantly.
+</ParamField>
+
+## Router-side AIC prompt-load flags
+
+Top-level flags used only for router-side prompt-load modeling, together with
+`router_prefill_load_model: "aic"` in `--router-config`. Engine timing AIC still belongs in the
+engine-args JSON above. Both surfaces accept the MoE parallelism fields; for Kimi-style TP-only MoE
+configs, set `--aic-moe-tp-size` equal to `--aic-tp-size`, with `--aic-moe-ep-size 1` and
+`--aic-attention-dp-size 1`.
+
+<ParamField path="--aic-backend" type="string" default="null">
+  Backend for the router-side perf model.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
+</ParamField>
+
+<ParamField path="--aic-system" type="string" default="null">
+  GPU SKU for the router-side perf model, for example `h200_sxm`.
+</ParamField>
+
+<ParamField path="--aic-backend-version" type="string" default="auto">
+  AIC backend engine version. When unset, uses the default version for the backend.
+</ParamField>
+
+<ParamField path="--aic-model-path" type="string" default="null">
+  HuggingFace model identifier for the router-side perf model.
+</ParamField>
+
+<ParamField path="--aic-tp-size" type="integer" default="1">
+  Tensor-parallel size for router-side latency prediction.
+</ParamField>
+
+<ParamField path="--aic-moe-tp-size" type="integer" default="null">
+  Mixture-of-Experts tensor-parallel size. Required by some MoE models.
+</ParamField>
+
+<ParamField path="--aic-moe-ep-size" type="integer" default="null">
+  Mixture-of-Experts expert-parallel size. Required by some MoE models.
+</ParamField>
+
+<ParamField path="--aic-attention-dp-size" type="integer" default="null">
+  Attention data-parallel size. Required by some MoE models.
+</ParamField>
+
+## Constraints
+
+DynoSim validates these before running and fails immediately on any violation.
+
+Shared constraints:
+
+- `extra_engine_args.engine_type` must be `vllm`, `sglang`, or `trtllm`
+- aggregated simulation requires the existing aggregated args path
+- disaggregated simulation requires both `prefill_engine_args` and `decode_engine_args`
+- disaggregated simulation requires `router_mode=kv_router`
+- `dp_size` must be `1`
+- disaggregated simulation requires matching `block_size` in `prefill_engine_args` and `decode_engine_args`
+
+Additional offline constraints:
+
+- offline `kv_router` requires `num_workers > 1`
+- single-worker offline mode is a dedicated fast path for `vllm`, `sglang`, and `trtllm`;
+  it supports flat request runs and workload-driven multi-turn runs
+- offline disaggregated simulation is a separate two-stage runtime with prefill and decode worker pools
+
+Additional online constraints:
+
+- the current live simulation path is also limited to aggregated workers
+
+## Report schema
+
+The report — and the equivalent Python APIs `dynamo.replay.run_trace_replay(...)` and
+`dynamo.replay.run_synthetic_trace_replay(...)` — contains:
+
+- request counts
+- input and output token totals
+- virtual duration and wall-clock runtime
+- request and token throughput
+- prefix cache reuse ratio
+- TTFT, TTST, TPOT, ITL, and end-to-end latency summaries
+- output-token-throughput-per-user summaries
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="DynoSim Runs" icon="play" href="../../dynosim/runs.md">
+    Input formats, run modes, and when to use DynoSim versus AIPerf.
+  </Card>
+  <Card title="DynoSim Sweeps" icon="magnifying-glass-chart" href="../../dynosim/sweeps.md">
+    Search many simulated configurations against SLA and GPU-budget constraints.
+  </Card>
+  <Card title="Mocker CLI Reference" icon="terminal" href="mocker-cli-reference.mdx">
+    The `python -m dynamo.mocker` engine flags these JSON fields mirror.
+  </Card>
+  <Card title="Planner Simulation Benchmarking" icon="gauge" href="../../dynosim/planner-benchmarking.md">
+    Drive the planner in the simulation loop against a saved trace.
+  </Card>
+</CardGroup>

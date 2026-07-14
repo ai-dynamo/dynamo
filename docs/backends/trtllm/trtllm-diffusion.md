@@ -87,15 +87,27 @@ curl -X POST http://localhost:8000/v1/images/generations \
 
 ## Configuration Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--media-output-fs-url` | Filesystem URL for storing generated media | `file:///tmp/dynamo_media` |
-| `--default-height` | Default image/video height | `480` |
-| `--default-width` | Default image/video width | `832` |
-| `--default-num-frames` | Default frame count | `81` |
-| `--default-num-images-per-prompt` | Default number of images per prompt | `1` |
-| `--enable-teacache` | Enable TeaCache optimization | `False` |
-| `--disable-torch-compile` | Disable torch.compile | `False` |
+<ParamField path="--media-output-fs-url" type="url" default="file:///tmp/dynamo_media">
+  Filesystem URL for storing generated media.
+</ParamField>
+<ParamField path="--default-height" type="int" default="480">
+  Default image/video height.
+</ParamField>
+<ParamField path="--default-width" type="int" default="832">
+  Default image/video width.
+</ParamField>
+<ParamField path="--default-num-frames" type="int" default="81">
+  Default frame count.
+</ParamField>
+<ParamField path="--default-num-images-per-prompt" type="int" default="1">
+  Default number of images per prompt.
+</ParamField>
+<ParamField path="--enable-teacache" type="flag" default="False">
+  Enable TeaCache optimization.
+</ParamField>
+<ParamField path="--disable-torch-compile" type="flag" default="False">
+  Disable torch.compile.
+</ParamField>
 
 ## Limitations
 

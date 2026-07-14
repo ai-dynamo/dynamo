@@ -93,7 +93,7 @@ See the [Frontend Guide](frontend-guide.md) for full configuration options.
 
 | Document | Description |
 |----------|-------------|
-| [Configuration Reference](configuration.md) | All CLI arguments, env vars, and HTTP endpoints |
+| [Configuration Reference](frontend-config-reference.mdx) | All CLI arguments, env vars, and HTTP endpoints |
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [NVIDIA Request Extensions (nvext)](nvext.md) | Custom request fields for routing hints and cache control |
 | [Router Documentation](../router/README.md) | KV-aware routing configuration |

@@ -183,35 +183,70 @@ The shared Hugging Face cache PVC applied in the [Kubernetes Deployment](#kubern
 
 ## Worker Configuration Reference
 
-### CLI Flags
+<Tabs>
+<Tab title="CLI Flags">
 
-| Flag | Default | Description |
-|---|---|---|
-| `--model` | `FastVideo/LTX2-Distilled-Diffusers` | HuggingFace model path |
-| `--num-gpus` | `1` | Number of GPUs for distributed inference |
-| `--enable-optimizations` | off | Enables FP4 quantization and `torch.compile` |
-| `--attention-backend` | `TORCH_SDPA` | Sets `FASTVIDEO_ATTENTION_BACKEND`; choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN` |
+Flags passed to `worker.py`:
 
-### Request Parameters (`nvext`)
+<ParamField path="--model" type="string" default="FastVideo/LTX2-Distilled-Diffusers">
+  HuggingFace model path.
+</ParamField>
+<ParamField path="--num-gpus" type="int" default="1">
+  Number of GPUs for distributed inference.
+</ParamField>
+<ParamField path="--enable-optimizations" type="flag" default="off">
+  Enables FP4 quantization and `torch.compile`.
+</ParamField>
+<ParamField path="--attention-backend" type="string" default="TORCH_SDPA">
+  Sets `FASTVIDEO_ATTENTION_BACKEND`. Choices: `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, `SAGE_SLA_ATTN`.
+</ParamField>
 
-| Field | Default | Description |
-|---|---|---|
-| `fps` | `24` | Frames per second |
-| `num_frames` | `121` | Total frames; overrides `fps * seconds` when set |
-| `num_inference_steps` | `5` | Diffusion inference steps |
-| `guidance_scale` | `1.0` | Classifier-free guidance scale |
-| `seed` | `10` | RNG seed for reproducibility |
-| `negative_prompt` | — | Text to avoid in generation |
+</Tab>
+<Tab title="Request Parameters (nvext)">
 
-### Environment Variables
+Fields nested under `nvext` in the `/v1/videos` request body:
 
-| Variable | Default | Description |
-|---|---|---|
-| `FASTVIDEO_VIDEO_CODEC` | `libx264` | Video codec for MP4 encoding |
-| `FASTVIDEO_X264_PRESET` | `ultrafast` | x264 encoding speed preset |
-| `FASTVIDEO_ATTENTION_BACKEND` | `TORCH_SDPA` | Attention backend; `worker.py` sets this from `--attention-backend` and validates `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, and `SAGE_SLA_ATTN` |
-| `FASTVIDEO_STAGE_LOGGING` | `1` | Enable per-stage timing logs |
-| `FASTVIDEO_LOG_LEVEL` | — | Set to `DEBUG` for verbose logging |
+<ParamField path="fps" type="int" default="24">
+  Frames per second.
+</ParamField>
+<ParamField path="num_frames" type="int" default="121">
+  Total frames; overrides `fps * seconds` when set.
+</ParamField>
+<ParamField path="num_inference_steps" type="int" default="5">
+  Diffusion inference steps.
+</ParamField>
+<ParamField path="guidance_scale" type="float" default="1.0">
+  Classifier-free guidance scale.
+</ParamField>
+<ParamField path="seed" type="int" default="10">
+  RNG seed for reproducibility.
+</ParamField>
+<ParamField path="negative_prompt" type="string">
+  Text to avoid in generation.
+</ParamField>
+
+</Tab>
+<Tab title="Environment Variables">
+
+<ParamField path="FASTVIDEO_VIDEO_CODEC" type="string" default="libx264">
+  Video codec for MP4 encoding.
+</ParamField>
+<ParamField path="FASTVIDEO_X264_PRESET" type="string" default="ultrafast">
+  x264 encoding speed preset.
+</ParamField>
+<ParamField path="FASTVIDEO_ATTENTION_BACKEND" type="string" default="TORCH_SDPA">
+  Attention backend; `worker.py` sets this from `--attention-backend` and validates `FLASH_ATTN`, `TORCH_SDPA`, `SAGE_ATTN`, `SAGE_ATTN_THREE`, `VIDEO_SPARSE_ATTN`, `VMOBA_ATTN`, `SLA_ATTN`, and `SAGE_SLA_ATTN`.
+</ParamField>
+<ParamField path="FASTVIDEO_STAGE_LOGGING" type="string" default="1">
+  Enable per-stage timing logs.
+</ParamField>
+<ParamField path="FASTVIDEO_LOG_LEVEL" type="string">
+  Set to `DEBUG` for verbose logging.
+</ParamField>
+
+</Tab>
+</Tabs>
+
 
 ## Troubleshooting
 

@@ -204,5 +204,5 @@ Decoding still uses HuggingFace, so this is usually not caused by the `fastokens
 - [`fastokens`: A Solution to the Tokenization Bottleneck](https://www.crusoe.ai/resources/blog/reducing-ttft-by-cpumaxxing-tokenization)
 - [`fastokens` on GitHub](https://github.com/crusoecloud/fastokens)
 - [Tokenizer component reference](../../components/frontend/Tokenizer.md)
-- [Frontend configuration reference](../../components/frontend/configuration.md)
+- [Frontend configuration reference](../../components/frontend/frontend-config-reference.mdx)
 - [Frontend benchmarking](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/frontend/README.md)

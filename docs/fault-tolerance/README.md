@@ -34,6 +34,6 @@ These operate automatically and are documented as architecture references, not c
 
 Every flag and environment variable for the configurable behaviors is cataloged in the Reference tab:
 
-- [Frontend Configuration](../components/frontend/configuration.md) — migration limit, admission control, and busy thresholds.
+- [Frontend Configuration](../components/frontend/frontend-config-reference.mdx) — migration limit, admission control, and busy thresholds.
 - [Runtime Configuration](../reference/runtime-config-reference.mdx) — worker-side engine request limit.
 - [Observability Environment Variables](../reference/observability/environment-variables.mdx) — health-check and system-port variables.

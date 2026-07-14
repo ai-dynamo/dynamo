@@ -103,6 +103,8 @@ redirects:
     destination: "/dynamo/dev/documentation/style-guide"
   - source: "/dynamo/dev/documentation/dynamo-docs-guide"
     destination: "/dynamo/dev/documentation/building-and-publishing"
+  - source: "/dynamo/dev/components/frontend/configuration"
+    destination: "/dynamo/dev/components/frontend/frontend-config-reference"
   - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental/:slug*"
     destination: "/dynamo/dev/user-guides/diffusion/:slug*"
   - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental"

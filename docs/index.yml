@@ -32,7 +32,7 @@ tabs:
     icon: magnifying-glass-chart
     skip-slug: true
   well-lit-paths:
-    display-name: Well-Lit Paths
+    display-name: Walkthroughs
     icon: road
     skip-slug: true
   recipes:
@@ -71,6 +71,8 @@ navigation:
             path: getting-started/introduction.mdx
           - page: Quickstart
             path: kubernetes/README.md
+          - page: Compatibility
+            path: reference/compatibility.mdx
           # - page: Local Quickstart
           #   path: getting-started/quickstart.mdx
 
@@ -125,13 +127,15 @@ navigation:
                   path: kubernetes/cloud-providers/gke/gke.md
 
       # ==================== Usage ====================
-      - section: Model Deployment # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
-        icon: microchip
+      - section: Model Deployment (K8s) # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
+        icon: kubernetes
         contents:
           - page: Introduction
             path: getting-started/kubernetes-deployment.md
           - page: Deploy with DGD
             path: kubernetes/dgd-guide.md
+          - page: KV Aware Routing
+            path: kubernetes/dgd-kv-routing.md
           - page: Disaggregated Serving
             path: features/disaggregated-serving/README.md
           - page: Size with AIConfigurator
@@ -140,8 +144,6 @@ navigation:
             path: kubernetes/deployment/multinode-deployment.md
           - page: Model Caching
             path: kubernetes/model-caching.md
-          - page: KV Aware Routing
-            path: kubernetes/dgd-kv-routing.md
           - page: KV Cache Offloading
             path: kubernetes/dgd-kv-offloading.md
           - section: Auto Deploy with DGDR
@@ -225,9 +227,9 @@ navigation:
 
   - tab: use-cases
     layout:
-      # ==================== Use Cases ====================
-      - section: Use Cases
-        icon: magnifying-glass-chart
+      # ==================== Key Features ====================
+      - section: Key Features
+        icon: star
         contents:
           - section: Tool Calling & Reasoning
             slug: parsing
@@ -256,6 +258,11 @@ navigation:
                 path: fault-tolerance/request-rejection.md
               - page: Graceful Shutdown
                 path: fault-tolerance/graceful-shutdown.md
+
+      # ==================== Use Cases ====================
+      - section: Use Cases
+        icon: magnifying-glass-chart
+        contents:
           - section: Agents
             slug: agents
             contents:
@@ -281,7 +288,7 @@ navigation:
                 path: features/multimodal/encoder-disaggregation.md
               - page: Multimodal KV Routing
                 path: features/multimodal/multimodal-kv-routing.md
-          - section: Diffusion (Preview)
+          - section: Diffusion
             slug: diffusion
             contents:
               - page: Overview
@@ -299,8 +306,8 @@ navigation:
 
   - tab: well-lit-paths
     layout:
-      # ==================== Well-Lit Paths ====================
-      - section: Well-Lit Paths
+      # ==================== Walkthroughs ====================
+      - section: Walkthroughs
         icon: road
         contents:
           - page: Overview
@@ -361,8 +368,6 @@ navigation:
                     path: components/frontend/README.md
                   - page: Frontend Guide
                     path: components/frontend/frontend-guide.md
-                  - page: Configuration Reference
-                    path: components/frontend/configuration.md
                   - page: Tokenizer
                     path: components/frontend/Tokenizer.md
               - section: Router
@@ -630,8 +635,6 @@ navigation:
       - section: Reference Info
         icon: circle-info
         contents:
-          - page: Compatibility
-            path: reference/compatibility.mdx
           - page: Release Artifacts
             path: reference/release-artifacts.mdx
           - page: Glossary
@@ -667,14 +670,25 @@ navigation:
         contents:
           - page: Runtime Configuration
             path: reference/runtime-config-reference.mdx
+          - page: Frontend Configuration
+            path: components/frontend/frontend-config-reference.mdx
           - page: Planner Configuration
             path: components/planner/planner-config-reference.mdx
+          - page: Profiler Configuration
+            path: components/profiler/profiler-config-reference.mdx
+          - page: KVBM Configuration
+            path: components/kvbm/kvbm-config-reference.mdx
           - page: Mocker CLI Reference
             path: components/mocker/mocker-cli-reference.mdx
           - page: DynoSim Replay CLI Reference
             path: components/mocker/replay-cli-reference.mdx
           - page: Global Router Configuration
             path: components/router/global-router-config-reference.mdx
+
+      # ==================== Backend Configuration ====================
+      - section: Backend Configuration
+        icon: server
+        contents:
           - page: vLLM Configuration
             path: backends/vllm/vllm-config-reference.mdx
           - page: SGLang Configuration

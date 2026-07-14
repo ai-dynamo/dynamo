@@ -130,5 +130,5 @@ the parser configuration, or the parser logic.
   request examples
 - [Chat Processors](chat-processors.mdx) --
   `--dyn-chat-processor` and the engine-fallback path to vLLM and SGLang parsers
-- [Frontend Configuration Reference](../components/frontend/configuration.md)
+- [Frontend Configuration Reference](../components/frontend/frontend-config-reference.mdx)
   -- full CLI flag reference for the frontend and worker

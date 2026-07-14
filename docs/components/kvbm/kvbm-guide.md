@@ -491,6 +491,7 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --kv-transfer-config '{"kv_connect
 ## See Also
 
 - [KVBM Overview](README.md) for a quick overview of KV Caching, KVBM and its architecture
+- [KVBM Configuration Reference](kvbm-config-reference.mdx) for the full `DYN_KVBM_*` and `KVBM_*` configuration field reference
 - [KVBM Design](../../design-docs/kvbm-design.md) for a deep dive into KVBM architecture
 - [LMCache Integration](../../integrations/lmcache-integration.md)
 - [FlexKV Integration](../../integrations/flexkv-integration.md)
