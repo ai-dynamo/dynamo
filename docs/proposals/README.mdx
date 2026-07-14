@@ -1,0 +1,67 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Dynamo Enhancement Proposals"
+subtitle: "How DEPs are authored, reviewed, discussed, and ratified in the Dynamo repository."
+---
+
+A Dynamo Enhancement Proposal (DEP) captures an architecture, design, or process decision along with the motivation behind it. This tab hosts DEPs authored as markdown in the `docs/proposals/` directory of the `ai-dynamo/dynamo` repository, rendered here so the design content, its review, and open community debate stay close to the code.
+
+This workflow is compatible with the approved [Dynamo DEP process](https://github.com/ai-dynamo/enhancements/blob/main/deps/0000-dep-process.md) in the `ai-dynamo/enhancements` repository. It reuses infrastructure that already exists (this docs site and GitHub Discussions) rather than adding new systems.
+
+## The Hybrid Model
+
+A DEP lives in four connected places, each doing the job it is best at:
+
+- **Anchor**: a GitHub tracking issue in `ai-dynamo/dynamo`. The stable, linkable home for the proposal's status and cross-references.
+- **Content**: a markdown file in `docs/proposals/`, versioned with the code and rendered on this Proposals tab with a status banner.
+- **Line-level review**: the draft pull request that adds or edits the DEP markdown. Reviewers leave line comments and suggestions on the exact text.
+- **Open-ended debate**: a comment widget embedded at the bottom of each rendered DEP page, backed by GitHub Discussions via [giscus](https://giscus.app). Any GitHub user can comment on the public page without repository access.
+
+## Workflow
+
+1. **Open a tracking issue** in `ai-dynamo/dynamo`. This is the anchor for the DEP.
+2. **Author the DEP as a draft PR.** Copy [`TEMPLATE.mdx`](./TEMPLATE.mdx) to `docs/proposals/NNNN-your-feature.mdx` (use a descriptive slug; do not assign a number yet). Fill in the required sections. Reviewers use PR line comments and suggestions for precise, line-level review.
+3. **Merge as Draft.** Once the shape is agreed, merge the PR with the status banner set to Draft. Merging early makes the proposal discoverable and renders it on this tab; it does not imply acceptance. The banner makes the Draft status unambiguous.
+4. **Discuss on the rendered page.** Open-ended debate happens in the giscus thread on the published page, so community members without repo access can participate. Paste the resulting Discussion URL into the `Discussions-To` field. Link the tracking issue to that thread as well.
+5. **Advance the status via follow-up PRs.** As the proposal moves through Under Review to Approved (or to Rejected, Deferred, or Replaced), update the status banner and header in a short follow-up PR. Significant changes after approval get a new DEP; the original is marked Replaced.
+
+## Status Banner Convention
+
+Every rendered DEP page opens with a status banner so an in-flight proposal never reads as ratified. Use a GitHub-style admonition, which this docs pipeline converts to a native callout automatically (see `fern/convert_callouts.py`). Set the banner to match the DEP's current status:
+
+| Status | Source admonition | Renders as |
+| :----- | :---------------- | :--------- |
+| Draft | `> [!WARNING]` | Warning |
+| Under Review (a.k.a. Proposed) | `> [!IMPORTANT]` | Info |
+| Approved (a.k.a. Accepted) | `> [!NOTE]` | Note |
+| Rejected, Deferred, or Replaced (a.k.a. Superseded) | `> [!CAUTION]` | Error |
+
+Example banner for a Draft proposal:
+
+```md
+> [!WARNING]
+> **Status: Draft.** This proposal is under active discussion and is not an accepted decision.
+```
+
+Keep the `**Status**` header field and the banner in sync. The header field carries the full enum value; the banner carries the reader-facing callout.
+
+## Commenting on a DEP
+
+Comments on each rendered DEP page are powered by GitHub Discussions through giscus. Sign in with any GitHub account to comment; no repository access is required. The widget is the `GiscusComments` component (`fern/components/GiscusComments.tsx`), imported at the top of each DEP page and placed last.
+
+Before the widget can load, a repository maintainer fills in two values once, repo-wide:
+
+- Enable the [giscus GitHub App](https://github.com/apps/giscus) on `ai-dynamo/dynamo` (GitHub Discussions is already enabled).
+- Run the configurator at [giscus.app](https://giscus.app) with the repository and the target Discussions category (for example, `Ideas`), then copy the generated `data-repo-id` and `data-category-id` into `GiscusComments.tsx`.
+
+With `data-mapping="pathname"`, each DEP page binds to its own Discussion the first time someone comments, so no per-page configuration is needed.
+
+## Files in This Directory
+
+- [`TEMPLATE.mdx`](./TEMPLATE.mdx): the DEP template. Copy it to start a new proposal.
+- [`0000-example-dep.mdx`](./0000-example-dep.mdx): a worked example that renders every section. Not a real decision.
+
+## Relationship to ai-dynamo/enhancements
+
+The `ai-dynamo/enhancements` repository is the established home for DEPs and holds the approved [`0000-dep-process`](https://github.com/ai-dynamo/enhancements/blob/main/deps/0000-dep-process.md). The section vocabulary and ordering in this template match that repository so a DEP is portable between the two. Whether to migrate the existing enhancements DEPs into `docs/proposals/` or to keep both homes and add this debate layer to the enhancements repo instead is an open decision for the group; this scaffold supports either outcome.

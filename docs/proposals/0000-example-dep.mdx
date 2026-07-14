@@ -1,0 +1,158 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DEP-0000: Example Proposal"
+subtitle: "A sample DEP that shows how proposals render on the docs site. Not a real decision."
+---
+
+{/*
+  This is a worked EXAMPLE that fills in the template so the Proposals tab has
+  real content to render in preview. Its subject is deliberately the DEP
+  publishing workflow itself, so it stays grounded in what actually exists. It
+  is not an accepted decision. Copy TEMPLATE.mdx (not this file) to start a new
+  DEP.
+*/}
+
+import { GiscusComments } from "@/components/GiscusComments";
+
+> [!WARNING]
+> **Status: Draft.** This is an illustrative example, not an accepted decision. It exists so the Proposals tab renders with real content. Copy `TEMPLATE.mdx` to author a real DEP.
+
+[Discuss this DEP on GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions) &middot; line-level review happens on the [draft PR](https://github.com/ai-dynamo/dynamo/pulls).
+
+**DEP**: 0000
+
+**Status**: Draft
+
+**Authors**: Dynamo Docs Infrastructure (example)
+
+**Category**: Process
+
+**Replaces**: N/A
+
+**Replaced By**: N/A
+
+**Sponsor**: [A code owner or maintainer]
+
+**Required Reviewers**: [Technical leads required for acceptance]
+
+**Review Date**: [Target date for review]
+
+**Tracking Issue**: [Link to the DEP tracking issue in ai-dynamo/dynamo]
+
+**Pull Request**: [Link to the PR that introduces this DEP]
+
+**Implementation PR / Tracking Issue**: N/A
+
+**Discussions-To**: [Populated after the first giscus comment creates the thread]
+
+## Summary
+
+Dynamo Enhancement Proposals (DEPs) can be authored as markdown in this repository under `docs/proposals/` and rendered on a dedicated Proposals tab at docs.nvidia.com/dynamo. Each rendered page carries a status banner and an embedded discussion widget so the design content, the review, and the open-ended debate live close to the code.
+
+## Motivation
+
+DEP content, line-level review, and open-ended debate have historically been split across a separate repository, pull request threads, and meetings. That split makes it hard for a reader to find the current state of a proposal and hard for a community member without repo access to weigh in.
+
+Colocating the DEP markdown with the code, rendering it on the docs site, and attaching a GitHub-Discussions-backed comment widget keeps all three concerns in one discoverable place while reusing infrastructure that already exists (the Fern docs site and GitHub Discussions).
+
+### Goals
+
+* Keep DEP content next to the code it describes, versioned with the code.
+* Render every DEP on the public docs site with an unambiguous status.
+* Let any GitHub user comment on the rendered page without repo access.
+
+### Non Goals
+
+* Replacing the tracking issue as the anchor for a DEP.
+* Migrating the existing proposals from `ai-dynamo/enhancements`. That is a separate decision.
+
+### Requirements
+
+#### REQ 1: Status Must Be Unambiguous
+
+Every rendered DEP page **MUST** show its status (Draft, Under Review, Approved, Replaced, Deferred, or Rejected) prominently at the top, so an in-flight proposal never reads as ratified.
+
+#### REQ 2: Debate Must Be Open to the Community
+
+Commenting on a rendered DEP **MUST NOT** require write access to the repository. Any authenticated GitHub user **SHOULD** be able to comment.
+
+## Proposal
+
+A DEP is a markdown file under `docs/proposals/`, authored from `TEMPLATE.mdx`. It is wired into the Fern navigation under a Proposals tab. The page renders with:
+
+1. A status banner, using a GitHub-style admonition that Fern converts to a native callout.
+2. A link to the GitHub Discussion and to the draft PR near the top.
+3. An embedded giscus widget at the bottom, backed by GitHub Discussions.
+
+The lifecycle is: open a tracking issue, author the DEP as a draft PR (line-level review), merge as Draft, gather open-ended debate on the rendered page, and advance the status through follow-up PRs.
+
+## Implementation Details
+
+The Proposals tab is declared in `docs/index.yml`. The status banner uses `> [!WARNING]` for Draft, which the docs pipeline converts to a Fern callout. The comment widget is the `GiscusComments` MDX component in `fern/components/GiscusComments.tsx`, imported at the top of each page and placed last.
+
+### Deferred to Implementation
+
+* The concrete giscus `data-repo-id` and `data-category-id` values, produced by the giscus configurator once the giscus GitHub App is installed.
+
+## Implementation Phases
+
+### Phase 0: Scaffold
+
+**Release Target**: [Date]
+
+**Effort Estimate**: Small. One engineer, docs-only.
+
+**Work Items**: [Link to GitHub issue]
+
+**Supported API / Behavior**:
+
+* Proposals tab, template, status banner convention, and example page.
+
+**Not Supported**:
+
+* Automated DEP numbering or index generation.
+
+## Related Proposals
+
+* `ai-dynamo/enhancements` DEP-0000 (the approved DEP process this workflow is compatible with).
+
+## Alternate Solutions
+
+### Alt 1: Keep All DEPs in ai-dynamo/enhancements Only
+
+**Pros**:
+
+* One home; no duplication of process.
+
+**Cons**:
+
+* Content is not rendered on the docs site and is not colocated with the code.
+* Community debate is limited to those who watch the enhancements repo.
+
+**Reason Rejected**:
+
+* Does not meet REQ 1 (rendered, unambiguous status) or REQ 2 (open community debate on the page).
+
+## Background
+
+Enhancement-proposal processes such as Kubernetes KEPs and Rust RFCs store proposals as markdown in the repository and review them through pull requests. This example follows that lineage and adds a rendered docs page plus a discussion widget.
+
+### References
+
+* [Dynamo DEP process (ai-dynamo/enhancements)](https://github.com/ai-dynamo/enhancements/blob/main/deps/0000-dep-process.md)
+
+### Terminology and Definitions
+
+| Term | Definition |
+| :--- | :--------- |
+| **DEP** | Dynamo Enhancement Proposal. |
+| **giscus** | A comment system that stores comments in GitHub Discussions. |
+
+### Acronyms and Abbreviations
+
+**DEP**: Dynamo Enhancement Proposal
+
+{/* Discussion widget, last on the page. */}
+
+<GiscusComments />

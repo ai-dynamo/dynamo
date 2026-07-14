@@ -1,0 +1,197 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DEP Template"
+subtitle: "Copy this file to docs/proposals/NNNN-your-feature.mdx and fill it in."
+---
+
+{/*
+  Adapted from ai-dynamo/enhancements/NNNN-complete-template.md
+  (https://github.com/ai-dynamo/enhancements/blob/main/NNNN-complete-template.md).
+  Section vocabulary and ordering match the enhancements repo so DEPs stay
+  portable between the two homes. In-tree additions: a DEP number field, a
+  Tracking Issue field, a Discussions-To field, an MDX status banner, and the
+  giscus discussion widget. Top-level sections use H2 (the page title comes
+  from the frontmatter above) to match the Fern docs-site convention.
+  Delete this comment block and the two placeholder-import lines you do not
+  need when you copy the template.
+*/}
+
+import { GiscusComments } from "@/components/GiscusComments";
+
+> [!WARNING]
+> **Status: Draft.** This proposal is under active discussion and is not an accepted decision. Update this banner whenever the status changes. See the [status banner convention](./README.mdx#status-banner-convention).
+
+[Discuss this DEP on GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions) &middot; line-level review happens on the [draft PR](https://github.com/ai-dynamo/dynamo/pulls).
+
+**DEP**: NNNN
+
+**Status**: Draft | Under Review | Approved | Replaced | Deferred | Rejected
+
+**Authors**: [Name/Team]
+
+**Category**: Architecture | Process | Guidelines
+
+**Replaces**: [Link to previous proposal, if applicable]
+
+**Replaced By**: [Link to superseding proposal, if applicable]
+
+**Sponsor**: [Name of the code owner or maintainer shepherding the process]
+
+**Required Reviewers**: [Names of technical leads required for acceptance]
+
+**Review Date**: [Target date for review]
+
+**Tracking Issue**: [Link to the DEP tracking issue in ai-dynamo/dynamo]
+
+**Pull Request**: [Link to the PR that introduces this DEP]
+
+**Implementation PR / Tracking Issue**: [Link to the implementation PR or issue]
+
+**Discussions-To**: [Link to the GitHub Discussion thread for this page. With `data-mapping="pathname"`, giscus creates the thread the first time someone comments; paste the resulting Discussion URL here.]
+
+## Summary
+
+**[Required]**
+
+## Motivation
+
+**[Required]**
+
+Describe the problem that needs to be addressed with enough detail for someone familiar with the project to understand. Generally one to two short paragraphs. Additional details can go in the Background section. Cover **what** the issue is and **why** it needs to be addressed. Link to GitHub issues if relevant.
+
+### Goals
+
+**[Optional. Omit if not applicable.]**
+
+List additional goals as bullet points. Goals may be aspirational or difficult to measure but guide the proposal.
+
+* Goal
+* Goal
+* Goal
+
+### Non Goals
+
+**[Optional. Omit if not applicable.]**
+
+List items that are out of scope or specifically not required. Indicates the scope of the proposal and the issue being resolved.
+
+### Requirements
+
+**[Optional. Omit if not applicable.]**
+
+List additional requirements in numbered subheadings.
+
+#### REQ 1: [Title]
+
+Describe the requirement in as much detail as necessary for others to understand it and how it applies to the DEP. Requirements should be measurable and are used to determine whether a DEP has been successfully implemented.
+
+Name requirements with a monotonically increasing number, for example `REQ 1: Title`, then `REQ 2: Title`. Use title case. Keep names as descriptive as possible while remaining terse.
+
+Use all-caps, bolded terms like **MUST** and **SHOULD** when describing each requirement. See [RFC-2119](https://datatracker.ietf.org/doc/html/rfc2119) for details.
+
+## Proposal
+
+**[Required]**
+
+Describe the high-level design. Use subsections as needed, but start with an overview and then dig into the details. Provide images and diagrams to aid understanding.
+
+## Implementation Details
+
+**[Optional. Omit if not applicable.]**
+
+Add detailed items here including interface signatures. Add anything relevant that is more of a detail than central to the proposal. Use subsections and bullet points as needed. Link to the implementation PR if applicable.
+
+### Deferred to Implementation
+
+**[Optional. Omit if not applicable.]**
+
+List items that are under discussion but that will be resolved only during implementation or code review.
+
+## Implementation Phases
+
+**[Optional. Omit if not applicable.]**
+
+List phases of implementation (can be a single phase). Give each phase a monotonically increasing number, for example `Phase 0`, then `Phase 1`. Give phases titles if it helps.
+
+### Phase 0: [Optional Title]
+
+**Release Target**: [Date]
+
+**Effort Estimate**: [Estimate of time and number of engineers to complete the phase]
+
+**Work Items**: [One or more links to GitHub issues]
+
+**Supported API / Behavior**:
+
+* [Name and concise description of the API or behavior]
+
+**Not Supported**:
+
+* [Name and concise description of the API or behavior]
+
+## Related Proposals
+
+**[Optional. Omit if not applicable.]**
+
+* File
+* File
+
+## Alternate Solutions
+
+**[Required. If not applicable, write N/A.]**
+
+List solutions that were considered but ultimately rejected. Free form is fine; one possible format is shown below.
+
+### Alt 1: [Title]
+
+**Pros**:
+
+* [Positive aspects of this solution]
+
+**Cons**:
+
+* [Negative aspects of this solution]
+
+**Reason Rejected**:
+
+* [Why this option was not chosen]
+
+**Notes**:
+
+[Optional additional comments about this solution.]
+
+## Background
+
+**[Optional. Omit if not applicable.]**
+
+Add context and references to help reviewers and authors understand the problem and the solution being proposed.
+
+### References
+
+**[Optional. Omit if not applicable.]**
+
+* [Hyper-linked title of an external reference]
+
+### Terminology and Definitions
+
+**[Optional. Omit if not applicable.]**
+
+List additional terms and definitions. Keep definitions concise and link to external resources where useful. Keep the list sorted alphabetically.
+
+| Term | Definition |
+| :--- | :--------- |
+| **Term** | Definition |
+
+### Acronyms and Abbreviations
+
+**[Optional. Omit if not applicable.]**
+
+List frequently used acronyms and abbreviations that are uncommon or unlikely to be known by the reader. Keep the list sorted alphabetically.
+
+**ACR**: Expanded meaning
+
+{/* The discussion widget must be the last thing on the page. It is powered by
+    GitHub Discussions via giscus; see fern/components/GiscusComments.tsx. */}
+
+<GiscusComments />
