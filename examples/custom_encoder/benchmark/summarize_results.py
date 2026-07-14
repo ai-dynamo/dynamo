@@ -22,6 +22,10 @@ METRICS = [
     ("TTFT p50 (ms)", "time_to_first_token", "p50", False, 1),
     ("TTFT p90 (ms)", "time_to_first_token", "p90", False, 1),
     ("TTFT p99 (ms)", "time_to_first_token", "p99", False, 1),
+    ("E2E latency avg (ms)", "request_latency", "avg", False, 1),
+    ("E2E latency p50 (ms)", "request_latency", "p50", False, 1),
+    ("E2E latency p90 (ms)", "request_latency", "p90", False, 1),
+    ("E2E latency p99 (ms)", "request_latency", "p99", False, 1),
     ("Throughput (req/s)", "request_throughput", "avg", True, 3),
 ]
 

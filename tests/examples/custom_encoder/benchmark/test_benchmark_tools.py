@@ -73,9 +73,15 @@ def test_validation_and_markdown_cover_nine_cells(tmp_path: Path) -> None:
     assert len(validate_matrix(tmp_path)) == 9
     markdown = _markdown(tmp_path, _load_rows(tmp_path))
     assert "=== TTFT avg (ms) ===" in markdown
+    assert "=== E2E latency avg (ms) ===" in markdown
+    assert "=== E2E latency p50 (ms) ===" in markdown
+    assert "=== E2E latency p90 (ms) ===" in markdown
+    assert "=== E2E latency p99 (ms) ===" in markdown
     assert "=== Throughput (req/s) ===" in markdown
-    assert "E2E latency" not in markdown
     assert markdown.index("=== TTFT p99 (ms) ===") < markdown.index(
+        "=== E2E latency avg (ms) ==="
+    )
+    assert markdown.index("=== E2E latency p99 (ms) ===") < markdown.index(
         "=== Throughput (req/s) ==="
     )
     assert markdown.count("[artifact]") == 9
