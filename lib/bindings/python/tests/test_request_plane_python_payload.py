@@ -61,28 +61,33 @@ async def request_plane_client(runtime):
     client = await endpoint.client()
     try:
         await client.wait_for_instances()
-
-        # instances() returns a structured snapshot across all transports; its
-        # instance_ids must match instance_ids(). Each entry carries transport
-        # details. On the TCP request plane every instance's transport is "tcp"
-        # with a "host:port/..." address.
-        instances = client.instances()
-        assert {i.instance_id for i in instances} == set(client.instance_ids())
-        # On the TCP request plane every instance exposes the identity fields of
-        # the served endpoint plus a populated "tcp" transport address.
-        for instance in instances:
-            assert instance.namespace == "direct-python-msgpack"
-            assert instance.component == "backend"
-            assert instance.endpoint == "generate"
-            assert instance.device_type in (None, "cpu", "cuda")
-            assert instance.transport.kind == "tcp"
-            assert ":" in instance.transport.address
-
         yield client
     finally:
         server_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await server_task
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("request_plane", ["tcp", "nats"], indirect=True)
+async def test_client_instances_snapshot(request_plane, request_plane_client):
+    """Client.instances() exposes the endpoint's instances with transport
+    details on each request plane: "tcp" carries a "host:port/..." address,
+    "nats" carries a "nats_tcp" subject address."""
+    expected_kind = "nats_tcp" if request_plane == "nats" else "tcp"
+
+    instances = request_plane_client.instances()
+    assert {i.instance_id for i in instances} == set(
+        request_plane_client.instance_ids()
+    )
+    for instance in instances:
+        assert instance.namespace == "direct-python-msgpack"
+        assert instance.component == "backend"
+        assert instance.endpoint == "generate"
+        assert instance.device_type in (None, "cpu", "cuda")
+        assert instance.transport.kind == expected_kind
+        assert instance.transport.address  # populated on both planes
 
 
 @pytest.mark.asyncio
