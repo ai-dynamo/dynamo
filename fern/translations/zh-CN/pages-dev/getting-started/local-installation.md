@@ -162,7 +162,7 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
 - **SGLang：** 无需标志（默认禁用 KV events）
 - **TensorRT-LLM：** 无需标志（默认禁用 KV events）
 
-对于事件驱动的 KV routing，vLLM 和 SGLang 要求在执行 prefill 的 worker 上设置 backend 专用的 `--kv-events-config`。TensorRT-LLM 要求设置 `--publish-events-and-metrics`。有关完整的 frontend 和 worker 配置，请参阅 [Router Guide](../../../../../docs/components/router/router-guide.md#quick-start)。
+对于事件驱动的 KV routing，vLLM 要求在 aggregated worker 或 disaggregated prefill worker 上设置 `--kv-events-config`。SGLang 要求在 aggregated worker 上设置该 flag；在 disaggregated serving 中，prefill 和 decode worker 都需要设置。TensorRT-LLM 要求设置 `--publish-events-and-metrics`。有关完整的 frontend 和 worker 配置，请参阅 [Router Guide](../../../../../docs/components/router/router-guide.md#quick-start)。
 
 ## 测试你的部署
 

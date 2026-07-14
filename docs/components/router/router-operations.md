@@ -151,8 +151,11 @@ When `--router-kv-overlap-score-credit` is set to 0, no KV indexer is created an
 Backend KV event publishing is independent of the frontend's `--no-router-kv-events` flag. The frontend flag controls whether the router consumes events; backend flags control whether workers publish them. If the router is not consuming events, workers that still publish will waste resources but cause no harm.
 
 - **vLLM**: Omit `--kv-events-config` to keep publishing disabled. To enable it, pass
-  `--kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557"}'`.
-- **SGLang**: Pass `--kv-events-config` with a JSON config to enable, or omit it to keep publishing disabled.
+  `--kv-events-config '{"enable_kv_cache_events":true,"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'`
+  to aggregated workers or disaggregated prefill workers.
+- **SGLang**: Omit `--kv-events-config` to keep publishing disabled. To enable it, pass
+  `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'` to
+  aggregated workers or to both prefill and decode workers in disaggregated serving.
 - **TRT-LLM**: Pass `--publish-events-and-metrics` to enable, or omit it to keep publishing disabled.
 
 The CLI arg `--router-ttl-secs` controls local cache prediction lifetime when the router operates without receiving events from workers. When workers are configured to publish KV events, the router relies on worker-side eviction events and this parameter is ignored.

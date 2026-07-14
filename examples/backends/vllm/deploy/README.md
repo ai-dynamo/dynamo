@@ -116,6 +116,7 @@ An event-driven vLLM `DynamoGraphDeployment` requires configuration on both side
    every aggregated worker. In disaggregated serving, add it to prefill workers only.
 
    ```text
+   --stream-interval 20
    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
    ```
 

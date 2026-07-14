@@ -33,6 +33,7 @@ prefill worker:
 
 ```bash
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+  --stream-interval 20 \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
 ```
 

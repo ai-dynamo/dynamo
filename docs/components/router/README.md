@@ -24,6 +24,7 @@ workers:
 
    ```bash
    python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+     --stream-interval 20 \
      --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
    ```
 
@@ -32,6 +33,7 @@ workers:
 
    ```bash
    python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B \
+     --stream-interval 20 \
      --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
    ```
 
@@ -40,10 +42,12 @@ workers that share a network namespace. For TensorRT-LLM, pass `--publish-events
 [Router Operations](router-operations.md#additional-notes) for all backend settings.
 
 > [!TIP]
-> For vLLM workers, start with `--stream-interval 20` to reduce host-side engine and bridge
-> overhead under load. This setting is recommended for host efficiency; it is not required for KV
-> routing. See [Recommended Stream Interval](../../backends/vllm/vllm-reference-guide.md#recommended-stream-interval)
-> for the streaming-granularity tradeoff.
+> For vLLM and SGLang workers, start with `--stream-interval 20` to reduce host-side engine and
+> bridge overhead under load. This setting is recommended for host efficiency; it is not required
+> for KV routing. See the vLLM and SGLang reference guides for the
+> [vLLM](../../backends/vllm/vllm-reference-guide.md#recommended-stream-interval) and
+> [SGLang](../../backends/sglang/sglang-reference-guide.md#recommended-stream-interval)
+> streaming-granularity tradeoffs.
 
 For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service and add the backend event flag to
 the appropriate vLLM or SGLang workers as described above. For approximate routing without worker

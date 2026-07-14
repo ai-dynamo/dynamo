@@ -163,10 +163,11 @@ For dependency-free local development, leave KV event publishing disabled:
 - **SGLang:** No flag needed (KV events disabled by default)
 - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-For event-driven KV routing, vLLM and SGLang require a backend-specific `--kv-events-config` on
-workers that perform prefill. TensorRT-LLM requires `--publish-events-and-metrics`. See the
-[Router Guide](../components/router/router-guide.md#quick-start) for the complete frontend and worker
-configuration.
+For event-driven KV routing, vLLM requires `--kv-events-config` on aggregated workers or
+disaggregated prefill workers. SGLang requires the flag on aggregated workers or on both prefill and
+decode workers in disaggregated serving. TensorRT-LLM requires `--publish-events-and-metrics`. See
+the [Router Guide](../components/router/router-guide.md#quick-start) for the complete frontend and
+worker configuration.
 
 ## Test Your Deployment
 

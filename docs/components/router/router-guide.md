@@ -24,21 +24,33 @@ Event-driven KV routing requires both of these steps:
    python -m dynamo.frontend --router-mode kv --http-port 8000
    ```
 
-2. Start each backend worker that performs prefill with KV event publication enabled. For an
-   aggregated vLLM worker:
+2. Enable KV event publication with the configuration for your backend.
+
+   For vLLM, pass `--kv-events-config` to each aggregated worker or disaggregated prefill worker:
 
    ```bash
    python -m dynamo.vllm --model Qwen/Qwen3-0.6B \
+     --stream-interval 20 \
      --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
    ```
 
-In a disaggregated vLLM deployment, pass `--kv-events-config` to prefill workers, not decode-only
-workers. SGLang also uses a backend-specific `--kv-events-config`. TensorRT-LLM uses
-`--publish-events-and-metrics`. For approximate routing without worker events, omit the backend
-event flag and start the frontend with `--no-router-kv-events`.
+   For SGLang, pass `--kv-events-config` to each aggregated worker. In disaggregated deployments,
+   pass it to both prefill and decode workers:
 
-For vLLM host-side tuning, see
-[Recommended Stream Interval](../../backends/vllm/vllm-reference-guide.md#recommended-stream-interval).
+   ```bash
+   python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B \
+     --stream-interval 20 \
+     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+   ```
+
+Do not pass `--kv-events-config` to vLLM decode-only workers. Use a unique ZMQ endpoint port for
+workers that share a network namespace. TensorRT-LLM uses `--publish-events-and-metrics`. For
+approximate routing without worker events, omit the backend event flag and start the frontend with
+`--no-router-kv-events`.
+
+For host-side tuning details, see the recommended stream interval guidance for
+[vLLM](../../backends/vllm/vllm-reference-guide.md#recommended-stream-interval) and
+[SGLang](../../backends/sglang/sglang-reference-guide.md#recommended-stream-interval).
 
 #### CLI Arguments
 
@@ -64,8 +76,8 @@ For detailed configuration options and tuning parameters, see [Configuration and
 
 ### Kubernetes Deployment
 
-An event-driven vLLM `DynamoGraphDeployment` requires both `DYN_ROUTER_MODE=kv` on the Frontend
-service and `--kv-events-config` on each aggregated worker or disaggregated prefill worker:
+An event-driven `DynamoGraphDeployment` requires `DYN_ROUTER_MODE=kv` on the Frontend service and
+backend-specific worker arguments. The following example configures vLLM:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -93,8 +105,22 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --stream-interval
+            - "20"
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+```
+
+For a SGLang worker, use the corresponding backend arguments:
+
+```yaml
+args:
+  - --model-path
+  - Qwen/Qwen3-0.6B
+  - --stream-interval
+  - "20"
+  - --kv-events-config
+  - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
 ```
 
 **Key Points:**
@@ -102,6 +128,9 @@ spec:
 - Set `DYN_ROUTER_MODE=kv` on the **Frontend** service only.
 - Pass `--kv-events-config` to vLLM workers that perform prefill. In aggregated serving, those are
   the aggregated workers. In disaggregated serving, those are the prefill workers only.
+- Pass `--kv-events-config` to every KV-routed SGLang worker. In disaggregated serving, those are
+  both prefill and decode workers.
+- Start with `--stream-interval 20` on vLLM and SGLang workers to reduce host-side overhead.
 - For approximate cache-state prediction, omit `--kv-events-config` and set
   `DYN_ROUTER_USE_KV_EVENTS=false` on the Frontend service.
 
