@@ -204,8 +204,9 @@ RUN --mount=type=secret,id=gitlab_user \
     GITLAB_TOKEN=$(cat /run/secrets/gitlab_token) && \
     git clone --depth 1 --branch ${MLPERF_REF} https://${GITLAB_USERNAME}:${GITLAB_TOKEN}@gitlab-master.nvidia.com/mlpinf/mlperf-inference.git /opt/mlperf-inference
 WORKDIR /opt/mlperf-inference/closed/NVIDIA
-RUN pip install ".[llm]"
-RUN pip install "huggingface_hub<0.34"
+RUN HF_BASE=$(pip show huggingface_hub | awk '/^Version:/{print $2}') \
+ && pip install ".[llm]" \
+ && pip install --break-system-packages --no-cache-dir --no-deps "huggingface_hub==${HF_BASE}"
 
 
 ENV DYNAMO_HOME=/opt/dynamo
