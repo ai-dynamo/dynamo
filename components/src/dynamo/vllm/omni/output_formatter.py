@@ -29,6 +29,7 @@ from dynamo.common.utils.output_modalities import RequestType
 from dynamo.common.utils.video_utils import encode_video
 from dynamo.vllm.handlers import build_prompt_tokens_details
 from dynamo.vllm.omni.utils import is_empty_payload
+from dynamo.vllm.omni.video_convert import to_canonical
 
 logger = logging.getLogger(__name__)
 
@@ -139,8 +140,9 @@ class DiffusionFormatter:
             )
         try:
             start_time = time.time()
+            canonical = to_canonical(images)
             video_bytes = await asyncio.to_thread(
-                encode_video, images, fps, container=output_format
+                encode_video, canonical, fps, container=output_format
             )
 
             if response_format == "b64_json":
