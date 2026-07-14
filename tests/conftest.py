@@ -53,6 +53,39 @@ def _is_xdist_worker(config: pytest.Config) -> bool:
     return hasattr(config, "workerinput")
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """On a failed test, copy managed-process worker logs into the CI artifacts dir.
+
+    Serve/e2e tests run engines via ManagedProcess, which writes the real
+    worker/engine traceback to /tmp/dynamo_tests/<node>/<cmd>.log.txt (plus a
+    <node>_frontend/ sibling). Those files live only on the runner and are lost
+    when it's reclaimed, so worker crashes surface in CI only as a health-check
+    timeout. Copy them (failure-only) under $GITHUB_WORKSPACE/test-results/
+    worker-logs/<node>/ so the existing upload-artifact step preserves them.
+    """
+    outcome = yield
+    report = outcome.get_result()
+    if report.when not in ("setup", "call") or not report.failed:
+        return
+    workspace = os.environ.get("GITHUB_WORKSPACE")
+    if not workspace:
+        return  # only relevant in CI, where test-results/ is uploaded
+    dest = Path(workspace) / "test-results" / "worker-logs" / item.name
+    try:
+        for suffix, prefix in (("", ""), ("_frontend", "frontend_")):
+            src = Path(resolve_test_output_path(item.name + suffix))
+            if not src.is_dir():
+                continue
+            for log in src.glob("*.log*"):
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(log, dest / (prefix + log.name))
+    except Exception as exc:  # never let log copying fail the run
+        logging.getLogger(__name__).warning(
+            "Could not copy worker logs for %s: %s", item.name, exc
+        )
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_sessionstart(session: pytest.Session) -> None:
     if not collection_env_guard_disabled():
