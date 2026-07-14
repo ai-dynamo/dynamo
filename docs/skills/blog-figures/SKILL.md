@@ -71,22 +71,25 @@ This loop is deliberately slow. The polished hand-tuned feel of the corpus comes
 2. **Rectangular shapes only.** `border-radius: 0` everywhere. No rounded corners. Ever.
 3. **Muted fills at `opacity: 0.75`.** Never solid saturated fills.
 4. **Selective accent.** Dynamo green (`#76b900`) only for the single primary item in a figure. Never for everything. If everything is green, nothing is green.
-5. **Two typefaces, one family.** The Dynamo Dark body sans (`Arial, Helvetica, sans-serif`) + the aligned mono (`'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace`), both from `design_tokens.yaml`. Never a third font, never a display serif or light-weight face.
-6. **One headline style.** 18 px ALL-CAPS title, weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`, top-left of canvas (per `design_tokens.yaml`). Scale the title up to 24–42 px for a full-width hero, but keep the weight, case, letter-spacing, and font — size is the only lever. A hero may add a one-line subtitle beneath the title in `#767676`, 12–14 px, weight 400, sentence case: title carries the takeaway, subtitle carries the qualifier.
+5. **Two typefaces, one family.** The Dynamo Dark sans (`Helvetica Neue, Helvetica, Arial, sans-serif` — display titles lead with Helvetica Neue Light; every other role is the token `Arial, Helvetica, sans-serif`) + the aligned mono (`'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace`). Never a third font and never a display serif — Helvetica Neue and Arial are the same visual sans.
+6. **Title treatment matches the figure scale.** Two treatments, one family, both top-left:
+   - **Hero / display** (hero and section-anchor figures): the Helvetica set — `Helvetica Neue, Helvetica, Arial, sans-serif`, weight 300, **title case** (never uppercase), 42 px hero / 36 px body. Pair it with a one-line subtitle in the same set, weight 300, `#767676`, 20–22 px, sentence case, `<config / model> — <takeaway>`.
+   - **Compact / chart** (dense dashboards, heatmaps, inline charts): the `design_tokens.yaml` title — `Arial, Helvetica, sans-serif`, 18 px, weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`.
+   Never uppercase a hero title; never light-weight a compact chart title.
 7. **1px subtle borders.** Never 2px or thicker except for emphasis on the single accent item, and never on container frames.
 
 If you find yourself writing "well, this figure is special" — you're wrong. The non-negotiables are non-negotiable. Find a way to express what you need within them.
 
 ### One Family, Scaled to Fit
 
-There is one house family — **Dynamo Dark** — anchored on `design_tokens.yaml`. It does not fork by figure type. What changes is *size*, not fonts, weights, or palette:
+There is one house family — **Dynamo Dark** — anchored on `design_tokens.yaml`. Body labels, mono ticks, and the palette are identical everywhere; only the **title treatment** shifts with figure scale:
 
-| Figure role | Canvas | Title size |
+| Figure role | Canvas | Title treatment |
 |---|---|---|
-| Inline / body chart (dense marks, heatmaps, many series) | 680–1280 px wide | 18 px |
-| Full-width hero / section anchor (one compressed takeaway) | 1600 px wide | 24–42 px |
+| Inline / body chart (dense marks, heatmaps, many series) | 680–1280 px wide | Compact: Arial, 18 px, weight 700, uppercase, 0.08em |
+| Full-width hero / section anchor (one compressed takeaway) | 1600 px wide | Display: Helvetica set, 42 px, weight 300, title case |
 
-Every figure in a blog uses the same fonts and weights; only the canvas and title size step up for heroes.
+Helvetica Neue (display titles) and Arial (every other role) are the same visual sans, so the two title treatments read as one family.
 
 **Find the canonical reference before drafting.** Don't guess the treatment. Open an existing exemplar (compact: `docs/digest/flash-indexer/images/`; hero: `docs/digest/dynosim/`) and read the actual `<style>` block — font sizes, weights, exact color hex codes, title placement. Better still, read `design_tokens.yaml` directly; it is the machine-readable source of truth. Five minutes of looking saves five render-and-iterate cycles.
 
@@ -285,7 +288,7 @@ Existing sibling skills to use, not re-implement:
 - `frontend-design` — HTML/CSS craft (loose adaptation when authoring HTML→PNG sources).
 - `parallel-agent-audit` and `plan-to-autorun` — when iterating on 4+ figures simultaneously, use the worktree-per-figure pattern (one git worktree + `.venv` per figure script) so renders run in parallel and edits to one figure can't break the others.
 
-Canonical design system source: [`docs/digest/flash-indexer/tools/design_tokens.yaml`](../flash-indexer/tools/design_tokens.yaml) is the machine-readable source of truth (colors, fonts, weights, spacing). Each digest post copies it (plus `plotly_dynamo.py` and `theme.d2`) into its own `tools/` so old posts keep rendering; never fork the values.
+Canonical design system source: [`docs/digest/flash-indexer/tools/design_tokens.yaml`](../../digest/flash-indexer/tools/design_tokens.yaml) is the machine-readable source of truth (colors, fonts, weights, spacing). Each digest post copies it (plus `plotly_dynamo.py` and `theme.d2`) into its own `tools/` so old posts keep rendering; never fork the values.
 
 ## Self-Check Before Declaring Done
 

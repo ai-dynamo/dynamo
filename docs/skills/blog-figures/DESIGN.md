@@ -2,7 +2,7 @@
 
 Source of truth for the visual system used in Dynamo Digest figures. Everything here is quotable — the blog-figures skill and any automation cite this file verbatim.
 
-The machine-readable source of truth is [`design_tokens.yaml`](../flash-indexer/tools/design_tokens.yaml) (`meta.name: dynamo-dark`, consumed by the D2 theme and the Plotly template). This file is its prose companion. When a value here disagrees with the tokens, the tokens win — fix this file.
+The machine-readable source of truth is [`design_tokens.yaml`](../../digest/flash-indexer/tools/design_tokens.yaml) (`meta.name: dynamo-dark`, consumed by the D2 theme and the Plotly template). This file is its prose companion. When a value here disagrees with the tokens, the tokens win — fix this file.
 
 **One family.** Every Dynamo figure uses a single aesthetic called **Dynamo Dark**. There is no second family. Figures scale in size — inline chart, body figure, full-width hero — but never switch fonts, weights, or palette. ("DynoSim" and "flash-indexer" are the names of blog posts that use this aesthetic, not separate families; "Mocker" is the Dynamo load-simulator component, not a figure family.)
 
@@ -82,19 +82,35 @@ For non-accent bars that need to distinguish 2–3 series, pull greys from `#8c8
 
 ## Typography — One Family
 
-Two typefaces, straight from the tokens. Never a third.
+One Dynamo Dark family: the sans (`Helvetica Neue, Helvetica, Arial, sans-serif`, with Helvetica Neue leading for display titles) plus the aligned mono. Never a third. The title has two treatments that differ only by figure scale — Helvetica Neue and Arial are the same visual sans, so both read as one family.
+
+### Display / Hero Title
+
+Hero and section-anchor figures use a light display title in the Helvetica set, title case — the generous, quiet headline voice.
+
+| Role | Family | Size (px) | Weight | Case | Color |
+|---|---|---|---|---|---|
+| Title | `Helvetica Neue, Helvetica, Arial, sans-serif` | 42 (hero) / 36 (body) | 300 | title case | `#ffffff` |
+| Subtitle | `Helvetica Neue, Helvetica, Arial, sans-serif` | 22 (hero) / 17 (body) | 300 | sentence case | `#767676` |
+
+Title is top-left, never uppercase, never a display serif. The subtitle sits one line below with an em-dash pattern: `<hardware / config / model> — <takeaway>`. A short labeled headline stays title case; a full-sentence verdict headline may drop to sentence case.
+
+### Compact / Chart Title
+
+Dense dashboards, heatmaps, and inline charts use the compact title from `design_tokens.yaml` — tight ALL-CAPS for a data-dashboard read.
 
 | Role | Family | Size (px) | Weight | Transform | Letter-spacing |
 |---|---|---|---|---|---|
 | Title | `Arial, Helvetica, sans-serif` | 18 | 700 | uppercase | 0.08em |
+
+### Shared Roles (both scales)
+
+| Role | Family | Size (px) | Weight | Transform | Letter-spacing |
+|---|---|---|---|---|---|
 | Heading | `Arial, Helvetica, sans-serif` | 14 | 600 | uppercase | 0.05em |
 | Label | `Arial, Helvetica, sans-serif` | 12 | 400 | none | 0 |
 | Annotation | `Arial, Helvetica, sans-serif` | 10 | 400 | none | 0 |
 | Code / ticks / numbers | `'Roboto Mono', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace` | 10–13 | 400 | none | 0 |
-
-The title is 18 px at inline / body scale. For a full-width hero figure, scale the title up (24–42 px) but keep everything else the same: weight 700, `text-transform: uppercase`, `letter-spacing: 0.08em`, and the sans stack above. Size is the only lever that changes with scale — never switch to a display serif, a light weight, or sentence case for heroes.
-
-Title color is `#ffffff`. A hero title may carry a one-line subtitle beneath it in `text.muted` (`#767676`), set at label size (12–14 px, weight 400, sentence case). The title carries the takeaway; the subtitle carries the qualifier (config, units, model).
 
 ## Canvas and Layout
 
@@ -164,7 +180,7 @@ These are anti-patterns. Every one of them has shown up in a real figure draft. 
 
 - **3D bars, isometric perspective, drop shadows, gradient fills.** The only allowed gradient is a soft green glow on a single accent element, and even that is a last resort.
 - **Rounded corners.** `border-radius: 0` everywhere.
-- **A second type family.** One family — Dynamo Dark. Do not introduce a display serif, Helvetica Neue, Geist, or any font outside the `Arial, Helvetica, sans-serif` + `Roboto Mono` token stack.
+- **A third type family.** One family — Dynamo Dark: the Helvetica/Arial sans (display titles use its Helvetica Neue Light weight) + `Roboto Mono`. Do not introduce a display serif, Geist, or any font outside that set.
 - **More than two accent colors per figure.** If the figure has coral + green + yellow + blue all carrying meaning, the design is overloaded. Reduce.
 - **Raw hex outside the tokens.** Every color comes from `design_tokens.yaml`. If you reach for a new hex, the role does not yet exist in the system; add it canonically or reuse an existing role.
 - **Inconsistent label placement across the family.** Inside-some, outside-others, above-some in the same blog reads as broken. One rule per visual category.
@@ -179,7 +195,7 @@ These are anti-patterns. Every one of them has shown up in a real figure draft. 
 Walk this list explicitly, item by item, before declaring done. No silent "looks fine."
 
 1. **Ground is `#000000`.** Background is pure black, not transparent, not soft.
-2. **Type treatment is the one family.** Title is 18 px+ uppercase weight 700 in the Arial sans stack; body sans and mono are the token stacks. No Helvetica Neue, no Geist, no third font.
+2. **Type treatment matches the scale.** Hero titles are the Helvetica set, weight 300, title case; compact chart titles are Arial 700 uppercase; body sans and mono are the token stacks. No display serif, no Geist, no third family.
 3. **Single accent.** Green appears only on the one item that's "winning"; other figures in the blog use green for the same role.
 4. **Numbers are real.** Every digit traces back to a source of truth.
 5. **Geometry is computed.** Arrow endpoints, card edges, column alignments, legend centers all derive from named constants — not eyeballed.

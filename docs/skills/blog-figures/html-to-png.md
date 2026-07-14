@@ -20,7 +20,7 @@ This is the only pathway with no in-corpus example, so this file gives you a wor
 
 ## `figure.html` Template
 
-Single-file HTML. CSS variables mirror the canonical [`design_tokens.yaml`](../flash-indexer/tools/design_tokens.yaml). Fixed canvas size for deterministic PNG export.
+Single-file HTML. CSS variables mirror the canonical [`design_tokens.yaml`](../../digest/flash-indexer/tools/design_tokens.yaml). Fixed canvas size for deterministic PNG export.
 
 ```html
 <!doctype html>
@@ -267,6 +267,6 @@ Beyond the seven non-negotiables in [SKILL.md](SKILL.md), confirm:
 - [ ] CSS variables match `design_tokens.yaml`. No raw hex in CSS outside the `:root` block.
 - [ ] `border-radius: 0` on every styled element. (Default browser rounding on inputs/buttons does not apply because there are none.)
 - [ ] Two font families maximum (`var(--font-sans)`, `var(--font-mono)`).
-- [ ] Title uses `text-transform: uppercase` with `letter-spacing: 0.08em`.
+- [ ] Compact chart title uses `text-transform: uppercase` with `letter-spacing: 0.08em`. A hero/display figure instead uses the Helvetica-set light title in title case (see [DESIGN.md](DESIGN.md)).
 - [ ] Body has `background: var(--bg-primary)` (not transparent, not `inherit`).
 - [ ] Figure width is fixed in pixels (not `100%`, not `vw`). Determinism.
