@@ -30,6 +30,8 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
+const testDGDName = "my-dgd"
+
 // newV1alpha1DGDR builds a fully-populated v1alpha1 DGDR for use in tests.
 func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 	profilingBlob := map[string]interface{}{
@@ -73,7 +75,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			},
 			EnableGPUDiscovery: &trueVal,
 			DeploymentOverrides: &DeploymentOverridesSpec{
-				Name:      "my-dgd",
+				Name:      testDGDName,
 				Namespace: "prod",
 				Labels:    map[string]string{"team": "ml"},
 			},
@@ -84,7 +86,7 @@ func newV1alpha1DGDR() *DynamoGraphDeploymentRequest {
 			ObservedGeneration: 3,
 			ProfilingResults:   "configmap/profiling-cm",
 			Deployment: &DeploymentStatus{
-				Name:      "my-dgd",
+				Name:      testDGDName,
 				Namespace: "prod",
 				State:     "initializing",
 				Created:   true,
@@ -217,19 +219,9 @@ func TestConvertTo_SpecFields(t *testing.T) {
 		t.Errorf("ModelCache.PVCMountPath: got %q, want %q", dst.Spec.ModelCache.PVCMountPath, "/data/model")
 	}
 
-	// EnableGPUDiscovery → annotation
-	if dst.Annotations[legacyAnnDGDREnableGPUDisc] != "true" {
-		t.Errorf("legacyAnnDGDREnableGPUDisc annotation: got %q, want %q", dst.Annotations[legacyAnnDGDREnableGPUDisc], "true")
-	}
-
-	// OutputPVC → annotation
-	if dst.Annotations[legacyAnnDGDROutputPVC] != "output-pvc" {
-		t.Errorf("legacyAnnDGDROutputPVC annotation: got %q, want %q", dst.Annotations[legacyAnnDGDROutputPVC], "output-pvc")
-	}
-
-	// DeploymentOverrides → annotation
-	if dst.Annotations[legacyAnnDGDRDeployOverrides] == "" {
-		t.Error("legacyAnnDGDRDeployOverrides annotation is empty")
+	// Alpha-only fields use the structural sparse payload.
+	if dst.Annotations[annDGDRSpec] == "" {
+		t.Error("annDGDRSpec structural annotation is empty")
 	}
 }
 
@@ -251,18 +243,13 @@ func TestConvertTo_StatusFields(t *testing.T) {
 	}
 
 	// Deployment.Name → DGDName
-	if dst.Status.DGDName != "my-dgd" {
-		t.Errorf("Status.DGDName: got %q, want %q", dst.Status.DGDName, "my-dgd")
+	if dst.Status.DGDName != testDGDName {
+		t.Errorf("Status.DGDName: got %q, want %q", dst.Status.DGDName, testDGDName)
 	}
 
-	// Backend → annotation
-	if dst.Annotations[legacyAnnDGDRStatusBackend] != "vllm" {
-		t.Errorf("legacyAnnDGDRStatusBackend annotation: got %q, want %q", dst.Annotations[legacyAnnDGDRStatusBackend], "vllm")
-	}
-
-	// ProfilingResults → annotation
-	if dst.Annotations[legacyAnnDGDRProfilingResults] != "configmap/profiling-cm" {
-		t.Errorf("legacyAnnDGDRProfilingResults annotation: got %q, want %q", dst.Annotations[legacyAnnDGDRProfilingResults], "configmap/profiling-cm")
+	// Alpha-only status uses the structural sparse payload.
+	if dst.Annotations[annDGDRStatus] == "" {
+		t.Error("annDGDRStatus structural annotation is empty")
 	}
 }
 
@@ -367,120 +354,6 @@ func TestConvertTo_InvalidProfilingConfigJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("ConvertTo() expected error for invalid JSON, got nil")
 	}
-}
-
-func TestDGDRReadsLegacyAnnotationsWrittenByOldConverter(t *testing.T) {
-	original := newV1alpha1DGDR()
-	hub, err := legacyDGDRConvertToHubForTest(original)
-	if err != nil {
-		t.Fatalf("legacy convert to hub: %v", err)
-	}
-
-	restored := &DynamoGraphDeploymentRequest{}
-	if err := restored.ConvertFrom(hub); err != nil {
-		t.Fatalf("ConvertFrom() error = %v", err)
-	}
-
-	if diff := cmp.Diff(original.Spec, restored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
-		t.Fatalf("spec mismatch after legacy read (-want +got):\n%s", diff)
-	}
-	assertProfilingConfigBlobHas(t, restored.Spec.ProfilingConfig.Config, map[string]any{
-		"extra_key": "preserved",
-	})
-	if diff := cmp.Diff(original.Status, restored.Status); diff != "" {
-		t.Fatalf("status mismatch after legacy read (-want +got):\n%s", diff)
-	}
-}
-
-func TestDGDRWritesLegacyAnnotationsReadableByOldConverter(t *testing.T) {
-	original := newV1alpha1DGDR()
-	hub := &v1beta1.DynamoGraphDeploymentRequest{}
-	if err := original.ConvertTo(hub); err != nil {
-		t.Fatalf("ConvertTo() error = %v", err)
-	}
-
-	for _, key := range []string{
-		legacyAnnDGDREnableGPUDisc,
-		legacyAnnDGDRProfilingConfig,
-		legacyAnnDGDRConfigMapRef,
-		legacyAnnDGDROutputPVC,
-		legacyAnnDGDRDeployOverrides,
-		legacyAnnDGDRStatusBackend,
-		legacyAnnDGDRProfilingResults,
-		legacyAnnDGDRDeploymentStatus,
-	} {
-		if hub.Annotations[key] == "" {
-			t.Fatalf("legacy annotation %q was not written", key)
-		}
-	}
-
-	legacyRestored := legacyDGDRConvertFromHubForTest(hub)
-	if diff := cmp.Diff(original.Spec, legacyRestored.Spec, cmpopts.IgnoreFields(ProfilingConfigSpec{}, "Config")); diff != "" {
-		t.Fatalf("legacy restored spec mismatch (-want +got):\n%s", diff)
-	}
-	assertProfilingConfigBlobHas(t, legacyRestored.Spec.ProfilingConfig.Config, map[string]any{
-		"extra_key": "preserved",
-	})
-	if diff := cmp.Diff(original.Status, legacyRestored.Status); diff != "" {
-		t.Fatalf("legacy restored status mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestDGDRLegacyProfilingConfigDoesNotOverrideLiveHubFields(t *testing.T) {
-	legacyBlob, err := json.Marshal(map[string]any{
-		"sla": map[string]any{
-			"ttft": 100,
-			"itl":  10,
-			"isl":  200,
-			"osl":  20,
-		},
-		"deployment": map[string]any{
-			"modelCache": map[string]any{
-				"pvcName": "stale-pvc",
-			},
-		},
-		"planner":   map[string]any{"stale": true},
-		"extra_key": "keep",
-	})
-	if err != nil {
-		t.Fatalf("marshal legacy blob: %v", err)
-	}
-	hub := &v1beta1.DynamoGraphDeploymentRequest{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "edited",
-			Annotations: map[string]string{
-				legacyAnnDGDRProfilingConfig: string(legacyBlob),
-			},
-		},
-		Spec: v1beta1.DynamoGraphDeploymentRequestSpec{
-			Model: "model",
-		},
-	}
-
-	spoke := &DynamoGraphDeploymentRequest{}
-	if err := spoke.ConvertFrom(hub); err != nil {
-		t.Fatalf("ConvertFrom() error = %v", err)
-	}
-	restored := &v1beta1.DynamoGraphDeploymentRequest{}
-	if err := spoke.ConvertTo(restored); err != nil {
-		t.Fatalf("ConvertTo() error = %v", err)
-	}
-
-	if restored.Spec.SLA != nil {
-		t.Fatalf("stale legacy SLA restored into live hub spec: %#v", restored.Spec.SLA)
-	}
-	if restored.Spec.Workload != nil {
-		t.Fatalf("stale legacy workload restored into live hub spec: %#v", restored.Spec.Workload)
-	}
-	if restored.Spec.ModelCache != nil {
-		t.Fatalf("stale legacy model cache restored into live hub spec: %#v", restored.Spec.ModelCache)
-	}
-	if restored.Spec.Features != nil && restored.Spec.Features.Planner != nil {
-		t.Fatalf("stale legacy planner restored into live hub spec: %#v", restored.Spec.Features.Planner)
-	}
-	assertProfilingConfigBlobHas(t, spoke.Spec.ProfilingConfig.Config, map[string]any{
-		"extra_key": "keep",
-	})
 }
 
 func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
@@ -695,56 +568,4 @@ func mustDGDRJSON(t *testing.T, v any) []byte {
 		t.Fatalf("marshal JSON: %v", err)
 	}
 	return data
-}
-
-func TestRestoreDGDRDeploymentStatusValidatesRequestState(t *testing.T) {
-	hubStatus := &v1beta1.DynamoGraphDeploymentRequestStatus{
-		Phase:   v1beta1.DGDRPhaseReady,
-		DGDName: "demo-dgd",
-	}
-	deploymentStatus := DeploymentStatus{
-		Name:    "demo-dgd",
-		Created: true,
-	}
-	validPayload, err := json.Marshal(dgdrDeploymentStatusAnnotation{
-		DeploymentStatus: deploymentStatus,
-		RequestState:     DGDRStateDeploymentDeleted,
-	})
-	if err != nil {
-		t.Fatalf("marshal valid payload: %v", err)
-	}
-	legacyPayload, err := json.Marshal(deploymentStatus)
-	if err != nil {
-		t.Fatalf("marshal legacy payload: %v", err)
-	}
-	invalidPayload, err := json.Marshal(dgdrDeploymentStatusAnnotation{
-		DeploymentStatus: deploymentStatus,
-		RequestState:     DGDRState("NotAState"),
-	})
-	if err != nil {
-		t.Fatalf("marshal invalid payload: %v", err)
-	}
-
-	t.Run("valid", func(t *testing.T) {
-		gotDeployment, gotState, ok := restoreDGDRDeploymentStatus(string(validPayload), hubStatus)
-		if !ok {
-			t.Fatal("restoreDGDRDeploymentStatus() rejected valid payload")
-		}
-		if gotState != DGDRStateDeploymentDeleted {
-			t.Fatalf("state = %q, want %q", gotState, DGDRStateDeploymentDeleted)
-		}
-		if diff := cmp.Diff(deploymentStatus, gotDeployment); diff != "" {
-			t.Fatalf("deployment mismatch (-want +got):\n%s", diff)
-		}
-	})
-	t.Run("legacy", func(t *testing.T) {
-		if _, _, ok := restoreDGDRDeploymentStatus(string(legacyPayload), hubStatus); ok {
-			t.Fatal("restoreDGDRDeploymentStatus() accepted legacy payload without requestState")
-		}
-	})
-	t.Run("invalid", func(t *testing.T) {
-		if _, _, ok := restoreDGDRDeploymentStatus(string(invalidPayload), hubStatus); ok {
-			t.Fatal("restoreDGDRDeploymentStatus() accepted invalid requestState")
-		}
-	})
 }

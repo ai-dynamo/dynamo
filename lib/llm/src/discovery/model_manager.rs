@@ -66,6 +66,14 @@ enum PrefillActivationState {
     PrefillReady(Box<Endpoint>),
 }
 
+/// State for the optional Encode endpoint / token-pipeline rendezvous.
+#[derive(Default)]
+struct EncoderActivationState {
+    consumer: Option<oneshot::Sender<Endpoint>>,
+    endpoint: Option<Box<Endpoint>>,
+    routing_enabled: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ModelManagerError {
     #[error("Model not found: {0}")]
@@ -101,6 +109,9 @@ pub struct ModelManager {
     /// Prefill router activation rendezvous, keyed by "model_name:namespace".
     prefill_router_activators: DashMap<String, PrefillActivationState>,
 
+    /// Encode router activation rendezvous, keyed by "model_name:namespace".
+    encoder_router_activators: DashMap<String, EncoderActivationState>,
+
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
@@ -117,6 +128,17 @@ pub struct ModelManager {
     /// per component and can restart it if the previous one exited (avoids double counting on
     /// rebuilds while keeping the feed durable).
     lora_load_feeds: DashMap<String, tokio::task::JoinHandle<()>>,
+
+    /// Alias → primary model name mapping. Used to normalize metrics labels.
+    alias_to_primary: DashMap<String, String>,
+
+    /// Serializes name-reservation transitions — the primary claim in
+    /// [`Self::add_worker_set`] and the alias claim in [`Self::register_alias`] —
+    /// so a name cannot be concurrently claimed as both a primary and an alias.
+    /// A cold-path lock (worker registration, not request serving), uncontended
+    /// in steady state; held only across in-memory map reads/writes, never across
+    /// an `.await`.
+    reservation_lock: parking_lot::Mutex<()>,
 }
 
 impl Default for ModelManager {
@@ -138,6 +160,7 @@ impl ModelManager {
             models: DashMap::new(),
             cards: DashMap::new(),
             prefill_router_activators: DashMap::new(),
+            encoder_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
             lora_routing_table,
             lora_state_tracker,
@@ -145,6 +168,8 @@ impl ModelManager {
             lora_filter,
             lora_enabled: crate::lora::lora_serving_enabled(),
             lora_load_feeds: DashMap::new(),
+            alias_to_primary: DashMap::new(),
+            reservation_lock: parking_lot::Mutex::new(()),
         }
     }
 
@@ -177,10 +202,158 @@ impl ModelManager {
         }
     }
 
-    /// Add a WorkerSet to a Model. Creates the Model if it doesn't exist.
-    pub fn add_worker_set(&self, model_name: &str, namespace: &str, worker_set: WorkerSet) {
+    /// Add a WorkerSet to a Model under its primary name. Creates the Model if it
+    /// doesn't exist. Returns `false` (registering nothing) when `model_name` is
+    /// already reserved as another deployment's alias.
+    ///
+    /// The names a live deployment holds — its primary plus every alias — are
+    /// globally reserved until it is removed, so a later deployment cannot claim
+    /// any of them, as either a primary or an alias. This is the primary-side
+    /// mirror of [`Self::register_alias`] (which rejects an alias colliding with a
+    /// live primary or another primary's alias); together they make name
+    /// reservation first-come and symmetric across namespaces. A later deployment
+    /// re-using a name fails loudly rather than silently displacing the owner.
+    ///
+    /// Holds [`Self::reservation_lock`] across the reserved-name check and the
+    /// insert so the claim is atomic against a concurrent `register_alias` for
+    /// the same name (a name can never end up both a live primary and an alias).
+    /// The lock is always taken before any map access, so it never inverts with a
+    /// DashMap shard lock.
+    pub fn add_worker_set(&self, model_name: &str, namespace: &str, worker_set: WorkerSet) -> bool {
+        let _reservation = self.reservation_lock.lock();
+        if let Some(reserved_by) = self.alias_to_primary.get(model_name) {
+            tracing::warn!(
+                model_name,
+                reserved_by = reserved_by.value().as_str(),
+                "Model name is already reserved as an alias of another deployment — refusing to \
+                 register. Choose a different name or remove the conflicting deployment."
+            );
+            return false;
+        }
         let model = self.get_or_create_model(model_name);
         model.add_worker_set(namespace.to_string(), Arc::new(worker_set));
+        true
+    }
+
+    /// Add an already-Arc-wrapped WorkerSet to a Model. Creates the Model if it doesn't exist.
+    /// Used to register the same WorkerSet under multiple model names (aliases).
+    ///
+    /// Logs a warning and skips if a *different* primary already owns this name —
+    /// this guards against operator misconfiguration where two unrelated models
+    /// declare a colliding alias. The first claim wins; the second is rejected.
+    pub fn add_worker_set_arc(
+        &self,
+        model_name: &str,
+        namespace: &str,
+        worker_set: Arc<WorkerSet>,
+    ) -> bool {
+        // Collision check: if `model_name` already exists as a primary (i.e.
+        // already has worker sets AND is not currently an alias), refuse to
+        // clobber it. The two facts are read one map at a time — the `models`
+        // guard is dropped before touching `alias_to_primary` — so this never
+        // holds one shard lock while acquiring the other (register_alias probes
+        // them in the opposite order; holding across would risk a deadlock).
+        let is_live_primary = self
+            .models
+            .get(model_name)
+            .is_some_and(|existing| !existing.is_empty());
+        if is_live_primary && !self.alias_to_primary.contains_key(model_name) {
+            tracing::warn!(
+                alias = model_name,
+                namespace,
+                "Alias collides with a registered primary model — skipping. \
+                 Choose a different alias or rename the conflicting model."
+            );
+            return false;
+        }
+
+        let model = self.get_or_create_model(model_name);
+        model.add_worker_set(namespace.to_string(), worker_set);
+        true
+    }
+
+    /// Record that `alias` is an alternate name for `primary`. Used to normalize metrics labels.
+    ///
+    /// The claim is taken atomically through the map entry so two concurrent
+    /// registrations of the same alias cannot both succeed. First-write-wins:
+    /// re-registering the same alias→primary is idempotent, but a conflicting
+    /// primary (or a name already owned by a registered primary model) is
+    /// refused and logged so operators find the collision in the logs rather
+    /// than through silent metric re-attribution.
+    ///
+    /// Holds [`Self::reservation_lock`] across the live-primary probe and the
+    /// entry insert so the claim is atomic against a concurrent `add_worker_set`
+    /// for the same name. Within that section the `models` guard is dropped before
+    /// touching `alias_to_primary` (via `is_some_and`), and the lock is taken
+    /// before any map access, so no DashMap shard lock is ever held across another.
+    pub fn register_alias(&self, alias: &str, primary: &str) -> bool {
+        let _reservation = self.reservation_lock.lock();
+        if self
+            .models
+            .get(alias)
+            .is_some_and(|model| !model.is_empty())
+            && !self.alias_to_primary.contains_key(alias)
+        {
+            tracing::warn!(
+                alias,
+                primary,
+                "Alias collides with a registered primary model — refusing to register. \
+                 Choose a different alias or rename the conflicting model."
+            );
+            return false;
+        }
+
+        match self.alias_to_primary.entry(alias.to_string()) {
+            Entry::Occupied(existing) => {
+                if existing.get() != primary {
+                    tracing::warn!(
+                        alias,
+                        new_primary = primary,
+                        existing_primary = existing.get().as_str(),
+                        "Alias is already claimed by a different primary — refusing to overwrite. \
+                         Existing claim wins."
+                    );
+                    return false;
+                }
+                // Same alias→same primary — idempotent, no-op.
+                true
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(primary.to_string());
+                true
+            }
+        }
+    }
+
+    /// Remove a previously registered alias mapping once the alias has no WorkerSets.
+    pub fn unregister_alias_if_empty(&self, alias: &str, primary: &str) {
+        if self
+            .models
+            .get(alias)
+            .is_some_and(|model| !model.is_empty())
+        {
+            return;
+        }
+
+        self.alias_to_primary
+            .remove_if(alias, |_, existing| existing == primary);
+    }
+
+    /// Return the primary (canonical) model name for `model`, resolving aliases.
+    /// Returns `model` unchanged if it is not an alias.
+    pub fn resolve_canonical_name(&self, model: &str) -> String {
+        self.alias_to_primary
+            .get(model)
+            .map(|v| v.value().clone())
+            .unwrap_or_else(|| model.to_string())
+    }
+
+    /// Whether `alias` is currently reserved as an alias of `primary`. Teardown
+    /// uses this to clean up only the alias names a deployment actually owns.
+    pub fn alias_belongs_to(&self, alias: &str, primary: &str) -> bool {
+        self.alias_to_primary
+            .get(alias)
+            .is_some_and(|owner| owner.value() == primary)
     }
 
     /// Remove a WorkerSet from a Model. Removes the Model if it becomes empty.
@@ -1266,6 +1439,161 @@ impl ModelManager {
         }
     }
 
+    /// Register the optional encoder hop for a token-serving WorkerSet.
+    /// A cached Encode endpoint activates rebuilt consumers immediately.
+    pub fn register_encoder_router(
+        &self,
+        model_name: &str,
+        namespace: &str,
+    ) -> Option<oneshot::Receiver<Endpoint>> {
+        let key = Self::model_namespace_key(model_name, namespace);
+        match self.encoder_router_activators.entry(key) {
+            Entry::Occupied(mut o) => {
+                if o.get().consumer.is_some() {
+                    tracing::error!(
+                        model_name = %model_name,
+                        namespace = %namespace,
+                        "Token WorkerSet already registered for this encoder router"
+                    );
+                    return None;
+                }
+                let (tx, rx) = oneshot::channel();
+                let state = o.get_mut();
+                if state.routing_enabled {
+                    if let Some(endpoint) = state.endpoint.as_ref() {
+                        let _ = tx.send((**endpoint).clone());
+                    } else {
+                        state.consumer = Some(tx);
+                    }
+                } else {
+                    state.consumer = Some(tx);
+                }
+                Some(rx)
+            }
+            Entry::Vacant(v) => {
+                let (tx, rx) = oneshot::channel();
+                v.insert(EncoderActivationState {
+                    consumer: Some(tx),
+                    ..Default::default()
+                });
+                Some(rx)
+            }
+        }
+    }
+
+    /// Mark the model namespace as explicitly depending on an Encode worker.
+    /// Activation waits for both this signal and an Encode endpoint so worker
+    /// discovery order does not change routing behavior.
+    pub fn enable_encoder_routing(&self, model_name: &str, namespace: &str) {
+        let key = Self::model_namespace_key(model_name, namespace);
+        // Option::zip would eagerly evaluate consumer.take(), dropping the
+        // waiter when the Encode endpoint has not arrived yet.
+        #[allow(clippy::manual_option_zip)]
+        let sender_and_endpoint = match self.encoder_router_activators.entry(key) {
+            Entry::Occupied(mut o) => {
+                let state = o.get_mut();
+                state.routing_enabled = true;
+                state
+                    .endpoint
+                    .as_ref()
+                    .map(|endpoint| (**endpoint).clone())
+                    .and_then(|endpoint| state.consumer.take().map(|sender| (sender, endpoint)))
+            }
+            Entry::Vacant(v) => {
+                v.insert(EncoderActivationState {
+                    routing_enabled: true,
+                    ..Default::default()
+                });
+                None
+            }
+        };
+        if let Some((sender, endpoint)) = sender_and_endpoint {
+            let _ = sender.send(endpoint);
+        }
+    }
+
+    /// Publish an Encode endpoint and activate any waiting token pipeline.
+    pub fn activate_encoder_router(&self, model_name: &str, namespace: &str, endpoint: Endpoint) {
+        let key = Self::model_namespace_key(model_name, namespace);
+        let sender = match self.encoder_router_activators.entry(key) {
+            Entry::Occupied(mut o) => {
+                let state = o.get_mut();
+                state.endpoint = Some(Box::new(endpoint.clone()));
+                state
+                    .routing_enabled
+                    .then(|| state.consumer.take())
+                    .flatten()
+            }
+            Entry::Vacant(v) => {
+                v.insert(EncoderActivationState {
+                    endpoint: Some(Box::new(endpoint.clone())),
+                    ..Default::default()
+                });
+                None
+            }
+        };
+        if let Some(sender) = sender {
+            if sender.send(endpoint).is_err() {
+                tracing::warn!(
+                    model_name = %model_name,
+                    namespace = %namespace,
+                    "Encoder router consumer disappeared before activation; endpoint remains cached"
+                );
+            }
+        } else {
+            self.reactivate_encoder_routers(model_name, namespace);
+        }
+    }
+
+    fn reactivate_encoder_routers(&self, model_name: &str, namespace: &str) {
+        if let Some(model) = self.get_model(model_name) {
+            for ws in model.worker_sets() {
+                if ws.namespace() == namespace
+                    && let Some(ref router) = ws.encoder_router
+                    && router.is_deactivated()
+                {
+                    router.reactivate();
+                }
+            }
+        }
+    }
+
+    /// Drop a stale Encode endpoint and make existing token pipelines bypass it.
+    pub fn remove_encoder_activator(&self, model_name: &str, namespace: &str) {
+        let key = Self::model_namespace_key(model_name, namespace);
+        if let Entry::Occupied(mut o) = self.encoder_router_activators.entry(key) {
+            let should_remove = {
+                let state = o.get_mut();
+                state.endpoint = None;
+                state.consumer.is_none()
+            };
+            if should_remove {
+                o.remove();
+            }
+        }
+    }
+
+    pub fn deactivate_encoder_router_for_consumers(&self, model_name: &str, namespace: &str) {
+        if let Some(model) = self.get_model(model_name) {
+            for ws in model.worker_sets() {
+                if ws.namespace() == namespace
+                    && let Some(ref router) = ws.encoder_router
+                {
+                    router.deactivate();
+                }
+            }
+        }
+    }
+
+    /// Remove a waiter owned by a token WorkerSet that failed or was removed,
+    /// while preserving a cached live Encode endpoint for rebuilds.
+    pub fn remove_consumer_encoder_waiter(&self, model_name: &str, namespace: &str) {
+        let key = Self::model_namespace_key(model_name, namespace);
+        if let Some(mut state) = self.encoder_router_activators.get_mut(&key) {
+            state.consumer = None;
+        }
+    }
+
     // -- Worker monitoring --
 
     /// Gets or sets the load threshold config for a model's worker monitor.
@@ -1437,6 +1765,8 @@ fn has_required_kv_transfer_policy(configs: &HashMap<WorkerId, ModelRuntimeConfi
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
 
     use crate::local_model::runtime_config::ModelRuntimeConfig;
     use crate::model_card::ModelDeploymentCard;
@@ -1670,6 +2000,97 @@ mod tests {
 
         // Model should still exist (ns1 still there)
         assert!(mm.get_model("llama").is_some());
+    }
+
+    #[test]
+    fn test_alias_resolution_maps_to_primary() {
+        let mm = ModelManager::new();
+
+        assert!(mm.register_alias("llama-alias", "llama"));
+
+        assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama");
+        assert_eq!(mm.resolve_canonical_name("llama"), "llama");
+    }
+
+    #[test]
+    fn test_register_alias_rejects_primary_collision() {
+        let mm = ModelManager::new();
+        mm.add_worker_set("llama-alias", "ns1", make_worker_set("ns1", "abc"));
+
+        assert!(!mm.register_alias("llama-alias", "llama"));
+
+        assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama-alias");
+    }
+
+    #[test]
+    fn test_primary_registration_rejected_when_name_reserved_as_alias() {
+        let mm = ModelManager::new();
+
+        // Model "a" reserves "shared" as an alias and attaches its worker set.
+        assert!(mm.register_alias("shared", "a"));
+        assert!(mm.add_worker_set_arc("shared", "ns1", Arc::new(make_worker_set("ns1", "abc"))));
+        assert_eq!(mm.resolve_canonical_name("shared"), "a");
+
+        // A later deployment cannot claim "shared" as its own primary — the name
+        // stays reserved for "a" (first-come, symmetric with register_alias).
+        assert!(!mm.add_worker_set("shared", "ns2", make_worker_set("ns2", "def")));
+        assert_eq!(mm.resolve_canonical_name("shared"), "a");
+
+        // "a"'s alias mirror is untouched and no foreign worker set was added.
+        let model = mm.get_model("shared").expect("alias model present");
+        assert!(model.get_worker_set("ns1").is_some());
+        assert!(model.get_worker_set("ns2").is_none());
+    }
+
+    #[test]
+    fn test_alias_belongs_to_identifies_owner() {
+        let mm = ModelManager::new();
+        assert!(mm.register_alias("chat", "llama"));
+
+        assert!(mm.alias_belongs_to("chat", "llama"));
+        // Not owned by a different primary, and a non-alias name is owned by nobody.
+        assert!(!mm.alias_belongs_to("chat", "other"));
+        assert!(!mm.alias_belongs_to("not-an-alias", "llama"));
+
+        // A live primary named "chat" (a different deployment) is not an alias of
+        // "llama" — so a "llama" teardown must not treat "chat" as its own.
+        let mm2 = ModelManager::new();
+        mm2.add_worker_set("chat", "ns1", make_worker_set("ns1", "abc"));
+        assert!(!mm2.alias_belongs_to("chat", "llama"));
+    }
+
+    #[test]
+    fn test_primary_registration_succeeds_for_unreserved_name() {
+        let mm = ModelManager::new();
+        assert!(mm.add_worker_set("llama", "ns1", make_worker_set("ns1", "abc")));
+        assert!(mm.get_model("llama").is_some());
+        // A second worker set for the same primary is fine (replicas share a name).
+        assert!(mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc")));
+    }
+
+    #[test]
+    fn test_unregister_alias_if_empty_keeps_mapping_with_remaining_worker_sets() {
+        let mm = ModelManager::new();
+        assert!(mm.register_alias("llama-alias", "llama"));
+
+        assert!(mm.add_worker_set_arc(
+            "llama-alias",
+            "ns1",
+            Arc::new(make_worker_set("ns1", "abc")),
+        ));
+        assert!(mm.add_worker_set_arc(
+            "llama-alias",
+            "ns2",
+            Arc::new(make_worker_set("ns2", "abc")),
+        ));
+
+        mm.remove_worker_set("llama-alias", "ns1");
+        mm.unregister_alias_if_empty("llama-alias", "llama");
+        assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama");
+
+        mm.remove_worker_set("llama-alias", "ns2");
+        mm.unregister_alias_if_empty("llama-alias", "llama");
+        assert_eq!(mm.resolve_canonical_name("llama-alias"), "llama-alias");
     }
 
     #[test]
@@ -1923,6 +2344,169 @@ mod tests {
         let mm = ModelManager::new();
         // Should not panic
         mm.remove_prefill_activator("llama", "ns1");
+    }
+
+    #[test]
+    fn test_encoder_router_registration_and_waiter_cleanup() {
+        let mm = ModelManager::new();
+        let rx = mm.register_encoder_router("llama", "ns1");
+        assert!(rx.is_some());
+        assert!(mm.register_encoder_router("llama", "ns1").is_none());
+
+        drop(rx);
+        mm.remove_consumer_encoder_waiter("llama", "ns1");
+        assert!(mm.register_encoder_router("llama", "ns1").is_some());
+    }
+
+    #[test]
+    fn test_encoder_router_different_namespaces_are_independent() {
+        let mm = ModelManager::new();
+        assert!(mm.register_encoder_router("llama", "ns1").is_some());
+        assert!(mm.register_encoder_router("llama", "ns2").is_some());
+    }
+
+    #[test]
+    fn test_remove_encoder_activator_drops_stale_state_without_waiter() {
+        let mm = ModelManager::new();
+        let key = ModelManager::model_namespace_key("llama", "ns1");
+        mm.encoder_router_activators.insert(
+            key.clone(),
+            EncoderActivationState {
+                routing_enabled: true,
+                ..Default::default()
+            },
+        );
+
+        mm.remove_encoder_activator("llama", "ns1");
+
+        assert!(!mm.encoder_router_activators.contains_key(&key));
+        let _receiver = mm
+            .register_encoder_router("llama", "ns1")
+            .expect("registration after cleanup must succeed");
+        let state = mm.encoder_router_activators.get(&key).unwrap();
+        assert!(!state.routing_enabled);
+        assert!(state.consumer.is_some());
+    }
+
+    #[test]
+    fn test_remove_encoder_activator_preserves_waiting_consumer() {
+        let mm = ModelManager::new();
+        let key = ModelManager::model_namespace_key("llama", "ns1");
+        let _receiver = mm
+            .register_encoder_router("llama", "ns1")
+            .expect("consumer registration must succeed");
+        mm.enable_encoder_routing("llama", "ns1");
+
+        mm.remove_encoder_activator("llama", "ns1");
+
+        let state = mm.encoder_router_activators.get(&key).unwrap();
+        assert!(state.consumer.is_some());
+        assert!(state.endpoint.is_none());
+        assert!(state.routing_enabled);
+    }
+
+    #[derive(Clone, Copy)]
+    enum EncoderActivationSignal {
+        Register,
+        Enable,
+        Activate,
+    }
+
+    #[tokio::test]
+    async fn test_encoder_router_activates_in_every_signal_order() {
+        use EncoderActivationSignal::{Activate, Enable, Register};
+
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("encoder-activation-orders".to_string())
+            .unwrap()
+            .component("encoder".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let orders = [
+            [Register, Enable, Activate],
+            [Register, Activate, Enable],
+            [Enable, Register, Activate],
+            [Enable, Activate, Register],
+            [Activate, Register, Enable],
+            [Activate, Enable, Register],
+        ];
+
+        for order in orders {
+            let mm = ModelManager::new();
+            let mut receiver = None;
+            for signal in order {
+                match signal {
+                    Register => {
+                        receiver = mm.register_encoder_router("llama", "ns1");
+                    }
+                    Enable => mm.enable_encoder_routing("llama", "ns1"),
+                    Activate => {
+                        mm.activate_encoder_router("llama", "ns1", endpoint.clone());
+                    }
+                }
+            }
+
+            let activated = receiver
+                .expect("every order registers a consumer")
+                .await
+                .expect("all three signals must activate the consumer");
+            assert_eq!(activated, endpoint);
+        }
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_encoder_router_repeated_enable_preserves_waiter() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("encoder-repeated-enable".to_string())
+            .unwrap()
+            .component("encoder".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let mm = ModelManager::new();
+        let receiver = mm
+            .register_encoder_router("llama", "ns1")
+            .expect("consumer registration must succeed");
+
+        mm.enable_encoder_routing("llama", "ns1");
+        mm.enable_encoder_routing("llama", "ns1");
+        mm.activate_encoder_router("llama", "ns1", endpoint.clone());
+
+        assert_eq!(receiver.await.unwrap(), endpoint);
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn test_encoder_router_reactivates_every_matching_worker_set() {
+        let router_a = crate::kv_router::EncoderRouter::disabled();
+        let router_b = crate::kv_router::EncoderRouter::disabled();
+        let mm = ModelManager::new();
+        let mut ws_a = make_worker_set("ns1", "checksum-a");
+        ws_a.encoder_router = Some(router_a.clone());
+        let mut ws_b = make_worker_set("ns1", "checksum-b");
+        ws_b.encoder_router = Some(router_b.clone());
+        mm.add_worker_set("llama", "ns1:chat:decode", ws_a);
+        mm.add_worker_set("llama", "ns1:completions:decode", ws_b);
+
+        mm.deactivate_encoder_router_for_consumers("llama", "ns1");
+        assert!(router_a.is_deactivated());
+        assert!(router_b.is_deactivated());
+
+        mm.reactivate_encoder_routers("llama", "ns1");
+
+        assert!(!router_a.is_deactivated());
+        assert!(!router_b.is_deactivated());
     }
 
     // -- remove_decode_prefill_waiter tests (stale-DecodeWaiting cleanup) --

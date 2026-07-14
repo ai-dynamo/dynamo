@@ -31,6 +31,7 @@ dynamo-tokens = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+arc-swap = "1.9.1"
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 indexmap = { workspace = true }
@@ -57,6 +58,7 @@ parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 
 rustc-hash = "2.1.1"
+slotmap = "1"
 
 # standalone-indexer (optional)
 axum = { workspace = true, optional = true }

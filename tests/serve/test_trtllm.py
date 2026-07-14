@@ -24,6 +24,7 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     completion_payload,
     completion_payload_default,
+    guided_decoding_chat_payload_default,
     metric_payload_default,
     multimodal_payload_default,
     router_selection_chat_payload_default,
@@ -99,7 +100,7 @@ trtllm_configs = {
         name="aggregated_unified",
         directory=trtllm_dir,
         script_name="agg.sh",
-        script_args=["--unified"],
+        script_args=["--unified", "--guided-decoding-backend", "xgrammar"],
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
@@ -116,6 +117,7 @@ trtllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            guided_decoding_chat_payload_default(),
         ],
     ),
     "disaggregated": TRTLLMConfig(

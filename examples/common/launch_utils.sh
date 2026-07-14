@@ -235,6 +235,36 @@ wait_for_ready() {
     return 1
 }
 
+allocate_free_port() {
+    python3 - <<'PY'
+import random
+import socket
+
+PORT_MIN = 1024
+PORT_MAX = 49151
+MAX_ATTEMPTS = 256
+
+for _ in range(MAX_ATTEMPTS):
+    port = random.randint(PORT_MIN, PORT_MAX)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sock.close()
+        continue
+
+    try:
+        print(port)
+        break
+    finally:
+        sock.close()
+else:
+    raise RuntimeError(
+        f"could not find a free port in the registered range {PORT_MIN}-{PORT_MAX}"
+    )
+PY
+}
+
 # pick_worker_module <legacy_module> <unified_module> "$@"
 #
 # Strips `--unified` from argv and selects the matching `python -m <module>`

@@ -160,23 +160,27 @@ Allowed local helpers:
 - Saved entries for named lists must include the list-map key, such as
   `ComponentName` for DGD components.
 
-## Legacy DGDR Exception
+## Legacy DGDR Read Compatibility
 
-- Do not add new legacy formats.
-- Existing legacy DGDR annotations are temporary downgrade shims only.
-- Keep legacy keys named `legacyAnn*`.
-- Keep their `TODO(sttts)` removal comments.
-- Isolate legacy reads/writes in legacy helpers.
+- New conversions write only the structural `nvidia.com/dgdr-spec` and
+  `nvidia.com/dgdr-status` payloads.
+- Dynamo 1.0/1.1 DGDR annotations are a read-only forward-upgrade fallback for
+  stored objects that predate structural preservation. Never re-emit them.
+- Keep legacy keys named `legacyAnn*` and isolate their decoding in legacy
+  helpers.
+- Keep the legacy implementation and its focused fixtures in dedicated
+  `dynamographdeploymentrequest_legacy_read*` files so the eventual removal is
+  isolated from structural conversion.
 - Decode legacy data into the same typed `restored` model used by structural
-  conversion.
-- Legacy data is an old-value cache only.
-- Legacy data must not override fields representable by live `src`.
-- Keep the old converter as a test oracle while downgrade compatibility is
-  required.
-- Legacy-vs-structural fuzz tests may normalize inputs to the old converter's
-  representable behavior.
-- Main round-trip fuzz tests must not keep workarounds for fixed structural
-  conversion bugs.
+  conversion. Structural payloads take precedence when both formats exist.
+- Legacy data is an old-value cache only and must not override fields
+  representable by live `src`.
+- Controllers that need v1alpha1-only fields must obtain them through typed API
+  conversion so structural and legacy precedence remains centralized.
+- Keep focused fixtures for legacy reads. Do not retain the old converter as an
+  oracle or mask legacy annotations in the main round-trip fuzz tests.
+- Remove the read fallback only after the supported upgrade window or an
+  explicit stored-object migration guarantees that legacy-only objects are gone.
 
 ## API Changes
 

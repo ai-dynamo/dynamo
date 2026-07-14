@@ -218,12 +218,22 @@ class TestUsageStatistics:
         assert result["completion_tokens"] == 3
         assert result["total_tokens"] is None
 
-    def test_build_completion_usage_with_cached_tokens(self):
-        """Test that cached tokens are reported in prompt_tokens_details."""
+    @pytest.mark.parametrize(
+        ("num_cached_tokens", "expected_prompt_tokens_details"),
+        [
+            (None, None),
+            (0, {"cached_tokens": 0}),
+            (3, {"cached_tokens": 3}),
+        ],
+    )
+    def test_build_completion_usage_with_cached_tokens(
+        self, num_cached_tokens, expected_prompt_tokens_details
+    ):
+        """Test that cached-token availability and counts remain distinct."""
         mock_output = Mock()
         mock_output.prompt_token_ids = [1, 2, 3, 4, 5]
         mock_output.outputs = [Mock(token_ids=[6, 7])]
-        mock_output.num_cached_tokens = 3
+        mock_output.num_cached_tokens = num_cached_tokens
 
         result = BaseWorkerHandler._build_completion_usage(
             mock_output, embedding_sequence_length=None
@@ -231,4 +241,4 @@ class TestUsageStatistics:
 
         assert result["prompt_tokens"] == 5
         assert result["completion_tokens"] == 2
-        assert result["prompt_tokens_details"] == {"cached_tokens": 3}
+        assert result["prompt_tokens_details"] == expected_prompt_tokens_details
