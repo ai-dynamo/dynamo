@@ -805,6 +805,32 @@ class TestHealthCheckPriority:
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
 
     @pytest.mark.asyncio
+    async def test_default_max_tokens_uses_processed_prompt_token_ids(self):
+        """DECODE-style processed tokens size the remaining context correctly."""
+        handler = self._make_handler()
+        handler.max_seq_len = 100
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={"prompt_token_ids": list(range(40))}
+        )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": None},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["sampling_params"].max_tokens == 60
+
+    @pytest.mark.asyncio
     async def test_routing_cache_salt_forwarded_to_generate_async(self):
         handler = self._make_handler()
         generation_result = self._make_mock_generation_result()
@@ -849,6 +875,9 @@ class TestDefaultMaxTokens:
     def test_image_without_expanded_defers(self):
         # No expanded length available -> defer to engine default (None)
         assert HandlerBase._default_max_tokens(100, [1, 2, 3], True, None) is None
+
+    def test_image_zero_expanded_len_is_valid(self):
+        assert HandlerBase._default_max_tokens(100, [], True, 0) == 100
 
     def test_floors_at_one(self):
         # Prompt already at/over context -> never returns <= 0

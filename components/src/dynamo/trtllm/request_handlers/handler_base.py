@@ -1057,9 +1057,16 @@ class HandlerBase(BaseGenerativeHandler):
                 if isinstance(processed_input, dict)
                 else None
             )
+            prompt_token_ids = (
+                processed_input.get("prompt_token_ids")
+                if isinstance(processed_input, dict)
+                else None
+            )
             default_max_tokens = self._default_max_tokens(
                 self.max_seq_len,
-                request.get("token_ids", []),
+                prompt_token_ids
+                if prompt_token_ids is not None
+                else request.get("token_ids", []),
                 has_images,
                 expanded_prompt_len,
             )
@@ -1421,7 +1428,7 @@ class HandlerBase(BaseGenerativeHandler):
         if max_seq_len is None:
             return None
         if has_images:
-            if not expanded_prompt_len:
+            if expanded_prompt_len is None:
                 return None
             return max(1, max_seq_len - expanded_prompt_len)
         return max(1, max_seq_len - len(token_ids))
