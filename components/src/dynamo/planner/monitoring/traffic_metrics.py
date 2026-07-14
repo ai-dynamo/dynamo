@@ -294,9 +294,9 @@ class PrometheusAPIClient:
                 )
                 started_result = self.prom.custom_query(query=started_query)
                 if started_result:
-                    started_count = float(started_result[0]["value"][1])
-                    if not math.isnan(started_count):
-                        return started_count
+                    router_started_count = float(started_result[0]["value"][1])
+                    if not math.isnan(router_started_count):
+                        return router_started_count
 
                 router_requests_total = (
                     f"{prometheus_names.name_prefix.COMPONENT}_"
@@ -318,8 +318,10 @@ class PrometheusAPIClient:
                         router_requests_total,
                     )
                     return 0
-                completed_count = float(completed_result[0]["value"][1])
-                return 0 if math.isnan(completed_count) else completed_count
+                router_completed_count = float(completed_result[0]["value"][1])
+                return (
+                    0 if math.isnan(router_completed_count) else router_completed_count
+                )
             except Exception as e:
                 logger.error("Error getting avg request count: %s", e)
                 return 0
