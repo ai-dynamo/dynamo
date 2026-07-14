@@ -1,137 +1,134 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # GPU Memory Service (GMS)
 
-## Overview
+GPU Memory Service (GMS) owns CUDA Virtual Memory Management (VMM) allocation handles outside
+inference-engine processes. Clients import those handles, map them into their own virtual address
+spaces, and access them under read-write (RW) or read-only (RO) sessions.
 
-The **GPU Memory Service (GMS)** is an out-of-process GPU memory manager that decouples ownership of GPU memory from the processes that use it. This enables:
+GMS supports:
 
-- **Zero-copy sharing** of GPU memory across multiple processes
-- **Data survival** across process crashes
-- **Fast model loading** via memory import instead of disk I/O for subsequent workers
+- Publishing a model-weight layout once and importing it in later workers without another disk load
+- Keeping committed model weights resident across reader-process replacement
+- Preserving client virtual addresses while mappings are temporarily removed
+- Managing mutable KV cache allocation lifecycles for vLLM and SGLang
+- Loading GMS-managed weights in vLLM, SGLang, and TensorRT-LLM
 
-GMS provides PyTorch integration via `CUDAPluggableAllocator` and pre-built integrations for inference frameworks like **vLLM** and **SGLang**.
+Committed layouts survive reader disconnects while the GMS process, GPU, and driver remain healthy.
+Uncommitted RW layouts do not survive writer disconnects. In particular, the current vLLM and
+SGLang integrations discard KV cache backing on pause and allocate fresh backing on resume.
 
-## Problem Statement
+## Process Topology
 
-In traditional LLM inference deployments, each worker process:
-1. Loads model weights from disk/network into GPU memory
-2. Owns that GPU memory for the lifetime of the process
-3. Cannot share weights with other workers on the same GPU
+The standard launcher starts two independent GMS daemons for every visible GPU:
 
-This leads to:
-- **Slow worker startup** (weight loading is I/O bound)
-- **Memory waste** (duplicate weights when running multiple workers)
-- **No crash resilience** (GPU memory lost when process dies)
-
-## Solution Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│                                                                                      │
-│  ┌────────────────────┐                  ┌─────────────────────────────────────────┐ │
-│  │        GMS         │                  │    GMSClientMemoryManager (Writer)      │ │
-│  │                    │                  │                                         │ │
-│  │ ┌────────────────┐ │                  │  ┌─────────────────────────────────┐    │ │
-│  │ │ Memory Manager │ │ ◄── Unix ───────►│  │         GMS Session             │    │ │
-│  │ └────────────────┘ │    Socket        │  └─────────────────────────────────┘    │ │
-│  │                    │       +          │                                         │ │
-│  │ ┌────────────────┐ │      FD          │  Writer-only: create_mapping, commit    │ │
-│  │ │ Session / FSM  │ │  (SCM_RIGHTS)    └─────────────────────────────────────────┘ │
-│  │ └────────────────┘ │                                                              │
-│  │                    │                  ┌─────────────────────────────────────────┐ │
-│  │ ┌────────────────┐ │                  │    GMSClientMemoryManager (Reader)      │ │
-│  │ │ Metadata Store │ │                  │                                         │ │
-│  │ └────────────────┘ │ ◄── Unix ───────►│  ┌─────────────────────────────────┐    │ │
-│  │                    │    Socket        │  │         GMS Session             │    │ │
-│  └────────────────────┘       +          │  └─────────────────────────────────┘    │ │
-│                              FD          │                                         │ │
-│                          (SCM_RIGHTS)    │  Reader-only: create_mapping (import),   │ │
-│                                          │               unmap_all_vas, remap      │ │
-│                                          └─────────────────────────────────────────┘ │
-│                                                                                      │
-└──────────────────────────────────────────────────────────────────────────────────────┘
+```text
+GPU 0
+|
++-- weights daemon  <->  gms_GPU-UUID_weights.sock
+|   +-- allocation manager
+|   +-- session manager and FSM
+|   +-- metadata and committed-layout hash
+|
++-- kv_cache daemon <->  gms_GPU-UUID_kv_cache.sock
+    +-- allocation manager
+    +-- session manager and FSM
+    +-- metadata and committed-layout hash
 ```
 
-## Core Components
+Each daemon owns one memory domain for one GPU. The daemons do not share allocations, metadata, lock
+state, or committed state. A reference to "the server state" in this document means the state of one
+daemon and socket. The standard launcher supervises its children as one failure domain: if any child
+exits, it terminates every GMS daemon that it started.
 
-GMS follows a client-server architecture where the **server** owns GPU memory allocations and the **clients** map that memory into their own address spaces. The key insight is that the socket connection itself acts as a distributed lock.
+Run the standard launcher with:
 
-### Server
+```bash
+python -m gpu_memory_service.cli.server
+```
 
-The GMS server runs as an independent process that manages GPU memory without ever mapping it to its own address space. This design allows the server to:
+The launcher discovers visible GPUs and starts both daemons for each one. To run one daemon directly,
+specify its device and domain:
 
-- **Survive GPU driver failures** - no CUDA context means no vulnerability to driver resets
-- **Outlive client processes** - memory persists across client crashes
-- **Arbitrate access** - enforce single-writer, multiple-reader semantics
+```bash
+python -m gpu_memory_service --device 0 --tag weights
+```
 
-The server consists of three main components:
+## Ownership and Mapping
 
-1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and eagerly exports one shareable file descriptor (`cuMemExportToShareableHandle`) per allocation. Later export RPCs `dup()` that cached FD instead of calling back into CUDA again. Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
+The server calls `cuMemCreate` and caches one shareable file descriptor exported with
+`cuMemExportToShareableHandle` for each allocation. Export RPCs duplicate the cached descriptor.
+The server does not call `cuMemMap` for application allocations.
 
-2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
+Clients use `GMSClientMemoryManager` to:
 
-3. **Metadata Store / Layout State** - `GMS` owns the metadata table and committed layout hash. Allocations and metadata live in one flat store that is cleared on each new writer connect or writer abort.
+- Import allocation file descriptors as CUDA handles
+- Reserve virtual address (VA) ranges
+- Map allocations and set RW or RO access
+- Record allocation metadata needed to reconstruct tensors
+- Unmap allocations while retaining VA reservations
 
-Each GMS server is responsible for managing memory of only 1 GPU, and does not interact with GMS servers corresponding to other GPUs.
+> [!NOTE]
+> Use `GMSClientMemoryManager` instead of the low-level RPC client. The RPC client is an
+> implementation detail.
 
-### Client
+An allocation remains physically resident while a server or client CUDA handle, or a duplicated
+shareable file descriptor, references it. Calling `unmap_all_vas()` releases the client's mapping
+and imported handle, but does not necessarily release the underlying GPU allocation. A committed
+weight allocation remains owned by the weights daemon. For KV cache, the normal pause path unmaps
+the client handles and then aborts the RW session, which releases the KV daemon's handles. External
+handles or exported descriptors can delay final reclamation.
 
-Clients connect to the server to acquire locks and access GPU memory. The supported client API is:
-
-1. **GMSClientMemoryManager** - High-level client that wraps an internal RPC transport layer and handles all CUDA VMM operations for memory import and mapping safely:
-   - Imports file descriptors and converts them to CUDA memory handles
-   - Reserves virtual address space and maps physical memory
-   - Sets appropriate access permissions (RW for writers, RO for readers)
-   - Supports **unmap/remap** for VA-stable memory release under memory pressure
-
-> **Note**: Always use `GMSClientMemoryManager` to interact with GMS from client code. The low-level RPC client is an implementation detail and should not be used directly.
-
-### Memory Allocation and Import Flow
-
-The following diagram shows how `GMSClientMemoryManager` interacts with the server and GPU. **Writers** allocate new memory while **readers** import existing allocations - both flows share the same export/import/map sequence.
+### Allocation and Import Flow
 
 ```mermaid
 sequenceDiagram
     participant C as GMSClientMemoryManager
-    participant S as GMS
-    participant GPU as GPU Memory
+    participant S as One GMS daemon
+    participant GPU as GPU memory
 
-    %% Connection
-    C->>S: Connect (Unix Socket)
     C->>S: HandshakeRequest(lock_type)
-    S-->>C: HandshakeResponse(granted_lock)
+    S-->>C: HandshakeResponse(granted_lock_type)
 
-    %% Allocation (Writer only)
-    rect rgb(255, 245, 230)
-        Note over C,GPU: Writer only: Allocate new memory
+    opt RW allocation
         C->>S: AllocateRequest(size, tag)
         S->>GPU: cuMemCreate(size)
-        GPU-->>S: handle
+        GPU-->>S: allocation handle
         S->>GPU: cuMemExportToShareableHandle(handle)
-        GPU-->>S: cached fd
-        S-->>C: AllocateResponse(allocation_id)
+        GPU-->>S: cached file descriptor
+        S-->>C: AllocateResponse(allocation_id, layout_slot)
     end
 
-    %% Export/Import (Both Writer and Reader)
-    Note over C,GPU: Both Writer and Reader: Export and map
     C->>S: ExportAllocationRequest(allocation_id)
-    S->>S: dup(cached fd)
-    S-->>C: Response + fd (via SCM_RIGHTS)
-
-    C->>GPU: cuMemImportFromShareableHandle(fd)
+    S->>S: dup(cached file descriptor)
+    S-->>C: Response and file descriptor via SCM_RIGHTS
+    C->>GPU: cuMemImportFromShareableHandle(file descriptor)
     C->>GPU: cuMemAddressReserve(size)
     C->>GPU: cuMemMap(va, handle)
     C->>GPU: cuMemSetAccess(va, RW or RO)
-
-    Note over C,GPU: Memory now accessible at VA
 ```
 
----
+## Observable Server State
 
-## State Machine
+The four-state FSM describes granted sessions for one daemon. It is not the complete lock-admission
+model. The observable state is derived from the active RW session, active RO sessions, and the
+stored committed-layout flag:
 
-The server maintains a finite state machine (FSM) that governs lock acquisition and memory access. The state is **derived** from the current connections rather than stored explicitly.
+| State | Active Sessions | Committed Layout |
+|---|---|---|
+| `EMPTY` | None | No |
+| `RW` | One writer | No |
+| `COMMITTED` | None | Yes |
+| `RO` | One or more readers | Yes |
 
-### States and Transitions
+The committed flag remains set while the observable state is `RO`. Queued writers and a writer
+reservation used during the handshake are additional coordination state that does not appear as a
+fifth `ServerState` value.
+
+### Granted-Session Transitions
 
 ```mermaid
 stateDiagram-v2
@@ -145,470 +142,292 @@ stateDiagram-v2
     COMMITTED --> RO : RO_CONNECT
 
     RO --> RO : RO_CONNECT
-    RO --> RO : RO_DISCONNECT (not last)
-    RO --> COMMITTED : RO_DISCONNECT (last)
+    RO --> RO : RO_DISCONNECT (readers remain)
+    RO --> COMMITTED : RO_DISCONNECT (last reader)
 ```
 
-### State Descriptions
+The transition diagram begins after admission grants a session. It therefore does not show a request
+waiting behind another session or a transient writer reservation.
 
-| State | Description | Can Connect RW | Can Connect RO |
-|-------|-------------|:--------------:|:--------------:|
-| `EMPTY` | No connections, no committed layout visible | ✓ | ✗ |
-| `RW` | Writer connected (exclusive access) | ✗ | ✗ |
-| `COMMITTED` | Committed layout visible to readers, no active connections | ✓ | ✓ |
-| `RO` | One or more readers connected (shared access) | ✗ | ✓ |
+### Admission Policy
+
+| Requested Mode | Grant Policy |
+|---|---|
+| `RW` | Grant when no session or writer reservation is active. While waiting, block new reader grants. |
+| `RO` | Grant for a committed layout when no RW session, queued writer, or reserved writer exists. |
+| `RW_OR_RO` | Grant RW when uncommitted and free; grant RO when committed and reader admission is open; otherwise wait. |
+
+Only an explicit `RW` request enters the waiting-writer count and receives writer preference;
+`RW_OR_RO` does not. The policy is not strict FIFO ordering among writers. It prevents a stream of
+new readers from indefinitely delaying an explicit RW request. A waiting writer behind active
+readers can be granted RW only after the last reader disconnects.
 
 ### Events
 
-| Event | Trigger | Description |
-|-------|---------|-------------|
-| `RW_CONNECT` | Writer connects | Acquires exclusive write lock, clears the previous committed layout immediately, and starts a fresh RW layout build |
-| `RW_COMMIT` | Writer calls `commit()` | Publishes the current RW layout as the committed layout and releases the lock |
-| `RW_ABORT` | Writer disconnects without commit | Drops the active RW layout and returns to `EMPTY` |
-| `RO_CONNECT` | Reader connects | Acquires shared read lock |
-| `RO_DISCONNECT` | Reader disconnects | Releases shared lock; if last reader, returns to COMMITTED |
+| Event | Effect |
+|---|---|
+| `RW_CONNECT` | Grant exclusive access, clear any previous committed layout, and start a fresh active layout. |
+| `RW_COMMIT` | Publish the active layout, remove RW ownership, and enter `COMMITTED`. |
+| `RW_ABORT` | Clear the active allocations, metadata, and hash, then enter `EMPTY`. |
+| `RO_CONNECT` | Add a reader for the committed layout. |
+| `RO_DISCONNECT` | Remove a reader; the last reader returns the observable state to `COMMITTED`. |
 
-### Lock Semantics
+### Session Lifetime
 
-A handshaken socket connection **is** the lock:
+A successfully handshaken socket represents an active server session. Closing an uncommitted RW
+session triggers `RW_ABORT`; closing an RO session removes that reader. `commit()` releases RW
+ownership as part of the commit operation rather than waiting for a later explicit unlock.
 
-- **Crash resilience**: Connection close (including process crash) automatically releases the lock
-- **No explicit unlock**: Eliminates forgotten locks and deadlocks
-- **Atomic transitions**: State changes happen atomically with socket operations
+The session controls access to server RPCs. It does not invalidate CUDA handles already imported by
+other processes. Runtime inspection probes (`GetRuntimeState` and `GetEventHistory`) connect, fetch
+diagnostics, and close without entering the granted-session FSM.
 
-The only exception is the runtime inspection probes (`GetRuntimeState`, `GetEventHistory`): they connect, fetch diagnostics, and close without entering the lock FSM.
+## Memory-Domain Lifecycles
 
-### Layout Lifecycle
+### Weights
 
-Layout creation and publication work like this:
+The first weight loader normally uses `RW_OR_RO`:
 
-```mermaid
-flowchart LR
-    A[EMPTY or COMMITTED] -->|RW_CONNECT| B[Fresh RW layout]
-    B -->|Allocate memory and write metadata| C{Writer outcome}
-    C -->|RW_COMMIT| D[Publish layout as committed]
-    C -->|RW_ABORT| E[Discard layout]
-    D -->|Next RW_CONNECT| F[Fresh RW layout]
-    E -->|Next RW_CONNECT| F
+```text
+EMPTY -> RW -> COMMITTED -> RO
 ```
 
-- `RW_CONNECT` starts a fresh RW layout build.
-- `RW_COMMIT` publishes the current layout; it does not create another one.
-- `RW_ABORT` discards the current RW layout and returns the system to `EMPTY`.
-- `RW -> EMPTY` does not require allocating a new layout first; it happens immediately when the writer drops the session before commit.
-- There is no RPC that clears the active RW layout while keeping the same writer session alive. To abandon a partially built RW layout, the writer must disconnect or call `abort()`, and any later RW build starts from a fresh `RW_CONNECT`.
-- Allocations and metadata live in one flat store that is cleared on `RW_CONNECT` and `RW_ABORT`.
-- RO requests are served only from the committed layout, while RW requests mutate only the active layout.
-- Read RPCs (`export`, allocation lookup/listing, metadata lookup/listing) operate on that single live store. This is safe because the FSM prevents RW and RO sessions from coexisting.
-- `metadata_put` validates allocation ownership and offset bounds, `free` cascades metadata cleanup, and `commit` rejects dangling metadata references.
+An RW loader allocates and populates weights, calls `commit()`, reconnects RO, and remaps the
+committed allocations at its preserved VAs. Later loaders receive RO and import the same committed
+layout. Reader disconnects do not clear it. A later explicit RW grant clears the old committed layout
+before building a replacement.
 
-### Allocation Backpressure on OOM
+### KV Cache
 
-When a writer requests a new allocation, GMS treats CUDA OOM as a transient condition:
+The vLLM and SGLang integrations keep GMS-managed KV cache in an uncommitted RW layout while an
+engine is active:
 
-- `cuMemCreate` OOM does **not** immediately fail the request.
-- The server retries in a loop and only returns success after allocation is created.
-- Server CLI flags:
-  - `--alloc-retry-interval` (default `0.5`)
-  - `--alloc-retry-timeout` (default unset = wait indefinitely)
-
-This ensures the "new writer gets fresh allocations" workflow can wait for memory reclamation instead of racing into immediate OOM failures.
-
-### Guarantees
-
-- GMS guarantees that its own RPCs do not mix committed and active generations, and that `GMSClientMemoryManager.commit()` performs a CUDA synchronize and unmaps the writer's local mappings before publish.
-- After local unmap, `commit()` does not attempt in-process recovery. Non-CUDA failures raise, and CUDA VMM failures exit the process.
-- The only non-fatal client connection failure is lock acquisition timeout. Other client-side GMS transport, protocol, and server error responses raise.
-- Any non-OOM CUDA VMM failure on either client or server is fatal and exits the process.
-- On the server, an untrusted client connection is isolated to that connection: transport loss and response-send failures unwind the connection state, and only server invariant violations or CUDA failures kill the server.
-- Runtime-state `allocation_count` and `allocations_cleared` report server-owned allocation handles only. Imported handles in other processes can still keep VRAM alive after the server clears its own layout state.
-- GMS *does not* prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW layouts use fresh allocations and may wait for memory reclamation before allocation succeeds.
-
----
-
-### Server Trust Boundary
-
-```mermaid
-flowchart TD
-    A[Client event on server connection] --> B{Can server read and decode it?}
-    B -- no --> C[Drop connection]
-    C --> D[Run disconnect cleanup]
-    D --> E[RW_ABORT or RO_DISCONNECT]
-
-    B -- yes --> F{Valid client request?}
-    F -- no --> G[Send ErrorResponse]
-
-    F -- yes --> H{Did request expose server invariant failure?}
-    H -- yes --> I[Exit server process]
-
-    H -- no --> J[Build response or apply commit]
-    J --> K{Can server send response?}
-    K -- no --> D
-    K -- yes --> L[Continue session or close committed writer]
+```text
+active:  EMPTY -> RW
+pause:   RW -> EMPTY
+resume:  EMPTY -> RW
 ```
 
-- `Drop connection` means the server stops trusting that socket and unwinds only that connection's lock state.
-- After `RW_COMMIT`, disconnect cleanup only closes the committed writer socket; it does not roll the server back to `RW_ABORT`.
-- `Valid client request?` covers mode/state violations, unknown requests, and request validation failures like bad metadata offsets.
-- `Did request expose server invariant failure?` covers impossible layout/FSM states and commit-time metadata integrity failures.
+Pause performs:
 
-## Sequence Diagrams
+1. `unmap_all_vas()` to release the engine's mappings and imported handles while retaining VAs.
+2. `abort()` to close the RW session and clear the KV daemon's allocation handles.
 
-### Writer Flow (Cold Start)
+Resume performs:
 
-The first worker loads weights from disk and publishes them to GMS.
+1. `connect(RW)` to start a fresh KV layout.
+2. `reallocate_all_handles("kv_cache")` to allocate new physical backing for the preserved mappings.
+3. `remap_all_vas()` to map that backing at the original VAs.
 
-```mermaid
-sequenceDiagram
-    participant W as Writer Process
-    participant C as GMSClientMemoryManager
-    participant S as GMS
+Tensor addresses remain stable, but KV cache bytes do not survive. TensorRT-LLM does not use GMS for
+KV cache; it uses TensorRT-LLM's native collective sleep and wake operations when that interface is
+available.
 
-    W->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
-    W->>C: mgr.connect(RW)
-    C->>S: HandshakeRequest(lock_type=RW)
-    S->>S: Session FSM: EMPTY/COMMITTED -> RW
-    S->>S: Clear prior committed layout
-    S->>S: Start fresh RW layout
-    S-->>C: HandshakeResponse(success=true)
+## Layout Publication and Compatibility
 
-    loop For each tensor
-        W->>C: mgr.create_mapping(size=size, tag=tag)
-        Note over C,S: See Memory Allocation Flow above
-        W->>C: mgr.metadata_put(key, allocation_id, offset, shape)
-    end
+`commit()` is a publication barrier. The client synchronizes CUDA work, unmaps its local RW mappings
+while retaining VAs, sends the commit request, and releases the RW session. The server validates
+metadata and publishes the layout hash before readers can import it.
 
-    W->>C: mgr.commit()
-    C->>GPU: synchronize()
-    C->>GPU: cuMemUnmap(...) + cuMemRelease(...)
-    C->>S: CommitRequest()
-    S->>S: Publish current layout as committed
-    S->>S: FSM: RW → COMMITTED
-    S-->>C: CommitResponse(success=true)
-    W->>C: mgr.connect(RO)
-    W->>C: mgr.remap_all_vas()
+On commit, the server sorts allocations by `layout_slot` and hashes:
+
+- Canonical allocation rank, requested size, aligned size, and tag
+- Metadata key, owning allocation rank, byte offset, and value
+
+The hash deliberately excludes allocation IDs, raw `layout_slot` values, CUDA handles, and allocation
+contents. Matching hashes mean that two layouts are structurally compatible, not that they are the
+same allocation generation or contain the same bytes. `remap_all_vas()` matches allocations by
+canonical rank and updates local allocation IDs when it remaps a compatible replacement layout.
+
+If the hash changes, `remap_all_vas()` raises `StaleMemoryLayoutError`. It does not rebuild tensors
+automatically. Current framework integrations do not recover automatically: vLLM exits the worker,
+while SGLang and TensorRT-LLM propagate a resume failure.
+
+The hash is cleared when RW admission replaces a committed layout.
+
+## Allocation Backpressure
+
+GMS treats `cuMemCreate` out-of-memory responses as transient:
+
+- `--alloc-retry-interval` controls the delay between attempts and defaults to `0.5` seconds.
+- `--alloc-retry-timeout` limits total retry time and defaults to `60.0` seconds in the server CLI.
+- Lower-level server constructors accept `None` for an unbounded retry timeout.
+
+Non-OOM CUDA VMM failures are fatal. Allocation retry also stops if the requesting client
+disconnects.
+
+## Failure Boundaries
+
+GMS provides process-level lifetime separation, not GPU or node fault tolerance:
+
+- A committed weight layout can survive a reader or engine-process crash.
+- An uncommitted RW layout is cleared when its writer disconnects or crashes.
+- A GMS process failure loses that daemon's server-owned handles and state.
+- Under the standard launcher, one child failure causes the supervisor to stop its sibling daemons.
+- A GPU reset, driver failure, or node failure is outside the persistence guarantee.
+- The server initializes CUDA and owns CUDA driver resources even though it does not map application
+  allocations with `cuMemMap`.
+- GMS does not prove that a disconnected writer has no in-flight GPU work. New RW layouts use fresh
+  allocations and can wait for old handle references to be reclaimed.
+
+Runtime `allocation_count` and `allocations_cleared` values count server-owned allocation handles.
+Imported handles in other processes can keep memory resident after the server clears its own layout.
+
+## Client API
+
+Construct the high-level client with:
+
+```python
+GMSClientMemoryManager(
+    socket_path,
+    *,
+    device=0,
+    tag=None,
+    scratch_size=512 * 1024 * 1024,
+)
 ```
 
-### Reader Flow (Warm Start)
+The public lifecycle operations are:
 
-Subsequent workers import weights from GMS instead of loading from disk.
+| Category | Operations |
+|---|---|
+| Session | `connect(lock_type, timeout_ms=None)`, `abort()`, `close(*, best_effort=False)` |
+| Server handles | `allocate_handle()`, `export_handle()`, `get_handle_info()`, `free_handle()`, `list_handles()` |
+| Publication | `commit()`, `get_memory_layout_hash()` |
+| Metadata | `metadata_put()`, `metadata_get()`, `metadata_list()`, `metadata_delete()` |
+| Local VA | `reserve_va()`, `map_va()`, `unmap_va()`, `free_va()` |
+| Mappings | `create_mapping()`, `destroy_mapping()`, `unmap_all_vas()`, `remap_all_vas()` |
+| Fresh backing | `reallocate_all_handles()` |
 
-```mermaid
-sequenceDiagram
-    participant R as Reader Process
-    participant C as GMSClientMemoryManager
-    participant S as GMS
+The vLLM shadow integration also uses `create_scratch_mapping()`,
+`prepare_scratch_for_reallocation()`, and `destroy_scratch_mapping()`. These operations replace
+client-local scratch backing with fresh server backing while preserving VAs.
 
-    R->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
-    R->>C: mgr.connect(RO)
-    C->>S: HandshakeRequest(lock_type=RO)
-    S-->>C: HandshakeResponse(success=true, committed=true)
-
-    R->>C: mgr.metadata_list()
-    S-->>C: keys=[...]
-
-    loop For each tensor key
-        R->>C: mgr.metadata_get(key)
-        S-->>C: allocation_id, offset, shape
-        R->>C: mgr.create_mapping(allocation_id=allocation_id)
-        Note over C,S: See Memory Import Flow above
-    end
-
-    Note over R,C: Keep connection open during inference
-```
-
-### Unmap/Remap Flow (Memory Pressure)
-
-Readers can temporarily release GPU memory while preserving virtual address reservations. This enables "shadow engine" patterns where inactive workers release memory for active ones.
-
-```mermaid
-sequenceDiagram
-    participant R as Reader Process
-    participant C as GMSClientMemoryManager
-    participant S as GMS
-    participant GPU as GPU Memory
-
-    Note over R,GPU: Need to temporarily release GPU memory
-
-    R->>C: mgr.unmap_all_vas()
-    C->>GPU: cudaDeviceSynchronize()
-
-    loop For each mapping
-        C->>GPU: cuMemUnmap(va)
-        C->>GPU: cuMemRelease(handle)
-        Note over C: Keep VA reservation!
-    end
-
-    R->>C: mgr.abort()
-    C->>S: Close socket (release RO lock)
-    S->>S: FSM: RO → COMMITTED (if last reader)
-
-    Note over R,GPU: GPU memory released, VA preserved
-    Note over R,GPU: Another writer could publish a new layout here
-
-    R->>C: mgr.connect(RO)
-    R->>C: mgr.remap_all_vas()
-    C->>S: GetStateHashRequest()
-    S-->>C: GetStateHashResponse(hash)
-
-    alt hash == saved_hash
-        C->>S: Export preserved allocations from the committed layout
-        S-->>C: Response + FDs
-        C->>GPU: Import handles and remap at preserved VAs
-        C-->>R: Remap succeeds and tensor pointers stay valid
-    else hash != saved_hash
-        C-->>R: StaleMemoryLayoutError
-        C-->>R: Re-import from scratch
-    end
-```
-
-### Auto-Mode (RW_OR_RO)
-
-The `RW_OR_RO` mode automatically selects writer or reader based on server state, simplifying multi-worker deployments.
-
-```mermaid
-sequenceDiagram
-    participant P as Process
-    participant C as GMSClientMemoryManager
-    participant S as GMS
-
-    Note over P,S: Auto-mode: try RW only when no committed layout exists
-
-    P->>C: mgr = GMSClientMemoryManager(socket_path, device=0)
-    P->>C: mgr.connect(RW_OR_RO)
-    C->>S: HandshakeRequest(lock_type=RW_OR_RO)
-
-    alt No committed weights AND no RW holder
-        S->>S: Grant RW lock
-        S->>S: FSM: EMPTY → RW
-        S-->>C: HandshakeResponse(granted=RW, committed=false)
-        Note over P: First process - load from disk
-    else Weights already committed
-        S->>S: Grant RO lock
-        S->>S: FSM: COMMITTED → RO
-        S-->>C: HandshakeResponse(granted=RO, committed=true)
-        Note over P: Subsequent process - import from GMS
-    else RW held by another
-        S->>S: Wait for current writer to either commit or abort
-        alt current writer commits
-            S->>S: Grant RO from COMMITTED
-            S-->>C: HandshakeResponse(granted=RO, committed=true)
-            Note over P: Import published weights
-        else current writer aborts
-            S->>S: Grant RW from EMPTY
-            S-->>C: HandshakeResponse(granted=RW, committed=false)
-            Note over P: Previous writer gave up; this process becomes the writer
-        end
-    end
-```
-
----
-
-## Key Design Decisions
-
-### 1. No VA Mapping on Server
-
-The server never maps memory to virtual addresses (`cuMemMap`). This means:
-- **No CUDA context** required on the server
-- Server can survive GPU driver resets
-- Memory management is fully delegated to clients
-
-### 2. Socket-as-Lock
-
-The socket connection **is** the lock:
-- RW lock: Exclusive connection (only one RW at a time)
-- RO lock: Shared connection (multiple RO allowed)
-- Lock release = socket close (automatic on crash)
-
-Benefits:
-- **Crash resilience**: If a reader crashes, its lock is automatically released
-- **No explicit unlock**: No forgotten locks or deadlocks
-
-### 3. VA-Stable Unmap/Remap
-
-During `unmap_all_vas()`:
-- Physical memory is released (`cuMemUnmap` + `cuMemRelease`)
-- VA reservations are **kept** (`cuMemAddressReserve` still valid)
-
-During `remap_all_vas()`:
-- Same VAs are reused for mapping
-- **Tensor pointers remain valid** (no need to update PyTorch tensors)
-
-### 4. Memory Layout Hash
-
-On commit, the server computes a hash of:
-- All allocation layout slots, sizes, aligned sizes, and tags
-- All metadata keys, offsets, and values
-
-On `remap_all_vas()`, this hash is checked:
-- If match: Safe to remap (layout unchanged)
-- If mismatch: Raise `StaleMemoryLayoutError` (must re-import)
-
-The hash is tied to the currently committed layout and is cleared as soon as a writer acquires RW.
-
-**Important**: This detects **structural** changes, not **content** changes.
-Weight values can be modified in-place (e.g., RL training updates) as long as the structure is preserved.
-
----
+`connect(..., timeout_ms=None)` uses separate timeouts for socket availability and session
+admission. With `None`, the client waits up to 30 seconds for the Unix socket and indefinitely for
+the requested lock. A positive `timeout_ms` value applies independently to both waits.
 
 ## Wire Protocol
 
-### Message Format
+Messages use a four-byte big-endian length followed by a msgpack payload:
 
-```
-┌──────────────┬────────────────────────────────────────┐
-│ Length (4B)  │  msgpack-encoded Message               │
-│ big-endian   │                                        │
-└──────────────┴────────────────────────────────────────┘
-```
-
-### FD Passing
-
-File descriptors are passed out-of-band using Unix socket `SCM_RIGHTS`:
-
-```python
-# Server side (send FD)
-socket.send_fds(sock, [message_bytes], [fd])
-
-# Client side (receive FD)
-data, fds, _, _ = socket.recv_fds(sock, bufsize, maxfds=1)
-fd = fds[0] if fds else -1
+```text
++-------------+------------------------------------------+
+| Length (4B) | msgpack-encoded message                  |
+| big-endian  |                                          |
++-------------+------------------------------------------+
 ```
 
----
+Allocation file descriptors are passed out of band with Unix socket `SCM_RIGHTS`.
 
-## API Reference
+## Framework Integrations
 
-### GMSClientMemoryManager
+Start GMS before launching an engine with `--load-format gms`. Dynamo configures the backend-specific
+integration from that load format.
 
-The API is organized in two tiers. **Tier 2 (convenience)** is what integrations normally use. **Tier 1 (atomic)** exposes individual operations for advanced callers.
+| Backend | GMS-Managed Weights | GMS-Managed KV Cache | Pause and Resume |
+|---|---|---|---|
+| vLLM | Yes | With sleep mode; shadow mode begins with client-local scratch backing | GMS for weights and KV |
+| SGLang | Yes | Yes | GMS for weights and KV |
+| TensorRT-LLM | Yes | No | GMS for weights; native TensorRT-LLM operations for KV when available |
 
-```python
-class GMSClientMemoryManager:
-    def __init__(socket_path: str, *, device: int = 0): ...
-
-    # Properties
-    @property granted_lock_type: Optional[GrantedLockType]
-    @property is_connected: bool
-    @property is_unmapped: bool
-    @property total_bytes: int
-
-    # --- Tier 1: Connection ---
-    def connect(lock_type: RequestedLockType, timeout_ms: Optional[int] = None) -> None
-    def abort() -> None
-
-    # --- Tier 1: Handle ops (server-side, RW only) ---
-    def allocate_handle(size: int, tag: str = "default") -> Tuple[str, int]  # Returns allocation_id, layout_slot
-    def export_handle(allocation_id: str) -> int                     # Returns FD
-    def get_handle_info(allocation_id: str) -> GetAllocationResponse
-    def free_handle(allocation_id: str) -> bool
-    def commit() -> bool                                             # Sync + unmap local mappings + publish; raises on non-CUDA failure after unmap
-    def get_memory_layout_hash() -> str
-    def list_handles(tag: Optional[str] = None) -> List[GetAllocationResponse]
-
-    # --- Tier 1: VA ops (local) ---
-    def reserve_va(size: int) -> int                                 # Returns VA
-    def map_va(fd, va, size, allocation_id, tag) -> int              # Returns handle
-    def unmap_va(va: int) -> None                                    # Keeps VA reservation
-    def free_va(va: int) -> None                                     # Releases VA reservation
-
-    # --- Tier 1: Metadata ---
-    def metadata_put(key: str, allocation_id: str, offset_bytes: int, value: bytes) -> bool
-    def metadata_get(key: str) -> Optional[Tuple[str, int, bytes]]
-    def metadata_list(prefix: str = "") -> List[str]
-    def metadata_delete(key: str) -> bool
-
-    # --- Tier 2: Convenience ---
-    def create_mapping(allocation_id=None, size=0, tag="default") -> int  # Allocate or import
-    def destroy_mapping(va: int) -> None
-    def unmap_all_vas() -> None          # Sync + unmap all, preserve VA reservations
-    def remap_all_vas() -> None          # Re-import at preserved VAs (checks layout hash)
-    def reallocate_all_handles(tag="default") -> None  # Fresh server handles for preserved VAs
-    def close() -> None
-```
-
----
-
-## Framework Integration (vLLM / SGLang)
-
-GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `--load-format gms` when launching an engine.
-
-### How It Works
-
-When `--load-format gms` is set:
-
-1. **A GMS server must already be running** for the target GPU device. The engine connects to it via a Unix socket derived from the GPU UUID.
-2. The engine uses `RW_OR_RO` mode by default: if no committed layout exists and no writer holds the lock, the first process gets RW and loads weights from disk. If another writer is already active, later clients wait until that writer either commits or aborts; after a commit they get RO to import published weights, and after an abort one of them can become the new RW writer.
-3. Both weights and KV cache are managed by GMS, but they use separate tags:
-   - `weights`: publish/import flow (`RW_OR_RO`, then `RO` after commit)
-   - `kv_cache`: separate RW-only tag for mutable KV-cache memory
-
-#### vLLM
+### vLLM
 
 ```bash
 python -m dynamo.vllm \
-  --model <model> \
+  --model Qwen/Qwen3-0.6B \
   --load-format gms \
-  --worker-cls gpu_memory_service.integrations.vllm.worker:GMSWorker \
   --enable-sleep-mode \
   --gpu-memory-utilization 0.9
 ```
 
-The integration uses a custom worker class (`GMSWorker`) that:
-- Establishes the GMS connection early in `init_device()` so vLLM's `MemorySnapshot` can account for committed weights
-- Registers a custom model loader (`GMSModelLoader`) for the `gms` load format
-- Patches `torch.cuda.empty_cache` to avoid releasing GMS-managed memory
-- Uses two GMS tags on the GPU:
-  - `weights`: normal publish/import flow (`RW_OR_RO`, then `RO` after commit)
-  - `kv_cache`: separate RW-only tag for mutable KV-cache memory
-- Routes both weight and KV-cache allocation through a `CUDAPluggableAllocator` backed by the appropriate GMS tag
+Dynamo selects `GMSWorker` automatically for `--load-format gms`. Do not pass `--worker-cls`.
+Weights use the `weights` daemon. With `--enable-sleep-mode`, mutable KV allocations use the
+`kv_cache` daemon.
 
-#### SGLang
+`--gms-shadow-mode` requires `--load-format gms`. It derives weight writer or reader mode from
+`ENGINE_ID` and uses client-local aliased scratch backing for initial KV cache setup. After
+initialization, the worker automatically pauses, removes the scratch backing, and waits for the
+failover lock. On the first wake, it converts the preserved scratch bookkeeping, allocates fresh
+server backing, and remaps it at the captured VAs. See
+[Shadow Engine Failover](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/shadow-engine-failover.md)
+for the complete operator workflow.
+
+### SGLang
 
 ```bash
 python -m dynamo.sglang \
-  --model-path <model> \
+  --model-path Qwen/Qwen3-0.6B \
   --load-format gms \
-  --enable-memory-saver \
+  --disable-cuda-graph \
+  --disable-piecewise-cuda-graph \
   --mem-fraction-static 0.9
 ```
 
-The integration patches `torch_memory_saver` to route both weight and KV-cache operations through GMS:
-- Weights (`"weights"`) use the `weights` GMS tag
-- KV cache (`"kv_cache"`) uses a separate RW-only `kv_cache` GMS tag
-- Other tags are not supported in GMS mode
-- The `--enable-memory-saver` flag is required to activate the memory saver pathway
+GMS setup enables SGLang's memory-saver path automatically. Do not add
+`--enable-memory-saver` solely for GMS. The integration supports the `weights` and `kv_cache`
+memory-saver tags. Unsupported tags are ignored with a warning.
 
-### Shadow Engine Failover (Pause / Resume)
+GMS mode does not support `--enable-weights-cpu-backup`,
+`--enable-draft-weights-cpu-backup`, or the pauseable CUDA-graph memory-saver path. The graph-disable
+flags in the example select the supported pause path.
 
-Both integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
+### TensorRT-LLM
 
-- **vLLM**: `sleep` / `wake_up` (via `/engine/control/sleep` and `/engine/control/wake_up` HTTP endpoints)
-- **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
+```bash
+python -m dynamo.trtllm \
+  --model Qwen/Qwen3-0.6B \
+  --load-format gms
+```
 
-Under the hood, pausing calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Resuming is tag-specific:
+TensorRT-LLM publishes or imports model weights through the `weights` daemon. Its KV cache remains
+under TensorRT-LLM ownership and uses TensorRT-LLM collective RPCs for sleep and wake when the
+runtime exposes that private interface.
 
-- **weights**: `connect(RO)` + `remap_all_vas()`
-- **kv_cache**: `connect(RW)` + `reallocate_all_handles("kv_cache")` + `remap_all_vas()`
+### Pause and Resume
 
-Tensor pointers remain valid because the original virtual addresses are preserved.
+vLLM exposes `/engine/control/sleep` and `/engine/control/wake_up`. GMS pause and resume require
+`--enable-sleep-mode` unless shadow mode is active. The GMS worker pauses both weights and KV cache
+regardless of the requested vLLM sleep level.
 
-This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a fresh RW layout in its own GMS tag before it is reallocated.
+SGLang exposes `/engine/control/release_memory_occupation` and
+`/engine/control/resume_memory_occupation`. The vLLM and SGLang GMS operations are:
 
-### Configuration via `model_loader_extra_config`
+| Domain | Pause | Resume |
+|---|---|---|
+| Weights | `unmap_all_vas()` then `abort()` | `connect(RO)` then `remap_all_vas()` |
+| KV cache | `unmap_all_vas()` then `abort()` | `connect(RW)`, `reallocate_all_handles("kv_cache")`, then `remap_all_vas()` |
 
-To force read-only mode (import only, never load from disk), pass `gms_read_only` via the framework's `--model-loader-extra-config` flag:
+Pausing a reader releases its local weight mapping, but the committed weights remain owned by the
+weights daemon. Pausing the KV writer clears the KV daemon's active layout. Resume remaps the
+currently committed, structurally compatible weight layout and creates fresh physical KV
+allocations. A compatible weight layout may be a replacement generation with new allocation IDs and
+physical backing.
+
+With `--load-format gms`, TensorRT-LLM also exposes
+`/engine/control/release_memory_occupation` and `/engine/control/resume_memory_occupation`. Those
+operations use GMS unmap and remap for weights and attempt TensorRT-LLM collective RPCs for KV cache.
+If the runtime does not expose `_collective_rpc`, the integration logs a warning and leaves KV cache
+under runtime control.
+
+### Model Loader Configuration
+
+Set `gms_read_only` to force import-only RO mode and prevent the engine from publishing weights:
 
 ```bash
 --model-loader-extra-config '{"gms_read_only": true}'
 ```
 
-This forces `RO` lock mode instead of the default `RW_OR_RO` auto-detection. The engine will only import existing committed weights and fail if none are available.
+This selects RO instead of `RW_OR_RO`. With the default `timeout_ms=None`, the connection waits
+indefinitely for reader admission if no layout is committed or a writer has priority. It does not
+fail immediately.
 
-To bound how long a restored engine waits for the published weights layout before remapping, pass `gms_ro_connect_timeout_ms`:
+For vLLM and SGLang, set `gms_ro_connect_timeout_ms` to bound a weight reconnect during resume:
 
 ```bash
 --model-loader-extra-config '{"gms_ro_connect_timeout_ms": 300000}'
 ```
 
-The default is `null`, which waits indefinitely. Set an integer value to fail after that many milliseconds.
+The default is `null`, which leaves lock admission unbounded while socket availability remains
+limited to 30 seconds. TensorRT-LLM currently consumes `gms_read_only` but not
+`gms_ro_connect_timeout_ms`.

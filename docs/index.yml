@@ -569,6 +569,8 @@ navigation:
             path: kubernetes/fluxcd.md
           - page: Model Caching with Fluid
             path: kubernetes/model-caching-with-fluid.md
+          - page: Cold Start Optimizations and Resiliency Support Matrix
+            path: kubernetes/cold-start-and-resiliency.md
           # -- Reference --
           - page: Tuning Disaggregated Performance
             path: performance/tuning.md
