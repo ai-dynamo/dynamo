@@ -649,7 +649,9 @@ def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     config.validate()
     assert config.session_affinity_ttl_secs is None
     assert config.router_kwargs()["session_affinity_ttl_secs"] is None
-    assert config.router_kwargs()["session_affinity_header_key"] == "x-dynamo-session-id"
+    assert (
+        config.router_kwargs()["session_affinity_header_key"] == "x-dynamo-session-id"
+    )
 
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "600")
     parser = argparse.ArgumentParser()
