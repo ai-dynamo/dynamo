@@ -3451,16 +3451,15 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restricted` _string_ | Deprecated: Namespace-restricted mode is deprecated and will be removed in a future release.<br />Use cluster-wide mode (leave Restricted empty) instead. |  |  |
-| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Deprecated: Scope is only used in namespace-restricted mode, which is deprecated. |  |  |
+| `restricted` _string_ | Restricted enables namespace-restricted mode for development and testing.<br />Namespace-restricted mode is not supported for production. |  |  |
+| `scope` _[NamespaceScopeConfiguration](#namespacescopeconfiguration)_ | Scope configures the namespace ownership claim in namespace-restricted mode. |  |  |
 
 
 #### NamespaceScopeConfiguration
 
 
 
-Deprecated: NamespaceScopeConfiguration is used only by the deprecated namespace-restricted
-mode and will be removed in a future release.
+NamespaceScopeConfiguration configures the development/test namespace ownership claim.
 
 
 

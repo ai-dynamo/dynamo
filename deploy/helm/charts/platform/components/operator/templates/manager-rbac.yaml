@@ -102,6 +102,7 @@ rules:
   - patch
   - update
   - watch
+{{- if not .Values.namespaceRestriction.enabled }}
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
@@ -126,6 +127,7 @@ rules:
   - patch
   - update
   - watch
+{{- end }}
 - apiGroups:
   - grove.io
   resources:
