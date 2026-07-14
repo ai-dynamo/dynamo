@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generate the Qwen3-VL custom-encoder QPS benchmark workload."""
+"""Generate the Qwen2.5-VL custom-encoder QPS benchmark workload."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from benchmarks.multimodal.jsonl.generate_images import (  # noqa: E402
     generate_target_sized_jpeg_pool,
 )
 
-MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 RATES = (16, 24, 32)
 REQUESTS_PER_RATE = 1000
 TARGET_ISL = 515

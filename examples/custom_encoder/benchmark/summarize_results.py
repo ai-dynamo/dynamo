@@ -76,7 +76,7 @@ def _markdown(root: Path, rows: list[dict[str, Any]]) -> str:
     metadata_path = root / "benchmark_metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     lines = [
-        "# Qwen3-VL custom encoder image benchmark",
+        "# Qwen2.5-VL custom encoder image benchmark",
         "",
         "All cells use 1,000 streaming image requests, exact ISL 515, exact OSL 70, "
         "and one unique 500×500 JPEG per request. `*` marks the best runtime at a rate.",
@@ -87,12 +87,14 @@ def _markdown(root: Path, rows: list[dict[str, Any]]) -> str:
         f"- Dynamo commit: `{metadata.get('dynamo_commit')}`",
         f"- Container image: `{metadata.get('container_image')}`",
         f"- vLLM version: `{metadata.get('vllm_version')}`",
+        f"- Transformers version: `{metadata.get('transformers_version')}`",
+        f"- PyTorch version: `{metadata.get('torch_version')}`",
         f"- AIPerf version: `{metadata.get('aiperf_version')}`",
         f"- GPU: `{metadata.get('gpu')}`",
         f"- CUDA_VISIBLE_DEVICES: `{metadata.get('cuda_visible_devices')}`",
         f"- Custom encoder: `{metadata['custom_encoder_class']}`",
         f"- ViT loading: {metadata['custom_encoder_load']}.",
-        "- Custom embedding/preprocess caches: disabled; queue wait: 1 ms.",
+        "- Custom preprocess cache: disabled; queue wait: 1 ms.",
         "",
         "## Results",
         "",

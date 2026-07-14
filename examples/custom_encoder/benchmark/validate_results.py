@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 RUNTIMES = ("vllm-serve", "dynamo-native", "dynamo-custom-encoder")
 RATES = (16, 24, 32)
@@ -26,6 +26,8 @@ def validate_result(
     expected_requests: int = 1000,
     expected_isl: int = 515,
     expected_osl: int = 70,
+    expected_runtimes: Collection[str] = RUNTIMES,
+    expected_rates: Collection[int] = RATES,
 ) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     failures: list[str] = []
@@ -33,9 +35,9 @@ def validate_result(
     loadgen = data.get("input_config", {}).get("loadgen", {})
     rate = int(loadgen.get("request_rate", -1))
 
-    if runtime not in RUNTIMES:
+    if runtime not in expected_runtimes:
         failures.append("runtime")
-    if rate not in RATES:
+    if rate not in expected_rates:
         failures.append("request_rate")
     if _metric(data, "request_count") != float(expected_requests):
         failures.append("request_count")

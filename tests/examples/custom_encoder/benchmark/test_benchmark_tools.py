@@ -8,7 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from examples.custom_encoder.benchmark.run_ablation import VARIANTS
+from examples.custom_encoder.benchmark.summarize_ablation import (
+    _load_rows as _load_ablation_rows,
+)
+from examples.custom_encoder.benchmark.summarize_ablation import (
+    _markdown as _ablation_markdown,
+)
 from examples.custom_encoder.benchmark.summarize_results import _load_rows, _markdown
+from examples.custom_encoder.benchmark.validate_ablation import validate_ablation
 from examples.custom_encoder.benchmark.validate_results import validate_matrix
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -56,14 +64,16 @@ def test_validation_and_markdown_cover_nine_cells(tmp_path: Path) -> None:
         for rate in RATES:
             _write_result(tmp_path, runtime, rate)
     metadata = {
-        "model": "Qwen/Qwen3-VL-2B-Instruct",
+        "model": "Qwen/Qwen2.5-VL-3B-Instruct",
         "dynamo_commit": "abc123",
         "container_image": "test-image",
         "vllm_version": "test",
         "aiperf_version": "0.8.0",
         "gpu": "H100",
         "cuda_visible_devices": "0",
-        "custom_encoder_class": "examples.custom_encoder.Qwen3VLVisionEncoder",
+        "custom_encoder_class": (
+            "examples.custom_encoder.qwen2_vl_vision_encoder." "Qwen2VLVisionEncoder"
+        ),
         "custom_encoder_load": "retains model.visual",
     }
     (tmp_path / "benchmark_metadata.json").write_text(
@@ -86,3 +96,16 @@ def test_validation_and_markdown_cover_nine_cells(tmp_path: Path) -> None:
     )
     assert markdown.count("[artifact]") == 9
     assert markdown.count("[command]") == 9
+
+
+def test_ablation_validation_and_markdown_cover_all_variants(tmp_path: Path) -> None:
+    for label, _buckets, _max_batch_cost, _disabled in VARIANTS:
+        for rate in RATES:
+            _write_result(tmp_path, label, rate)
+
+    assert len(validate_ablation(tmp_path)) == len(VARIANTS) * len(RATES)
+    markdown = _ablation_markdown(tmp_path, _load_ablation_rows(tmp_path))
+    assert "eager-b1" in markdown
+    assert "graph-b8-only" in markdown
+    assert "graph-full" in markdown
+    assert markdown.count("[artifact]") == len(VARIANTS) * len(RATES)

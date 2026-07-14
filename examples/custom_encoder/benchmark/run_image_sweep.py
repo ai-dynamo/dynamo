@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run the nine-cell vLLM/native/custom Qwen3-VL image QPS sweep."""
+"""Run the nine-cell vLLM/native/custom Qwen2.5-VL image QPS sweep."""
 
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ from benchmarks.multimodal.sweep.config import (  # noqa: E402
 )
 from benchmarks.multimodal.sweep.orchestrator import run_sweep  # noqa: E402
 
-MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 RATES = (16, 24, 32)
 REQUESTS = 1000
-ENCODER_CLASS = "examples.custom_encoder.qwen3_vl_vision_encoder.Qwen3VLVisionEncoder"
+ENCODER_CLASS = "examples.custom_encoder.qwen2_vl_vision_encoder.Qwen2VLVisionEncoder"
 
 AIPERF_EXTRA_ARGS = [
     "--endpoint-type",
@@ -86,6 +86,14 @@ def _metadata(
         aiperf_version = importlib.metadata.version("aiperf")
     except importlib.metadata.PackageNotFoundError:
         aiperf_version = _command_output(["aiperf", "--version"])
+    try:
+        torch_version = importlib.metadata.version("torch")
+    except importlib.metadata.PackageNotFoundError:
+        torch_version = None
+    try:
+        transformers_version = importlib.metadata.version("transformers")
+    except importlib.metadata.PackageNotFoundError:
+        transformers_version = None
     manifest_path = workload_dir / "workload_manifest.json"
     return {
         "model": model,
@@ -97,7 +105,7 @@ def _metadata(
         "aiperf_extra_args": AIPERF_EXTRA_ARGS,
         "custom_encoder_class": ENCODER_CLASS,
         "custom_encoder_load": (
-            "AutoProcessor and Qwen3VLForConditionalGeneration are loaded in bf16; "
+            "AutoProcessor and Qwen2_5_VLForConditionalGeneration are loaded in bf16; "
             "model.visual is retained and the remaining checkpoint is released"
         ),
         "dynamo_commit": os.environ.get("DYNAMO_BENCHMARK_COMMIT")
@@ -107,6 +115,9 @@ def _metadata(
         "container_image": os.environ.get("DYNAMO_BENCHMARK_IMAGE"),
         "vllm_version": vllm_version,
         "aiperf_version": aiperf_version,
+        "torch_version": torch_version,
+        "transformers_version": transformers_version,
+        "python_version": platform.python_version(),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "workload_manifest_sha256": hashlib.sha256(
             manifest_path.read_bytes()
@@ -143,8 +154,7 @@ def _config(
             "DYN_MAX_MODEL_LEN": "2048",
             "DYN_MAX_NUM_SEQS": "64",
             "DYN_VLLM_GPU_MEMORY_UTILIZATION": "0.7",
-            "DYN_QWEN3_VL_EMBEDDING_CACHE_BYTES": "0",
-            "DYN_QWEN3_VL_PREPROCESS_CACHE_SIZE": "0",
+            "DYN_QWEN2_VL_PREPROCESS_CACHE_SIZE": "0",
             "DYN_CUSTOM_ENCODER_QUEUE_WAIT_MS": "1",
         },
         aiperf_extra_args=AIPERF_EXTRA_ARGS,
@@ -179,7 +189,7 @@ def run_matrix(
     vllm_workflow = (
         REPO_ROOT / "examples/custom_encoder/benchmark/workflows/vllm_serve.sh"
     )
-    custom_workflow = REPO_ROOT / "examples/custom_encoder/launch/agg_qwen3_vl.sh"
+    custom_workflow = REPO_ROOT / "examples/custom_encoder/launch/agg_qwen2_vl.sh"
 
     for rate in rates:
         native_input = workload_dir / f"image_native_qps{rate}_1000_isl515.jsonl"

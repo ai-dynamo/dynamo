@@ -1,27 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify Qwen3-VL custom-encoder CUDA graph parity and memory stability."""
+"""Verify Qwen2.5-VL custom-encoder CUDA graph parity and memory stability."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import logging
-from dataclasses import replace
 
 import torch
 from PIL import Image
 
-from examples.custom_encoder.qwen3_vl_vision_encoder import (
+from examples.custom_encoder.qwen2_vl_vision_encoder import (
     _GRAPH_IMAGE_SIZES,
-    Qwen3VLVisionEncoder,
-    _StaticQwen3VLVisionForward,
+    Qwen2VLVisionEncoder,
+    _StaticQwen2VLVisionForward,
 )
 
 
 def verify(model: str, replay_iterations: int) -> None:
-    encoder = Qwen3VLVisionEncoder()
+    encoder = Qwen2VLVisionEncoder()
     encoder.build(model)
     try:
         buckets = encoder.buckets
@@ -43,7 +41,7 @@ def verify(model: str, replay_iterations: int) -> None:
         retained = None
         for item in templates:
             grid = encoder._grid_key(item)
-            adapter = _StaticQwen3VLVisionForward(
+            adapter = _StaticQwen2VLVisionForward(
                 encoder._visual, grid, 1, encoder._device
             ).eval()
             with torch.inference_mode():
@@ -104,21 +102,6 @@ def verify(model: str, replay_iterations: int) -> None:
             f"pinned_staging_bytes={pinned_staging_bytes}"
         )
 
-        cached_item = replace(
-            templates[0], content_digest=hashlib.sha256(b"cache-parity").digest()
-        )
-        first = encoder.forward_batch([cached_item], target_bucket=1)[0]
-        expected = first.clone()
-        first.zero_()
-        second = encoder.forward_batch([cached_item], target_bucket=1)[0]
-        torch.testing.assert_close(second, expected, rtol=0, atol=0)
-        assert encoder._embedding_cache is not None
-        stats = encoder._embedding_cache.stats
-        assert stats["hits"] == stats["misses"] == 1
-        print(
-            "embedding_cache_hit_ok "
-            f"entries={stats['entries']} current_bytes={stats['current_bytes']}"
-        )
     finally:
         encoder.close()
 
@@ -126,7 +109,7 @@ def verify(model: str, replay_iterations: int) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="Qwen/Qwen3-VL-2B-Instruct")
+    parser.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--replay-iterations", type=int, default=20)
     args = parser.parse_args()
     verify(args.model, args.replay_iterations)

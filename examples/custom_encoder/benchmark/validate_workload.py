@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Audit Qwen3-VL image workload JSONLs, JPEGs, hashes, and token lengths."""
+"""Audit Qwen2.5-VL image workload JSONLs, JPEGs, hashes, and token lengths."""
 
 from __future__ import annotations
 
