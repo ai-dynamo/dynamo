@@ -102,7 +102,7 @@ def _markdown(root: Path, rows: list[dict[str, Any]]) -> str:
         "1536 columns for the Qwen2.5-1.5B decoder. This is not a trained projection "
         "and the benchmark makes no quality or model-parity claim.",
         "",
-        "Each cell uses 1,000 streaming requests, exact ISL 515, exact OSL 75, and "
+        "Each cell uses 1,000 streaming requests, exact ISL 515, exact OSL 70, and "
         "a disjoint pool of unique 500×500 JPEGs between 50 and 60 KiB.",
         "",
         "## Runtime",

@@ -93,7 +93,7 @@ def _write_result(root: Path, runtime: str, rate: int) -> None:
             "cli_command": "aiperf profile --random-seed 42",
         },
         "input_sequence_length": {"min": 515, "avg": 515, "max": 515},
-        "output_sequence_length": {"min": 75, "avg": 75, "max": 75},
+        "output_sequence_length": {"min": 70, "avg": 70, "max": 70},
         "time_to_first_token": _latency(float(rate)),
         "request_latency": _latency(float(rate * 10)),
         "request_throughput": {"avg": float(rate)},
@@ -125,7 +125,7 @@ def _write_concurrency_result(root: Path, concurrency: int) -> None:
             ),
         },
         "input_sequence_length": {"min": 515, "avg": 515, "max": 515},
-        "output_sequence_length": {"min": 75, "avg": 75, "max": 75},
+        "output_sequence_length": {"min": 70, "avg": 70, "max": 70},
         "time_to_first_token": _latency(float(concurrency)),
         "request_latency": _latency(float(concurrency * 10)),
         "request_throughput": {"avg": float(concurrency)},
@@ -206,7 +206,7 @@ def test_concurrency_config_uses_closed_loop_axis_and_requested_tuning(
 
     assert config.request_rates is None
     assert config.concurrencies == [32]
-    assert config.osl == 75
+    assert config.osl == 70
     assert config.env["DYN_QWEN2_VL_PREPROCESS_CONCURRENCY"] == "64"
     assert config.env["DYN_QWEN2_VL_MAX_BATCH_COST"] == "64"
     assert config.env["DYN_QWEN2_VL_GRAPH_BATCH_BUCKETS"] == "1,2,4,8,16,32,64"

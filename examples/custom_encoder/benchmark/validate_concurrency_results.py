@@ -25,7 +25,7 @@ def validate_result(
     path: Path,
     expected_requests: int = 1000,
     expected_isl: int = 515,
-    expected_osl: int = 75,
+    expected_osl: int = 70,
     expected_concurrencies: Collection[int] = CONCURRENCIES,
 ) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))

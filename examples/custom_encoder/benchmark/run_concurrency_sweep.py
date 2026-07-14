@@ -61,7 +61,7 @@ def _metadata(
         "encoder_model": encoder_model,
         "requests_per_cell": 1 if smoke else REQUESTS_PER_CONCURRENCY,
         "warmup_requests": 1 if smoke else 20,
-        "osl": 1 if smoke else 75,
+        "osl": 1 if smoke else 70,
         "streaming": True,
         "custom_encoder_class": ENCODER_CLASS,
         "performance_only_adapter": (
@@ -116,7 +116,7 @@ def _config(
     return SweepConfig(
         model=decoder_model,
         concurrencies=[1 if smoke else concurrency],
-        osl=1 if smoke else 75,
+        osl=1 if smoke else 70,
         conversation_num=1 if smoke else REQUESTS_PER_CONCURRENCY,
         warmup_count=1 if smoke else 20,
         port=8000,
