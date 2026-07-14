@@ -771,3 +771,479 @@ def test_build_dgd_config_pvc_with_model_path_no_hf_home() -> None:
         assert (
             len(hf_homes) == 0
         ), f"HF_HOME should not be set on {svc_name} when model_path is a PVC subpath"
+
+
+# -----------------------------------------------------------------------------
+# auto_inject_trust_remote_code / model_has_auto_map
+# -----------------------------------------------------------------------------
+
+
+def _make_dgd_with_workers(*worker_names: str) -> dict:
+    """Build a minimal DGD dict with the given worker services + a Frontend."""
+    services: dict = {
+        "Frontend": {
+            "extraPodSpec": {
+                "mainContainer": {"args": ["--http-port", "8000"]},
+            },
+        },
+    }
+    for name in worker_names:
+        services[name] = {
+            "extraPodSpec": {
+                "mainContainer": {"args": ["--model", "some/model", "--tp", "1"]},
+            },
+        }
+    return {"spec": {"services": services}}
+
+
+def test_model_has_auto_map_local_dir_with_auto_map(tmp_path) -> None:
+    import json as _json
+
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    cfg = {
+        "model_type": "nemotron_h",
+        "auto_map": {
+            "AutoConfig": "configuration_nemotron_h.NemotronHConfig",
+            "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM",
+        },
+    }
+    (tmp_path / "config.json").write_text(_json.dumps(cfg))
+    assert model_has_auto_map(tmp_path) is True
+
+
+def test_model_has_auto_map_local_dir_without_auto_map(tmp_path) -> None:
+    import json as _json
+
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    (tmp_path / "config.json").write_text(_json.dumps({"model_type": "llama"}))
+    assert model_has_auto_map(tmp_path) is False
+
+
+def test_model_has_auto_map_local_dir_missing_config_returns_false(tmp_path) -> None:
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    assert model_has_auto_map(tmp_path) is False
+
+
+def test_materialize_dgd_injects_trust_remote_code_for_vllm() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    decode_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert decode_args[-1] == "--trust-remote-code"
+    # Original args preserved.
+    assert decode_args[:-1] == ["--model", "some/model", "--tp", "1"]
+    # Frontend untouched.
+    assert "--trust-remote-code" not in (
+        result["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+    )
+
+
+def test_materialize_dgd_injects_trust_remote_code_for_sglang() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("SglangDecodeWorker", "SglangPrefillWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="sglang",
+            model_name_or_path="some/model",
+        )
+
+    for svc in ("SglangDecodeWorker", "SglangPrefillWorker"):
+        args = result["spec"]["services"][svc]["extraPodSpec"]["mainContainer"]["args"]
+        assert args.count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_skips_trust_when_no_auto_map() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=False,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert "--trust-remote-code" not in args
+
+
+def test_materialize_dgd_fails_closed_for_mutable_remote_ref() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=False,
+    ):
+        with pytest.raises(
+            RuntimeError, match="Refusing to auto-inject --trust-remote-code"
+        ):
+            materialize_dgd(
+                cfg,
+                purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+                runtime_backend="vllm",
+                model_name_or_path="some/model",
+            )
+
+
+def test_materialize_dgd_skips_trust_for_trtllm() -> None:
+    """TRT-LLM uses a YAML field, not the CLI flag."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("TRTLLMDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="trtllm",
+            model_name_or_path="some/model",
+        )
+
+    args = result["spec"]["services"]["TRTLLMDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert "--trust-remote-code" not in args
+
+
+def test_materialize_dgd_remote_ref_with_explicit_override_skips_error() -> None:
+    """When the user already set --trust-remote-code via overrides, the
+    mutable-remote-ref error must not fire — the manual escape hatch works."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    # Simulate user override having already appended the flag.
+    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ].append("--trust-remote-code")
+
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=False,
+    ):
+        # Should NOT raise RuntimeError because the flag is already present.
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/remote-model",
+        )
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_trust_injection_is_idempotent() -> None:
+    """Running materialize_dgd twice must not duplicate the flag."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+        result2 = materialize_dgd(
+            result,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    args = result2["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_respects_existing_trust_flag() -> None:
+    """An explicit --trust-remote-code already in args must not be duplicated."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ].append("--trust-remote-code")
+
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_excludes_frontend_and_planner() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg["spec"]["services"]["Planner"] = {
+        "extraPodSpec": {"mainContainer": {"args": ["--interval", "30"]}},
+    }
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    assert "--trust-remote-code" not in (
+        result["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+    )
+    assert "--trust-remote-code" not in (
+        result["spec"]["services"]["Planner"]["extraPodSpec"]["mainContainer"]["args"]
+    )
+
+
+def test_materialize_dgd_shell_form_worker() -> None:
+    """Shell-form workers (command=['sh','-c'], args=['<single string>']) must
+    have the flag appended inside the string, not as a second list element."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [
+                                "python3 -m vllm.entrypoints.openai.api_server "
+                                "--model some/model --tp 1"
+                            ],
+                        },
+                    },
+                },
+            }
+        }
+    }
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    # Must still be a single-element list (shell form preserved).
+    assert isinstance(result_args, list) and len(result_args) == 1
+    assert result_args[0].endswith("--trust-remote-code")
+
+    # Idempotency: materializing again must not duplicate the flag.
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result2 = materialize_dgd(
+            result,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result2_args = result2["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert len(result2_args) == 1
+    assert result2_args[0].count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_shell_form_preserves_syntax() -> None:
+    """Shell-form args with shell operators (&&, |, etc.) must not be
+    corrupted by shlex round-tripping."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    original_cmd = (
+        "export FOO=bar && python3 -m vllm.entrypoints.openai.api_server "
+        "--model some/model --tp 1"
+    )
+    cfg = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [original_cmd],
+                        },
+                    },
+                },
+            }
+        }
+    }
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert len(result_args) == 1
+    # The original shell syntax (&&, export) must be preserved verbatim.
+    assert result_args[0] == original_cmd + " --trust-remote-code"
+
+
+def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:
+    """Unexpected errors (network, auth) must return True (conservative default)
+    rather than silently returning False and risking a missed injection."""
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    with patch(
+        "dynamo.profiler.utils.model_info.hf_hub_download",
+        side_effect=OSError("simulated network failure"),
+    ):
+        result = model_has_auto_map("some/hf-model")
+
+    assert result is True
+
+
+def test_model_has_auto_map_returns_false_for_repo_not_found() -> None:
+    """RepositoryNotFoundError means the model doesn't exist — no custom code.
+    The detection uses type(e).__name__ so no huggingface_hub import is needed."""
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    class RepositoryNotFoundError(Exception):
+        pass
+
+    with patch(
+        "dynamo.profiler.utils.model_info.hf_hub_download",
+        side_effect=RepositoryNotFoundError("404"),
+    ):
+        result = model_has_auto_map("nonexistent/model")
+
+    assert result is False
+
+
+def test_model_has_auto_map_returns_false_for_malformed_json(tmp_path) -> None:
+    """Malformed config.json must return False (can't parse, assume no auto_map)."""
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    (tmp_path / "config.json").write_text("{this is not valid json}")
+    result = model_has_auto_map(tmp_path)
+    assert result is False

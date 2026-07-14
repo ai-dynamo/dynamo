@@ -651,6 +651,9 @@ def _make_decode_handler(
         use_unified_vision_chunk=False,
     )
     handler._deferred_aborts = {}
+    # Real BaseWorkerHandler.__init__ (patched out above) sets this; the
+    # aggregated branch in _generate_token_mode reads it, so mirror the default.
+    handler._custom_encoder = None
     return handler
 
 

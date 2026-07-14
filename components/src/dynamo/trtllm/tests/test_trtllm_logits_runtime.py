@@ -391,6 +391,12 @@ def test_adapter_invokes_or_logs_on_bad_shape(shape, expect_invoke, caplog):
         )
 
 
+# Unlike the rest of this module (CPU-only mocks, module-level
+# profiled_vram_gib(0)), this test initializes a real CUDA context, so the
+# GPU-parallel scheduler must reserve VRAM for it instead of packing it onto
+# an already-full GPU as a zero-VRAM filler.
+@pytest.mark.profiled_vram_gib(2.0)
+@pytest.mark.requested_trtllm_vram_gib(2.0)
 def test_adapter_enters_engine_cuda_stream():
     """When `stream_ptr` is non-null, the adapter wraps the processor
     call in `torch.cuda.stream(ExternalStream(stream_ptr))` so the

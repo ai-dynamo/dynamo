@@ -535,6 +535,14 @@ Lifecycle and runtime:
 - **Sleep/wake (vLLM)** — `sleep` / `wake_up` controls via
   `VllmEnginePauseController` (discovery unregister before sleep,
   re-register after wake; `worker.rs` `engine_control_policy`)
+- **KV block clearing (vLLM)** — `POST /engine/control/clear_kv_blocks`
+  on the unified worker's system port,
+  with an empty JSON object (`{}`). The control resets both the prefix
+  cache and connector cache in aggregated, prefill, and decode modes. It
+  returns `{"status":"success","message":"KV cache cleared"}` on
+  success and HTTP 200 with `status:"error"` on semantic failure. The
+  control runs directly without pausing generation or draining requests;
+  if blocks are still in use, retry after the active requests finish.
 - **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
   with the legacy handler: `new_data_parallel_size` validation, a
   single-flight lock (concurrent scales rejected, not queued), and the
@@ -598,14 +606,13 @@ Observability:
 
 Request handling:
 - **Guided decoding / structured outputs** — wired per-engine on the
-  request side, with engine-specific coverage:
+  request side with JSON schema, regex, grammar, and choice coverage:
   - vLLM (`build_sampling_params` → `StructuredOutputsParams`):
     JSON schema, regex, grammar, choice.
   - TRT-LLM (`GuidedDecodingParams`): JSON schema, regex, grammar,
     choice, `json_object`.
-  - SGLang (`_get_guided_decoding_params`): JSON schema only;
-    regex / grammar / choice are silently dropped (see SGLang gaps
-    below).
+  - SGLang (`_get_guided_decoding_params`): JSON schema, regex,
+    grammar through `ebnf`, and choice through an escaped regex.
 - **Structural tag generation** — `WorkerConfig.structural_tag_{mode,
   scope, schema}` + `serialize_structural_tag` helper
 - **Custom Jinja chat templates** — `WorkerConfig.custom_jinja_template`
@@ -630,7 +637,6 @@ Request handling:
 |---------|-------------|
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
-| KV block clearing | Prefix cache reset endpoint |
 | `VllmEngineMonitor` | Background `EngineDeadError` detection task |
 | Instrumented scheduler + FPM relay | Per-forward-pass `ForwardPassMetrics` ZMQ telemetry |
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
@@ -656,7 +662,6 @@ Request handling:
 | `protocol.py` Pydantic models | `EmbeddingRequest`, `DisaggPreprocessedRequest`, multimodal content types |
 | `--disagg-config` YAML override | `--disagg-config` / `--disagg-config-key` for YAML-based disagg config |
 | `--enable-rl` | RL support via `call_tokenizer_manager` route |
-| Guided-decoding constraint coverage | `_get_guided_decoding_params` forwards only `json` (and `structural_tag`); `regex` / `grammar` / `choice` are silently dropped on the unified path even though SGLang's engine accepts them |
 
 ### TRT-LLM-specific gaps
 
@@ -686,10 +691,9 @@ For users picking what to land next on the unified path:
    (engine updates `/engine/update/load_lora|unload_lora|list_loras` + a
    `/v1/loras` compatibility alias; see [What works today](#what-works-today)).
    Remaining: SGLang and TRT-LLM, which advertise no LoRA updates yet.
-3. **Engine routes / lifecycle endpoints** — weight updates, KV block
-   clearing, prefix cache reset. (Profiling, sleep/wake, elastic-EP
-   scaling, and headless multi-node already landed.) Visible in operator
-   workflows.
+3. **Engine routes / lifecycle endpoints** — weight updates. (Profiling,
+   sleep/wake, KV block clearing, elastic-EP scaling, and headless
+   multi-node already landed.) Visible in operator workflows.
 4. **Snapshot / CRIU** — production checkpoint support.
 5. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.

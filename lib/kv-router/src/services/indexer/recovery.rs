@@ -59,16 +59,15 @@ async fn try_recover_from_peer(
 
     let dump: HashMap<String, DumpEntry> =
         resp.json().await.context("failed to parse dump response")?;
-
     let mut total_events = 0usize;
     for (map_key, entry) in dump {
-        let (model_name, tenant_id) = map_key
+        let (model_name, routing_group) = map_key
             .split_once(':')
             .ok_or_else(|| anyhow::anyhow!("invalid dump key format: {map_key}"))?;
 
         let key = IndexerKey {
             model_name: model_name.to_string(),
-            tenant_id: tenant_id.to_string(),
+            routing_group: routing_group.to_string(),
         };
 
         let indexer = registry.get_or_create_indexer(key, entry.block_size);
