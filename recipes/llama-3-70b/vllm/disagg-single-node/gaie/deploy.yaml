@@ -5,12 +5,7 @@ kind: DynamoGraphDeployment
 metadata:
   name: llama3-70b-disagg
   annotations:
-    # Frontend runs as a sidecar in the worker pods (frontendSidecar below).
-    # Container discovery makes each worker discoverable per-container, so the
-    # sidecar frontend uses local-worker readiness: the pod reports Ready only
-    # once its colocated model is registered and routable (not just when the
-    # process is up). Under the default pod discovery this would deadlock, so
-    # the operator only enables local-worker readiness in container mode.
+    # Required for the frontendSidecar's local-worker readiness (pod reports Ready only once its colocated model is routable).
     nvidia.com/dynamo-kube-discovery-mode: container
 spec:
   backendFramework: vllm
