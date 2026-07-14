@@ -474,6 +474,9 @@ class Qwen2VLVisionEncoder(QwenVisionEncoderBackend):
 
         with torch.inference_mode():
             image_embeds = visual(pixel_values, grid_thw=image_grid_thw)
+            # Transformers 5.x wraps the merged vision tokens in
+            # BaseModelOutputWithPooling; 4.x returns the tensor directly.
+            image_embeds = getattr(image_embeds, "pooler_output", image_embeds)
         if events:
             events[2].record()
         # One batched D2H copy avoids a synchronization and allocation per image.
