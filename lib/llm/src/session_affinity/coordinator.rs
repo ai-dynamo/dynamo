@@ -189,7 +189,7 @@ impl AffinityCoordinator {
             match self.inner.entries.entry(session_id.clone()) {
                 Entry::Vacant(entry) => {
                     self.reserve_entry()?;
-                    tracing::info!(
+                    tracing::debug!(
                         session_id = %session_id,
                         "session affinity miss: new session, pinning after worker selection"
                     );
@@ -228,7 +228,7 @@ impl AffinityCoordinator {
                         active_leases,
                         idle_deadline,
                     } if *active_leases == 0 && *idle_deadline <= now => {
-                        tracing::info!(
+                        tracing::debug!(
                             session_id = %session_id,
                             "session affinity miss: pin expired (idle past TTL), re-selecting worker"
                         );
@@ -255,7 +255,7 @@ impl AffinityCoordinator {
                         ..
                     } => {
                         validate_bound_target(&session_id, *target, requested_target)?;
-                        tracing::info!(
+                        tracing::debug!(
                             session_id = %session_id,
                             worker_id = target.worker_id,
                             dp_rank = ?target.dp_rank,
@@ -301,11 +301,10 @@ impl AffinityCoordinator {
             return Ok(None);
         }
         validate_bound_target(session_id.as_str(), *target, requested_target)?;
-        tracing::info!(
+        tracing::debug!(
             session_id = %session_id.as_str(),
             worker_id = target.worker_id,
             dp_rank = ?target.dp_rank,
-            active_leases = *active_leases + 1,
             "session affinity hit: reusing pinned worker"
         );
 
