@@ -103,7 +103,8 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
-_RL_INIT_WEIGHTS_UPDATE_GROUP_TIMEOUT_S = 30.0
+_RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
+_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -121,6 +122,15 @@ def build_prompt_tokens_details(
     if num_cached_tokens is None:
         return None
     return {"cached_tokens": num_cached_tokens}
+
+
+def _rl_init_weights_timeout_s() -> float:
+    return float(
+        os.environ.get(
+            _RL_INIT_WEIGHTS_TIMEOUT_ENV,
+            str(_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S),
+        )
+    )
 
 
 class _DeferredAbort:
@@ -1104,11 +1114,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             config.model,
         )
 
-    def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
-        logger.error(f"vLLM EngineDeadError: {e}")
+    def _shutdown_worker(self) -> NoReturn:
         logger.warning("Initiating Dynamo Runtime shutdown.")
         self.runtime.shutdown()
         os._exit(1)
+
+    def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
+        logger.error(f"vLLM EngineDeadError: {e}")
+        self._shutdown_worker()
 
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
@@ -1721,25 +1734,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
         async with self._pause_lock:
             try:
-                await asyncio.wait_for(
-                    self.engine_client.collective_rpc(rpc, kwargs=kwargs),
-                    timeout=_RL_INIT_WEIGHTS_UPDATE_GROUP_TIMEOUT_S,
+                timeout_s = _rl_init_weights_timeout_s()
+                rpc_task = asyncio.create_task(
+                    self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 )
+                try:
+                    done, _ = await asyncio.wait({rpc_task}, timeout=timeout_s)
+                except asyncio.CancelledError:
+                    rpc_task.cancel()
+                    await asyncio.gather(rpc_task, return_exceptions=True)
+                    raise
+                if rpc_task not in done:
+                    rpc_task.cancel()
+                    await asyncio.gather(rpc_task, return_exceptions=True)
+                    logger.error(
+                        f"[RL] init_weights_update_group timed out after "
+                        f"{timeout_s:.1f} seconds (rpc={rpc}); terminating the "
+                        "worker because EngineCore may still be blocked"
+                    )
+                    self._shutdown_worker()
+
+                await rpc_task
                 logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
                 return {"status": "ok", "message": "Weight update group initialized"}
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
-            except asyncio.TimeoutError:
-                logger.error(
-                    "[RL] init_weights_update_group timed out after %.1f seconds "
-                    "(rpc=%s); terminating the worker because EngineCore may "
-                    "still be blocked",
-                    _RL_INIT_WEIGHTS_UPDATE_GROUP_TIMEOUT_S,
-                    rpc,
-                )
-                logger.warning("Initiating Dynamo Runtime shutdown.")
-                self.runtime.shutdown()
-                os._exit(1)
             except Exception as e:
                 logger.error(f"[RL] init_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}

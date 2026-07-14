@@ -1690,7 +1690,15 @@ class TestRLAdminRouteHardening:
         )
         assert not handler._pause_lock.locked()
 
+    def test_init_weights_update_group_timeout_defaults_to_30_seconds(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", raising=False)
+
+        assert mod._rl_init_weights_timeout_s() == 30.0
+
     @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
     async def test_init_weights_update_group_timeout_exits_worker(self, monkeypatch):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
@@ -1707,7 +1715,7 @@ class TestRLAdminRouteHardening:
                 raise
 
         handler.engine_client.collective_rpc = AsyncMock(side_effect=blocked_rpc)
-        monkeypatch.setattr(mod, "_RL_INIT_WEIGHTS_UPDATE_GROUP_TIMEOUT_S", 0.01)
+        monkeypatch.setenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", "0.01")
         exit_mock = MagicMock(side_effect=SystemExit(1))
         monkeypatch.setattr(mod.os, "_exit", exit_mock)
 
@@ -1718,6 +1726,54 @@ class TestRLAdminRouteHardening:
 
         assert exc_info.value.code == 1
         assert rpc_cancelled.is_set()
+        handler.runtime.shutdown.assert_called_once_with()
+        exit_mock.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_returns_inner_timeout_error(
+        self, monkeypatch
+    ):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=TimeoutError("transport timed out")
+        )
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        resp = await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        assert resp == {"status": "error", "message": "transport timed out"}
+        handler.runtime.shutdown.assert_not_called()
+        exit_mock.assert_not_called()
+        assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_init_weights_update_group_engine_dead_exits_worker(
+        self, monkeypatch
+    ):
+        from vllm.v1.engine.exceptions import EngineDeadError
+
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.runtime = MagicMock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=EngineDeadError("engine dead")
+        )
+        exit_mock = MagicMock(side_effect=SystemExit(1))
+        monkeypatch.setattr(mod.os, "_exit", exit_mock)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+
+        assert exc_info.value.code == 1
         handler.runtime.shutdown.assert_called_once_with()
         exit_mock.assert_called_once_with(1)
 
