@@ -46,6 +46,8 @@ const (
 	Checkpoint Name = "checkpoint"
 
 	// Grove enables Grove-backed workload orchestration.
+	// The configuration override is merged with API auto-detection. Grove must be
+	// installed and serve grove.io/v1alpha1.
 	//
 	// Owner: @julienmancuso
 	// Experimental since: v0.4.0
@@ -55,6 +57,8 @@ const (
 	Grove Name = "grove"
 
 	// LWS enables LeaderWorkerSet-backed workload orchestration.
+	// The configuration override is merged with API auto-detection. LWS must serve
+	// leaderworkerset.x-k8s.io/v1 and Volcano must serve scheduling.volcano.sh/v1beta1.
 	//
 	// Owner: @julienmancuso
 	// Experimental since: v0.3.0
@@ -64,6 +68,8 @@ const (
 	LWS Name = "lws"
 
 	// KaiScheduler enables Kai Scheduler integration.
+	// The configuration override is merged with API auto-detection. Kai Scheduler
+	// must be installed and serve scheduling.run.ai/v2 Queue resources.
 	//
 	// Owner: @julienmancuso
 	// Experimental since: v0.5.0
@@ -72,7 +78,8 @@ const (
 	// Default: false
 	KaiScheduler Name = "kaiScheduler"
 
-	// VolcanoScheduler enables Volcano scheduling for Grove workloads.
+	// VolcanoScheduler injects Volcano scheduler settings into Grove PodCliqueSets.
+	// It is opt-in and requires Volcano to serve scheduling.volcano.sh/v1beta1.
 	//
 	// Owner: @xianlubird
 	// Experimental since: v1.4.0
@@ -82,6 +89,8 @@ const (
 	VolcanoScheduler Name = "volcanoScheduler"
 
 	// DRA enables Dynamic Resource Allocation using resource.k8s.io/v1.
+	// The configuration override is merged with API auto-detection. This optional
+	// gate requires Kubernetes 1.34 or later, where the v1 API is available.
 	//
 	// Owner: @julienmancuso
 	// Experimental since: v1.2.0
@@ -91,6 +100,8 @@ const (
 	DRA Name = "dra"
 
 	// Istio enables Istio DestinationRule reconciliation.
+	// The configuration override is merged with API auto-detection. Istio must be
+	// installed and serve networking.istio.io/v1beta1 DestinationRule resources.
 	//
 	// Owner: @atchernych
 	// Experimental since: N/A
