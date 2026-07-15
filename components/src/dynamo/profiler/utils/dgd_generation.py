@@ -44,6 +44,7 @@ from dynamo.profiler.utils.profile_common import (
     is_mocker_enabled,
     is_planner_enabled,
     needs_profile_data,
+    resolve_model_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -232,7 +233,13 @@ def generate_mocker_config(
             ].get("mainContainer"):
                 service_config["extraPodSpec"]["mainContainer"]["image"] = image
 
-    model = dgdr.model
+    # DGH-1124: the served name stays the model id (so requests match), but the
+    # load path must prefer the local PVC mount — otherwise an offline mocker
+    # worker tries to fetch the tokenizer from HuggingFace, fails, and never
+    # registers. resolve_model_path returns the local PVC path when the model
+    # is present there, else the model id (mirrors the real-backend path).
+    model_name = dgdr.model
+    model_path = resolve_model_path(dgdr)
     aic_workers = _mocker_aic_worker_picks(aic_spec)
     for worker_name in _mocker_worker_names():
         service_config = (
@@ -243,14 +250,52 @@ def generate_mocker_config(
                 "mainContainer", {}
             )
             args_list = main_container.get("args", [])
-            args_list = set_argument_value(args_list, "--model-path", model)
-            args_list = set_argument_value(args_list, "--model-name", model)
+            args_list = set_argument_value(args_list, "--model-path", model_path)
+            args_list = set_argument_value(args_list, "--model-name", model_name)
             pick = aic_workers.get(worker_name) if aic_workers else None
             if pick is not None and aic_spec is not None:
                 args_list = _inject_mocker_aic_args(args_list, aic_spec, pick)
             main_container["args"] = args_list
+            # DGH-1124: mount the model-cache PVC so an offline mocker worker can
+            # read the model from the PVC instead of reaching for HuggingFace.
+            _mount_model_cache_pvc(service_config, dgdr)
 
     return mocker_config
+
+
+def _mount_model_cache_pvc(service_dict: dict, dgdr) -> None:
+    """Mount the DGDR's model-cache PVC into a service's mainContainer.
+
+    No-op when no model cache PVC is configured. Idempotent — skips if a volume
+    or mount for the PVC is already present (e.g. user override).
+    """
+    model_cache = getattr(dgdr, "modelCache", None)
+    if not (model_cache and model_cache.pvcName and model_cache.pvcMountPath):
+        return
+
+    volume_name = "model-cache"
+    extra_pod_spec = service_dict.setdefault("extraPodSpec", {})
+    volumes = extra_pod_spec.setdefault("volumes", [])
+    if not any(v.get("name") == volume_name for v in volumes):
+        volumes.append(
+            {
+                "name": volume_name,
+                "persistentVolumeClaim": {
+                    "claimName": model_cache.pvcName,
+                    "readOnly": True,
+                },
+            }
+        )
+    main_container = extra_pod_spec.setdefault("mainContainer", {})
+    volume_mounts = main_container.setdefault("volumeMounts", [])
+    if not any(m.get("name") == volume_name for m in volume_mounts):
+        volume_mounts.append(
+            {
+                "name": volume_name,
+                "mountPath": model_cache.pvcMountPath,
+                "readOnly": True,
+            }
+        )
 
 
 def enable_planner_worker_scaling_adapters(

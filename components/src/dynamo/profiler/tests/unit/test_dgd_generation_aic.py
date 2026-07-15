@@ -15,14 +15,17 @@ try:
     from dynamo.profiler.utils.dgd_generation import (
         _build_planner_config,
         _inject_mocker_aic_args,
+        _mocker_worker_names,
         build_aic_interpolation_spec,
         build_aic_perf_model_spec,
         enable_vllm_benchmark_mode,
+        generate_mocker_config,
     )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         FeaturesSpec,
         MockerSpec,
+        ModelCacheSpec,
     )
 except ImportError as e:
     pytest.skip(f"Missing dependency: {e}", allow_module_level=True)
@@ -526,3 +529,60 @@ class TestEnableVllmBenchmarkMode:
         assert (
             _benchmark_mode(cfg["spec"]["services"]["VllmPrefillWorker"]) == "prefill"
         )
+
+
+class TestMockerModelCachePvc:
+    """DGH-1124: mocker workers must load from the local PVC path (not the HF
+    id) and get the model-cache PVC mounted, so offline deployments work."""
+
+    def _mocker_worker_args(self, cfg, worker):
+        svc = cfg["spec"]["services"][worker]
+        return svc, svc["extraPodSpec"]["mainContainer"]["args"]
+
+    def test_mocker_offline_pvc_uses_local_path_and_mounts_pvc(self, tmp_path):
+        # Stage a local model dir with config.json on the "PVC" so
+        # resolve_model_path prefers it over the HF id.
+        mount = tmp_path / "models"
+        model_dir = mount / "org" / "model"
+        model_dir.mkdir(parents=True)
+        (model_dir / "config.json").write_text("{}")
+
+        dgdr = DynamoGraphDeploymentRequestSpec(
+            model="org/model",
+            features=FeaturesSpec(mocker=MockerSpec(enabled=True)),
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath=str(mount),
+                pvcModelPath="org/model",
+            ),
+        )
+
+        cfg = generate_mocker_config(dgdr, aic_spec=None)
+
+        for worker in _mocker_worker_names():
+            svc, args = self._mocker_worker_args(cfg, worker)
+            # served name stays the model id so requests match
+            assert args[args.index("--model-name") + 1] == "org/model"
+            # load path is the local PVC path, not the HF id
+            assert args[args.index("--model-path") + 1] == str(model_dir)
+            # the model-cache PVC is mounted onto the worker
+            mounts = svc["extraPodSpec"]["mainContainer"]["volumeMounts"]
+            assert any(m["mountPath"] == str(mount) for m in mounts)
+            volumes = svc["extraPodSpec"]["volumes"]
+            assert any(
+                v.get("persistentVolumeClaim", {}).get("claimName") == "model-cache"
+                for v in volumes
+            )
+
+    def test_mocker_without_pvc_falls_back_to_model_id(self):
+        dgdr = DynamoGraphDeploymentRequestSpec(
+            model="org/model",
+            features=FeaturesSpec(mocker=MockerSpec(enabled=True)),
+        )
+        cfg = generate_mocker_config(dgdr, aic_spec=None)
+        for worker in _mocker_worker_names():
+            svc, args = self._mocker_worker_args(cfg, worker)
+            assert args[args.index("--model-path") + 1] == "org/model"
+            # no PVC configured -> no model-cache mount added
+            mounts = svc["extraPodSpec"]["mainContainer"].get("volumeMounts", [])
+            assert not any(m.get("name") == "model-cache" for m in mounts)
