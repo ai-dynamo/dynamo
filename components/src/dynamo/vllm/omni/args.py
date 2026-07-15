@@ -374,7 +374,9 @@ class OmniConfig(DynamoRuntimeConfig):
     # Realtime (bidirectional) serving mode
     realtime: bool = False
 
-    # Compatibility fields used by shared LoRA registration logic.
+    # Reserved compatibility fields for shared/base LoRA registration paths.
+    # Omni currently overrides LoRA discovery registration, but these fields
+    # keep OmniConfig shape-compatible with shared handler expectations.
     disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
     route_to_encoder: bool = False
 

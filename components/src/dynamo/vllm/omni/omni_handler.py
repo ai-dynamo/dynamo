@@ -264,6 +264,7 @@ class OmniHandler(BaseOmniHandler):
             base_model_path=self.config.model,
             worker_type=WorkerType.Aggregated,
             needs=[],
+            max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
         )
 
     async def load_lora(self, request=None):

@@ -57,6 +57,7 @@ async def init_omni(
     runtime: DistributedRuntime, config: OmniConfig, shutdown_event: asyncio.Event
 ):
     """Initialize Omni worker for multi-stage pipeline generation."""
+    # Intentional function-local import to avoid omni package import cycles.
     from dynamo.vllm.omni import OmniHandler
 
     generate_endpoint = runtime.endpoint(
