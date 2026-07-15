@@ -158,14 +158,14 @@ def assemble_final_config(
 def _vllm_worker_roles() -> dict[str, str]:
     """Canonical DGD service name → DYN_BENCHMARK_MODE role.
 
-    Sourced from :class:`VllmComponentName` so we stay in sync with the
-    rest of the planner/profiler if the k8s service names are ever
-    renamed.
+    Canonical names: VllmPrefillWorker / VllmDecodeWorker are taken from
+    :class:`VllmComponentName`; VllmWorker (agg) is the fixed name used in
+    all v1beta1 agg manifests and resolved dynamically by the planner.
     """
     return {
         VllmComponentName.prefill_worker_k8s_name: "prefill",
         VllmComponentName.decode_worker_k8s_name: "decode",
-        VllmComponentName.agg_worker_k8s_name: "agg",
+        "VllmWorker": "agg",
     }
 
 

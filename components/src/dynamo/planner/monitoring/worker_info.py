@@ -201,7 +201,7 @@ def resolve_worker_info(
             model_name = mdc_model
             logger.info(f"Using model name from MDC: {model_name}")
         elif can_query_mdc:
-            get_model_name_kwargs = {
+            get_model_name_kwargs: dict[str, Any] = {
                 "require_prefill": require_prefill,
                 "require_decode": require_decode,
             }
