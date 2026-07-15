@@ -124,7 +124,9 @@ def test_deprecated_publish_events_flag_alias_maps_and_logs(monkeypatch, caplog)
     warnings.warn(DeprecationWarning) from library code is not)."""
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("WARNING"), pytest.warns(
+        DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+    ):
         config = parse_args(["--publish-events-and-metrics"])
     assert config.publish_events_and_metrics is True
     assert config.use_kv_events is True
@@ -138,23 +140,23 @@ def test_deprecated_publish_events_env_alias_maps_and_logs(monkeypatch, caplog):
     """The deprecated DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS env var must still
     map to the new env var AND surface its deprecation notice on the log
     stream."""
+    # parse_args copies the deprecated env var into the new one via a direct
+    # os.environ write. Swap in a throwaway copy so monkeypatch restores the real
+    # environment on teardown and that write does not leak into later tests.
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.setenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", "true")
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("WARNING"), pytest.warns(
+        DeprecationWarning, match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated"
+    ):
         config = parse_args([])
-    try:
-        assert config.publish_events_and_metrics is True
-        assert config.use_kv_events is True
-        # parse_args copies the deprecated env var into the new one via a direct
-        # os.environ write, which monkeypatch does not track — pop it so it does
-        # not leak into later tests.
-        assert os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] == "true"
-        assert any(
-            "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated" in r.message
-            for r in caplog.records
-        )
-    finally:
-        os.environ.pop("DYN_TRTLLM_PUBLISH_KV_EVENTS", None)
+    assert config.publish_events_and_metrics is True
+    assert config.use_kv_events is True
+    assert os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] == "true"
+    assert any(
+        "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated" in r.message
+        for r in caplog.records
+    )
 
 
 @pytest.mark.asyncio
