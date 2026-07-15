@@ -598,15 +598,15 @@ async fn test_batch_api_skeleton_routes_return_not_implemented() {
     assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["code"], 501);
-    assert_eq!(body["message"], "Batch file storage is not implemented yet.");
+    assert_eq!(
+        body["message"],
+        "Batch file storage is not implemented yet."
+    );
 
     let response = client
         .post(format!("{base}/v1/batches"))
-        .json(&serde_json::json!({
-            "input_file_id": "file-123",
-            "endpoint": "/v1/completions",
-            "completion_window": "24h"
-        }))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("not valid JSON")
         .send()
         .await
         .unwrap();
@@ -624,6 +624,12 @@ async fn test_batch_api_skeleton_routes_return_not_implemented() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], 501);
+    assert_eq!(
+        body["message"],
+        "Batch job lifecycle persistence is not implemented yet."
+    );
 
     let response = client
         .get(format!("{base}/v1/files/file-123/content"))

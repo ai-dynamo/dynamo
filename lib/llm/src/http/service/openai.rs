@@ -54,7 +54,6 @@ use crate::protocols::common::extensions::{
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
-    batches::NvCreateBatchRequest,
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -81,8 +80,7 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
-const BATCH_FILE_STORAGE_NOT_IMPLEMENTED: &str =
-    "Batch file storage is not implemented yet.";
+const BATCH_FILE_STORAGE_NOT_IMPLEMENTED: &str = "Batch file storage is not implemented yet.";
 const BATCH_JOB_STATE_NOT_IMPLEMENTED: &str =
     "Batch job lifecycle persistence is not implemented yet.";
 const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
@@ -2860,15 +2858,13 @@ pub fn batch_router(
     (docs, router)
 }
 
-async fn create_batch_file(_body: Bytes) -> Result<Response, ErrorResponse> {
+async fn create_batch_file() -> Result<Response, ErrorResponse> {
     Err(ErrorMessage::not_implemented_error(
         BATCH_FILE_STORAGE_NOT_IMPLEMENTED,
     ))
 }
 
-async fn create_batch(
-    Json(_request): Json<NvCreateBatchRequest>,
-) -> Result<Response, ErrorResponse> {
+async fn create_batch() -> Result<Response, ErrorResponse> {
     Err(ErrorMessage::not_implemented_error(
         BATCH_JOB_STATE_NOT_IMPLEMENTED,
     ))

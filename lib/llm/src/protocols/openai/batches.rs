@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +26,22 @@ pub struct NvBatchRequestCounts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NvBatchError {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub param: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NvBatchErrors {
+    pub object: String,
+    pub data: Vec<NvBatchError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NvCreateBatchRequest {
     pub input_file_id: String,
     pub endpoint: String,
@@ -35,7 +50,7 @@ pub struct NvCreateBatchRequest {
     pub metadata: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NvBatch {
     pub id: String,
     pub object: String,
@@ -65,7 +80,7 @@ pub struct NvBatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_file_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub errors: Option<Value>,
+    pub errors: Option<NvBatchErrors>,
     pub request_counts: NvBatchRequestCounts,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
@@ -111,6 +126,32 @@ mod tests {
         assert_eq!(
             request.metadata.unwrap().get("campaign").unwrap(),
             "synthetic-data"
+        );
+    }
+
+    #[test]
+    fn batch_errors_serialize_as_openai_list() {
+        let errors = NvBatchErrors {
+            object: "list".to_string(),
+            data: vec![NvBatchError {
+                code: "invalid_request".to_string(),
+                message: "The request is invalid.".to_string(),
+                param: Some("body".to_string()),
+                line: Some(3),
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_value(errors).unwrap(),
+            serde_json::json!({
+                "object": "list",
+                "data": [{
+                    "code": "invalid_request",
+                    "message": "The request is invalid.",
+                    "param": "body",
+                    "line": 3
+                }]
+            })
         );
     }
 }
