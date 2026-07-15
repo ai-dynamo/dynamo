@@ -6,6 +6,8 @@
 package discovery
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +20,8 @@ const (
 	apiGroupRBAC       = "rbac.authorization.k8s.io"
 	apiGroupCore       = ""
 	apiGroupNvidia     = "nvidia.com"
+	maxLabelValueLen   = 63
+	hashLen            = 8
 )
 
 func GetK8sDiscoveryServiceAccountName(dgdName string) string {
@@ -26,6 +30,7 @@ func GetK8sDiscoveryServiceAccountName(dgdName string) string {
 
 func GetK8sDiscoveryServiceAccount(dgdName string, namespace string) *corev1.ServiceAccount {
 	name := GetK8sDiscoveryServiceAccountName(dgdName)
+	labelValue := getK8sDiscoveryLabelValue(name)
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -33,7 +38,7 @@ func GetK8sDiscoveryServiceAccount(dgdName string, namespace string) *corev1.Ser
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "dynamo-operator",
 				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       name,
+				"app.kubernetes.io/name":       labelValue,
 			},
 		},
 	}
@@ -41,6 +46,7 @@ func GetK8sDiscoveryServiceAccount(dgdName string, namespace string) *corev1.Ser
 
 func GetK8sDiscoveryRole(dgdName string, namespace string) *rbacv1.Role {
 	name := GetK8sDiscoveryServiceAccountName(dgdName)
+	labelValue := getK8sDiscoveryLabelValue(name)
 	roleName := name + "-role"
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
@@ -49,7 +55,7 @@ func GetK8sDiscoveryRole(dgdName string, namespace string) *rbacv1.Role {
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "dynamo-operator",
 				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       name,
+				"app.kubernetes.io/name":       labelValue,
 			},
 		},
 		Rules: []rbacv1.PolicyRule{
@@ -74,6 +80,7 @@ func GetK8sDiscoveryRole(dgdName string, namespace string) *rbacv1.Role {
 
 func GetK8sDiscoveryRoleBinding(dgdName, namespace string) *rbacv1.RoleBinding {
 	name := GetK8sDiscoveryServiceAccountName(dgdName)
+	labelValue := getK8sDiscoveryLabelValue(name)
 	roleName := name + "-role"
 	bindingName := name + "-binding"
 	return &rbacv1.RoleBinding{
@@ -83,7 +90,7 @@ func GetK8sDiscoveryRoleBinding(dgdName, namespace string) *rbacv1.RoleBinding {
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "dynamo-operator",
 				"app.kubernetes.io/component":  "rbac",
-				"app.kubernetes.io/name":       name,
+				"app.kubernetes.io/name":       labelValue,
 			},
 		},
 		Subjects: []rbacv1.Subject{
@@ -99,4 +106,19 @@ func GetK8sDiscoveryRoleBinding(dgdName, namespace string) *rbacv1.RoleBinding {
 			Name:     roleName,
 		},
 	}
+}
+
+func getK8sDiscoveryLabelValue(serviceAccountName string) string {
+	if len(serviceAccountName) <= maxLabelValueLen {
+		return serviceAccountName
+	}
+
+	sum := sha256.Sum256([]byte(serviceAccountName))
+	hash := hex.EncodeToString(sum[:])[:hashLen]
+	keep := maxLabelValueLen - len(hash) - 1
+	if keep <= 0 {
+		return hash
+	}
+
+	return serviceAccountName[:keep] + "-" + hash
 }
