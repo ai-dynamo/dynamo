@@ -233,11 +233,8 @@ def generate_mocker_config(
             ].get("mainContainer"):
                 service_config["extraPodSpec"]["mainContainer"]["image"] = image
 
-    # #11650: the served name stays the model id (so requests match), but the
-    # load path must prefer the local PVC mount — otherwise an offline mocker
-    # worker tries to fetch the tokenizer from HuggingFace, fails, and never
-    # registers. resolve_model_path returns the local PVC path when the model
-    # is present there, else the model id (mirrors the real-backend path).
+    # #11650: served name stays the model id (so requests match); load path
+    # prefers the local PVC mount so an offline worker doesn't reach for HF.
     model_name = dgdr.model
     model_path = resolve_model_path(dgdr)
     aic_workers = _mocker_aic_worker_picks(aic_spec)
@@ -256,8 +253,7 @@ def generate_mocker_config(
             if pick is not None and aic_spec is not None:
                 args_list = _inject_mocker_aic_args(args_list, aic_spec, pick)
             main_container["args"] = args_list
-            # #11650: mount the model-cache PVC so an offline mocker worker can
-            # read the model from the PVC instead of reaching for HuggingFace.
+            # #11650: mount the model-cache PVC so the offline worker reads from it.
             _mount_model_cache_pvc(service_config, dgdr)
 
     return mocker_config
@@ -266,36 +262,38 @@ def generate_mocker_config(
 def _mount_model_cache_pvc(service_dict: dict, dgdr) -> None:
     """Mount the DGDR's model-cache PVC into a service's mainContainer.
 
-    No-op when no model cache PVC is configured. Idempotent — skips if a volume
-    or mount for the PVC is already present (e.g. user override).
+    No-op unless the model-cache PVC is fully specified — the same fields
+    resolve_model_path needs to point --model-path at the mount, so we never
+    add a mount the worker's load path won't reference.
     """
     model_cache = dgdr.modelCache
-    if not (model_cache and model_cache.pvcName and model_cache.pvcMountPath):
+    if not (
+        model_cache
+        and model_cache.pvcName
+        and model_cache.pvcMountPath
+        and model_cache.pvcModelPath
+    ):
         return
 
     volume_name = "model-cache"
     extra_pod_spec = service_dict.setdefault("extraPodSpec", {})
-    volumes = extra_pod_spec.setdefault("volumes", [])
-    if not any(v.get("name") == volume_name for v in volumes):
-        volumes.append(
-            {
-                "name": volume_name,
-                "persistentVolumeClaim": {
-                    "claimName": model_cache.pvcName,
-                    "readOnly": True,
-                },
-            }
-        )
-    main_container = extra_pod_spec.setdefault("mainContainer", {})
-    volume_mounts = main_container.setdefault("volumeMounts", [])
-    if not any(m.get("name") == volume_name for m in volume_mounts):
-        volume_mounts.append(
-            {
-                "name": volume_name,
-                "mountPath": model_cache.pvcMountPath,
+    extra_pod_spec.setdefault("volumes", []).append(
+        {
+            "name": volume_name,
+            "persistentVolumeClaim": {
+                "claimName": model_cache.pvcName,
                 "readOnly": True,
-            }
-        )
+            },
+        }
+    )
+    main_container = extra_pod_spec.setdefault("mainContainer", {})
+    main_container.setdefault("volumeMounts", []).append(
+        {
+            "name": volume_name,
+            "mountPath": model_cache.pvcMountPath,
+            "readOnly": True,
+        }
+    )
 
 
 def enable_planner_worker_scaling_adapters(
