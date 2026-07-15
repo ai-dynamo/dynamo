@@ -89,9 +89,11 @@ areas:
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
   - components/src/dynamo/sglang/
+  - components/src/dynamo/sglang_sidecar/
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
+  - lib/sglang-sidecar/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
@@ -1065,90 +1067,6 @@ shared:
   owners:
   - gms
 classify:
-  keyword_rules:
-  - match: multimodal_handlers
-    area: multimodal
-  - match: multimodal_utils
-    area: multimodal
-  - match: image_diffusion
-    area: diffusion
-  - match: video_generation
-    area: diffusion
-  - match: video_diffusion
-    area: diffusion
-  - match: diffus
-    area: diffusion
-  - match: multimodal
-    area: multimodal
-  - match: /omni
-    area: multimodal
-  - match: kv_connector
-    area: kv-memory
-  - match: block_manager
-    area: kv-memory
-  - match: kvbm
-    area: kv-memory
-  - match: nixl
-    area: kv-memory
-  - match: kv_event
-    area: kv-memory
-    coowner: observability
-  - match: kv_router
-    area: router
-  - match: /router
-    area: router
-  - match: planner
-    area: planner
-  - match: profiler
-    area: planner
-  - match: prometheus
-    area: observability
-  - match: telemetry
-    area: observability
-  - match: grafana
-    area: observability
-  - match: metrics
-    coowner: observability
-  - match: /rl/
-    area: rl
-  - match: weight_update
-    area: rl
-  - match: logits
-    coowner: frontend
-  - match: tokeniz
-    area: frontend
-  - match: preprocess
-    area: frontend
-  - match: recipes/
-    area: performance
-  - match: benchmark
-    area: performance
-  - match: /bench
-    area: performance
-  - match: mocker
-    area: performance
-  - match: tokenspeed
-    area: tokenspeed
-  - match: /vllm
-    area: backend-vllm
-  - match: /sglang
-    area: backend-sglang
-  - match: /trtllm
-    area: backend-trtllm
-  - match: operator
-    area: operator
-  - match: /helm
-    area: operator
-  - match: snapshot
-    area: gms
-  - match: inference-gateway
-    area: epp
-  - match: fault_tolerance
-    area: fault-tolerance
-  - match: /fern/
-    area: docs
-  - match: docs/
-    area: docs
   filetype_rules:
   - pattern: '*Dockerfile*'
     coowner: ops

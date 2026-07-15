@@ -5,7 +5,7 @@ use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
 use super::super::runtime_utils::WorkerCompletionPayload;
-use crate::common::protocols::{DirectRequest, ForwardPassSnapshot};
+use crate::common::protocols::DirectRequest;
 use crate::loadgen::ReplayRequestHashes;
 use crate::scheduler::AdmissionEvent;
 
@@ -46,9 +46,6 @@ pub(in crate::replay::offline) struct EngineEffects {
     pub(in crate::replay::offline) pass_start_kv_events: Vec<RouterEvent>,
     pub(in crate::replay::offline) immediate_completions: Vec<WorkerCompletionPayload>,
     pub(in crate::replay::offline) scheduled_completions: Vec<ScheduledWorkerCompletion>,
-    /// Forward pass metrics snapshots emitted by workers during this drive cycle,
-    /// keyed by worker index. Collected for planner integration.
-    pub(in crate::replay::offline) fpm_snapshots: Vec<(usize, ForwardPassSnapshot)>,
 }
 
 impl EngineEffects {

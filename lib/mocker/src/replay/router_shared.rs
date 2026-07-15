@@ -35,15 +35,17 @@ impl SequencePublisher for ReplayNoopPublisher {
 pub(super) struct ReplayWorkerConfig {
     pub(super) max_num_batched_tokens: u64,
     pub(super) total_kv_blocks: u64,
+    pub(super) data_parallel_start_rank: u32,
+    pub(super) data_parallel_size: u32,
 }
 
 impl WorkerConfigLike for ReplayWorkerConfig {
     fn data_parallel_start_rank(&self) -> u32 {
-        0
+        self.data_parallel_start_rank
     }
 
     fn data_parallel_size(&self) -> u32 {
-        1
+        self.data_parallel_size
     }
 
     fn max_num_batched_tokens(&self) -> Option<u64> {
@@ -65,6 +67,8 @@ pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWo
             .map(|tokens| tokens as u64)
             .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
         total_kv_blocks: args.num_gpu_blocks as u64,
+        data_parallel_start_rank: 0,
+        data_parallel_size: args.dp_size.max(1),
     }
 }
 
@@ -83,9 +87,13 @@ pub(super) fn replay_slots(
     workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
 ) -> Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>> {
     let dp_range = workers_with_configs
-        .keys()
-        .copied()
-        .map(|worker_id| (worker_id, (0, 1)))
+        .iter()
+        .map(|(&worker_id, config)| {
+            (
+                worker_id,
+                (config.data_parallel_start_rank, config.data_parallel_size),
+            )
+        })
         .collect();
     // NOTE: Offline replay must retire requests through explicit lifecycle events. Wall-clock
     // expiry is a live-router cleanup heuristic and must not observe simulator CPU time: a

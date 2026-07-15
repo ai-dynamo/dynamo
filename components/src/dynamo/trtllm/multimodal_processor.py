@@ -81,6 +81,41 @@ class MultimodalRequestProcessor:
             enable_frontend_decoding=enable_frontend_decoding
         )
 
+        # Input processor used only to size an omitted max_tokens (see
+        # _expanded_prompt_len). Optional: unavailable for models without a
+        # registered processor, in which case max_tokens sizing is left to the engine.
+        self.input_processor = None
+        try:
+            from tensorrt_llm.inputs import create_input_processor
+
+            self.input_processor = create_input_processor(model_dir, self.tokenizer)
+        except Exception as e:
+            logging.warning("Input processor unavailable for max_tokens sizing: %s", e)
+
+    def _expanded_prompt_len(
+        self, token_ids: List[int], images: Optional[List[Any]]
+    ) -> Optional[int]:
+        """Post-expansion prompt length: text tokens plus per-image tokens, with
+        image placeholders in token_ids replaced by their expanded token counts.
+
+        Returns None when it cannot be computed, so callers fall back to the
+        engine default instead of an over/underestimate.
+        """
+        if not self.input_processor or not images or not token_ids:
+            return None
+        try:
+            mm_ids = self.input_processor.get_mm_token_ids()
+            mm_id_set = set(mm_ids.tolist()) if mm_ids is not None else set()
+            num_placeholders = sum(1 for t in token_ids if t in mm_id_set)
+            image_tokens = sum(
+                int(self.input_processor.get_num_tokens_per_image(image=img))
+                for img in images
+            )
+            return len(token_ids) - num_placeholders + image_tokens
+        except Exception as e:
+            logging.warning("Could not compute expanded prompt length: %s", e)
+            return None
+
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
         parsed = urlparse(path)
@@ -403,6 +438,15 @@ class MultimodalRequestProcessor:
             logging.warning("No token_ids in request")
             return None
         processed_inputs["prompt_token_ids"] = token_ids
+
+        # Post-expansion prompt length, so an omitted max_tokens can be sized
+        # against the real context usage rather than the unexpanded placeholders.
+        mm_data = processed_inputs.get("multi_modal_data")
+        expanded_len = self._expanded_prompt_len(
+            token_ids, mm_data.get("image") if mm_data else None
+        )
+        if expanded_len is not None:
+            processed_inputs["expanded_prompt_len"] = expanded_len
 
         return processed_inputs
 
