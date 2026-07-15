@@ -308,15 +308,3 @@ runs:
         path: test-results/allure-results/
         retention-days: 7
         if-no-files-found: ignore
-
-    # Worker/engine logs for FAILED serve tests (populated by the
-    # pytest_runtest_makereport hook in tests/conftest.py). These hold the real
-    # engine traceback that health-check timeouts otherwise hide.
-    - name: Upload Worker Logs (failed tests)
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      if: always()
-      with:
-        name: worker-logs-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/worker-logs/
-        retention-days: 7
-        if-no-files-found: ignore
