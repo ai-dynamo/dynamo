@@ -59,13 +59,35 @@ async def request_plane_client(runtime):
         endpoint.serve_endpoint(_generate, health_check_payload=health_payload)
     )
     client = await endpoint.client()
-    await client.wait_for_instances()
+    try:
+        await client.wait_for_instances()
+        yield client
+    finally:
+        server_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await server_task
 
-    yield client
 
-    server_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await server_task
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("request_plane", ["tcp", "nats"], indirect=True)
+async def test_client_instances_snapshot(request_plane, request_plane_client):
+    """Client.instances() exposes the endpoint's instances with transport
+    details on each request plane: "tcp" carries a "host:port/..." address,
+    "nats" carries a "nats_tcp" subject address."""
+    expected_kind = "nats_tcp" if request_plane == "nats" else "tcp"
+
+    instances = request_plane_client.instances()
+    assert {i.instance_id for i in instances} == set(
+        request_plane_client.instance_ids()
+    )
+    for instance in instances:
+        assert instance.namespace == "direct-python-msgpack"
+        assert instance.component == "backend"
+        assert instance.endpoint == "generate"
+        assert instance.device_type in (None, "cpu", "cuda")
+        assert instance.transport.kind == expected_kind
+        assert instance.transport.address  # populated on both planes
 
 
 @pytest.mark.asyncio
