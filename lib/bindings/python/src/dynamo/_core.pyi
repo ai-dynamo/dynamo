@@ -250,6 +250,41 @@ class PyAsyncRequestStream:
     def __aiter__(self) -> "PyAsyncRequestStream": ...
     async def __anext__(self) -> JsonLike: ...
 
+class TransportType:
+    """
+    A read-only view of an instance's transport, wrapping the runtime
+    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp")
+    and ``address`` is its (transport-specific) address. The address format is
+    not a stable parse target.
+    """
+
+    @property
+    def kind(self) -> str: ...
+    @property
+    def address(self) -> str: ...
+
+class Instance:
+    """
+    A read-only view of a single registered instance of an endpoint, wrapping a
+    snapshot of the runtime ``Instance``. ``str(instance)`` yields
+    ``"namespace/component/endpoint/instance_id"``.
+    """
+
+    @property
+    def instance_id(self) -> int: ...
+    @property
+    def namespace(self) -> str: ...
+    @property
+    def component(self) -> str: ...
+    @property
+    def endpoint(self) -> str: ...
+    @property
+    def transport(self) -> TransportType: ...
+    @property
+    def device_type(self) -> Optional[str]:
+        """Device type, e.g. "cpu" or "cuda", or None if unspecified."""
+        ...
+
 class Client:
     """
     A client capable of calling served instances of an endpoint
@@ -263,6 +298,20 @@ class Client:
 
         Returns:
             A list of currently available instance IDs
+        """
+        ...
+
+    def instances(self) -> List[Instance]:
+        """
+        Get a snapshot of the current instances with full transport details.
+
+        Like ``instance_ids()``, the result is a snapshot of the watched
+        instance set; pair with ``wait_for_instances()`` to block until
+        instances exist.
+
+        Returns:
+            A list of ``Instance`` for the currently available instances,
+            across all transports (TCP, NATS, ...).
         """
         ...
 

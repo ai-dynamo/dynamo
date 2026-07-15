@@ -189,6 +189,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Endpoint>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
+    m.add_class::<Instance>()?;
+    m.add_class::<TransportType>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<PyAsyncRequestStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
@@ -739,6 +741,95 @@ struct ModelCardInstanceId {
 struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
     endpoint: rs::component::Endpoint,
+}
+
+/// A read-only view of an instance's transport, wrapping the runtime
+/// `TransportType`. Exposes the transport `kind` ("tcp" / "nats_tcp") and its
+/// `address`; the address format is transport-specific and not a stable parse
+/// target.
+#[pyclass(eq, hash, frozen)]
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct TransportType {
+    inner: rs::component::TransportType,
+}
+
+#[pymethods]
+impl TransportType {
+    #[getter]
+    fn kind(&self) -> &str {
+        match &self.inner {
+            rs::component::TransportType::Nats(_) => "nats_tcp",
+            rs::component::TransportType::Tcp(_) => "tcp",
+        }
+    }
+
+    #[getter]
+    fn address(&self) -> &str {
+        self.inner.address()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TransportType(kind={:?}, address={:?})",
+            self.kind(),
+            self.address()
+        )
+    }
+}
+
+/// A read-only view of a single registered instance of an endpoint, wrapping a
+/// snapshot of the runtime `Instance`.
+#[pyclass(eq, frozen)]
+#[derive(Clone, PartialEq, Eq)]
+struct Instance {
+    inner: rs::component::Instance,
+}
+
+#[pymethods]
+impl Instance {
+    #[getter]
+    fn instance_id(&self) -> u64 {
+        self.inner.instance_id
+    }
+
+    #[getter]
+    fn namespace(&self) -> &str {
+        &self.inner.namespace
+    }
+
+    #[getter]
+    fn component(&self) -> &str {
+        &self.inner.component
+    }
+
+    #[getter]
+    fn endpoint(&self) -> &str {
+        &self.inner.endpoint
+    }
+
+    #[getter]
+    fn transport(&self) -> TransportType {
+        TransportType {
+            inner: self.inner.transport.clone(),
+        }
+    }
+
+    /// Device type, e.g. "cpu" or "cuda", or None if unspecified.
+    #[getter]
+    fn device_type(&self) -> Option<&str> {
+        self.inner.device_type.as_ref().map(|d| match d {
+            rs::component::DeviceType::Cpu => "cpu",
+            rs::component::DeviceType::Cuda => "cuda",
+        })
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Instance({})", self.inner)
+    }
 }
 
 #[pyclass]
@@ -1366,6 +1457,18 @@ impl Client {
     /// Replaces endpoint_ids.
     fn instance_ids(&self) -> Vec<u64> {
         self.router.client.instance_ids()
+    }
+
+    /// Get a snapshot of the current instances with full transport details.
+    /// Like `instance_ids()`, the result is a snapshot of the watched instance
+    /// set; pair with `wait_for_instances()` to block until instances exist.
+    fn instances(&self) -> Vec<Instance> {
+        self.router
+            .client
+            .instances()
+            .into_iter()
+            .map(|inner| Instance { inner })
+            .collect()
     }
 
     /// Wait for an instance to be available for work.
