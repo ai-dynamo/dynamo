@@ -289,6 +289,7 @@ struct StateFlags {
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
     generate_endpoints_enabled: AtomicBool,
+    batch_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -306,6 +307,7 @@ impl StateFlags {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
             EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Batch => self.batch_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -341,6 +343,9 @@ impl StateFlags {
             EndpointType::Generate => self
                 .generate_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
+            EndpointType::Batch => self
+                .batch_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
         }
     }
 }
@@ -369,6 +374,7 @@ impl State {
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
                 generate_endpoints_enabled: AtomicBool::new(false),
+                batch_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
@@ -535,6 +541,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
+
+    #[builder(default = "true")]
+    enable_batch_endpoints: bool,
 
     /// Experimental engine-native APIs (currently the token-in/token-out
     /// `Generate` endpoint `POST /inference/v1/generate`). **Disabled by
@@ -881,6 +890,10 @@ static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
+/// Environment variable to set the batch files endpoint path (default: `/v1/files`)
+static HTTP_SVC_FILES_PATH_ENV: &str = "DYN_HTTP_SVC_FILES_PATH";
+/// Environment variable to set the batches endpoint path (default: `/v1/batches`)
+static HTTP_SVC_BATCHES_PATH_ENV: &str = "DYN_HTTP_SVC_BATCHES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 /// Environment variable to enable the experimental vLLM-compatible
@@ -937,6 +950,9 @@ impl HttpServiceConfigBuilder {
         state
             .flags
             .set(&EndpointType::Responses, config.enable_responses_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Batch, config.enable_batch_endpoints);
         state.flags.set(
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
@@ -1183,6 +1199,11 @@ impl HttpServiceConfigBuilder {
             request_template.clone(),
             var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
         );
+        let (batch_docs, batch_route) = super::openai::batch_router(
+            state.clone(),
+            var(HTTP_SVC_FILES_PATH_ENV).ok(),
+            var(HTTP_SVC_BATCHES_PATH_ENV).ok(),
+        );
         let mut endpoint_routes = HashMap::new();
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
@@ -1192,6 +1213,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+        endpoint_routes.insert(EndpointType::Batch, (batch_docs, batch_route));
 
         if enable_anthropic_endpoints {
             tracing::warn!("Anthropic Messages API (/v1/messages) is experimental.");

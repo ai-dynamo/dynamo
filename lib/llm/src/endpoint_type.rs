@@ -26,6 +26,8 @@ pub enum EndpointType {
     AnthropicMessages,
     /// Generate API (token-in/token-out)
     Generate,
+    /// OpenAI Batch API
+    Batch,
 }
 
 impl EndpointType {
@@ -41,6 +43,7 @@ impl EndpointType {
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::Generate => "generate",
+            Self::Batch => "batch",
         }
     }
 
@@ -56,6 +59,7 @@ impl EndpointType {
             Self::Responses,
             Self::AnthropicMessages,
             Self::Generate,
+            Self::Batch,
         ]
     }
 }
@@ -82,5 +86,15 @@ mod tests {
     #[test]
     fn generate_in_all() {
         assert!(EndpointType::all().contains(&EndpointType::Generate));
+    }
+
+    #[test]
+    fn batch_as_str() {
+        assert_eq!(EndpointType::Batch.as_str(), "batch");
+    }
+
+    #[test]
+    fn batch_in_all() {
+        assert!(EndpointType::all().contains(&EndpointType::Batch));
     }
 }

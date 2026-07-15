@@ -576,6 +576,71 @@ async fn wait_for_service_ready(port: u16) {
     }
 }
 
+#[tokio::test]
+async fn test_batch_api_skeleton_routes_return_not_implemented() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{port}");
+
+    let response = client
+        .post(format!("{base}/v1/files"))
+        .body("{\"custom_id\":\"r1\"}\n")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], 501);
+    assert_eq!(body["message"], "Batch file storage is not implemented yet.");
+
+    let response = client
+        .post(format!("{base}/v1/batches"))
+        .json(&serde_json::json!({
+            "input_file_id": "file-123",
+            "endpoint": "/v1/completions",
+            "completion_window": "24h"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], 501);
+    assert_eq!(
+        body["message"],
+        "Batch job lifecycle persistence is not implemented yet."
+    );
+
+    let response = client
+        .get(format!("{base}/v1/batches/batch-123"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+    let response = client
+        .get(format!("{base}/v1/files/file-123/content"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        body["message"],
+        "Batch output file retrieval is not implemented yet."
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
 // NOTE: BYOT (Bring Your Own Type) client tests were removed during the
 // upstream async-openai migration. They depended on the forked
 // dynamo_protocols::config and http::client modules which no longer exist.

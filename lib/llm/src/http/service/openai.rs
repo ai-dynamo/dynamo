@@ -54,6 +54,7 @@ use crate::protocols::common::extensions::{
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
+    batches::NvCreateBatchRequest,
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
@@ -80,6 +81,12 @@ pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
+const BATCH_FILE_STORAGE_NOT_IMPLEMENTED: &str =
+    "Batch file storage is not implemented yet.";
+const BATCH_JOB_STATE_NOT_IMPLEMENTED: &str =
+    "Batch job lifecycle persistence is not implemented yet.";
+const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
+    "Batch output file retrieval is not implemented yet.";
 
 use super::error::{SanitizedError, overload_status_code};
 
@@ -2816,6 +2823,71 @@ pub fn embeddings_router(
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
+}
+
+/// Create an Axum [`Router`] for the OpenAI Batch API skeleton.
+///
+/// The first slice exposes the route and protocol shape. Durable file storage,
+/// batch job persistence, dispatch, and output assembly are implemented by
+/// follow-up work, so handlers return explicit 501 responses instead of
+/// accepting work that cannot complete yet.
+pub fn batch_router(
+    state: Arc<service_v2::State>,
+    files_path: Option<String>,
+    batches_path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let files_path = files_path.unwrap_or("/v1/files".to_string());
+    let file_content_path = format!("{}/{{file_id}}/content", files_path);
+    let batches_path = batches_path.unwrap_or("/v1/batches".to_string());
+    let batch_path = format!("{}/{{batch_id}}", batches_path);
+
+    let docs = vec![
+        RouteDoc::new(axum::http::Method::POST, &files_path),
+        RouteDoc::new(axum::http::Method::GET, &file_content_path),
+        RouteDoc::new(axum::http::Method::POST, &batches_path),
+        RouteDoc::new(axum::http::Method::GET, &batch_path),
+    ];
+
+    let router = Router::new()
+        .route(&files_path, post(create_batch_file))
+        .route(&file_content_path, get(retrieve_batch_file_content))
+        .route(&batches_path, post(create_batch))
+        .route(&batch_path, get(retrieve_batch))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+
+    (docs, router)
+}
+
+async fn create_batch_file(_body: Bytes) -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_FILE_STORAGE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn create_batch(
+    Json(_request): Json<NvCreateBatchRequest>,
+) -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_JOB_STATE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn retrieve_batch(
+    axum::extract::Path(_batch_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_JOB_STATE_NOT_IMPLEMENTED,
+    ))
+}
+
+async fn retrieve_batch_file_content(
+    axum::extract::Path(_file_id): axum::extract::Path<String>,
+) -> Result<Response, ErrorResponse> {
+    Err(ErrorMessage::not_implemented_error(
+        BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED,
+    ))
 }
 
 /// List Models
