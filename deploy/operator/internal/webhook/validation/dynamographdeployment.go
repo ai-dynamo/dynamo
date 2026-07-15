@@ -124,6 +124,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		&dgd.ObjectMeta,
 		field.NewPath("metadata"),
 		hasIntraPodFailover(&dgd.Spec),
+		hasFrontendSidecar(&dgd.Spec),
 	)...)
 
 	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(v.groveEnabled, dgd)
@@ -143,6 +144,7 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 	objectMeta *metav1.ObjectMeta,
 	fldPath *field.Path,
 	hasIntraPodFailover bool,
+	hasFrontendSidecar bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	annotationsPath := fldPath.Child("annotations")
@@ -188,6 +190,21 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 			objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode],
 			`must be "container" when intra-pod failover is configured`,
 		))
+	}
+
+	// local-worker readiness for a sidecar frontend is only injected under
+	// container discovery, because pod discovery would deadlock: the worker is
+	// discoverable only once its pod is Ready, but the pod is Ready only once
+	// the sidecar is Ready, which local-worker readiness gates on the worker.
+	// Outside container mode the sidecar silently falls back to process-mode
+	// readiness, so the worker pod can report Ready before its colocated model
+	// is routable. Warn (rather than reject) to keep this non-silent.
+	if hasFrontendSidecar && objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode] != "container" {
+		v.warnf(
+			"a frontendSidecar is configured but %s is not \"container\"; the sidecar frontend falls back to process-mode readiness, so the worker pod can report Ready before its colocated model is routable. Set annotation %s: container to enable local-worker readiness for the sidecar.",
+			consts.KubeAnnotationDynamoKubeDiscoveryMode,
+			consts.KubeAnnotationDynamoKubeDiscoveryMode,
+		)
 	}
 
 	return allErrs

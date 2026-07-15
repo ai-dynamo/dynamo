@@ -873,6 +873,8 @@ static HTTP_SVC_MODELS_PATH_ENV: &str = "DYN_HTTP_SVC_MODELS_PATH";
 static HTTP_SVC_HEALTH_PATH_ENV: &str = "DYN_HTTP_SVC_HEALTH_PATH";
 /// Environment variable to set the live endpoint path (default: `/live`)
 static HTTP_SVC_LIVE_PATH_ENV: &str = "DYN_HTTP_SVC_LIVE_PATH";
+/// Environment variable to set the readiness endpoint path (default: `/ready`)
+static HTTP_SVC_READY_PATH_ENV: &str = "DYN_HTTP_SVC_READY_PATH";
 /// Environment variable to set the chat completions endpoint path (default: `/v1/chat/completions`)
 static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
 /// Environment variable to set the completions endpoint path (default: `/v1/completions`)
@@ -1020,6 +1022,7 @@ impl HttpServiceConfigBuilder {
             },
             super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
+            super::health::ready_check_router(state.clone(), var(HTTP_SVC_READY_PATH_ENV).ok()),
         ];
         if admin_api_enabled {
             system_routes.push(super::busy_threshold::busy_threshold_router(
@@ -1349,6 +1352,107 @@ mod tests {
                 assert_eq!(live.status(), reqwest::StatusCode::OK);
 
                 drop(inflight);
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    /// In the default `process` readiness mode `/ready` returns 200 as soon as
+    /// the process is up (no models required), and flips to 503 while draining.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_ready_endpoint_process_mode() {
+        temp_env::async_with_vars(
+            [
+                (env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1")),
+                (super::super::health::READINESS_MODE_ENV, Some("process")),
+            ],
+            async {
+                let cancel_token = Arc::new(CancellationToken::new());
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder().port(port).build().unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
+
+                let service_token = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener((*service_token).clone(), listener)
+                        .await
+                        .unwrap();
+                });
+
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                let client = reqwest::Client::new();
+
+                // No models registered, but process mode is ready as soon as the
+                // process accepts requests.
+                let ready = client
+                    .get(format!("http://localhost:{}/ready", port))
+                    .send()
+                    .await
+                    .expect("ready request failed");
+                assert_eq!(ready.status(), reqwest::StatusCode::OK);
+
+                // Draining flips readiness to 503 regardless of mode.
+                cancel_token.cancel();
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
+                let ready = client
+                    .get(format!("http://localhost:{}/ready", port))
+                    .send()
+                    .await
+                    .expect("ready request failed");
+                assert_eq!(ready.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+                drop(inflight);
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    /// In `local-worker` readiness mode `/ready` returns 503 until a model has a
+    /// live, complete serving topology. With no workers registered it stays 503,
+    /// which is the whole point of the GAIE sidecar fix.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_ready_endpoint_local_worker_mode_not_ready_without_models() {
+        temp_env::async_with_vars(
+            [(
+                super::super::health::READINESS_MODE_ENV,
+                Some("local-worker"),
+            )],
+            async {
+                let cancel_token = Arc::new(CancellationToken::new());
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder().port(port).build().unwrap();
+
+                let service_token = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener((*service_token).clone(), listener)
+                        .await
+                        .unwrap();
+                });
+
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                // Process is up but no model is ready to serve -> not ready.
+                let ready = reqwest::Client::new()
+                    .get(format!("http://localhost:{}/ready", port))
+                    .send()
+                    .await
+                    .expect("ready request failed");
+                assert_eq!(ready.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+                cancel_token.cancel();
                 handle.abort();
             },
         )

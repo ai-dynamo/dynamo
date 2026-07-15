@@ -177,6 +177,15 @@ func hasIntraPodFailover(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) bool 
 	return false
 }
 
+func hasFrontendSidecar(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) bool {
+	for i := range spec.Components {
+		if spec.Components[i].FrontendSidecar != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func componentsByName(
 	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {

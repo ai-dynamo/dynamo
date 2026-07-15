@@ -150,6 +150,16 @@ const (
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
 
+	// FrontendReadinessModeEnvVar selects the semantics of the frontend `/ready`
+	// endpoint. See the Rust `ReadinessMode` enum.
+	FrontendReadinessModeEnvVar = "DYN_FRONTEND_READINESS_MODE"
+	// FrontendReadinessModeLocalWorker gates readiness on at least one model
+	// having a live, complete serving topology. Applied to frontend sidecars so
+	// a worker pod is only Ready once its colocated model is routable.
+	FrontendReadinessModeLocalWorker = "local-worker"
+	// FrontendReadyEndpointPath is the frontend Kubernetes traffic-readiness path.
+	FrontendReadyEndpointPath = "/ready"
+
 	// DynamoOperatorAllowGMSSnapshotEnvVar enables the temporary internal
 	// GMS + Snapshot admission gate when set to "1".
 	DynamoOperatorAllowGMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"

@@ -1822,6 +1822,29 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		}
 		base.Name = sidecarName
 		baseEnv := base.Env
+		// In GAIE mode the frontend runs as a sidecar in the worker pod, and a
+		// Kubernetes pod is Ready only when all of its containers are Ready. So
+		// the worker pod's readiness reflects BOTH the worker and this frontend
+		// sidecar. We want that pod to be Ready only when it can actually serve,
+		// so put the sidecar frontend into `local-worker` readiness mode: its
+		// `/ready` probe then reports Ready only once the colocated model is
+		// registered and routable, instead of as soon as the process is up (the
+		// default `process` mode).
+		//
+		// This is ONLY safe under container discovery mode. In pod mode a worker
+		// is discoverable only once its pod is Ready (EndpointSlice membership),
+		// but the pod is Ready only once this sidecar is Ready — and local-worker
+		// readiness waits for the worker to be discovered, so the pod would
+		// deadlock and never become Ready. Container mode watches per-container
+		// readiness, so the worker is discoverable before the whole pod is Ready,
+		// breaking the cycle. Under pod mode we leave the default `process` mode.
+		// Added to the defaults so a user-provided env of the same name still wins.
+		if parentContext.Discovery.Mode == configv1alpha1.KubeDiscoveryModeContainer {
+			baseEnv = append(baseEnv, corev1.EnvVar{
+				Name:  commonconsts.FrontendReadinessModeEnvVar,
+				Value: commonconsts.FrontendReadinessModeLocalWorker,
+			})
+		}
 		user := podSpec.Containers[i].DeepCopy()
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)

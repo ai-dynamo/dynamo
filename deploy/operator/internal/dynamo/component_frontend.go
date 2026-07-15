@@ -53,10 +53,15 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 		FailureThreshold:    3,
 	}
 
+	// Readiness = "can serve traffic". `/ready` (not `/health`) is the traffic
+	// readiness gate: in the default `process` mode it is ready once the process
+	// accepts requests; frontend sidecars additionally set
+	// DYN_FRONTEND_READINESS_MODE=local-worker so the pod is only Ready once its
+	// colocated model has a live, complete serving topology.
 	container.ReadinessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
-				Path: "/health",
+				Path: commonconsts.FrontendReadyEndpointPath,
 				Port: intstr.FromString(commonconsts.DynamoContainerPortName),
 			},
 		},

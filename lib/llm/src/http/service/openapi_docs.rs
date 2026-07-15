@@ -312,6 +312,7 @@ fn generate_summary_for_path(path: &str) -> String {
         "/v1/models" => "List available models".to_string(),
         "/health" => "Health check".to_string(),
         "/live" => "Liveness check".to_string(),
+        "/ready" => "Readiness check".to_string(),
         "/metrics" => "Prometheus metrics".to_string(),
         "/openapi.json" => "OpenAPI specification".to_string(),
         "/docs" => "API documentation".to_string(),
@@ -346,11 +347,19 @@ fn generate_description_for_path(path: &str) -> String {
                 .to_string()
         }
         "/health" => {
-            "Returns the health status of the service. Used for readiness probes."
+            "Returns the health status of the service, including discovered instances and endpoints. \
+            For Kubernetes readiness use the dedicated /ready endpoint."
                 .to_string()
         }
         "/live" => {
             "Returns the liveness status of the service. Used for liveness probes."
+                .to_string()
+        }
+        "/ready" => {
+            "Returns whether the service can serve traffic. Used for Kubernetes readiness probes. \
+            Behavior is controlled by DYN_FRONTEND_READINESS_MODE: 'process' (default) is ready once \
+            the process accepts requests; 'local-worker' additionally requires at least one model with \
+            a live, complete serving topology."
                 .to_string()
         }
         "/metrics" => {
