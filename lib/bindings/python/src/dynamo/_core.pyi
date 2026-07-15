@@ -1865,6 +1865,12 @@ class KvRouterConfig:
         serve_indexer: bool = False,
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
+        conditional_disagg_enabled: bool = False,
+        conditional_disagg_policy: str = "isl_bounding",
+        conditional_disagg_eff_isl_threshold: int = 2048,
+        conditional_disagg_eff_isl_ratio_threshold: float = 0.7,
+        conditional_disagg_prefill_busy_threshold: Optional[float] = None,
+        conditional_disagg_decode_busy_threshold: Optional[float] = None,
         router_predicted_ttl_secs: Optional[float] = None,
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
@@ -1913,6 +1919,12 @@ class KvRouterConfig:
             serve_indexer: Serve this router's local indexer from the worker component (default: False).
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
+            conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).
+            conditional_disagg_policy: Conditional-disagg policy, one of "isl_bounding", "prefill_load", or "isl_or_load" (default: "isl_bounding").
+            conditional_disagg_eff_isl_threshold: For "isl_bounding" and the ISL arm of "isl_or_load", require effective ISL to be below this many tokens (default: 2048).
+            conditional_disagg_eff_isl_ratio_threshold: For "isl_bounding" and the ISL arm of "isl_or_load", require effective ISL / raw ISL to be below this value (default: 0.7).
+            conditional_disagg_prefill_busy_threshold: Prefill busy threshold for load-aware conditional-disagg policies. When omitted, inherits router_queue_threshold when available.
+            conditional_disagg_decode_busy_threshold: Decode-busy guard threshold that disables bypass when the selected decode worker's projected decode load exceeds this fraction of KV capacity (default: None).
             router_predicted_ttl_secs: Enables predict-on-route when set. This TTL
                 applies to entries in the local side indexer and requires
                 use_kv_events=True. Set to None to disable. Independent of
