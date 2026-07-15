@@ -158,7 +158,7 @@ Below we provide a guide that lets you run all of our common deployment patterns
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/blob/v0.9.1/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -266,4 +266,4 @@ We currently provide deployment examples for Kubernetes and SLURM.
 - **[Deploying Dynamo with SGLang on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/slurm-jobs/README.md)**
+- **[Deploying Dynamo with SGLang on SLURM](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1)**

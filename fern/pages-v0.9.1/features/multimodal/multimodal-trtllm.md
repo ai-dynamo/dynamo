@@ -332,7 +332,7 @@ sequenceDiagram
 
 This section demonstrates how to deploy large multimodal models that require a multi-node setup using Slurm.
 
-> **Note:** The scripts referenced in this section can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+> **Note:** The scripts referenced in this section can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1).
 
 ### Environment Setup
 

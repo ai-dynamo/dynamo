@@ -191,4 +191,4 @@ You can find example workflows and reference implementations for deploying multi
 - [vLLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch)
 - [TRT-LLM multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/launch)
 - [SGLang multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch)
-- [Advanced multimodal examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/launch) (video, audio)
+- [Advanced multimodal examples](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1) (video, audio)
