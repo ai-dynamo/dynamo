@@ -273,7 +273,7 @@ impl RequestGuard {
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
         if scheduler_tracked {
-            request_metrics.requests_started_total.inc();
+            request_metrics.requests_started_total().inc();
         }
 
         Self {

@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from prometheus_api_client import PrometheusConnect
+from prometheus_api_client.exceptions import PrometheusApiClientException
 from pydantic import BaseModel, ValidationError
+from requests.exceptions import ConnectionError as RequestsConnectionError
+from requests.exceptions import Timeout as RequestsTimeout
 
 from dynamo import prometheus_names
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -306,7 +309,11 @@ class PrometheusAPIClient:
                     router_request_count = float(request_result[0]["value"][1])
                     if not math.isnan(router_request_count):
                         return router_request_count
-            except Exception as e:
+            except (
+                PrometheusApiClientException,
+                RequestsConnectionError,
+                RequestsTimeout,
+            ) as e:
                 logger.warning(
                     "Error querying admitted router requests from %s; falling back to "
                     "completed request count from %s, which may underestimate demand: %s",
@@ -314,6 +321,9 @@ class PrometheusAPIClient:
                     router_requests_total,
                     e,
                 )
+            except Exception:
+                logger.exception("Unexpected error querying admitted router requests")
+                raise
             else:
                 logger.warning(
                     "No usable Prometheus metric data available for %s; falling back to "
@@ -337,9 +347,16 @@ class PrometheusAPIClient:
                 return (
                     0 if math.isnan(router_completed_count) else router_completed_count
                 )
-            except Exception as e:
+            except (
+                PrometheusApiClientException,
+                RequestsConnectionError,
+                RequestsTimeout,
+            ) as e:
                 logger.error("Error getting completed router request count: %s", e)
                 return 0
+            except Exception:
+                logger.exception("Unexpected error parsing completed router requests")
+                raise
         # This function follows a different query pattern than the other metrics:
         # use frontend-started requests so throughput planning sees offered load,
         # not only completed responses.

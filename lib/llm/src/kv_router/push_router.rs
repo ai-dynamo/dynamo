@@ -732,7 +732,7 @@ mod tests {
     async fn router_request_counters_follow_admission_and_completion_lifecycle() {
         let (router, runtime) = router(None).await;
         let metrics = router.request_metrics.clone();
-        let started_before = metrics.requests_started_total.get();
+        let started_before = metrics.requests_started_total().get();
         let completed_before = metrics.requests_total.get();
 
         let controller = Controller::new("pre-admission-cancellation".to_string());
@@ -744,22 +744,22 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(metrics.requests_started_total.get(), started_before);
+        assert_eq!(metrics.requests_started_total().get(), started_before);
 
         let (_, _, mut query_guard) = track_request(&router, true).await;
         query_guard.abort().await;
         drop(query_guard);
-        assert_eq!(metrics.requests_started_total.get(), started_before);
+        assert_eq!(metrics.requests_started_total().get(), started_before);
 
         let (_, _, mut cancelled_guard) = track_request(&router, false).await;
 
-        assert_eq!(metrics.requests_started_total.get(), started_before + 1);
+        assert_eq!(metrics.requests_started_total().get(), started_before + 1);
         assert_eq!(metrics.requests_total.get(), completed_before);
 
         // Admission remains counted even when the request aborts before dispatch.
         cancelled_guard.abort().await;
         drop(cancelled_guard);
-        assert_eq!(metrics.requests_started_total.get(), started_before + 1);
+        assert_eq!(metrics.requests_started_total().get(), started_before + 1);
         assert_eq!(metrics.requests_total.get(), completed_before);
 
         let (failed_request, failed_selection, failed_dispatch_guard) =
@@ -775,7 +775,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(metrics.requests_started_total.get(), started_before + 2);
+        assert_eq!(metrics.requests_started_total().get(), started_before + 2);
         assert_eq!(metrics.requests_total.get(), completed_before);
 
         let (_, _, mut completed_guard) = track_request(&router, false).await;
@@ -783,7 +783,7 @@ mod tests {
         completed_guard.mark_dispatched();
         completed_guard.finish().await;
         drop(completed_guard);
-        assert_eq!(metrics.requests_started_total.get(), started_before + 3);
+        assert_eq!(metrics.requests_started_total().get(), started_before + 3);
         assert_eq!(metrics.requests_total.get(), completed_before + 1);
 
         drop(router);

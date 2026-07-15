@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from prometheus_api_client.exceptions import PrometheusApiClientException
 
 from dynamo import prometheus_names
 from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
@@ -600,11 +601,11 @@ class TestPrometheusAPIClientRouterSource:
             "may underestimate demand" in record.message for record in caplog.records
         )
 
-    def test_router_request_count_falls_back_when_started_query_raises(
+    def test_router_request_count_falls_back_on_expected_query_error(
         self, router_client, caplog
     ):
         router_client.prom.custom_query.side_effect = [
-            RuntimeError("started query failed"),
+            PrometheusApiClientException("started query failed"),
             [{"value": [0, "19.0"]}],
         ]
 
@@ -615,6 +616,32 @@ class TestPrometheusAPIClientRouterSource:
         assert router_client.prom.custom_query.call_count == 2
         assert any(
             "started query failed" in record.message for record in caplog.records
+        )
+
+    def test_router_request_count_returns_zero_when_completed_query_fails(
+        self, router_client
+    ):
+        router_client.prom.custom_query.side_effect = [
+            [],
+            PrometheusApiClientException("completed query failed"),
+        ]
+
+        result = router_client.get_avg_request_count("60s", "mymodel")
+
+        assert result == 0
+
+    def test_router_request_count_reraises_malformed_response(
+        self, router_client, caplog
+    ):
+        router_client.prom.custom_query.return_value = [{"unexpected": "shape"}]
+
+        with caplog.at_level(logging.ERROR), pytest.raises(KeyError):
+            router_client.get_avg_request_count("60s", "mymodel")
+
+        assert router_client.prom.custom_query.call_count == 1
+        assert any(
+            "Unexpected error querying admitted router requests" in record.message
+            for record in caplog.records
         )
 
     def test_router_request_count_falls_back_when_started_is_nan(self, router_client):
