@@ -622,8 +622,23 @@ pub struct ActiveSequenceEvent {
     pub worker: WorkerWithDpRank,
     pub data: ActiveSequenceEventData,
     pub router_id: u64,
+    /// Active-sequence sampling stride used by the sender. `None` is the
+    /// backwards-compatible representation of stride 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stride: Option<usize>,
     #[serde(default)]
     pub lora_name: Option<String>,
+}
+
+impl ActiveSequenceEvent {
+    /// Return the sender's effective stride, or `None` for a malformed zero.
+    pub fn effective_stride(&self) -> Option<usize> {
+        match self.stride {
+            None | Some(1) => Some(1),
+            Some(0) => None,
+            Some(stride) => Some(stride),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -2036,5 +2051,67 @@ mod tests {
             serde_json::to_string(&load).unwrap(),
             r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
         );
+    }
+
+    #[test]
+    fn active_sequence_event_stride_is_backwards_compatible() {
+        let event = ActiveSequenceEvent {
+            request_id: "request".to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::Free,
+            router_id: 7,
+            stride: None,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_value(&event).unwrap();
+        assert!(serialized.get("stride").is_none());
+        let decoded: ActiveSequenceEvent = serde_json::from_value(serialized).unwrap();
+        assert_eq!(decoded.effective_stride(), Some(1));
+    }
+
+    #[test]
+    fn active_sequence_event_stride_encodes_sparse_and_rejects_zero() {
+        let mut event = ActiveSequenceEvent {
+            request_id: "request".to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::Free,
+            router_id: 7,
+            stride: Some(4),
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            serialized.get("stride").and_then(|value| value.as_u64()),
+            Some(4)
+        );
+        assert_eq!(event.effective_stride(), Some(4));
+
+        event.stride = Some(0);
+        assert_eq!(event.effective_stride(), None);
+    }
+
+    #[test]
+    fn sparse_active_sequence_event_reduces_serialized_payload() {
+        let make_event = |token_sequence: Vec<SequenceHash>, stride| ActiveSequenceEvent {
+            request_id: "request".to_string(),
+            worker: WorkerWithDpRank::new(1, 0),
+            data: ActiveSequenceEventData::AddRequest {
+                token_sequence: Some(token_sequence),
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+            },
+            router_id: 7,
+            stride,
+            lora_name: None,
+        };
+        let full = make_event((0..12).collect(), None);
+        let sparse = make_event(vec![3, 7, 11], Some(4));
+
+        let full_payload = rmp_serde::to_vec_named(&full).unwrap();
+        let sparse_payload = rmp_serde::to_vec_named(&sparse).unwrap();
+        assert!(sparse_payload.len() < full_payload.len());
     }
 }

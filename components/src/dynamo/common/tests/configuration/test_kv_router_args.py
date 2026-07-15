@@ -131,6 +131,43 @@ def test_overlap_score_credit_decay_cli_uses_kv_router_config_field() -> None:
     assert config.kv_router_kwargs()["overlap_score_credit_decay"] == 0.5
 
 
+def test_active_sequence_stride_defaults_and_flows_to_binding_kwargs() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    default_config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
+    assert default_config.kv_router_kwargs()["router_active_sequence_stride"] == 1
+
+    explicit_config = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(["--router-active-sequence-stride", "4"])
+    )
+    assert explicit_config.kv_router_kwargs()["router_active_sequence_stride"] == 4
+
+
+def test_active_sequence_stride_env_flows_to_binding_kwargs(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE", "5")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
+    assert config.kv_router_kwargs()["router_active_sequence_stride"] == 5
+
+
+def test_active_sequence_stride_rejects_zero() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--router-active-sequence-stride", "0"])
+
+
+def test_active_sequence_stride_env_rejects_zero(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE", "0")
+
+    with pytest.raises(argparse.ArgumentTypeError, match="value must be at least 1"):
+        KvRouterArgGroup().add_arguments(argparse.ArgumentParser())
+
+
 def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

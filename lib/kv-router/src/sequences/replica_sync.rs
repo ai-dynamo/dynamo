@@ -146,17 +146,36 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     fn apply_replica_event(&self, event: ActiveSequenceEvent, effects: &mut ReplicaBatchEffects) {
+        if event.router_id == self.router_id {
+            return;
+        }
+
+        let received_stride = event.effective_stride().unwrap_or(0);
+        if received_stride != self.active_sequence_stride {
+            tracing::warn!(
+                source_router_id = event.router_id,
+                request_id = %event.request_id,
+                expected_stride = self.active_sequence_stride,
+                received_stride,
+                "Dropping active-sequence replica event with incompatible stride"
+            );
+            self.publisher.observe_replica_stride_mismatch(
+                self.active_sequence_stride,
+                received_stride,
+                self.worker_type(),
+            );
+            return;
+        }
+
         let ActiveSequenceEvent {
             request_id,
             worker: event_worker,
             data,
             router_id,
+            stride: _,
             lora_name,
         } = event;
-
-        if router_id == self.router_id {
-            return;
-        }
+        debug_assert_ne!(router_id, self.router_id);
 
         // ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
         // Peer routers still approximate decay anchoring with local receive time.

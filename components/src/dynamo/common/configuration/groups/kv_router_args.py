@@ -35,6 +35,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "use_kv_events",
     "router_replica_sync",
     "router_track_active_blocks",
+    "router_active_sequence_stride",
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
@@ -101,6 +102,13 @@ def _default_prefill_load_scale() -> float:
     return 1.0
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
 class KvRouterConfigBase(ConfigBase):
     """Mixin carrying the shared KvRouterConfig fields."""
 
@@ -114,6 +122,7 @@ class KvRouterConfigBase(ConfigBase):
     use_kv_events: bool
     router_replica_sync: bool
     router_track_active_blocks: bool
+    router_active_sequence_stride: int
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
@@ -283,6 +292,19 @@ class KvRouterArgGroup(ArgGroup):
                 "By default, active blocks are tracked for load balancing."
             ),
             obsolete_flag="--track-active-blocks",
+        )
+        add_argument(
+            g,
+            flag_name="--router-active-sequence-stride",
+            env_var="DYN_ROUTER_ACTIVE_SEQUENCE_STRIDE",
+            default=1,
+            dest="router_active_sequence_stride",
+            help=(
+                "KV Router: Retain one active-sequence hash for every N complete prompt "
+                "blocks. A value of 1 disables sparsity. All router replicas must use "
+                "the same value."
+            ),
+            arg_type=_positive_int,
         )
         add_negatable_bool_argument(
             g,

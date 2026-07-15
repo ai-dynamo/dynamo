@@ -103,6 +103,7 @@ where
         let slots = create_multi_worker_sequences(
             component.clone(),
             block_size as usize,
+            kv_router_config.router_active_sequence_stride,
             initial_workers,
             kv_router_config.router_replica_sync,
             router_id,

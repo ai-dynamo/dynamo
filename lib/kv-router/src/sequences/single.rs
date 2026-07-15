@@ -155,6 +155,7 @@ impl ActiveSequences {
         self.assert_consistent();
     }
 
+    #[cfg(test)]
     pub(super) fn active_blocks(&self) -> usize {
         self.blocks.active_blocks()
     }
@@ -321,8 +322,10 @@ impl ActiveSequences {
     }
 
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
+        let block_load = self.blocks.load();
         WorkerLoadSnapshot {
-            active_blocks: self.active_blocks(),
+            active_prompt_units: block_load.prompt_units,
+            active_output_blocks: block_load.output_blocks,
             active_requests: self.requests.len(),
             prefill: self.prefill.snapshot(),
         }

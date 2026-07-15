@@ -93,6 +93,11 @@ impl SequencePublisher for RuntimeSequencePublisher {
         self.worker_status_metrics
             .remove_worker(worker.worker_id, worker.dp_rank, worker_type);
     }
+
+    fn observe_replica_stride_mismatch(&self, expected: usize, received: usize, worker_type: &str) {
+        self.worker_status_metrics
+            .increment_active_sequence_stride_mismatch(expected, received, worker_type);
+    }
 }
 
 /// Concrete [`SequenceSubscriber`] backed by NATS typed event stream.
@@ -129,6 +134,7 @@ pub type ActiveSequencesMulti = ActiveSequencesMultiWorker<RuntimeSequencePublis
 pub async fn create_multi_worker_sequences(
     component: Component,
     block_size: usize,
+    active_sequence_stride: usize,
     workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
     replica_sync: bool,
     router_id: u64,
@@ -157,13 +163,14 @@ pub async fn create_multi_worker_sequences(
         })
         .collect();
 
-    let multi_worker = ActiveSequencesMultiWorker::new(
+    let multi_worker = ActiveSequencesMultiWorker::new_with_active_sequence_stride(
         publisher,
         block_size,
         dp_range,
         replica_sync,
         router_id,
         worker_type,
+        active_sequence_stride,
     );
 
     let arc = Arc::new(multi_worker);
@@ -219,6 +226,7 @@ mod tests {
         let seq_manager_1 = create_multi_worker_sequences(
             component.clone(),
             block_size,
+            1,
             workers_with_configs.clone(),
             true,
             1,
@@ -229,6 +237,7 @@ mod tests {
         let seq_manager_2 = create_multi_worker_sequences(
             component,
             block_size,
+            1,
             workers_with_configs,
             true,
             2,
@@ -375,6 +384,7 @@ mod tests {
         let seq_manager_1 = create_multi_worker_sequences(
             component.clone(),
             block_size,
+            1,
             workers_with_configs.clone(),
             true,
             1,
@@ -385,6 +395,7 @@ mod tests {
         let seq_manager_2 = create_multi_worker_sequences(
             component,
             block_size,
+            1,
             workers_with_configs,
             true,
             2,
