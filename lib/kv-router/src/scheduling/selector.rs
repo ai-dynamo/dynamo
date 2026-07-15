@@ -362,6 +362,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 .routing_constraints
                 .preferred_taint_multiplier(config.taints())
             {
+                // NOTE: This multiplicative bias assumes a non-negative score. Negative
+                // overlap scores expose its pre-existing sign sensitivity; keep it for now.
                 Some(multiplier) => base_score * multiplier,
                 None => base_score,
             }

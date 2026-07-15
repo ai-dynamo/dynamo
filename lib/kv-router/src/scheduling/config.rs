@@ -318,8 +318,8 @@ struct RouterConfigOverrideSerde {
 #[validate(schema(function = "validate_router_config_override"))]
 pub struct RouterConfigOverride {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling. Values above 1.0 give device overlap extra credit.
-    /// Set to 0.0 to ignore prefix matching.
+    /// load before sampling. Values must be finite and non-negative. Values above
+    /// 1.0 give device overlap extra credit. Set to 0.0 to ignore prefix matching.
     #[builder(default)]
     pub overlap_score_credit: Option<f64>,
 
@@ -447,8 +447,8 @@ impl Default for KvRouterConfigSerde {
 #[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling. Values above 1.0 give device overlap extra credit.
-    /// Set to 0.0 to ignore prefix matching.
+    /// load before sampling. Values must be finite and non-negative. Values above
+    /// 1.0 give device overlap extra credit. Set to 0.0 to ignore prefix matching.
     #[validate(custom(function = "validate_overlap_score_credit"))]
     pub overlap_score_credit: f64,
 
@@ -1371,14 +1371,6 @@ models:
 
     #[test]
     fn test_router_config_override_accepts_credit_above_one() {
-        let too_small = RouterConfigOverride {
-            overlap_score_credit: Some(-0.1),
-            prefill_load_scale: None,
-            router_temperature: None,
-            assume_kv_reuse: None,
-            track_prefill_tokens: None,
-            shared_cache_multiplier: None,
-        };
         let amplified = RouterConfigOverride {
             overlap_score_credit: Some(1.1),
             prefill_load_scale: None,
@@ -1388,8 +1380,18 @@ models:
             shared_cache_multiplier: None,
         };
 
-        assert!(too_small.validate().is_err());
         assert!(amplified.validate().is_ok());
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let invalid = RouterConfigOverride {
+                overlap_score_credit: Some(value),
+                prefill_load_scale: None,
+                router_temperature: None,
+                assume_kv_reuse: None,
+                track_prefill_tokens: None,
+                shared_cache_multiplier: None,
+            };
+            assert!(invalid.validate().is_err());
+        }
     }
 
     #[test]

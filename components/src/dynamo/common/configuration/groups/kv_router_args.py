@@ -177,8 +177,8 @@ class KvRouterArgGroup(ArgGroup):
             default=1.0,
             help=(
                 "KV Router: Credit multiplier for device-local prefix overlap. "
-                "Must be non-negative; values above 1.0 give device overlap extra "
-                "credit and can make the adjusted prefill cost negative."
+                "Must be finite and non-negative; values above 1.0 give device "
+                "overlap extra credit and can make the adjusted prefill cost negative."
             ),
             arg_type=float,
             dest="overlap_score_credit",
