@@ -2393,6 +2393,7 @@ dependencies = [
  "dynamo-mocker",
  "dynamo-parsers",
  "dynamo-runtime",
+ "dynamo-sglang-sidecar",
  "futures",
  "once_cell",
  "opentelemetry",
@@ -2512,6 +2513,28 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-sglang-sidecar"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "dynamo-runtime",
+ "futures",
+ "prost 0.13.5",
+ "rand 0.9.4",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
+ "url",
 ]
 
 [[package]]

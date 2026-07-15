@@ -257,6 +257,7 @@ pub(super) struct RequestGuard {
 impl RequestGuard {
     pub(super) fn new(
         chooser: Arc<KvRouter>,
+        request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
@@ -271,8 +272,9 @@ impl RequestGuard {
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        let request_metrics =
-            RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        if scheduler_tracked {
+            request_metrics.requests_started_total().inc();
+        }
 
         Self {
             cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked),
