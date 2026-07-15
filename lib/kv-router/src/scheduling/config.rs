@@ -53,19 +53,11 @@ const fn default_overlap_score_credit_decay() -> f64 {
 }
 
 pub const OVERLAP_SCORE_CREDIT_RANGE_ERROR: &str =
-    "overlap_score_credit must be between 0.0 and 1.0";
-pub const OVERLAP_SCORE_CREDIT_MIGRATION_ERROR: &str = concat!(
-    "overlap_score_credit must be between 0.0 and 1.0; values above 1.0 are probably not what ",
-    "you intended. If you want to weigh TTFT/prompt-side prefill load more heavily, keep ",
-    "overlap_score_credit <= 1.0 and use that larger value for prefill_load_scale instead; ",
-    "prefill_load_scale is applied after overlap credits."
-);
+    "overlap_score_credit must be a finite, non-negative number";
 
 pub fn overlap_score_credit_error_message(value: f64) -> Option<&'static str> {
-    if (0.0..=1.0).contains(&value) {
+    if value.is_finite() && value >= 0.0 {
         None
-    } else if value > 1.0 {
-        Some(OVERLAP_SCORE_CREDIT_MIGRATION_ERROR)
     } else {
         Some(OVERLAP_SCORE_CREDIT_RANGE_ERROR)
     }
@@ -326,7 +318,8 @@ struct RouterConfigOverrideSerde {
 #[validate(schema(function = "validate_router_config_override"))]
 pub struct RouterConfigOverride {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
+    /// load before sampling. Values above 1.0 give device overlap extra credit.
+    /// Set to 0.0 to ignore prefix matching.
     #[builder(default)]
     pub overlap_score_credit: Option<f64>,
 
@@ -454,7 +447,8 @@ impl Default for KvRouterConfigSerde {
 #[validate(schema(function = "validate_kv_router_config"))]
 pub struct KvRouterConfig {
     /// Device-local prefix-overlap credit multiplier applied to the prefill
-    /// load before sampling (0.0 to 1.0). Set to 0.0 to ignore prefix matching.
+    /// load before sampling. Values above 1.0 give device overlap extra credit.
+    /// Set to 0.0 to ignore prefix matching.
     #[validate(custom(function = "validate_overlap_score_credit"))]
     pub overlap_score_credit: f64,
 
@@ -926,8 +920,14 @@ mod tests {
             default.router_track_active_blocks
         );
 
-        let out_of_range = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
-        assert!(out_of_range.validate_config().is_err());
+        let amplified = config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "1.5")]);
+        assert!(amplified.validate_config().is_ok());
+
+        for value in ["-0.5", "NaN", "inf"] {
+            let invalid_credit =
+                config_from_values(&[("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", value)]);
+            assert!(invalid_credit.validate_config().is_err());
+        }
     }
 
     #[test]
@@ -1203,19 +1203,20 @@ models:
     }
 
     #[test]
-    fn test_kv_router_config_rejects_out_of_range_overlap_score_credit() {
-        let too_small = KvRouterConfig {
-            overlap_score_credit: -0.1,
-            ..Default::default()
-        };
-        let too_large = KvRouterConfig {
+    fn test_kv_router_config_accepts_credit_above_one() {
+        let amplified = KvRouterConfig {
             overlap_score_credit: 1.1,
             ..Default::default()
         };
 
-        assert!(too_small.validate().is_err());
-        let error = too_large.validate().unwrap_err().to_string();
-        assert!(error.contains("prefill_load_scale"));
+        assert!(amplified.validate().is_ok());
+        for value in [-0.1, f64::NAN, f64::INFINITY] {
+            let invalid = KvRouterConfig {
+                overlap_score_credit: value,
+                ..Default::default()
+            };
+            assert!(invalid.validate().is_err());
+        }
     }
 
     #[test]
@@ -1260,16 +1261,19 @@ models:
     }
 
     #[test]
-    fn test_kv_router_config_deserialize_rejects_invalid_values() {
+    fn test_kv_router_config_deserialize_accepts_credit_above_one() {
+        let amplified: KvRouterConfig =
+            serde_json::from_str(r#"{"overlap_score_credit":1.5}"#).unwrap();
         let credit_error =
-            serde_json::from_str::<KvRouterConfig>(r#"{"overlap_score_credit":1.1}"#)
+            serde_json::from_str::<KvRouterConfig>(r#"{"overlap_score_credit":-0.1}"#)
                 .unwrap_err()
                 .to_string();
         let scale_error = serde_json::from_str::<KvRouterConfig>(r#"{"prefill_load_scale":-0.1}"#)
             .unwrap_err()
             .to_string();
 
-        assert!(credit_error.contains("prefill_load_scale"));
+        assert_eq!(amplified.overlap_score_credit, 1.5);
+        assert!(credit_error.contains("overlap_score_credit"));
         assert!(scale_error.contains("prefill_load_scale"));
     }
 
@@ -1314,9 +1318,11 @@ models:
     }
 
     #[test]
-    fn test_router_config_override_deserialize_rejects_invalid_values() {
+    fn test_router_config_override_deserialize_accepts_credit_above_one() {
+        let amplified: RouterConfigOverride =
+            serde_json::from_str(r#"{"overlap_score_credit":1.5}"#).unwrap();
         let credit_error =
-            serde_json::from_str::<RouterConfigOverride>(r#"{"overlap_score_credit":1.1}"#)
+            serde_json::from_str::<RouterConfigOverride>(r#"{"overlap_score_credit":-0.1}"#)
                 .unwrap_err()
                 .to_string();
         let scale_error =
@@ -1324,7 +1330,8 @@ models:
                 .unwrap_err()
                 .to_string();
 
-        assert!(credit_error.contains("prefill_load_scale"));
+        assert_eq!(amplified.overlap_score_credit, Some(1.5));
+        assert!(credit_error.contains("overlap_score_credit"));
         assert!(scale_error.contains("prefill_load_scale"));
     }
 
@@ -1363,7 +1370,7 @@ models:
     }
 
     #[test]
-    fn test_router_config_override_rejects_out_of_range_overlap_score_credit() {
+    fn test_router_config_override_accepts_credit_above_one() {
         let too_small = RouterConfigOverride {
             overlap_score_credit: Some(-0.1),
             prefill_load_scale: None,
@@ -1372,7 +1379,7 @@ models:
             track_prefill_tokens: None,
             shared_cache_multiplier: None,
         };
-        let too_large = RouterConfigOverride {
+        let amplified = RouterConfigOverride {
             overlap_score_credit: Some(1.1),
             prefill_load_scale: None,
             router_temperature: None,
@@ -1382,8 +1389,7 @@ models:
         };
 
         assert!(too_small.validate().is_err());
-        let error = too_large.validate().unwrap_err().to_string();
-        assert!(error.contains("prefill_load_scale"));
+        assert!(amplified.validate().is_ok());
     }
 
     #[test]
