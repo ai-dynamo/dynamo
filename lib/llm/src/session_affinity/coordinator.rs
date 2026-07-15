@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     LlmResponse, MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
-    MAX_SESSION_AFFINITY_TTL_SECS,
+    MAX_SESSION_AFFINITY_TTL_SECS, trace,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -184,11 +184,15 @@ impl AffinityCoordinator {
             match self.inner.entries.entry(session_id.clone()) {
                 Entry::Vacant(entry) => {
                     self.reserve_entry()?;
-                    return Ok(AffinityAcquire::Initialize(entry.insert_initializing(
-                        &self.inner,
-                        session_id,
+                    let initialization =
+                        entry.insert_initializing(&self.inner, session_id, requested_target);
+                    trace::initialize(
+                        &initialization.session_id,
+                        initialization.revision,
                         requested_target,
-                    )));
+                        "new_session",
+                    );
+                    return Ok(AffinityAcquire::Initialize(initialization));
                 }
                 Entry::Occupied(mut entry) => match entry.get_mut() {
                     AffinityEntry::Initializing { notify, .. } => {
@@ -226,14 +230,21 @@ impl AffinityCoordinator {
                             notify: notify.clone(),
                         };
                         drop(entry);
-                        return Ok(AffinityAcquire::Initialize(AffinityInitialization {
+                        let initialization = AffinityInitialization {
                             coordinator: Arc::downgrade(&self.inner),
                             session_id,
                             revision,
                             notify,
                             requested_target,
                             active: true,
-                        }));
+                        };
+                        trace::initialize(
+                            &initialization.session_id,
+                            initialization.revision,
+                            requested_target,
+                            "idle_ttl_expired",
+                        );
+                        return Ok(AffinityAcquire::Initialize(initialization));
                     }
                     AffinityEntry::Bound {
                         target,
@@ -243,6 +254,7 @@ impl AffinityCoordinator {
                     } => {
                         validate_bound_target(&session_id, *target, requested_target)?;
                         *active_leases += 1;
+                        trace::bound_reuse(&session_id, *revision, *target, *active_leases);
                         let lease = AffinityLease {
                             coordinator: Arc::downgrade(&self.inner),
                             session_id,
@@ -399,11 +411,16 @@ impl AffinityAcquire {
     pub(crate) fn into_stream(
         self,
         selected_target: AffinityTarget,
+        phase: RequestPhase,
         stream: ManyOut<LlmResponse>,
     ) -> Result<ManyOut<LlmResponse>, Error> {
         match self {
             Self::Initialize(initialization) => {
-                Ok(initialization.commit(selected_target)?.into_stream(stream))
+                let session_id = initialization.session_id.clone();
+                let revision = initialization.revision;
+                let lease = initialization.commit(selected_target)?;
+                trace::bound_dispatch(&session_id, revision, selected_target, phase, "initialize");
+                Ok(lease.into_stream(stream))
             }
             Self::Bound { target, mut lease } => {
                 if let Err(error) = validate_bound_target("session", target, Some(selected_target))
@@ -411,8 +428,21 @@ impl AffinityAcquire {
                     lease.invalidate();
                     return Err(error);
                 }
+                trace::bound_dispatch(
+                    &lease.session_id,
+                    lease.revision,
+                    selected_target,
+                    phase,
+                    "bound",
+                );
                 Ok(lease.into_stream(stream))
             }
+        }
+    }
+
+    pub(crate) fn trace_bound_target_fallback_rebind(&self) {
+        if let Self::Bound { target, lease } = self {
+            trace::bound_target_fallback_rebind(&lease.session_id, lease.revision, *target);
         }
     }
 
@@ -456,6 +486,7 @@ impl AffinityInitialization {
             idle_deadline: Instant::now() + inner.ttl,
         };
         drop(entry);
+        trace::commit(&self.session_id, self.revision, target);
         self.active = false;
         self.notify.notify_waiters();
         Ok(AffinityLease {

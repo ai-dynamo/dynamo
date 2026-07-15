@@ -3,6 +3,7 @@
 
 mod coordinator;
 mod push_router;
+mod trace;
 
 pub(crate) use coordinator::{AffinityAcquire, affinity_id};
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
