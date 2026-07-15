@@ -242,6 +242,8 @@ class RequestHandlerConfig:
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
+    # Force engine-owned conversation-affinity ADP routing regardless of engine detection.
+    conversation_affinity: bool = False
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -266,10 +268,9 @@ class HandlerBase(BaseGenerativeHandler):
         # request (engine may not be initialized at handler construction). See
         # conversation_affinity.py. None = not yet resolved.
         self._conversation_affinity: Optional[bool] = None
-        # Manual override to force engine-side assignment of conversation-affinity
-        self._engine_conversation_affinity_env_override: bool = (
-            os.getenv("DYN_ENGINE_CONV_AFFINITY") == "1"
-        )
+        # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
+        # engine-side assignment of conversation-affinity regardless of engine detection.
+        self._engine_conversation_affinity_override: bool = config.conversation_affinity
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -1150,7 +1151,7 @@ class HandlerBase(BaseGenerativeHandler):
         dp_rank = routing.get("dp_rank") if routing else None
         conversation_params = None
         scheduling_params = None
-        if conv_affinity or self._engine_conversation_affinity_env_override:
+        if conv_affinity or self._engine_conversation_affinity_override:
             # Let the engine pick the rank from the conversation id (agent_context.session_id);
             # do NOT force a rank (an explicit rank is honored before affinity and bypasses it).
             conversation_params = conversation_params_for(
