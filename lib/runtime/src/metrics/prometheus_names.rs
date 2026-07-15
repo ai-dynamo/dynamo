@@ -281,8 +281,8 @@ pub mod frontend_service {
     /// gate, labeled by gate and model (model is empty for frontend-local gates)
     pub const ADMISSION_REJECTION_TOTAL: &str = "admission_rejection_total";
 
-    /// Configured frontend admission gate limit, labeled by gate.
-    /// Only exported for gates that are explicitly enabled.
+    /// Configured frontend admission gate limit, labeled by gate and model.
+    /// The model label is empty for frontend-local gates and global defaults.
     pub const ADMISSION_GATE_LIMIT: &str = "admission_gate_limit";
 
     /// Active decode blocks (KV cache blocks) per worker
@@ -827,6 +827,18 @@ pub mod kvstats {
 
     /// GPU cache usage as a percentage (0.0-1.0)
     pub const GPU_CACHE_USAGE_PERCENT: &str = "gpu_cache_usage_percent";
+
+    /// Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    pub const KV_CACHE_HIT_RATE: &str = "kv_cache_hit_rate";
+}
+
+/// Worker-lifecycle timing gauges set once per worker run.
+pub mod lifecycle {
+    /// Worker cleanup duration in seconds
+    pub const CLEANUP_TIME_SECONDS: &str = "cleanup_time_seconds";
+
+    /// Worker drain duration in seconds
+    pub const DRAIN_TIME_SECONDS: &str = "drain_time_seconds";
 }
 
 // Model information metrics

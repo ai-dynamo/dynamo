@@ -19,6 +19,7 @@ use crate::{
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
+use dynamo_runtime::metrics::prometheus_names::frontend_service::admission_gate;
 
 /// Build and run an HTTP service
 pub async fn run(
@@ -230,7 +231,7 @@ async fn run_watcher(
     let _endpoint_enabler_task = tokio::spawn(async move {
         while let Some(model_update) = rx.recv().await {
             update_http_endpoints(http_service.clone(), model_update.clone());
-            update_model_metrics(model_update, metrics.clone());
+            update_model_metrics(model_update, metrics.clone(), http_service.model_manager());
         }
     });
 
@@ -267,6 +268,7 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
                 service.enable_model_endpoint(endpoint_type, false);
             }
         }
+        ModelUpdate::Changed(_) => {}
     }
 }
 
@@ -274,7 +276,13 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
 fn update_model_metrics(
     model_type: ModelUpdate,
     metrics: Arc<crate::http::service::metrics::Metrics>,
+    manager: &ModelManager,
 ) {
+    let (model_name, aliases) = match &model_type {
+        ModelUpdate::Added(card) | ModelUpdate::Removed(card) | ModelUpdate::Changed(card) => {
+            (card.display_name.clone(), card.aliases.clone())
+        }
+    };
     match model_type {
         ModelUpdate::Added(card) => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
@@ -284,8 +292,24 @@ fn update_model_metrics(
         }
         ModelUpdate::Removed(card) => {
             tracing::debug!(model_name = card.display_name, "Model removed");
-            // Note: Metrics are typically not removed to preserve historical data
-            // This matches the behavior in the polling task
+        }
+        ModelUpdate::Changed(card) => {
+            tracing::debug!(model_name = card.display_name, "Model metadata changed");
+        }
+    }
+    // Multiple WorkerSets (P/D/Encode or a rolling update) can coexist for
+    // one served model. Recompute from the manager so one card's Added event
+    // cannot overwrite another card's more restrictive active override.
+    for served_name in std::iter::once(model_name).chain(aliases) {
+        let effective_limit = manager.request_concurrency_limit_override(&served_name);
+        metrics.sync_model_admission_gate_limit(&served_name, effective_limit);
+        if let Some(limit) = effective_limit {
+            tracing::info!(
+                gate = admission_gate::REQUEST_CONCURRENCY,
+                model = %served_name,
+                limit,
+                "frontend admission gate enabled for model"
+            );
         }
     }
 }

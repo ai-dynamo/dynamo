@@ -188,6 +188,9 @@ pub struct WorkerConfig {
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
     pub media_fetcher: Option<MediaFetcher>,
+    /// Per-model frontend request-concurrency override advertised on the
+    /// model deployment card. `None` leaves the frontend default in effect.
+    pub rejection_frontend_request_concurrency_limit: Option<u64>,
 }
 
 impl WorkerConfig {
@@ -227,6 +230,7 @@ impl Default for WorkerConfig {
             route_to_encoder: false,
             media_decoder: None,
             media_fetcher: None,
+            rejection_frontend_request_concurrency_limit: None,
         }
     }
 }
@@ -444,6 +448,7 @@ impl Worker {
         // a listener task just to get an InvalidArgument error.
         validate_model_input(self.config.model_input, &self.engine)?;
         validate_route_to_encoder(&self.config)?;
+        validate_request_concurrency_override(&self.config)?;
 
         // Install the OS signal handlers synchronously, before spawning
         // anything, so a SIGTERM delivered between this point and the
@@ -1523,6 +1528,16 @@ fn validate_route_to_encoder(config: &WorkerConfig) -> Result<(), DynamoError> {
     }
 }
 
+fn validate_request_concurrency_override(config: &WorkerConfig) -> Result<(), DynamoError> {
+    if config.rejection_frontend_request_concurrency_limit == Some(0) {
+        return Err(err(
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "rejection_frontend_request_concurrency_limit must be >= 1",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_endpoint_types(s: &str) -> Result<ModelType, DynamoError> {
     let mut out = ModelType::empty();
     let mut any = false;
@@ -1659,6 +1674,9 @@ async fn build_local_model(
         .custom_template_path(config.custom_jinja_template.clone())
         .media_decoder(config.media_decoder.clone())
         .media_fetcher(config.media_fetcher.clone())
+        .rejection_frontend_request_concurrency_limit(
+            config.rejection_frontend_request_concurrency_limit,
+        )
         .runtime_config(rt_cfg);
 
     // Resolve model_name to a local path. Empty string or a raw media engine
@@ -1998,6 +2016,29 @@ mod tests {
 
         assert!(local_model.card().media_decoder.is_some());
         assert!(local_model.card().media_fetcher.is_some());
+    }
+
+    #[tokio::test]
+    async fn build_local_model_carries_request_concurrency_override() {
+        let config = WorkerConfig {
+            rejection_frontend_request_concurrency_limit: Some(17),
+            ..WorkerConfig::default()
+        };
+        let engine_config = EngineConfig {
+            model: "admission-gate-test".to_string(),
+            ..EngineConfig::default()
+        };
+
+        let local_model = build_local_model(&config, &engine_config, true)
+            .await
+            .expect("name-only model with admission override must build");
+
+        assert_eq!(
+            local_model
+                .card()
+                .rejection_frontend_request_concurrency_limit,
+            Some(17)
+        );
     }
 
     #[test]
@@ -2548,6 +2589,31 @@ mod tests {
         async fn cleanup(&self) -> Result<(), DynamoError> {
             self.log.lock().unwrap().push("cleanup");
             Ok(())
+        }
+    }
+
+    #[test]
+    fn validate_request_concurrency_override_rejects_zero() {
+        let cfg = WorkerConfig {
+            rejection_frontend_request_concurrency_limit: Some(0),
+            ..WorkerConfig::default()
+        };
+        let err = validate_request_concurrency_override(&cfg).unwrap_err();
+        assert_eq!(
+            err.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(err.to_string().contains("must be >= 1"));
+    }
+
+    #[test]
+    fn validate_request_concurrency_override_accepts_none_and_positive() {
+        for limit in [None, Some(1), Some(17)] {
+            let cfg = WorkerConfig {
+                rejection_frontend_request_concurrency_limit: limit,
+                ..WorkerConfig::default()
+            };
+            validate_request_concurrency_override(&cfg).unwrap();
         }
     }
 

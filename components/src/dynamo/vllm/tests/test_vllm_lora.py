@@ -35,7 +35,11 @@ pytestmark = [
 ]
 
 
-def _make_lora_engine(enable_lora: bool = True, endpoint=None) -> VllmLLMEngine:
+def _make_lora_engine(
+    enable_lora: bool = True,
+    endpoint=None,
+    rejection_frontend_request_concurrency_limit: int | None = None,
+) -> VllmLLMEngine:
     """Build a VllmLLMEngine with only the LoRA-relevant state populated.
 
     Calls the real ``__init__`` (side-effect-free: only attribute assignment
@@ -53,6 +57,9 @@ def _make_lora_engine(enable_lora: bool = True, endpoint=None) -> VllmLLMEngine:
         disaggregation_mode=DisaggregationMode.AGGREGATED,
         served_model_name="base-model",
         component="test",
+        rejection_frontend_request_concurrency_limit=(
+            rejection_frontend_request_concurrency_limit
+        ),
     )
     engine.engine_client = SimpleNamespace(
         add_lora=AsyncMock(),
@@ -257,7 +264,9 @@ async def test_generate_passes_resolved_lora_request(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_load_lora_happy_path(monkeypatch):
-    engine = _make_lora_engine(endpoint=object())
+    engine = _make_lora_engine(
+        endpoint=object(), rejection_frontend_request_concurrency_limit=17
+    )
     register, _ = _patch_discovery(monkeypatch)
 
     result = await engine.load_lora(
@@ -269,6 +278,9 @@ async def test_load_lora_happy_path(monkeypatch):
     engine.engine_client.add_lora.assert_awaited_once()
     register.assert_awaited_once()
     assert register.await_args.kwargs["lora_name"] == "adapterA"
+    assert (
+        register.await_args.kwargs["rejection_frontend_request_concurrency_limit"] == 17
+    )
     assert engine.loaded_loras["adapterA"].id == 123
 
 

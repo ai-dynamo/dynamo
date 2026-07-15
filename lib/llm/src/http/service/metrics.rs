@@ -632,8 +632,9 @@ impl Metrics {
     /// The polling behavior can be configured via environment variables:
     /// - `DYN_HTTP_SVC_CONFIG_METRICS_POLL_INTERVAL_SECS`: Poll interval in seconds (must be > 0, supports fractional seconds, defaults to 8)
     ///
-    /// Metrics are never removed to preserve historical data. Runtime config and MDC
-    /// metrics are updated when models are discovered and their configurations are available.
+    /// Historical runtime and MDC metrics are retained. The admission-limit
+    /// gauge is the exception: it represents current configuration and removes
+    /// a named series when that model override is deleted.
     pub fn new() -> Self {
         Self::new_with_prefix(std::env::var(env_metrics::DYN_METRICS_PREFIX).ok())
     }
@@ -976,9 +977,10 @@ impl Metrics {
         let admission_gate_limit = IntGaugeVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::ADMISSION_GATE_LIMIT),
-                "Configured frontend admission gate limit (exported only for enabled gates)",
+                "Configured frontend admission gate limit (empty model means a \
+                 frontend-global/local limit; named model means an MDC override)",
             ),
-            &["gate"],
+            &["gate", "model"],
         )
         .unwrap();
 
@@ -1211,6 +1213,11 @@ impl Metrics {
     pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
         self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
 
+        self.sync_model_admission_gate_limit(
+            &card.display_name,
+            card.rejection_frontend_request_concurrency_limit,
+        );
+
         self.model_context_length
             .with_label_values(&[&card.display_name])
             .set(card.effective_context_length() as i64);
@@ -1317,10 +1324,39 @@ impl Metrics {
     }
 
     /// Export the configured limit for an enabled admission gate
-    pub fn set_admission_gate_limit(&self, gate: &str, limit: u64) {
+    pub fn set_admission_gate_limit(&self, gate: &str, model: &str, limit: u64) {
         self.admission_gate_limit
-            .with_label_values(&[gate])
+            .with_label_values(&[gate, model])
             .set(clamp_u64_to_i64(limit));
+    }
+
+    /// Synchronize the current per-model admission override
+    pub fn sync_model_admission_gate_limit(&self, model: &str, limit: Option<u64>) {
+        match limit.filter(|&value| value > 0) {
+            Some(limit) => self.set_admission_gate_limit(
+                frontend_service::admission_gate::REQUEST_CONCURRENCY,
+                model,
+                limit,
+            ),
+            None => self.remove_admission_gate_limit(
+                frontend_service::admission_gate::REQUEST_CONCURRENCY,
+                model,
+            ),
+        }
+    }
+
+    /// Remove a no-longer-active per-model admission gate limit
+    pub fn remove_admission_gate_limit(&self, gate: &str, model: &str) {
+        let _ = self
+            .admission_gate_limit
+            .remove_label_values(&[gate, model]);
+    }
+
+    /// Get the configured/effective admission gate limit
+    pub fn get_admission_gate_limit(&self, gate: &str, model: &str) -> i64 {
+        self.admission_gate_limit
+            .with_label_values(&[gate, model])
+            .get()
     }
 
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,
@@ -2219,6 +2255,42 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_gate_limit_tracks_mdc_add_update_and_removal() {
+        let metrics = Metrics::new();
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let mut card = ModelDeploymentCard::with_name_only("capped");
+        card.rejection_frontend_request_concurrency_limit = Some(17);
+
+        metrics.update_metrics_from_mdc(&card).unwrap();
+        let mut encoded = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&registry.gather(), &mut encoded)
+            .unwrap();
+        let text = String::from_utf8(encoded).unwrap();
+        assert!(
+            text.contains(
+                "dynamo_frontend_admission_gate_limit{gate=\"request_concurrency\",model=\"capped\"} 17"
+            ),
+            "MDC override must be exported before the first request: {text}"
+        );
+
+        card.rejection_frontend_request_concurrency_limit = None;
+        metrics.update_metrics_from_mdc(&card).unwrap();
+        let mut encoded = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&registry.gather(), &mut encoded)
+            .unwrap();
+        let text = String::from_utf8(encoded).unwrap();
+        assert!(
+            !text.contains(
+                "dynamo_frontend_admission_gate_limit{gate=\"request_concurrency\",model=\"capped\"}"
+            ),
+            "removed MDC override must not leave a stale limit: {text}"
+        );
+    }
 
     #[test]
     fn test_round_to_sig_figs() {

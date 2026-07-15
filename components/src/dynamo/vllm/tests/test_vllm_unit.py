@@ -369,6 +369,7 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         multimodal_embedding_cache_capacity_gb=0.0,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
+        rejection_frontend_request_concurrency_limit=17,
     )
     worker_config = object()
     parse_options = {}
@@ -391,6 +392,7 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
 
     assert config.engine_args.logprobs_mode == "processed_logprobs"
     assert engine.enable_rl is True
+    assert engine._rejection_frontend_request_concurrency_limit == 17
     assert result_worker_config is worker_config
     assert parse_options["fpm_trace_relay_supported"] is False
 

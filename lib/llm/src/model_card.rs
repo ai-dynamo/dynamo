@@ -1106,6 +1106,14 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
 
+                // A concurrency override changes frontend admission behavior,
+                // so it must split the WorkerSet during a rolling update. Omit
+                // the field when unset to preserve pre-field checksums.
+                if let Some(limit) = self.rejection_frontend_request_concurrency_limit {
+                    bytes_to_hash.extend(b"rejection_frontend_request_concurrency_limit\0");
+                    bytes_to_hash.extend(limit.to_be_bytes());
+                }
+
                 // Aliases participate in the checksum. Every worker in a
                 // deployment carries the same static --served-model-name list,
                 // so their checksums still match and they share one WorkerSet;
@@ -3062,6 +3070,27 @@ mod worker_type_tests {
         assert_ne!(
             encode_dnf, encode_single_alt,
             "adding an OR alternative must change mdcsum"
+        );
+    }
+
+    #[test]
+    fn mdcsum_covers_frontend_concurrency_override() {
+        fn hash(limit: Option<u64>) -> String {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.rejection_frontend_request_concurrency_limit = limit;
+            card.mdcsum().to_string()
+        }
+
+        let baseline = hash(None);
+        let capped_at_one = hash(Some(1));
+        let capped_at_two = hash(Some(2));
+        assert_ne!(
+            baseline, capped_at_one,
+            "adding the limit must change mdcsum"
+        );
+        assert_ne!(
+            capped_at_one, capped_at_two,
+            "changing the limit must change mdcsum"
         );
     }
 

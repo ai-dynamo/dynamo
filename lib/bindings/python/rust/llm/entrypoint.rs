@@ -643,7 +643,8 @@ impl EntrypointArgs {
                 rejection_frontend_request_concurrency_limit,
                 rejection_frontend_runtime_task_limit,
                 rejection_frontend_request_plane_connection_limit,
-            ),
+            )
+            .map_err(PyValueError::new_err)?,
             tls_cert_path,
             tls_key_path,
             extra_engine_args,

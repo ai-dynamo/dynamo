@@ -144,6 +144,9 @@ class WorkerConfig:
     route_to_encoder: bool = False
     media_decoder: Optional[MediaDecoder] = None
     media_fetcher: Optional[MediaFetcher] = None
+    # Per-model frontend request-concurrency override published on the MDC.
+    # None leaves the frontend-level default in effect.
+    rejection_frontend_request_concurrency_limit: Optional[int] = None
 
     @classmethod
     def from_runtime_config(
@@ -197,6 +200,9 @@ class WorkerConfig:
             # SGLang/TRT-LLM don't yet, so the getattr default keeps them at
             # False until they add the field on their own runtime config.
             "route_to_encoder": getattr(runtime_cfg, "route_to_encoder", False),
+            "rejection_frontend_request_concurrency_limit": getattr(
+                runtime_cfg, "rejection_frontend_request_concurrency_limit", None
+            ),
         }
         # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
         # `serving_mode`. Skip the probe when an override is supplied so
@@ -279,6 +285,9 @@ class Worker:
             route_to_encoder=self.config.route_to_encoder,
             media_decoder=self.config.media_decoder,
             media_fetcher=self.config.media_fetcher,
+            rejection_frontend_request_concurrency_limit=(
+                self.config.rejection_frontend_request_concurrency_limit
+            ),
         )
 
         loop = asyncio.get_running_loop()

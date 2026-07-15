@@ -142,9 +142,7 @@ def test_worker_concurrency_override_rejects_non_positive(
     _clear_override_env, value: str
 ):
     with pytest.raises(ValueError, match="must be a positive integer"):
-        _parse_runtime_args(
-            ["--rejection-frontend-request-concurrency-limit", value]
-        )
+        _parse_runtime_args(["--rejection-frontend-request-concurrency-limit", value])
 
 
 def test_worker_concurrency_override_env_var(monkeypatch):

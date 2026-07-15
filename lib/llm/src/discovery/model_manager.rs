@@ -1621,9 +1621,9 @@ impl ModelManager {
         model_entry.load_threshold_config(config)
     }
 
-    /// Per-model frontend admission concurrency override from model
-    /// registration (MDC `router_config`), if any of the model's worker
-    /// sets supplied one.
+    /// Per-model frontend admission concurrency override from the dedicated
+    /// ModelDeploymentCard field, if any of the model's worker sets supplied
+    /// one.
     pub fn request_concurrency_limit_override(&self, model: &str) -> Option<u64> {
         self.get_model(model)
             .and_then(|model_entry| model_entry.request_concurrency_limit_override())

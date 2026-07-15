@@ -187,6 +187,7 @@ class VllmLLMEngine(LLMEngine):
         frontend_decoding: bool = False,
         multimodal_embedding_cache_capacity_gb: float = 0.0,
         namespace: str = "dynamo",
+        rejection_frontend_request_concurrency_limit: Optional[int] = None,
     ):
         self.engine_args = engine_args
         self.disaggregation_mode = disaggregation_mode
@@ -201,6 +202,9 @@ class VllmLLMEngine(LLMEngine):
             multimodal_embedding_cache_capacity_gb
         )
         self._namespace = namespace
+        self._rejection_frontend_request_concurrency_limit = (
+            rejection_frontend_request_concurrency_limit
+        )
         self.engine_client: AsyncLLM | None = None
         self._vllm_config: Any = None
         self._default_sampling_params: Any = None
@@ -305,6 +309,9 @@ class VllmLLMEngine(LLMEngine):
                 config.multimodal_embedding_cache_capacity_gb
             ),
             namespace=config.namespace,
+            rejection_frontend_request_concurrency_limit=(
+                config.rejection_frontend_request_concurrency_limit
+            ),
         )
         media_decoder, media_fetcher = create_frontend_media_config(
             config.frontend_decoding
@@ -877,6 +884,9 @@ class VllmLLMEngine(LLMEngine):
             base_model_path=self.engine_args.model,
             worker_type=worker_type,
             needs=needs,
+            rejection_frontend_request_concurrency_limit=(
+                self._rejection_frontend_request_concurrency_limit
+            ),
         )
 
     def _lora_registration_topology(

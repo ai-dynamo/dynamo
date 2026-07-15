@@ -190,8 +190,13 @@ fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType)
 
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
+    /// A model card was added; HTTP surfaces and model-scoped metrics may change.
     Added(ModelDeploymentCard),
+    /// One or more HTTP endpoint types are no longer globally available.
     Removed(ModelDeploymentCard),
+    /// A worker-set lifecycle change may have changed model-scoped metadata,
+    /// even though the model's HTTP endpoint type remains globally available.
+    Changed(ModelDeploymentCard),
 }
 
 pub struct ModelWatcher {
@@ -1141,6 +1146,13 @@ impl ModelWatcher {
             }
         }
 
+        // Recompute model-scoped metrics even when this model remains active:
+        // rolling updates can remove the WorkerSet carrying the minimum
+        // admission override without changing global HTTP endpoint availability.
+        if let Some(tx) = &self.model_update_tx {
+            tx.send(ModelUpdate::Changed(card.clone())).await.ok();
+        }
+
         // Check if the Model still has instances in any namespace
         if !active_instances.is_empty() {
             tracing::debug!(
@@ -1162,6 +1174,10 @@ impl ModelWatcher {
         }
 
         if let Some(tx) = &self.model_update_tx {
+            // Send again after the final manager removal. The earlier Changed
+            // event covers rolling updates; this one guarantees full cleanup
+            // even if no WorkerSet matched the deleted discovery record.
+            tx.send(ModelUpdate::Changed(card.clone())).await.ok();
             for model_type in ALL_MODEL_TYPES {
                 if card.model_type.intersects(*model_type)
                     && is_model_type_list_empty(&self.manager, *model_type)

@@ -141,8 +141,8 @@ impl Default for StreamingDispatchConfig {
 ///
 /// Each gate is disabled when its limit is `None` and active only when
 /// explicitly configured. The HTTP service evaluates these before dispatching
-/// a request to the engine and rejects with HTTP 503 when a configured limit
-/// is exceeded.
+/// a request to the engine and rejects with HTTP 503 when admitting it would
+/// exceed a configured limit.
 ///
 /// - `request_concurrency_limit` is enforced separately for each served model.
 /// - `runtime_task_limit` and `request_plane_connection_limit` are
@@ -159,12 +159,25 @@ impl AdmissionGateConfig {
         request_concurrency_limit: Option<u64>,
         runtime_task_limit: Option<u64>,
         request_plane_connection_limit: Option<u64>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        for (name, limit) in [
+            ("request_concurrency_limit", request_concurrency_limit),
+            ("runtime_task_limit", runtime_task_limit),
+            (
+                "request_plane_connection_limit",
+                request_plane_connection_limit,
+            ),
+        ] {
+            if limit == Some(0) {
+                return Err(format!("{name} must be >= 1 (omit it to disable the gate)"));
+            }
+        }
+
+        Ok(Self {
             request_concurrency_limit,
             runtime_task_limit,
             request_plane_connection_limit,
-        }
+        })
     }
 
     /// Build from optional Python kwargs. Returns `None` when every limit is
@@ -173,18 +186,19 @@ impl AdmissionGateConfig {
         request_concurrency_limit: Option<u64>,
         runtime_task_limit: Option<u64>,
         request_plane_connection_limit: Option<u64>,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, String> {
         if request_concurrency_limit.is_none()
             && runtime_task_limit.is_none()
             && request_plane_connection_limit.is_none()
         {
-            return None;
+            return Ok(None);
         }
-        Some(Self::new(
+        Self::new(
             request_concurrency_limit,
             runtime_task_limit,
             request_plane_connection_limit,
-        ))
+        )
+        .map(Some)
     }
 
     pub fn request_concurrency_limit(&self) -> Option<u64> {
@@ -349,7 +363,8 @@ mod tests {
     #[test]
     fn admission_gate_optional_limits_return_none_when_all_unspecified() {
         assert_eq!(
-            AdmissionGateConfig::from_optional_limits(None, None, None),
+            AdmissionGateConfig::from_optional_limits(None, None, None)
+                .expect("unspecified limits should be valid"),
             None
         );
     }
@@ -357,12 +372,26 @@ mod tests {
     #[test]
     fn admission_gate_optional_limits_preserve_partial_values() {
         let config = AdmissionGateConfig::from_optional_limits(Some(8), None, Some(512))
+            .expect("positive limits should be valid")
             .expect("partial limits should produce a config");
 
         assert_eq!(config.request_concurrency_limit(), Some(8));
         assert_eq!(config.runtime_task_limit(), None);
         assert_eq!(config.request_plane_connection_limit(), Some(512));
         assert!(!config.is_disabled());
+    }
+
+    #[test]
+    fn admission_gate_programmatic_limits_reject_zero() {
+        for (request, runtime, request_plane, field) in [
+            (Some(0), None, None, "request_concurrency_limit"),
+            (None, Some(0), None, "runtime_task_limit"),
+            (None, None, Some(0), "request_plane_connection_limit"),
+        ] {
+            let error = AdmissionGateConfig::from_optional_limits(request, runtime, request_plane)
+                .expect_err("zero must not enable a reject-all gate");
+            assert!(error.contains(field), "unexpected error: {error}");
+        }
     }
 
     #[test]

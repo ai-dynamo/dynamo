@@ -428,6 +428,9 @@ class LoraMixin:
                                 max_gpu_lora_count=getattr(
                                     self.config.server_args, "max_loras_per_batch", None
                                 ),
+                                rejection_frontend_request_concurrency_limit=(
+                                    self.config.dynamo_args.rejection_frontend_request_concurrency_limit
+                                ),
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"

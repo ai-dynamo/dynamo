@@ -332,6 +332,10 @@ impl LocalModelBuilder {
     /// - A folder: The last part of the folder name: "/data/llms/Qwen2.5-3B-Instruct" -> "Qwen2.5-3B-Instruct"
     /// - An HF repo: The HF repo name: "Qwen/Qwen3-0.6B" stays the same
     pub async fn build(&mut self) -> anyhow::Result<LocalModel> {
+        anyhow::ensure!(
+            self.rejection_frontend_request_concurrency_limit != Some(0),
+            "rejection_frontend_request_concurrency_limit must be >= 1"
+        );
         // Generate an endpoint ID for this model if the user didn't provide one.
         // The user only provides one if exposing the model.
         let endpoint_id = self
@@ -915,6 +919,20 @@ mod env_self_host_metadata_tests {
         for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
             assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn local_model_builder_rejects_zero_request_concurrency_override() {
+        let mut builder = LocalModelBuilder::default();
+        builder.rejection_frontend_request_concurrency_limit(Some(0));
+        let err = builder
+            .build()
+            .await
+            .expect_err("zero admission override must fail validation");
+        assert!(
+            err.to_string()
+                .contains("rejection_frontend_request_concurrency_limit must be >= 1")
+        );
     }
 }
 

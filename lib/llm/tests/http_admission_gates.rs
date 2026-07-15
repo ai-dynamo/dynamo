@@ -140,7 +140,10 @@ async fn post_chat(port: u16, body: &serde_json::Value) -> reqwest::Response {
 
 #[tokio::test]
 async fn test_concurrency_gate_rejects_over_limit_per_model() {
-    let svc = start_gate_service(AdmissionGateConfig::new(Some(1), None, None)).await;
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(Some(1), None, None).expect("valid admission gate config"),
+    )
+    .await;
     let port = svc.port;
     let metrics = svc.state.metrics_clone();
 
@@ -251,7 +254,10 @@ async fn test_concurrency_gate_mdc_override_activates_without_global_default() {
     // override is gated; other served models stay unlimited. An out-of-
     // contract override of 0 is treated as absent rather than rejecting
     // all traffic.
-    let svc = start_gate_service(AdmissionGateConfig::new(None, None, None)).await;
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(None, None, None).expect("valid admission gate config"),
+    )
+    .await;
     let manager = svc.state.manager();
     add_model_with_override(manager, "capped", 1);
     add_model_with_override(manager, "zeroed", 0);
@@ -264,6 +270,11 @@ async fn test_concurrency_gate_mdc_override_activates_without_global_default() {
         metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, "capped"),
         1
     );
+    assert_eq!(
+        metrics.get_admission_gate_limit(admission_gate::REQUEST_CONCURRENCY, "capped"),
+        1,
+        "the MDC-only effective limit should be observable per model"
+    );
 
     svc.cancel_token.cancel();
     svc.task.abort();
@@ -273,7 +284,10 @@ async fn test_concurrency_gate_mdc_override_activates_without_global_default() {
 async fn test_concurrency_gate_mdc_override_wins_over_global_default() {
     // Global limit 1, but the MDC override raises "roomy" to 3: the override
     // takes precedence for that model while other models keep the global.
-    let svc = start_gate_service(AdmissionGateConfig::new(Some(1), None, None)).await;
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(Some(1), None, None).expect("valid admission gate config"),
+    )
+    .await;
     let manager = svc.state.manager();
     add_model_with_override(manager, "roomy", 3);
     let metrics = svc.state.metrics_clone();
@@ -287,7 +301,10 @@ async fn test_concurrency_gate_mdc_override_wins_over_global_default() {
 
 #[tokio::test]
 async fn test_concurrency_gate_disabled_by_default_admits_parallel_requests() {
-    let svc = start_gate_service(AdmissionGateConfig::new(None, None, None)).await;
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(None, None, None).expect("valid admission gate config"),
+    )
+    .await;
     let port = svc.port;
 
     let body = chat_request("slow", 500);
@@ -303,7 +320,10 @@ async fn test_concurrency_gate_disabled_by_default_admits_parallel_requests() {
 async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
     // A live tokio runtime always has far more than one alive task, so
     // limit=1 rejects every inference request.
-    let svc = start_gate_service(AdmissionGateConfig::new(None, Some(1), None)).await;
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(None, Some(1), None).expect("valid admission gate config"),
+    )
+    .await;
     let port = svc.port;
 
     let rejected = post_chat(port, &chat_request("fast", 1)).await;
@@ -332,7 +352,10 @@ async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
 
 #[tokio::test]
 async fn test_runtime_task_gate_admits_under_generous_limit() {
-    let svc = start_gate_service(AdmissionGateConfig::new(None, Some(1_000_000), None)).await;
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(None, Some(1_000_000), None).expect("valid admission gate config"),
+    )
+    .await;
     let port = svc.port;
 
     let ok = post_chat(port, &chat_request("fast", 1)).await;
@@ -344,20 +367,21 @@ async fn test_runtime_task_gate_admits_under_generous_limit() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn test_request_plane_gate_tracks_global_inflight_gauge() {
+async fn test_request_plane_gate_rejects_at_capacity() {
     // REQUEST_PLANE_INFLIGHT is a process-global gauge; no request-plane
     // traffic exists in this test binary, so simulate pressure directly.
-    let svc = start_gate_service(AdmissionGateConfig::new(None, None, Some(1))).await;
+    let svc = start_gate_service(
+        AdmissionGateConfig::new(None, None, Some(1)).expect("valid admission gate config"),
+    )
+    .await;
     let port = svc.port;
 
-    REQUEST_PLANE_INFLIGHT.inc();
     REQUEST_PLANE_INFLIGHT.inc();
 
     let rejected = post_chat(port, &chat_request("fast", 1)).await;
     let status = rejected.status();
     let body = rejected.text().await.unwrap();
 
-    REQUEST_PLANE_INFLIGHT.dec();
     REQUEST_PLANE_INFLIGHT.dec();
 
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

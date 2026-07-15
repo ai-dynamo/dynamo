@@ -1148,6 +1148,7 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
+        rejection_frontend_request_concurrency_limit=17,
     )
 
     result = await sglang_register._register_model_with_runtime_config(
@@ -1160,6 +1161,7 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
 
     assert result is True
     assert captured["kwargs"]["ignore_weights"] is True
+    assert captured["kwargs"]["rejection_frontend_request_concurrency_limit"] == 17
 
 
 @pytest.mark.asyncio
@@ -1195,6 +1197,7 @@ async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
         use_sglang_tokenizer=False,
         frontend_decoding=False,
         custom_jinja_template=None,
+        rejection_frontend_request_concurrency_limit=None,
     )
     engine = SimpleNamespace(
         tokenizer_manager=SimpleNamespace(
@@ -1303,6 +1306,7 @@ async def test_lora_registration_model_type_gate(
     config.server_args.model_path = "/models/base"
     config.server_args.page_size = 16
     config.dynamo_args.endpoint_types = endpoint_types
+    config.dynamo_args.rejection_frontend_request_concurrency_limit = 17
     handler.config = config
 
     handler._init_lora_tracking()
@@ -1324,3 +1328,4 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    assert captured["rejection_frontend_request_concurrency_limit"] == 17

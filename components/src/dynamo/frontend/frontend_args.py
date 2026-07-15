@@ -529,9 +529,10 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             arg_type=int,
             help=(
-                "Frontend admission gate: maximum concurrent frontend-admitted requests "
-                "for each served model, enforced before tokenization. Requests over the "
-                "limit are rejected with HTTP 503. Disabled by default; set to enable."
+                "Frontend admission gate: maximum concurrent frontend-admitted HTTP "
+                "inference requests for each served model, enforced before tokenization. "
+                "Requests over the limit are rejected with HTTP 503. Realtime WebSocket "
+                "sessions are not included. Disabled by default; set to enable."
             ),
         )
         add_argument(
@@ -553,10 +554,11 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             arg_type=int,
             help=(
-                "Frontend admission gate: maximum in-flight request-plane streams to "
-                "workers (outbound transport pressure) before new requests are rejected "
-                "with HTTP 503. Frontend-local self-protection, not per-model. Disabled "
-                "by default; set to enable."
+                "Frontend admission gate: maximum process-wide in-flight request-plane "
+                "requests/streams to workers before new requests are rejected with HTTP "
+                "503. This is an outbound transport-pressure proxy, not a physical TCP "
+                "connection count. Frontend-instance-local, not per-model. Disabled by "
+                "default; set to enable."
             ),
         )
 

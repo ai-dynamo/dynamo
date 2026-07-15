@@ -63,6 +63,10 @@ class frontend_perf:
     TOKENIZER_CACHE_HITS_TOTAL = "tokenizer_cache_hits_total"
     # L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     TOKENIZER_CACHE_MISSES_TOTAL = "tokenizer_cache_misses_total"
+    # Tokens returned from the L1 tokenizer prefix cache (cumulative, labeled by model)
+    TOKENIZER_CACHE_CACHED_TOKENS_TOTAL = "tokenizer_cache_cached_tokens_total"
+    # Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (cumulative, labeled by model)
+    TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL = "tokenizer_cache_uncached_tokens_total"
     # Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     DETOKENIZE_TOTAL_US = "detokenize_total_us"
     # Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
@@ -120,9 +124,7 @@ class frontend_service:
     # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
     # pooling-model latencies (sub-second) without sacrificing resolution.
     EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
-    # Number of `image_url` content parts per request (histogram). Named
-    # `images_per_request` so the auto-emitted `_sum` (cumulative image volume),
-    # `_count` (requests observed), and `_bucket` all read naturally.
+    # Number of `image_url` content parts per request (histogram)
     IMAGES_PER_REQUEST = "images_per_request"
     # Number of `video_url` content parts per request (histogram)
     VIDEOS_PER_REQUEST = "videos_per_request"
@@ -147,7 +149,9 @@ class frontend_service:
     MODEL_MIGRATION_TOTAL = "model_migration_total"
     # Total number of times migration was disabled because the sequence length
     # exceeded the configured max_seq_len limit
-    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = "model_migration_max_seq_len_exceeded_total"
+    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = (
+        "model_migration_max_seq_len_exceeded_total"
+    )
     # Total number of request cancellations
     MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
     # Total number of requests rejected due to resource exhaustion
@@ -155,8 +159,8 @@ class frontend_service:
     # Total number of requests rejected by a configured frontend admission
     # gate, labeled by gate and model (model is empty for frontend-local gates)
     ADMISSION_REJECTION_TOTAL = "admission_rejection_total"
-    # Configured frontend admission gate limit, labeled by gate.
-    # Only exported for gates that are explicitly enabled.
+    # Configured frontend admission gate limit, labeled by gate and model.
+    # The model label is empty for frontend-local gates and global defaults.
     ADMISSION_GATE_LIMIT = "admission_gate_limit"
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
@@ -264,17 +268,17 @@ class kvindexer:
 
 
 class kvrouter:
-
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
 
 
 class kvstats:
-
     # Total number of KV cache blocks available on the worker
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
     GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
+    # Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    KV_CACHE_HIT_RATE = "kv_cache_hit_rate"
 
 
 class labels:
@@ -307,8 +311,16 @@ class labels:
     ROUTER_ID = "router_id"
 
 
-class model_info:
+class lifecycle:
+    """Worker-lifecycle timing gauges set once per worker run."""
 
+    # Worker cleanup duration in seconds
+    CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
+    # Worker drain duration in seconds
+    DRAIN_TIME_SECONDS = "drain_time_seconds"
+
+
+class model_info:
     # Model load time in seconds
     LOAD_TIME_SECONDS = "model_load_time_seconds"
 

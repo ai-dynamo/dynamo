@@ -75,9 +75,7 @@ def test_admission_gate_rejects_non_positive_values(flag: str, value: str) -> No
 def test_admission_gate_env_vars_apply(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT", "4")
     monkeypatch.setenv("DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT", "20000")
-    monkeypatch.setenv(
-        "DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT", "1024"
-    )
+    monkeypatch.setenv("DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT", "1024")
 
     config = _parse_config([])
 
@@ -89,8 +87,6 @@ def test_admission_gate_env_vars_apply(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_admission_gate_cli_overrides_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT", "4")
 
-    config = _parse_config(
-        ["--rejection-frontend-request-concurrency-limit", "16"]
-    )
+    config = _parse_config(["--rejection-frontend-request-concurrency-limit", "16"])
 
     assert config.rejection_frontend_request_concurrency_limit == 16

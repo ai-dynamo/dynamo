@@ -3155,7 +3155,7 @@ class EntrypointArgs:
             tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
             rejection_frontend_request_concurrency_limit: Frontend admission gate: max concurrent requests per served model (unset=disabled)
             rejection_frontend_runtime_task_limit: Frontend admission gate: max alive frontend runtime tasks (unset=disabled)
-            rejection_frontend_request_plane_connection_limit: Frontend admission gate: max in-flight request-plane streams to workers (unset=disabled)
+            rejection_frontend_request_plane_connection_limit: Frontend admission gate: max process-wide in-flight request-plane requests/streams; this is not a physical TCP connection count (unset=disabled)
         """
         ...
 
@@ -3381,6 +3381,7 @@ class backend:
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
+            rejection_frontend_request_concurrency_limit: Optional[int] = None,
         ) -> None: ...
 
     class Worker:

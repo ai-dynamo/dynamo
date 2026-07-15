@@ -87,16 +87,23 @@ for migration instructions.
 
 Frontend-owned request rejection gates evaluated before tokenization. Every
 gate is disabled by default and active only when explicitly configured; a
-request over a configured limit is rejected with HTTP 503. Rejections are
-counted in the `dynamo_frontend_admission_rejection_total` metric (labeled by
-`gate` and `model`) and enabled limits are exported as
-`dynamo_frontend_admission_gate_limit`.
+request that would exceed a configured limit is rejected with HTTP 503.
+Rejections are counted in the `dynamo_frontend_admission_rejection_total` metric
+(labeled by `gate` and `model`) and enabled limits are exported as
+`dynamo_frontend_admission_gate_limit` (also labeled by `gate` and `model`). An
+empty model label denotes a frontend-global or frontend-local limit; a named
+model denotes that model's current MDC override.
+
+The per-model concurrency gate covers HTTP inference request/response endpoints,
+including `/inference/v1/generate`. It does not count `/v1/realtime` WebSocket
+sessions because their model is selected only after the HTTP 101 upgrade, when
+an HTTP 503 admission response is no longer possible.
 
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
-| `--rejection-frontend-request-concurrency-limit` | `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT` | disabled | Max concurrent frontend-admitted requests, enforced separately for each served model. Acts as the per-model default; a worker can override it for its model with the worker-side `--rejection-frontend-request-concurrency-limit` flag (carried on its registration / MDC via `register_llm`) |
+| `--rejection-frontend-request-concurrency-limit` | `DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT` | disabled | Max concurrent frontend-admitted HTTP inference requests, enforced separately for each served model. Acts as the per-model default; a worker can override it for its model with the worker-side `--rejection-frontend-request-concurrency-limit` flag (carried on its registration / MDC via `register_llm`) |
 | `--rejection-frontend-runtime-task-limit` | `DYN_REJECTION_FRONTEND_RUNTIME_TASK_LIMIT` | disabled | Max alive tasks on the frontend runtime (frontend-local self-protection, not per-model) |
-| `--rejection-frontend-request-plane-connection-limit` | `DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT` | disabled | Max in-flight request-plane streams to workers, i.e. outbound transport pressure (frontend-local, not per-model) |
+| `--rejection-frontend-request-plane-connection-limit` | `DYN_REJECTION_FRONTEND_REQUEST_PLANE_CONNECTION_LIMIT` | disabled | Max process-wide in-flight request-plane requests/streams to workers. This is an outbound transport-pressure proxy, not a physical TCP connection count (frontend-instance-local, not per-model) |
 
 ## Model Discovery
 

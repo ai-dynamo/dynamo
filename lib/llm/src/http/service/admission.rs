@@ -7,21 +7,22 @@
 //! tokenization using only coarse frontend-local state:
 //!
 //! - **Request concurrency** (`--rejection-frontend-request-concurrency-limit`):
-//!   enforced separately for each served model, protecting downstream model
-//!   capacity.
+//!   enforced separately for each served model on HTTP inference
+//!   request/response endpoints, protecting downstream model capacity. Realtime
+//!   WebSocket sessions select their model after the HTTP upgrade and are not
+//!   included.
 //! - **Runtime tasks** (`--rejection-frontend-runtime-task-limit`): alive tasks
 //!   on the frontend tokio runtime, protecting frontend compute capacity.
 //! - **Request-plane pressure**
-//!   (`--rejection-frontend-request-plane-connection-limit`): in-flight
-//!   request-plane streams to workers, protecting outbound transport resources
-//!   (worker connections / TCP source ports in TCP mode).
+//!   (`--rejection-frontend-request-plane-connection-limit`): process-wide
+//!   in-flight request-plane requests/streams to workers. This is an outbound
+//!   transport-pressure proxy, not a count of physical TCP connections.
 //!
 //! Every gate is disabled by default and active only when explicitly
-//! configured (see [`AdmissionGateConfig`]). A gate rejects when the observed
-//! value exceeds its configured limit, returning HTTP 503 with a
-//! gate-specific message. Frontend rejection is distinct from router and
-//! worker rejection: it never inspects token counts, queue state, or SLO
-//! predictions.
+//! configured (see [`AdmissionGateConfig`]). A gate rejects when admitting the
+//! request would exceed its configured limit, returning HTTP 503 with a
+//! gate-specific message. Frontend rejection is distinct from router and worker
+//! rejection: it never inspects token counts, queue state, or SLO predictions.
 
 use std::sync::Arc;
 
@@ -48,23 +49,30 @@ use dynamo_runtime::metrics::request_plane::REQUEST_PLANE_INFLIGHT;
 /// requests are exempted here so they surface the usual 404 instead of a
 /// misleading admission 503.
 ///
-/// The effective limit resolves per the DEP: a per-model override supplied
-/// at model registration (MDC `router_config`) wins over the frontend-global
-/// `--rejection-frontend-request-concurrency-limit`; either alone activates
-/// the gate for that model.
+/// The effective limit resolves per the DEP: the dedicated per-model
+/// `ModelDeploymentCard::rejection_frontend_request_concurrency_limit` override
+/// wins over the frontend-global
+/// `--rejection-frontend-request-concurrency-limit`; either alone activates the
+/// gate for that model.
 pub(crate) fn evaluate_model_concurrency_gate(
     state: &State,
     model: &str,
     metric_model: &str,
 ) -> Option<String> {
+    let metrics = state.metrics_clone();
     if model != metric_model {
+        // A model removed after advertising an override must not leave its
+        // current-state limit metric behind.
+        metrics.remove_admission_gate_limit(admission_gate::REQUEST_CONCURRENCY, model);
         return None;
     }
-    let limit = state
-        .manager()
-        .request_concurrency_limit_override(model)
-        .or_else(|| state.admission_gate_config().request_concurrency_limit())?;
-    let inflight = state.metrics_clone().get_inflight_count(metric_model);
+    let model_override = state.manager().request_concurrency_limit_override(model);
+    // Discovery normally publishes this before the first request; keep the
+    // request path as a backstop for embedded/manual model managers.
+    metrics.sync_model_admission_gate_limit(metric_model, model_override);
+    let limit =
+        model_override.or_else(|| state.admission_gate_config().request_concurrency_limit())?;
+    let inflight = metrics.get_inflight_count(metric_model);
     if inflight >= 0 && inflight as u64 > limit {
         return Some(reject(
             state,
@@ -102,6 +110,8 @@ pub(crate) fn check_frontend_local_gates(state: &State) -> Result<(), ErrorRespo
         let alive_tasks = tokio::runtime::Handle::current()
             .metrics()
             .num_alive_tasks() as u64;
+        // This measurement already includes the task executing the middleware,
+        // so `>` admits exactly `limit` live tasks and rejects the excess.
         if alive_tasks > limit {
             return Err(ErrorMessage::service_unavailable_with_body(reject(
                 state,
@@ -118,14 +128,17 @@ pub(crate) fn check_frontend_local_gates(state: &State) -> Result<(), ErrorRespo
 
     if let Some(limit) = config.request_plane_connection_limit() {
         let inflight_streams = REQUEST_PLANE_INFLIGHT.get();
-        if inflight_streams > limit as f64 {
+        // Unlike the model concurrency and runtime-task measurements, this
+        // process-wide gauge does not yet include the candidate HTTP request.
+        // Reject at equality so admitting it cannot knowingly exceed capacity.
+        if inflight_streams >= limit as f64 {
             return Err(ErrorMessage::service_unavailable_with_body(reject(
                 state,
                 admission_gate::REQUEST_PLANE_CONNECTION,
                 "",
                 format!(
-                    "Frontend admission gate rejected this request: {inflight_streams} \
-                     in-flight request-plane streams exceeds \
+                    "Frontend admission gate rejected this request: the in-flight \
+                     request-plane stream count ({inflight_streams}) has reached \
                      --rejection-frontend-request-plane-connection-limit={limit}; retry later"
                 ),
             )));
@@ -164,7 +177,7 @@ pub(crate) fn announce_enabled_gates(config: &AdmissionGateConfig, metrics: &sup
     ];
     for (gate, limit) in gates {
         if let Some(limit) = limit {
-            metrics.set_admission_gate_limit(gate, limit);
+            metrics.set_admission_gate_limit(gate, "", limit);
             tracing::info!(gate, limit, "frontend admission gate enabled");
         }
     }
