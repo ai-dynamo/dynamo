@@ -576,27 +576,108 @@ test("opens the tab synchronously before awaiting Promise.all (popup-blocker fix
   );
 });
 
-test("does not pass 'noopener' to window.open (keeps the tab handle for later redirect)", () => {
-  // With `noopener` in the feature string, `window.open` returns null
-  // and we lose the ability to steer the tab to the line-anchored URL
-  // once resolveLineAnchoredUrl completes. We compensate by nulling
-  // `opened.opener` on the returned window — see the guarding
-  // `opened.opener = null` in the source.
+test("cold-path retained-handle open does not pass 'noopener' and pairs with `opened.opener = null`", () => {
+  // Cold path: when the pre-warm memo hasn't resolved a line URL for
+  // the current selection, the click handler falls back to opening
+  // the fallback URL sync, retaining the tab handle so it can be
+  // upgraded via `opened.location.replace(...)` once
+  // `resolveLineAnchoredUrl` returns. That retention requires
+  // OMITTING `noopener` from the feature string on THAT specific
+  // open, and compensating with a `opened.opener = null` write to
+  // sever the reverse-tabnabbing edge. The warm-path open is
+  // separate and fully-hardened — see the "warm-path" tests below.
   const src = extractFnSource("onQuoteBtnClick");
-  // The `window.open(fallbackUrl, "_blank")` call must NOT carry the
-  // "noopener" feature. Detect the anti-pattern textually.
-  assert.doesNotMatch(
-    src,
-    /window\.open\([^)]*noopener/,
-    "window.open in onQuoteBtnClick must not pass 'noopener' — the " +
-    "returned handle is required to navigate the tab to the line-anchored URL"
+  // Locate the cold-path open by the `opened =` assignment prefix —
+  // it's the only `window.open` whose return value gets stored.
+  const coldMatch = src.match(/opened\s*=\s*[^;]*window\.open\([^)]*\)/);
+  assert.ok(
+    coldMatch,
+    "onQuoteBtnClick must have a cold-path `opened = window.open(...)` assignment"
   );
-  // But the mitigation MUST be present: `opened.opener = null`.
+  assert.doesNotMatch(
+    coldMatch[0],
+    /noopener/,
+    "the cold-path `opened = window.open(...)` must not pass 'noopener' — " +
+    "the returned handle is required to navigate the tab to the line-anchored URL"
+  );
+  // Mitigation MUST be present: `opened.opener = null`.
   assert.match(
     src,
     /opened\.opener\s*=\s*null/,
     "onQuoteBtnClick must null `opened.opener` to compensate for the " +
-    "missing 'noopener' feature"
+    "missing 'noopener' feature on the cold-path open"
+  );
+  // Cold-path upgrade path is preserved.
+  assert.match(
+    src,
+    /opened\.location\.replace\(/,
+    "onQuoteBtnClick must still upgrade the retained tab via " +
+    "`opened.location.replace(...)` when the resolver returns a line URL"
+  );
+});
+
+console.log("");
+console.log("onQuoteBtnClick / onDocumentMouseUp — pre-warm warm-path hardening");
+
+test("warm-path uses fully-hardened `noopener,noreferrer` open when memo has resolved URL", () => {
+  // When `onDocumentMouseUp` pre-warms `resolveLineAnchoredUrl` and
+  // it settles to a truthy line-anchored URL BEFORE the click, the
+  // click handler must take a fully-hardened synchronous open — no
+  // retained handle, no opener exposure, no `location.replace`
+  // needed. Structural check: `onQuoteBtnClick` must contain a
+  // `window.open(..., "noopener,noreferrer")` call, distinct from
+  // the cold-path retained-handle open asserted above.
+  const src = extractFnSource("onQuoteBtnClick");
+  assert.match(
+    src,
+    /window\.open\([^)]*"noopener,noreferrer"/,
+    "onQuoteBtnClick must have a warm-path `window.open(..., " +
+    '"noopener,noreferrer")` call — the strictly-preferred fully-hardened open'
+  );
+});
+
+test("warm-path is keyed by normalized quote so a stale selection falls to cold path", () => {
+  // The memo primed in `onDocumentMouseUp` is keyed by `normWs(text)`.
+  // If the reader re-selects between mouseup and click, the memo's
+  // quote no longer matches the click's `text`, and the click handler
+  // must NOT open the stale URL — it must fall to the cold path.
+  // Structural check: `onQuoteBtnClick` must reference `pendingAnchor`
+  // AND compare via `normWs(` so the guard is in place.
+  const src = extractFnSource("onQuoteBtnClick");
+  assert.match(
+    src,
+    /pendingAnchor/,
+    "onQuoteBtnClick must reference the `pendingAnchor` memo to " +
+    "gate the warm path"
+  );
+  assert.match(
+    src,
+    /normWs\(/,
+    "onQuoteBtnClick must key the warm-path check via `normWs(...)` " +
+    "so a re-selection with different whitespace still binds correctly, " +
+    "and a genuinely different selection falls to the cold path"
+  );
+});
+
+test("onDocumentMouseUp pre-warms the pendingAnchor memo and calls resolveLineAnchoredUrl", () => {
+  // The click's warm path is only useful if `onDocumentMouseUp`
+  // actually primes the memo the moment the pill appears. Without
+  // this pre-warm, every click takes the cold (opener-retained)
+  // path and the fully-hardened open never fires. Structural check:
+  // `onDocumentMouseUp` must set `pendingAnchor` AND fire
+  // `resolveLineAnchoredUrl(` after the selection passes the
+  // body-prose predicate.
+  const src = extractFnSource("onDocumentMouseUp");
+  assert.match(
+    src,
+    /pendingAnchor\s*=/,
+    "onDocumentMouseUp must assign to `pendingAnchor` to seed the memo"
+  );
+  assert.match(
+    src,
+    /resolveLineAnchoredUrl\(/,
+    "onDocumentMouseUp must call `resolveLineAnchoredUrl(...)` to " +
+    "pre-warm the line URL while the tab handle isn't yet needed"
   );
 });
 

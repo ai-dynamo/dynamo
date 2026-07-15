@@ -1076,6 +1076,27 @@
   var quoteBtnScrollListener = null;
   var quoteBtnHideTimeout = null;
 
+  /* Pre-warmed line-anchor URL for the current selection.
+   *
+   * `onDocumentMouseUp` seeds this memo the moment the "💬 Comment on
+   * GitHub" pill appears, kicking off `resolveLineAnchoredUrl` while
+   * the reader is still deciding whether to click. When the click
+   * fires later (typically hundreds of ms), if the memo's `key` still
+   * matches the current selection quote AND its `url` has resolved,
+   * `onQuoteBtnClick` takes a fully-hardened synchronous open —
+   * `window.open(url, "_blank", "noopener,noreferrer")` — with no
+   * retained handle and zero reverse-tabnabbing surface.
+   *
+   * Any mismatch (stale quote, url not yet resolved, resolver
+   * returned "") falls to the safe cold path from 13dbe8e2a6:
+   * sync-open the fallback without `noopener`, defensively null
+   * `opened.opener`, upgrade via `opened.location.replace(...)` when
+   * the resolver settles.
+   *
+   * Shape when active: `{ key: normalizedQuote, url: string | null }`.
+   */
+  var pendingAnchor = null;
+
   /** Return the mount config from the first (only) mount on the page,
    *  or null if there is no DEP mount rendered. The highlight-to-comment
    *  affordance is only meaningful on pages that already show comments. */
@@ -1286,17 +1307,41 @@
     if (!text || !cfg) return;
     var fallbackUrl = buildGitHubUrl(cfg);
     var quote = buildBlockquote(text);
-    // Popup-blocker discipline: `window.open` MUST be called
-    // synchronously inside this click handler so the browser sees the
-    // user-gesture activation. `resolveLineAnchoredUrl` awaits two
-    // network fetches (PR head + raw source), and Chrome / Safari drop
-    // the transient activation after a fetch resolves — a
-    // `window.open(...)` call from inside `Promise.all([...]).then(...)`
-    // gets popup-blocked. So: open the fallback tab now, keep the
-    // handle, and steer it to the line-anchored URL later. Clipboard
-    // writeText is dispatched sync inside `copyToClipboard`, so its
-    // async-permission check also lands inside the gesture window.
+    // Clipboard MUST fire inside the gesture window on both paths —
+    // `copyToClipboard` dispatches `navigator.clipboard.writeText`
+    // synchronously and only its permission check awaits.
     var copyP = copyToClipboard(quote);
+    var afterCopy = function (copied) {
+      showToast(
+        copied
+          ? "Quote copied \u2014 paste it in your GitHub comment."
+          : "Opened GitHub \u2014 clipboard copy blocked; select and copy manually."
+      );
+    };
+
+    // Warm path (strictly preferred). If `onDocumentMouseUp` already
+    // pre-warmed `resolveLineAnchoredUrl` for THIS exact quote and it
+    // settled to a truthy line-anchored URL, open synchronously with
+    // the fully-hardened feature string — no retained handle, no
+    // `opener` exposure, no cross-origin `location.replace`. Keyed
+    // by `normWs(text)` so a re-selection between mouseup and click
+    // can never open a stale URL.
+    var warm = pendingAnchor;
+    if (warm && warm.key === normWs(text) && warm.url) {
+      window.open(warm.url, "_blank", "noopener,noreferrer");
+      copyP.then(afterCopy);
+      return;
+    }
+
+    // Cold path. Popup-blocker discipline: `window.open` MUST be
+    // called synchronously so the browser sees the user-gesture
+    // activation. `resolveLineAnchoredUrl` awaits two network fetches
+    // (PR head + raw source), and Chrome / Safari drop the transient
+    // activation after a fetch resolves — a `window.open(...)` call
+    // from inside `Promise.all([...]).then(...)` gets popup-blocked.
+    // So: open the fallback tab now, keep the handle, and steer it
+    // to the line-anchored URL later.
+    //
     // Intentionally omit the "noopener" feature so we retain the
     // reference and can navigate the tab once the line URL resolves.
     // Defensively drop `opener` on the opened window; same-origin
@@ -1310,18 +1355,13 @@
     }
     var urlP = resolveLineAnchoredUrl(cfg, text);
     Promise.all([copyP, urlP]).then(function (results) {
-      var copied = results[0];
       var lineUrl = results[1];
       if (lineUrl && opened && !opened.closed) {
         // Cross-origin nav via opener is allowed; use `replace` so
         // the fallback URL doesn't get an entry in the tab's history.
         try { opened.location.replace(lineUrl); } catch (e) { /* noop */ }
       }
-      showToast(
-        copied
-          ? "Quote copied \u2014 paste it in your GitHub comment."
-          : "Opened GitHub \u2014 clipboard copy blocked; select and copy manually."
-      );
+      afterCopy(results[0]);
     });
   }
 
@@ -1359,6 +1399,19 @@
         return;
       }
       quoteBtnEl.__depBtnSelection = { text: text, cfg: cfg };
+      // Pre-warm the line-anchor resolution now so the click handler
+      // (fired hundreds of ms later, typically) can take the fully-
+      // hardened `noopener,noreferrer` open path — see `pendingAnchor`
+      // above. Keyed by the normalized quote so a re-selection between
+      // mouseup and click won't open a stale URL. Fire-and-forget; the
+      // resolver never rejects (returns "" on any failure).
+      var memo = { key: normWs(text), url: null };
+      pendingAnchor = memo;
+      resolveLineAnchoredUrl(cfg, text).then(function (u) {
+        // Guard against a late arrival for a stale memo — a fresh
+        // selection may have replaced `pendingAnchor` in the meantime.
+        if (pendingAnchor === memo && u) memo.url = u;
+      });
     }, 10);
   }
 
