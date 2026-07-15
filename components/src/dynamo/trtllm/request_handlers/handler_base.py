@@ -1147,6 +1147,15 @@ class HandlerBase(BaseGenerativeHandler):
         conv_affinity = (
             self._conversation_affinity or self._engine_conversation_affinity_override
         )
+        if (
+            self._engine_conversation_affinity_override
+            and not CONVERSATION_PARAMS_AVAILABLE
+        ):
+            raise RuntimeError(
+                "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                "release newer than 1.3.0rc20)."
+            )
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})

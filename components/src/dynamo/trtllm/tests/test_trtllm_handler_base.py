@@ -467,6 +467,7 @@ class TestDeferredAbortGuard:
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     @pytest.mark.asyncio
@@ -588,6 +589,7 @@ class TestMultimodalGuard:
         config = MagicMock()
         config.multimodal_processor = multimodal_processor
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     async def _prepare(self, handler, request, epd_metadata=None):
@@ -644,6 +646,7 @@ class TestPrefillPromptMetadata:
         config = MagicMock()
         config.multimodal_processor = MagicMock()
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
@@ -714,6 +717,7 @@ class TestDisaggRequestId:
         config = MagicMock()
         config.shutdown_event = None
         config.disagg_machine_id = machine_id
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         return handler
@@ -797,6 +801,7 @@ class TestHealthCheckPriority:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
