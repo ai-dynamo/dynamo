@@ -18,11 +18,12 @@ use crate::{
     },
 };
 
-/// Post-selection owner of scheduler bookkeeping.
+/// Owns scheduler cleanup after a worker is selected.
 ///
-/// `KvPushRouter` installs this through [`RequestGuard`] before its next
-/// fallible await. The admission lease moves directly from the scheduling
-/// response into this guard and remains the request-lifetime authority.
+/// `KvPushRouter` installs this through [`RequestGuard`] immediately after
+/// selection and before backend dispatch. The admission lease moves directly
+/// from the scheduling response into this guard and remains responsible for
+/// cleanup until the request ends.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
@@ -383,7 +384,8 @@ impl RequestGuard {
     pub(super) async fn mark_dispatched(&mut self) {
         if self.cleanup.request_progress.is_some() {
             // Backend dispatch already succeeded. Record that fact synchronously so
-            // lease cleanup can preserve event order if it overtakes the actor command.
+            // lease cleanup still reports Dispatched before the terminal event if it
+            // overtakes the actor command.
             self.cleanup.mark_dispatched();
             self.cleanup
                 .chooser
