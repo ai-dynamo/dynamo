@@ -22,10 +22,11 @@ import { DepMetadata } from "@/components/DepMetadata";
 import { GiscusComments } from "@/components/GiscusComments";
 
 {/* Metadata card. The status pill (Draft / Under Review / Approved / Replaced
-    / Deferred / Rejected) satisfies the "status prominently at the top" REQ.
-    Once your draft PR exists, add pr={NUMBER} to surface a "View PR" action;
-    fill trackingIssue / discussionsTo URLs. Do not repeat the front-matter
-    `title` here — Fern already renders it as the page H1 above the card. */}
+    / Deferred / Rejected) gives an at-a-glance status; the WARNING banner below
+    is the REQ-1 status admonition. Once your draft PR exists, add pr={NUMBER}
+    to surface a "View PR" action; fill trackingIssue / discussionsTo URLs. Do
+    not repeat the front-matter `title` here — Fern renders it as the page H1
+    above the card. */}
 
 <DepMetadata
   dep="NNNN"
@@ -38,6 +39,9 @@ import { GiscusComments } from "@/components/GiscusComments";
   trackingIssue="https://github.com/ai-dynamo/dynamo/issues"
   discussionsTo="https://github.com/ai-dynamo/dynamo/discussions"
 />
+
+> [!WARNING]
+> **Status: Draft.** This proposal is under active discussion and is not an accepted decision. Update this banner whenever the status changes. See the [status banner convention](./README.mdx#status-banner-convention).
 
 ## Summary
 

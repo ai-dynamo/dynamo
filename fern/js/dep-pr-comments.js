@@ -53,7 +53,19 @@
 
   var STYLE_ID = "dep-pr-styles";
   var MOUNT_ID = "dep-pr-comments";
-  var RENDERED_ATTR = "data-dep-pr-rendered";
+  var DONE_ATTR = "data-dep-pr-done";
+
+  /* Single-flight + cache so the observer/route re-scans below can never run
+   * two anchoring passes at once (which previously left an inconsistent mix of
+   * one pass's <mark>s and another pass's summary). `running` is held across
+   * the one async yield point (the GitHub fetch); `commentCache` makes re-runs
+   * after a React node swap reuse the fetched comments instead of refetching. */
+  var running = false;
+  var commentCache = {};
+  var retryScheduled = false;
+  var scanScheduled = false;
+  var retryCount = 0;
+  var MAX_RETRIES = 40;
 
   var BLOCK_TAGS = {
     P: true, LI: true, BLOCKQUOTE: true, H1: true, H2: true, H3: true, H4: true,
@@ -365,88 +377,135 @@
       });
   }
 
+  function cacheKey(cfg) {
+    return cfg.owner + "/" + cfg.repo + "#" + cfg.pr;
+  }
+
+  /* Anchor + render synchronously (no await inside). cleanup() first so a
+   * re-render (React node swap / SPA nav) never stacks marks on top of a prior
+   * pass. Called only while `running` is held, so it can't interleave. */
+  function renderInto(mount, cfg, root, raw) {
+    cleanup();
+    var comments = (raw || []).filter(function (c) {
+      return !cfg.path || c.path === cfg.path;
+    });
+
+    var groups = [];
+    var byQuote = {};
+    comments.forEach(function (c) {
+      var sel = selectorFromComment(c);
+      var key = sel.quote + "\u0000" + sel.prefix;
+      if (!byQuote[key]) {
+        byQuote[key] = { quote: sel.quote, prefix: sel.prefix, comments: [] };
+        groups.push(byQuote[key]);
+      }
+      byQuote[key].comments.push(c);
+    });
+
+    var anchored = 0;
+    var unanchored = [];
+    groups.forEach(function (g, gi) {
+      var loc = g.quote ? locateQuote(root, g.quote, g.prefix) : null;
+      if (!loc) { unanchored.push(g); return; }
+      var marks = wrapRange(loc, "g" + gi);
+      if (!marks.length) { unanchored.push(g); return; }
+      anchored++;
+
+      var badge = document.createElement("button");
+      badge.className = "dep-pr-badge dep-pr-ui";
+      badge.type = "button";
+      badge.setAttribute("aria-expanded", "false");
+      badge.innerHTML = "\uD83D\uDCAC " + g.comments.length;
+      marks[marks.length - 1].insertAdjacentElement("afterend", badge);
+
+      var card = document.createElement("div");
+      card.className = "dep-pr-card dep-pr-ui";
+      card.style.display = cfg.autoOpen ? "" : "none";
+      card.innerHTML = '<div class="dep-pr-card-eyebrow">PR #' + esc(cfg.pr) +
+        " review \u00B7 line comment</div>" +
+        g.comments.map(commentHtml).join("");
+      var block = blockAncestor(marks[0], root);
+      block.insertAdjacentElement("afterend", card);
+
+      badge.addEventListener("click", function () { toggleCard(card, badge); });
+    });
+
+    renderSection(mount, cfg, comments, groups, anchored, unanchored);
+  }
+
+  function scheduleRetry() {
+    if (retryScheduled || retryCount >= MAX_RETRIES) return;
+    retryScheduled = true;
+    retryCount++;
+    setTimeout(function () { retryScheduled = false; scan(); }, 250);
+  }
+
   function run(mount) {
+    if (running) return;                                  // single-flight
+    if (mount.getAttribute(DONE_ATTR) === "1") return;    // already rendered
     var cfg = readConfig(mount);
     if (!cfg.pr) return;
-    if (mount.getAttribute(RENDERED_ATTR) === "1") return;
-    mount.setAttribute(RENDERED_ATTR, "1");
 
     ensureStyles();
 
     var root = resolveRoot(mount);
     if (!root || normWs(root.textContent).length < 60) {
-      /* Prose not fully hydrated yet; drop the flag and retry shortly. */
-      mount.removeAttribute(RENDERED_ATTR);
-      setTimeout(function () { run(mount); }, 250);
+      scheduleRetry();  // prose not hydrated yet; retry without re-entrancy
       return;
     }
 
-    fetchComments(cfg).then(function (raw) {
-      var comments = (raw || []).filter(function (c) {
-        return !cfg.path || c.path === cfg.path;
-      });
+    running = true;
+    var key = cacheKey(cfg);
+    var pending = commentCache[key]
+      ? Promise.resolve(commentCache[key])
+      : fetchComments(cfg).then(function (raw) {
+          commentCache[key] = raw || [];
+          return commentCache[key];
+        });
 
-      var groups = [];
-      var byQuote = {};
-      comments.forEach(function (c) {
-        var sel = selectorFromComment(c);
-        var key = sel.quote + "\u0000" + sel.prefix;
-        if (!byQuote[key]) {
-          byQuote[key] = { quote: sel.quote, prefix: sel.prefix, comments: [] };
-          groups.push(byQuote[key]);
-        }
-        byQuote[key].comments.push(c);
-      });
-
-      var anchored = 0;
-      var unanchored = [];
-      groups.forEach(function (g, gi) {
-        var loc = g.quote ? locateQuote(root, g.quote, g.prefix) : null;
-        if (!loc) { unanchored.push(g); return; }
-        var marks = wrapRange(loc, "g" + gi);
-        if (!marks.length) { unanchored.push(g); return; }
-        anchored++;
-
-        var badge = document.createElement("button");
-        badge.className = "dep-pr-badge dep-pr-ui";
-        badge.type = "button";
-        badge.setAttribute("aria-expanded", "false");
-        badge.innerHTML = "\uD83D\uDCAC " + g.comments.length;
-        marks[marks.length - 1].insertAdjacentElement("afterend", badge);
-
-        var card = document.createElement("div");
-        card.className = "dep-pr-card dep-pr-ui";
-        card.style.display = cfg.autoOpen ? "" : "none";
-        card.innerHTML = '<div class="dep-pr-card-eyebrow">PR #' + esc(cfg.pr) +
-          " review \u00B7 line comment</div>" +
-          g.comments.map(commentHtml).join("");
-        var block = blockAncestor(marks[0], root);
-        block.insertAdjacentElement("afterend", card);
-
-        badge.addEventListener("click", function () { toggleCard(card, badge); });
-      });
-
-      renderSection(mount, cfg, comments, groups, anchored, unanchored);
+    pending.then(function (raw) {
+      try {
+        renderInto(mount, cfg, root, raw);
+        mount.setAttribute(DONE_ATTR, "1");
+      } finally {
+        running = false;
+      }
     }).catch(function (err) {
-      renderError(mount, cfg, err);
+      try {
+        renderError(mount, cfg, err);
+        mount.setAttribute(DONE_ATTR, "1");
+      } finally {
+        running = false;
+      }
     });
   }
 
   function scan() {
-    var mounts = document.querySelectorAll("#" + MOUNT_ID + "[data-pr]:not([" + RENDERED_ATTR + "='1'])");
+    var mounts = document.querySelectorAll(
+      "#" + MOUNT_ID + "[data-pr]:not([" + DONE_ATTR + "='1'])"
+    );
     for (var i = 0; i < mounts.length; i++) run(mounts[i]);
   }
 
+  /* Debounce observer-driven scans: our own DOM writes (marks/cards/section)
+   * and Fern's hydration both fire the observer; coalesce into one scan. */
+  function scheduleScan() {
+    if (scanScheduled) return;
+    scanScheduled = true;
+    setTimeout(function () { scanScheduled = false; scan(); }, 60);
+  }
+
   function onNav() {
-    /* SPA navigation: the previous mount div is detached; before scanning the
-     * new page, wipe any leftover badges/cards from the old one. */
+    /* SPA navigation: the previous mount div is detached. Clear stale marks and
+     * force a fresh anchoring pass against the new page's mount (if any). */
     cleanup();
-    setTimeout(scan, 50);
+    retryCount = 0;
+    scheduleScan();
   }
 
   function boot() {
     scan();
-    var mo = new MutationObserver(function () { scan(); });
+    var mo = new MutationObserver(scheduleScan);
     mo.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("popstate", onNav);
   }
