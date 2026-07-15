@@ -36,6 +36,7 @@ Dynamo provides support for improving latency and throughput for vision-and-lang
 |---------|-------------|
 | **[Embedding Cache](embedding-cache.md)** | CPU-side LRU cache that skips re-encoding repeated images |
 | **[Encoder Disaggregation](encoder-disaggregation.md)** | Separate vision encoder worker for independent scaling |
+| **[Custom Vision Encoders](custom-vision-encoder.md)** | In-process author-provided vision towers with cross-request batching |
 | **[Multimodal KV Routing](multimodal-kv-routing.md)** | MM-aware KV cache routing for optimal worker selection |
 
 ## Support Matrix
