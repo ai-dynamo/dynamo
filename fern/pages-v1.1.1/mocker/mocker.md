@@ -388,7 +388,7 @@ When resources become constrained, the mocker simulates the engine's real recove
 
 ### KV Block Manager
 
-The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](../../lib/kvbm-logical/), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](../../lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
+The mocker's KV block manager is now built on [`kvbm-logical::BlockManager<G1>`](../../lib/kvbm-logical/), the same logical block manager the real Dynamo runtime uses. The mocker wraps it in [`lib/mocker/src/kv_manager/kvbm_backend.rs`](https://github.com/ai-dynamo/dynamo/blob/36b4208e5e88fa4de75844039b6da06625ae5146/lib/mocker/src/kv_manager/kvbm_backend.rs) and translates its own `MoveBlock` protocol onto kvbm-logical's RAII lifecycle (`allocate → stage → register → drop`).
 
 Blocks still conceptually live in one of two pools:
 
@@ -417,7 +417,7 @@ Three `Use` outcomes are tracked for KV-event emission: `ActiveHit` (bump refcou
 
 ### Eviction Backends
 
-The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](../../lib/mocker/src/common/protocols.rs):
+The kvbm-logical inactive pool selects eviction victims via one of three backends, exposed as `MockerEvictionBackend` in [`lib/mocker/src/common/protocols.rs`](https://github.com/ai-dynamo/dynamo/blob/v1.1.1/lib/mocker/src/common/protocols.rs):
 
 - **`Lineage`** (default) — parent-chain aware: evicts leaf blocks first, preserving shared prefix chains. Subsumes the preemption-priority behavior the old hand-rolled `LRUEvictor::push_front` used to provide.
 - **`Lru`** — plain recency-based LRU.
@@ -493,9 +493,9 @@ The mocker is particularly useful for:
 | Document | Description |
 |----------|-------------|
 | [Benchmarking Dynamo Deployments](../benchmarks/benchmarking.md) | Run AIPerf against a mocker-backed deployment to measure latency, TTFT, throughput, and scaling behavior |
-| [Aggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/agg.yaml) | Deploy a mocker-backed aggregated DynamoGraphDeployment on Kubernetes |
-| [Disaggregated Mocker Deployment Example](../../examples/backends/mocker/deploy/disagg.yaml) | Deploy separate prefill and decode mocker workers for disaggregated-serving benchmarks |
-| [Global Planner Mocker Example](../../examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
+| [Aggregated Mocker Deployment Example](https://github.com/ai-dynamo/dynamo/blob/v1.1.1/examples/backends/mocker/deploy/agg.yaml) | Deploy a mocker-backed aggregated DynamoGraphDeployment on Kubernetes |
+| [Disaggregated Mocker Deployment Example](https://github.com/ai-dynamo/dynamo/blob/v1.1.1/examples/backends/mocker/deploy/disagg.yaml) | Deploy separate prefill and decode mocker workers for disaggregated-serving benchmarks |
+| [Global Planner Mocker Example](https://github.com/ai-dynamo/dynamo/blob/v1.1.1/examples/global_planner/global-planner-mocker-test.yaml) | Advanced multi-pool mocker setup for planner and global-router experiments |
 
 ## Feature Gaps (WIP)
 
