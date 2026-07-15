@@ -279,8 +279,16 @@ def main() -> None:
         marker_x.append(cx)
         marker_y.append(ly)
         marker_c.append(c)
-        # duration text, right of the marker; green for the MX accent phase
-        dur_color = green if s["role"] == "win" else text_secondary
+        # Above-bar text sits right of the marker. The narrow ModelExpress win is
+        # the single green accent, so instead of a bare "11s" we bind its phase
+        # name AND value into one callout anchored to the green marker + leader
+        # line -- making "Model load via MX P2P = 11s" unmistakable at a glance.
+        # Mirrors the in-bar "name · Xs" pattern. The name uses the light text
+        # token (AA on black); the value stays green to echo the segment.
+        if s["role"] == "win":
+            label_text = f'{s["name"]} · <span style="color:{green}">{s["dur"]}s</span>'
+        else:
+            label_text = f"{s['dur']}s"
         annotations.append(
             dict(
                 xref="x",
@@ -290,9 +298,9 @@ def main() -> None:
                 xshift=10,
                 xanchor="left",
                 yanchor="middle",
-                text=f"{s['dur']}s",
+                text=label_text,
                 showarrow=False,
-                font=dict(family=font_mono, size=14, color=dur_color, weight=500),
+                font=dict(family=font_mono, size=14, color=text_secondary, weight=500),
             )
         )
 
