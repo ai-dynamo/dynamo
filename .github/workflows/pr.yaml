@@ -673,11 +673,8 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      # TEMP (OPS-7716): widened to also run post_merge-marked trtllm tests in-PR
-      # to exercise the post_merge workflow's trtllm selection. REVERT to
-      # "pre_merge and trtllm ..." before merge.
-      cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      cpu_only_test_markers: pre_merge and trtllm and gpu_0
+      gpu_test_markers: pre_merge and trtllm and gpu_1
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -698,9 +695,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      # TEMP (OPS-7716): widened to also run post_merge-marked trtllm tests in-PR.
-      # REVERT to "pre_merge and trtllm ..." before merge.
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and (gpu_2 or gpu_4)'
+      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
