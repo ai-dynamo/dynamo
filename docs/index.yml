@@ -683,3 +683,11 @@ navigation:
       - page: "DEP-0000: Example Proposal"
         path: proposals/0000-example-dep.mdx
         slug: 0000-example-dep
+      # Demo mirror of ai-dynamo/enhancements PR #61 (Ryan Olson's Nova DEP).
+      # Cross-repo: the client runtime reads owner/repo/pr/path from the mount
+      # div in the mdx so it fetches from the enhancements repo, not this one.
+      # Illustrative only — remove or swap for a real in-repo DEP before this
+      # tab is announced.
+      - page: "DEP-Nova: Active Messaging (Demo)"
+        path: proposals/0000-nova.mdx
+        slug: 0000-nova
