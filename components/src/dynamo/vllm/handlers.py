@@ -2403,6 +2403,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Run backend.close() on the actor thread, then stop it — executor
             # GC would only end the thread, never call close().
             self._custom_encoder.shutdown()
+        if self.config.engine_client_mode == "sync-inproc":
+            self.engine_client.shutdown()
         for temp_dir in self.temp_dirs:
             try:
                 temp_dir.cleanup()

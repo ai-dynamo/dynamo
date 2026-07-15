@@ -57,6 +57,7 @@ from .capacity import (
     per_rank_kv_blocks,
 )
 from .constants import DisaggregationMode
+from .engine_client import VllmEngineClient
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
@@ -67,6 +68,7 @@ from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
+from .sync_inproc_engine import SyncInprocEngineClient, validate_sync_inproc_config
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -479,7 +481,7 @@ def setup_vllm_engine(
     config: Config,
     stat_logger: Optional[StatLoggerFactory] = None,
     fpm_worker_id: Optional[str] = None,
-) -> tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]:
+) -> tuple[VllmEngineClient, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]:
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
@@ -527,6 +529,10 @@ def setup_vllm_engine(
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     engine_args = config.engine_args
+    engine_client_mode = config.engine_client_mode
+
+    if engine_client_mode == "sync-inproc":
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
     if engine_args.enable_lora:
         if "VLLM_ALLOW_RUNTIME_LORA_UPDATING" not in os.environ:
@@ -566,6 +572,9 @@ def setup_vllm_engine(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
+
+    if engine_client_mode == "sync-inproc":
+        validate_sync_inproc_config(engine_args, vllm_config)
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None
@@ -608,13 +617,22 @@ def setup_vllm_engine(
 
     # Time engine initialization
     start_time = time.time()
-    engine_client = AsyncLLM.from_vllm_config(
-        vllm_config=vllm_config,
-        usage_context=usage_context,
-        stat_loggers=factory,
-        enable_log_requests=engine_args.enable_log_requests,
-        disable_log_stats=engine_args.disable_log_stats,
-    )
+    engine_client: VllmEngineClient
+    if engine_client_mode == "sync-inproc":
+        engine_client = SyncInprocEngineClient.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            stat_loggers=factory,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
+    else:
+        engine_client = AsyncLLM.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            stat_loggers=factory,
+            enable_log_requests=engine_args.enable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
     load_time = time.time() - start_time
 
     # Record model load time. ``component_gauges`` is None on the
@@ -644,7 +662,7 @@ async def register_vllm_model(
     model_type: ModelType,
     generate_endpoint: Endpoint,
     config: Config,
-    engine_client: AsyncLLM,
+    engine_client: VllmEngineClient,
     vllm_config: VllmConfig,
     worker_type: WorkerType,
     needs: list[list[WorkerType]] | None = None,
@@ -774,7 +792,7 @@ async def register_vllm_model(
     )
 
 
-def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
+def get_engine_cache_info(engine: VllmEngineClient) -> dict[str, Any]:
     """Return vLLM cache and scheduler limits used for model registration."""
 
     try:

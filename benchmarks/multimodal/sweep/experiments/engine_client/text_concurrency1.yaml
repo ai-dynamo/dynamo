@@ -1,0 +1,31 @@
+model: Qwen/Qwen2.5-1.5B-Instruct
+concurrency: 1
+request_count: 1000
+warmup_count: 20
+target_isl: 740
+osl: 70
+repeats: 5
+port: 8000
+timeout: 600
+max_model_len: 4096
+max_num_seqs: 1
+kv_cache_memory_bytes: 4294967296
+prefix_caching: true
+runtimes:
+  vllm-serve:
+    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
+    extra_args: []
+  dynamo-async:
+    workflow: benchmarks/multimodal/sweep/workflows/dynamo_agg.sh
+    extra_args: []
+  dynamo-sync:
+    workflow: benchmarks/multimodal/sweep/workflows/dynamo_agg.sh
+    extra_args:
+      - --engine-client-mode
+      - sync-inproc
+trial_order:
+  - [vllm-serve, dynamo-async, dynamo-sync]
+  - [dynamo-sync, dynamo-async, vllm-serve]
+  - [dynamo-async, dynamo-sync, vllm-serve]
+  - [vllm-serve, dynamo-sync, dynamo-async]
+  - [dynamo-sync, vllm-serve, dynamo-async]

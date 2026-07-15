@@ -5,7 +5,8 @@ import logging
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.v1.engine.async_llm import AsyncLLM
+
+from .engine_client import VllmEngineClient
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def select_main_attention_block_size(
 
 
 async def configure_kv_event_block_size(
-    engine: AsyncLLM,
+    engine: VllmEngineClient,
     vllm_config: VllmConfig,
 ) -> int:
     """Fetch engine cache-group metadata and cache the KV event block size on vLLM config."""

@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from vllm.config import VllmConfig
-from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
@@ -31,6 +30,7 @@ from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .engine_client import VllmEngineClient
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
@@ -59,7 +59,13 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
-EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
+EngineSetupResult = tuple[
+    VllmEngineClient,
+    VllmConfig,
+    Any,
+    Any,
+    Optional[LLMBackendMetrics],
+]
 
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:

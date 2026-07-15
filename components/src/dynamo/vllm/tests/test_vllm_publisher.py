@@ -11,6 +11,7 @@ so it is also the seam where the embedding worker must short-circuit
 the chat-shaped pipeline.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -125,3 +126,25 @@ def test_factory_default_is_chat_path(monkeypatch):
     assert constructed[0]["endpoint"] is endpoint
     assert constructed[0]["dp_rank"] == 3
     assert constructed[0]["component_gauges"] is component_gauges
+
+
+@pytest.mark.asyncio
+async def test_factory_preserves_runtime_loop_for_engine_thread(monkeypatch):
+    """Sync-engine stat loggers schedule endpoint setup on Dynamo's loop."""
+    constructed = []
+
+    def _fake_publisher(*args, **kwargs):
+        constructed.append(kwargs)
+        return Mock(spec=DynamoStatLoggerPublisher)
+
+    monkeypatch.setattr(publisher_mod, "DynamoStatLoggerPublisher", _fake_publisher)
+    runtime_loop = asyncio.get_running_loop()
+    factory = StatLoggerFactory(
+        endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    await asyncio.to_thread(factory.create_stat_logger, 0)
+
+    assert factory.event_loop is runtime_loop
+    assert constructed[0]["event_loop"] is runtime_loop

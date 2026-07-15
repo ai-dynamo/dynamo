@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import concurrent.futures
 import logging
 from typing import Optional
 
@@ -27,14 +28,27 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         endpoint: Endpoint,
         dp_rank: int = 0,
         component_gauges: Optional[LLMBackendMetrics] = None,
+        event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
         self._endpoint = endpoint
         self.dp_rank = dp_rank
         self.component_gauges = component_gauges or LLMBackendMetrics()
         self.num_gpu_block = 1
-        # Schedule async endpoint creation
-        self._endpoint_task = asyncio.create_task(self._create_endpoint())
+        # vLLM's synchronous in-process engine constructs stat loggers on its
+        # owner thread. Schedule endpoint creation back on Dynamo's runtime
+        # loop rather than requiring that thread to own an asyncio loop.
+        self._endpoint_task: asyncio.Task[None] | concurrent.futures.Future[None]
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if event_loop is None or event_loop is running_loop:
+            self._endpoint_task = asyncio.create_task(self._create_endpoint())
+        else:
+            self._endpoint_task = asyncio.run_coroutine_threadsafe(
+                self._create_endpoint(), event_loop
+            )
 
     async def _create_endpoint(self) -> None:
         """Create the NATS endpoint asynchronously."""
@@ -137,10 +151,17 @@ class StatLoggerFactory:
         endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
         embedding_worker: bool = False,
+        event_loop: Optional[asyncio.AbstractEventLoop] = None,
     ) -> None:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.embedding_worker = embedding_worker
+        if event_loop is None:
+            try:
+                event_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+        self.event_loop = event_loop
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
@@ -158,6 +179,7 @@ class StatLoggerFactory:
             endpoint=self.endpoint,
             dp_rank=dp_rank,
             component_gauges=self.component_gauges,
+            event_loop=self.event_loop,
         )
         self.created_logger = logger
 

@@ -255,6 +255,12 @@ class VllmLLMEngine(LLMEngine):
         if config is None:
             config = parse_args(argv, fpm_trace_relay_supported=False)
 
+        if config.engine_client_mode != "async-mp":
+            raise NotImplementedError(
+                "--engine-client-mode=sync-inproc is supported only by the legacy "
+                "`python -m dynamo.vllm` entry point"
+            )
+
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
             raise NotImplementedError(
                 "ENCODE is not supported by the unified vLLM entry point; "
