@@ -46,7 +46,7 @@ type Gate struct {
 //   - origin version is not valid semver
 //   - origin version < MinOriginVersion
 func (fg Gate) Enabled(annotations map[string]string) bool {
-	logger := log.Log.WithName("featuregate").WithValues("feature", fg.Name)
+	logger := log.Log.WithName("compatibility").WithValues("feature", fg.Name)
 
 	originVersion, exists := annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]
 	if !exists {
