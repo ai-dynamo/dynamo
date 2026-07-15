@@ -544,6 +544,9 @@ impl OpenAIPreprocessor {
             .chat_template_args
             .as_ref()
             .and_then(|args| {
+                // Match thinking_bool_from_args precedence: when both aliases
+                // are present, `thinking` wins and its normalized value is
+                // written back to both keys below.
                 for key in ["thinking", "enable_thinking"] {
                     match args.get(key) {
                         Some(serde_json::Value::Bool(_)) => {
@@ -4534,6 +4537,7 @@ mod tests {
             (serde_json::json!(true), true, "true"),
             (serde_json::json!("true"), true, "string true"),
             (serde_json::json!("TRUE"), true, "uppercase true"),
+            (serde_json::json!("1"), true, "string one"),
             (serde_json::json!("yes"), true, "yes"),
             (serde_json::json!("on"), true, "on"),
             (serde_json::json!(1), true, "one"),
@@ -4595,6 +4599,30 @@ mod tests {
             }
         }
         assert_case(None, None, true, "omitted Kimi default");
+
+        let mut conflicting_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "model": "moonshotai/Kimi-K2.5-Instruct",
+                "chat_template_kwargs": {
+                    "thinking": "true",
+                    "enable_thinking": false
+                }
+            }))
+            .unwrap();
+        OpenAIPreprocessor::normalize_thinking_arg(&mut conflicting_request, Some("kimi_k25"));
+        let args = conflicting_request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&serde_json::Value::Bool(true)));
+        assert_eq!(
+            args.get("enable_thinking"),
+            Some(&serde_json::Value::Bool(true))
+        );
+        let rendered = match &formatter {
+            dynamo_renderer::PromptFormatter::OAI(formatter) => {
+                formatter.render(&conflicting_request).unwrap()
+            }
+        };
+        assert_eq!(rendered, "<think>");
     }
 
     /// PRE.2 — Per-request reasoning gate. See `lib/llm/PREPROCESSOR_CASES.md`.

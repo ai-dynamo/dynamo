@@ -73,7 +73,7 @@ so the parser starts in reasoning mode immediately.
 
 Thinking arguments are normalized to a JSON boolean before prompt
 rendering so the template, SGLang guided-output gate, and postprocessor
-use the same value. The accepted enabled values are `true`, `"true"`,
+use the same value. The accepted enabled values are `true`, `"true"`, `"1"`,
 `"yes"`, `"on"`, and nonzero numbers. Kimi defaults an omitted value to
 enabled; `thinking=false` and equivalent falsey values disable PRE.2.
 
