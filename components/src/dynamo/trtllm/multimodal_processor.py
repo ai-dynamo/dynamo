@@ -90,7 +90,7 @@ class MultimodalRequestProcessor:
 
             self.input_processor = create_input_processor(model_dir, self.tokenizer)
         except Exception as e:
-            logging.debug("Input processor unavailable for max_tokens sizing: %s", e)
+            logging.warning("Input processor unavailable for max_tokens sizing: %s", e)
 
     def _expanded_prompt_len(
         self, token_ids: List[int], images: Optional[List[Any]]
