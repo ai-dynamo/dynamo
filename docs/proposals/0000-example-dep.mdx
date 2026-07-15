@@ -3,6 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "DEP-0000: Example Proposal"
 subtitle: "A sample DEP that shows how proposals render on the docs site. Not a real decision."
+# GitHub sources mirrored (read-only) onto this page. `pr` drives the inline
+# review + revision discussion; `tracking-issue` drives the design discussion.
+# Keep these in sync with the <PrInlineComments> props below (the component
+# props are what the client runtime actually reads via data- attributes).
+pr: 11687
+tracking-issue:
 ---
 
 {/*
@@ -14,7 +20,6 @@ subtitle: "A sample DEP that shows how proposals render on the docs site. Not a 
 */}
 
 import { DepMetadata } from "@/components/DepMetadata";
-import { GiscusComments } from "@/components/GiscusComments";
 import { PrInlineComments } from "@/components/PrInlineComments";
 
 <DepMetadata
@@ -35,23 +40,24 @@ import { PrInlineComments } from "@/components/PrInlineComments";
 
 ## Summary
 
-Dynamo Enhancement Proposals (DEPs) can be authored as markdown in this repository under `docs/proposals/` and rendered on a dedicated Proposals tab at docs.nvidia.com/dynamo. Each rendered page carries a status banner and an embedded discussion widget so the design content, the review, and the open-ended debate live close to the code.
+Dynamo Enhancement Proposals (DEPs) can be authored as markdown in this repository under `docs/proposals/` and rendered on a dedicated Proposals tab at docs.nvidia.com/dynamo. Each rendered page carries a status banner, a metadata card, and a read-only mirror of the DEP's GitHub comments (inline PR review, PR conversation, and the tracking-issue thread) so the design content, its review, and the open-ended debate live close to the code.
 
 ## Motivation
 
 DEP content, line-level review, and open-ended debate have historically been split across a separate repository, pull request threads, and meetings. That split makes it hard for a reader to find the current state of a proposal and hard for a community member without repo access to weigh in.
 
-Colocating the DEP markdown with the code, rendering it on the docs site, and attaching a GitHub-Discussions-backed comment widget keeps all three concerns in one discoverable place while reusing infrastructure that already exists (the Fern docs site and GitHub Discussions).
+Colocating the DEP markdown with the code, rendering it on the docs site, and mirroring the tracking-issue and PR comments onto the page keeps all three concerns in one discoverable place while reusing infrastructure that already exists: GitHub issues, pull requests, and the Fern docs site. There is no new comment system to run — the page reads GitHub's public API and deep-links back to GitHub for every reply.
 
 ### Goals
 
 * Keep DEP content next to the code it describes, versioned with the code.
 * Render every DEP on the public docs site with an unambiguous status.
-* Let any GitHub user comment on the rendered page without repo access.
+* Surface the DEP's GitHub discussion on the page and let any GitHub user join it (on the issue or PR) without repo write access.
 
 ### Non Goals
 
-* Replacing the tracking issue as the anchor for a DEP.
+* Replacing the tracking issue as the anchor and durable debate thread for a DEP.
+* Accepting comments on the docs page itself. Authoring and replies stay on GitHub; the page is a read-only mirror.
 * Migrating the existing proposals from `ai-dynamo/enhancements`. That is a separate decision.
 
 ### Requirements
@@ -62,25 +68,30 @@ Every rendered DEP page **MUST** show its status (Draft, Under Review, Approved,
 
 #### REQ 2: Debate Must Be Open to the Community
 
-Commenting on a rendered DEP **MUST NOT** require write access to the repository. Any authenticated GitHub user **SHOULD** be able to comment.
+Joining a DEP's discussion **MUST NOT** require write access to the repository. Any authenticated GitHub user **SHOULD** be able to comment on the linked issue or PR, and the page **SHOULD** surface those comments and deep-link to them.
 
 ## Proposal
 
-A DEP is a markdown file under `docs/proposals/`, authored from `TEMPLATE.mdx`. It is wired into the Fern navigation under a Proposals tab. The page renders with:
+A DEP is a markdown file under `docs/proposals/`, authored from `TEMPLATE.mdx`. It is wired into the Fern navigation under a Proposals tab. Two GitHub objects back each DEP:
 
-1. A status banner, using a GitHub-style admonition that Fern converts to a native callout.
-2. A link to the GitHub Discussion and to the draft PR near the top.
-3. An embedded giscus widget at the bottom, backed by GitHub Discussions.
+* The **tracking issue** is the stable anchor and the home for durable, open-ended **design discussion**.
+* The **pull request** that adds or edits the markdown is the **revision**: reviewers leave line-level comments on the exact text, plus general conversation on the PR.
 
-The lifecycle is: open a tracking issue, author the DEP as a draft PR (line-level review), merge as Draft, gather open-ended debate on the rendered page, and advance the status through follow-up PRs.
+The rendered page then shows:
+
+1. A status banner, using a GitHub-style admonition that Fern converts to a native callout, plus a metadata card (status pill, fields, and action links).
+2. A read-only mirror of the PR's inline review comments, anchored as highlights on the exact quoted text with expandable cards.
+3. Two read-only discussion threads below the content — "Revision discussion" (PR conversation) and "Design discussion" (tracking-issue thread) — each with a deep-link button to reply on GitHub.
+
+The lifecycle is: open a tracking issue (design discussion), author the DEP as a draft PR (line-level review + revision discussion), merge as Draft, and advance the status through follow-up PRs. Debate continues on the issue; the page always reflects it.
 
 ## Implementation Details
 
-The Proposals tab is declared in `docs/index.yml`. The status banner uses `> [!WARNING]` for Draft, which the docs pipeline converts to a Fern callout. The comment widget is the `GiscusComments` MDX component in `fern/components/GiscusComments.tsx`, imported at the top of each page and placed last.
+The Proposals tab is declared in `docs/index.yml`. The status banner uses `> [!WARNING]` for Draft, which the docs pipeline converts to a Fern callout. The metadata card is the `DepMetadata` component (`fern/components/DepMetadata.tsx`). The comment mirror is the `PrInlineComments` component (`fern/components/PrInlineComments.tsx`), which renders a `<div id="dep-pr-comments" data-pr=… data-issue=…>` mount; the client runtime in `fern/js/dep-pr-comments.js` (injected site-wide via `docs.yml` `js:`) reads those attributes and fetches three sources from GitHub's public REST API — `pulls/{pr}/comments` (inline review), `issues/{pr}/comments` (PR conversation), and `issues/{issue}/comments` (tracking issue) — then anchors the inline comments and renders the two discussion threads. It is read-only and unauthenticated; every card deep-links back to GitHub to reply.
 
 ### Deferred to Implementation
 
-* The concrete giscus `data-repo-id` and `data-category-id` values, produced by the giscus configurator once the giscus GitHub App is installed.
+* Baking the mirrored comments in at build time for production, to avoid GitHub's unauthenticated 60-requests/hour/IP rate limit on high-traffic pages.
 
 ## Implementation Phases
 
@@ -119,11 +130,11 @@ The Proposals tab is declared in `docs/index.yml`. The status banner uses `> [!W
 
 **Reason Rejected**:
 
-* Does not meet REQ 1 (rendered, unambiguous status) or REQ 2 (open community debate on the page).
+* Does not meet REQ 1 (rendered, unambiguous status) or REQ 2 (the discussion surfaced on the page and open to the community).
 
 ## Background
 
-Enhancement-proposal processes such as Kubernetes KEPs and Rust RFCs store proposals as markdown in the repository and review them through pull requests. This example follows that lineage and adds a rendered docs page plus a discussion widget.
+Enhancement-proposal processes such as Kubernetes KEPs and Rust RFCs store proposals as markdown in the repository and review them through pull requests. This example follows that lineage and adds a rendered docs page plus a read-only mirror of the DEP's GitHub issue and PR comments.
 
 ### References
 
@@ -134,17 +145,17 @@ Enhancement-proposal processes such as Kubernetes KEPs and Rust RFCs store propo
 | Term | Definition |
 | :--- | :--------- |
 | **DEP** | Dynamo Enhancement Proposal. |
-| **giscus** | A comment system that stores comments in GitHub Discussions. |
+| **Tracking issue** | The GitHub issue that anchors a DEP and hosts its durable design discussion. |
+| **Revision** | The pull request that adds or edits the DEP markdown; carries inline line review and PR conversation. |
 
 ### Acronyms and Abbreviations
 
 **DEP**: Dynamo Enhancement Proposal
 
-{/* Read-only mirror of this DEP's PR review line comments, anchored to the text
-    above. Points at the draft PR (#11687). Authoring stays on the PR. */}
+{/* Read-only mirror of this DEP's GitHub comments: inline PR review (anchored
+    to the text above), the PR conversation ("Revision discussion"), and the
+    tracking-issue thread ("Design discussion"). Set `pr` and (when one exists)
+    `issue`; here `issue` is omitted so the design-discussion empty state shows.
+    All read-only — replies happen on GitHub via the deep-link buttons. */}
 
 <PrInlineComments pr={11687} />
-
-{/* Discussion widget, last on the page. */}
-
-<GiscusComments />

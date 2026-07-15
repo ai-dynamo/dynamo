@@ -3,6 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "DEP Template"
 subtitle: "Copy this file to docs/proposals/NNNN-your-feature.mdx and fill it in."
+# GitHub sources mirrored (read-only) onto the rendered page. Fill `pr` once
+# your draft PR exists and `tracking-issue` once you open the anchor issue.
+# These document intent; the client runtime reads the matching <PrInlineComments>
+# props near the bottom, so keep the two in sync.
+pr:
+tracking-issue:
 ---
 
 {/*
@@ -10,16 +16,17 @@ subtitle: "Copy this file to docs/proposals/NNNN-your-feature.mdx and fill it in
   (https://github.com/ai-dynamo/enhancements/blob/main/NNNN-complete-template.md).
   Section vocabulary and ordering match the enhancements repo so DEPs stay
   portable between the two homes. In-tree additions: a DEP number field, a
-  Tracking Issue field, a Discussions-To field, an MDX status banner, and the
-  giscus discussion widget. Top-level sections use H2 (the page title comes
-  from the frontmatter above) to match the Fern docs-site convention.
-  Delete this comment block when you copy the template. Set your DEP number on
-  <DepMetadata dep="..."> and, once your draft PR exists, add pr={<number>} to
-  both <DepMetadata> and <PrInlineComments> (see the snippet near the bottom).
+  Tracking Issue field, an MDX status banner, and a read-only mirror of the
+  DEP's GitHub issue + PR comments (the <PrInlineComments> block at the bottom).
+  Top-level sections use H2 (the page title comes from the frontmatter above) to
+  match the Fern docs-site convention. Delete this comment block when you copy
+  the template. Set your DEP number on <DepMetadata dep="...">, and once your
+  draft PR and tracking issue exist, add pr={<number>} to <DepMetadata> and
+  pr={<number>} issue={<number>} to <PrInlineComments> (snippet near the bottom).
 */}
 
 import { DepMetadata } from "@/components/DepMetadata";
-import { GiscusComments } from "@/components/GiscusComments";
+import { PrInlineComments } from "@/components/PrInlineComments";
 
 {/* Metadata card. The status pill (Draft / Under Review / Approved / Replaced
     / Deferred / Rejected) gives an at-a-glance status; the WARNING banner below
@@ -184,18 +191,15 @@ List frequently used acronyms and abbreviations that are uncommon or unlikely to
 
 **ACR**: Expanded meaning
 
-{/* Read-only mirror of this DEP's PR review line comments, anchored to the text
-    above. Once your draft PR exists, add this import near the top:
+{/* Read-only mirror of this DEP's GitHub comments — keep it last on the page.
+    It renders three surfaces from the public GitHub API:
+      - inline PR review comments, anchored as highlights on the text above;
+      - "Revision discussion": the PR conversation;
+      - "Design discussion": the tracking-issue thread (durable debate).
+    Set pr={<your PR>} once the draft PR exists, and issue={<your issue>} once
+    the tracking issue exists (omit issue to show the "open a tracking issue"
+    empty state). Every card deep-links to GitHub to reply; the page never
+    posts. See fern/components/PrInlineComments.tsx and
+    fern/js/dep-pr-comments.js. */}
 
-    import { PrInlineComments } from "@/components/PrInlineComments";
-
-    and place this where you want the summary (set your PR number):
-
-    <PrInlineComments pr={12345} />
-
-    See fern/components/PrInlineComments.tsx. */}
-
-{/* The discussion widget must be the last thing on the page. It is powered by
-    GitHub Discussions via giscus; see fern/components/GiscusComments.tsx. */}
-
-<GiscusComments />
+<PrInlineComments pr={12345} issue={67890} />

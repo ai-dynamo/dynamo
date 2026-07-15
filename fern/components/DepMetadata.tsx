@@ -7,8 +7,8 @@
  * pill (Draft / Proposed / Accepted / ...), a labeled field grid, and an action
  * row of links (View PR, Tracking Issue, Discussion).
  *
- * Server component (no "use client"), mirroring RecipeStyles.tsx / GiscusComments
- * .tsx. Registered via docs.yml `experimental.mdx-components: ./components`;
+ * Server component (no "use client"), mirroring RecipeStyles.tsx. Registered
+ * via docs.yml `experimental.mdx-components: ./components`;
  * import per page: import { DepMetadata } from "@/components/DepMetadata";
  * The CSS ships as a page-level <style> (not docs.yml `css:`) so it survives the
  * shared NVIDIA global theme at publish, per the RecipeStyles constraint.

@@ -2,12 +2,17 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * PrInlineComments — SSR mount point for the read-only PR line-comment overlay.
+ * PrInlineComments — SSR mount point for the read-only GitHub comment mirror.
  *
- * The runtime that fetches the PR's line comments and anchors them into
- * `.fern-prose` lives in `fern/js/dep-pr-comments.js` and is injected by Fern
- * via `docs.yml` `js:`. See that file for the WHY (two earlier attempts to run
- * the runtime from inside this component failed on the live preview).
+ * The runtime lives in `fern/js/dep-pr-comments.js` (injected by Fern via
+ * `docs.yml` `js:`) and, reading this div's data-* attributes, renders three
+ * read-only surfaces:
+ *   1. inline PR review line comments  -> anchored <mark> highlights + cards,
+ *   2. the PR conversation             -> a "Revision discussion" thread,
+ *   3. the tracking-issue comments     -> a "Design discussion" thread.
+ * Each surface deep-links back to GitHub for replies; the page never posts.
+ * See that file for the WHY (two earlier attempts to run the runtime from
+ * inside this component failed on the live preview).
  *
  * This component renders ONLY a static <div id="dep-pr-comments" data-*=...>.
  * SSR of a plain div is reliable; the client script finds it, reads its data
@@ -19,13 +24,15 @@
  */
 
 interface PrInlineCommentsProps {
-  /** Pull request number whose review line comments are mirrored. */
+  /** Pull request number: source of inline review + revision-discussion comments. */
   pr: number;
+  /** Tracking-issue number: source of the design-discussion thread. Omit to show the empty "open a tracking issue" state. */
+  issue?: number;
   /** Repository owner (default "ai-dynamo"). */
   owner?: string;
   /** Repository name (default "dynamo"). */
   repo?: string;
-  /** Only show comments on this file path (default the example DEP). */
+  /** Only show inline comments on this file path (default the example DEP). */
   path?: string;
   /** If true, comment cards are expanded on first render. Default collapsed. */
   autoOpen?: boolean;
@@ -33,6 +40,7 @@ interface PrInlineCommentsProps {
 
 export function PrInlineComments({
   pr,
+  issue,
   owner = "ai-dynamo",
   repo = "dynamo",
   path = "docs/proposals/0000-example-dep.mdx",
@@ -42,6 +50,7 @@ export function PrInlineComments({
     <div
       id="dep-pr-comments"
       data-pr={String(pr)}
+      data-issue={issue ? String(issue) : ""}
       data-owner={owner}
       data-repo={repo}
       data-path={path}

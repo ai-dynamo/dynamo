@@ -670,9 +670,10 @@ navigation:
   - tab: proposals
     layout:
       # ==================== Dynamo Enhancement Proposals ====================
-      # Hybrid DEP home: markdown DEPs live in docs/proposals/, rendered here
-      # with a status banner and a giscus discussion widget. See the Overview
-      # page for the end-to-end workflow. Add new DEPs as pages below.
+      # DEP home: markdown DEPs live in docs/proposals/, rendered here with a
+      # status banner, a metadata card, and a read-only mirror of the DEP's
+      # GitHub issue + PR comments. See the Overview page for the end-to-end
+      # workflow. Add new DEPs as pages below.
       - page: Overview
         path: proposals/README.mdx
         slug: overview

@@ -5,25 +5,25 @@ title: "Dynamo Enhancement Proposals"
 subtitle: "How DEPs are authored, reviewed, discussed, and ratified in the Dynamo repository."
 ---
 
-A Dynamo Enhancement Proposal (DEP) captures an architecture, design, or process decision along with the motivation behind it. This tab hosts DEPs authored as markdown in the `docs/proposals/` directory of the `ai-dynamo/dynamo` repository, rendered here so the design content, its review, and open community debate stay close to the code.
+A Dynamo Enhancement Proposal (DEP) captures an architecture, design, or process decision along with the motivation behind it. This tab hosts DEPs authored as markdown in the `docs/proposals/` directory of the `ai-dynamo/dynamo` repository, rendered here so the design content, its review, and its debate stay close to the code.
 
-This workflow is compatible with the approved [Dynamo DEP process](https://github.com/ai-dynamo/enhancements/blob/main/deps/0000-dep-process.md) in the `ai-dynamo/enhancements` repository. It reuses infrastructure that already exists (this docs site and GitHub Discussions) rather than adding new systems.
+This workflow is compatible with the approved [Dynamo DEP process](https://github.com/ai-dynamo/enhancements/blob/main/deps/0000-dep-process.md) in the `ai-dynamo/enhancements` repository. It reuses infrastructure that already exists — GitHub issues, pull requests, and this docs site — rather than adding new systems. There is no separate comment service: the rendered page mirrors the DEP's GitHub comments read-only and deep-links back to GitHub for every reply.
 
-## The Hybrid Model
+## The Model: Issue + PR, Mirrored on the Page
 
-A DEP lives in four connected places, each doing the job it is best at:
+A DEP is backed by two GitHub objects and rendered as one page, each doing the job it is best at:
 
-- **Anchor**: a GitHub tracking issue in `ai-dynamo/dynamo`. The stable, linkable home for the proposal's status and cross-references.
-- **Content**: a markdown file in `docs/proposals/`, versioned with the code and rendered on this Proposals tab with a status banner.
-- **Line-level review**: the draft pull request that adds or edits the DEP markdown. Reviewers leave line comments and suggestions on the exact text.
-- **Open-ended debate**: a comment widget embedded at the bottom of each rendered DEP page, backed by GitHub Discussions via [giscus](https://giscus.app). Any GitHub user can comment on the public page without repository access.
+- **Tracking issue** (`ai-dynamo/dynamo`): the stable anchor for the DEP's status and cross-references, and the home for durable, open-ended **design discussion**. Any GitHub user can join it without repository write access.
+- **Pull request** (the revision): the draft PR that adds or edits the DEP markdown. Reviewers leave **inline line-level comments** on the exact text, plus general **conversation** on the PR.
+- **Content**: a markdown file in `docs/proposals/`, versioned with the code and rendered on this Proposals tab with a status banner and a metadata card.
+- **Rendered mirror**: the published page shows a read-only mirror of all three comment surfaces — inline review comments anchored as highlights on the quoted text, a "Revision discussion" thread (PR conversation), and a "Design discussion" thread (the tracking issue). Each has a deep-link button to reply on GitHub.
 
 ## Workflow
 
-1. **Open a tracking issue** in `ai-dynamo/dynamo`. This is the anchor for the DEP.
-2. **Author the DEP as a draft PR.** Copy [`TEMPLATE.mdx`](./TEMPLATE.mdx) to `docs/proposals/NNNN-your-feature.mdx` (use a descriptive slug; do not assign a number yet). Fill in the required sections. Reviewers use PR line comments and suggestions for precise, line-level review.
+1. **Open a tracking issue** in `ai-dynamo/dynamo`. This is the anchor and the durable design-discussion thread for the DEP.
+2. **Author the DEP as a draft PR.** Copy [`TEMPLATE.mdx`](./TEMPLATE.mdx) to `docs/proposals/NNNN-your-feature.mdx` (use a descriptive slug; do not assign a number yet). Fill in the required sections, and set `pr` / `issue` on the `<PrInlineComments>` block so the page mirrors the right threads. Reviewers use PR line comments and suggestions for precise, line-level review.
 3. **Merge as Draft.** Once the shape is agreed, merge the PR with the status banner set to Draft. Merging early makes the proposal discoverable and renders it on this tab; it does not imply acceptance. The banner makes the Draft status unambiguous.
-4. **Discuss on the rendered page.** Open-ended debate happens in the giscus thread on the published page, so community members without repo access can participate. Paste the resulting Discussion URL into the `Discussions-To` field. Link the tracking issue to that thread as well.
+4. **Discuss on the tracking issue.** Open-ended debate lives on the tracking issue, so community members without repo access can participate; the rendered page mirrors it in the "Design discussion" section. Keep the issue linked from the metadata card.
 5. **Advance the status via follow-up PRs.** As the proposal moves through Under Review to Approved (or to Rejected, Deferred, or Replaced), update the status banner and header in a short follow-up PR. Significant changes after approval get a new DEP; the original is marked Replaced.
 
 ## Status Banner Convention
@@ -48,14 +48,19 @@ Keep the `**Status**` header field and the banner in sync. The header field carr
 
 ## Commenting on a DEP
 
-Comments on each rendered DEP page are powered by GitHub Discussions through giscus. Sign in with any GitHub account to comment; no repository access is required. The widget is the `GiscusComments` component (`fern/components/GiscusComments.tsx`), imported at the top of each DEP page and placed last.
+Comments are hosted by GitHub, not by the docs site. The rendered page is a read-only mirror; every reply happens on GitHub, so nothing new needs to be installed or run. The `PrInlineComments` component (`fern/components/PrInlineComments.tsx`) renders a mount div, and the client runtime (`fern/js/dep-pr-comments.js`, injected site-wide via `docs.yml` `js:`) reads its `data-pr` / `data-issue` attributes and fetches three sources from GitHub's public REST API:
 
-Before the widget can load, a repository maintainer fills in two values once, repo-wide:
+- **Inline review** (`GET /repos/{owner}/{repo}/pulls/{pr}/comments`): line comments from the PR, anchored as highlights on the exact quoted text with expandable cards. Each links to that comment's reply UI on the PR.
+- **Revision discussion** (`GET /repos/{owner}/{repo}/issues/{pr}/comments`): the PR's general conversation, as a threaded list. (PR conversation lives on the issues endpoint.)
+- **Design discussion** (`GET /repos/{owner}/{repo}/issues/{issue}/comments`): the tracking-issue thread — the durable debate.
 
-- Enable the [giscus GitHub App](https://github.com/apps/giscus) on `ai-dynamo/dynamo` (GitHub Discussions is already enabled).
-- Run the configurator at [giscus.app](https://giscus.app) with the repository and the target Discussions category (for example, `Ideas`), then copy the generated `data-repo-id` and `data-category-id` into `GiscusComments.tsx`.
+Automation accounts (anything ending in `[bot]`) are filtered out of the discussion threads so they show human debate. Each thread has a "Comment on the PR/issue" deep-link, and the design section shows an "open a tracking issue" prompt when no issue is linked. Set the sources per page:
 
-With `data-mapping="pathname"`, each DEP page binds to its own Discussion the first time someone comments, so no per-page configuration is needed.
+```mdx
+<PrInlineComments pr={12345} issue={67890} />
+```
+
+The fetch is unauthenticated, so it is subject to GitHub's 60-requests/hour/IP limit; on a 403 the affected section degrades to a notice plus a link to the thread. For high-traffic production pages, bake the comments in at build time to remove that limit.
 
 ## Files in This Directory
 

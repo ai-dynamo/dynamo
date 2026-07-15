@@ -105,6 +105,18 @@
     ".dep-pr-unanchored{margin-top:1rem;padding:10px 12px;border:1px dashed var(--border,var(--grayscale-a5,#cfcfcf));border-radius:8px;color:var(--pst-color-text-base,#1a1a1a);}" +
     ".dep-pr-unanchored h4{margin:0 0 8px;font-size:.9rem;color:var(--pst-color-text-base,#1a1a1a);}" +
     ".dep-pr-unanchored li{margin:0 0 8px;font-size:13px;}" +
+    /* Discussion sections (revision + design), read-only threaded lists. */
+    ".dep-pr-thread{margin-top:1.75rem;color:var(--pst-color-text-base,#1a1a1a);}" +
+    ".dep-pr-thread-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:.5rem;}" +
+    ".dep-pr-thread-title{font-size:1.05rem;font-weight:600;margin:0;color:var(--pst-color-heading,inherit);}" +
+    ".dep-pr-thread-sub{font-size:.8rem;color:var(--pst-color-text-muted,#777);margin:.1rem 0 0;}" +
+    ".dep-pr-thread-item{padding:9px 11px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-radius:8px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);}" +
+    ".dep-pr-thread-item + .dep-pr-thread-item{margin-top:8px;}" +
+    ".dep-pr-action{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border:1px solid var(--nv-color-green,#76b900);border-radius:7px;background:transparent;color:var(--pst-color-text-base,#1a1a1a);font-size:12px;font-weight:600;line-height:1;text-decoration:none;white-space:nowrap;}" +
+    ".dep-pr-action:hover{background:rgba(118,185,0,.12);text-decoration:none;}" +
+    ".dep-pr-empty{padding:11px 13px;border:1px dashed var(--border,var(--grayscale-a5,#cfcfcf));border-radius:8px;font-size:13px;color:var(--pst-color-text-muted,#777);}" +
+    ".dep-pr-empty a{color:var(--nv-color-green,#76b900);font-weight:600;text-decoration:none;}" +
+    ".dep-pr-empty a:hover{text-decoration:underline;}" +
     ".dep-pr-quote{color:var(--pst-color-text-muted,#777);font-style:italic;}";
 
   function ensureStyles() {
@@ -289,7 +301,7 @@
     }
   }
 
-  function commentHtml(c) {
+  function commentHtml(c, replyLabel) {
     var login = (c.user && c.user.login) || "unknown";
     var avatar = (c.user && c.user.avatar_url) || "";
     var body = String(c.body || "").split(/\n{2,}/)
@@ -297,12 +309,13 @@
     var av = avatar
       ? '<img class="dep-pr-avatar" src="' + esc(avatar) + '" alt="" width="20" height="20">'
       : "";
+    var label = replyLabel || "View / reply on GitHub";
     return '<div class="dep-pr-comment">' +
       '<div class="dep-pr-comment-head">' + av +
       '<span class="dep-pr-author">' + esc(login) + '</span>' +
       '<span class="dep-pr-date">' + esc(fmtDate(c.created_at)) + '</span></div>' +
       '<div class="dep-pr-body">' + body + '</div>' +
-      '<a class="dep-pr-link" href="' + esc(c.html_url) + '" target="_blank" rel="noopener">View / reply on GitHub &rarr;</a>' +
+      '<a class="dep-pr-link" href="' + esc(c.html_url) + '" target="_blank" rel="noopener">' + esc(label) + ' &rarr;</a>' +
       '</div>';
   }
 
@@ -330,15 +343,24 @@
 
   function readConfig(mount) {
     var pr = parseInt(mount.getAttribute("data-pr") || "0", 10);
+    var issue = parseInt(mount.getAttribute("data-issue") || "0", 10);
     var owner = mount.getAttribute("data-owner") || "ai-dynamo";
     var repo = mount.getAttribute("data-repo") || "dynamo";
     var path = mount.getAttribute("data-path") || "";
     var autoOpen = mount.getAttribute("data-auto-open") === "true";
-    return { pr: pr, owner: owner, repo: repo, path: path, autoOpen: autoOpen };
+    return { pr: pr, issue: issue, owner: owner, repo: repo, path: path, autoOpen: autoOpen };
   }
 
-  function renderSection(mount, cfg, comments, groups, anchoredCount, unanchored) {
+  /* Inline review-comment summary + the unanchored fallback list. Returns HTML;
+   * renderInto() composes it with the discussion sections. */
+  function inlineSummaryHtml(cfg, comments, anchoredCount, unanchored, reviewErr) {
     var prUrl = "https://github.com/" + cfg.owner + "/" + cfg.repo + "/pull/" + cfg.pr;
+    if (reviewErr) {
+      return '<p class="dep-pr-heading">Inline review comments</p>' +
+        '<p class="dep-pr-note">' + esc(rateMsg(reviewErr, "review comments")) +
+        ' View them on <a href="' + esc(prUrl) + '/files" target="_blank" rel="noopener">PR #' +
+        esc(cfg.pr) + "</a>.</p>";
+    }
     var total = comments.length;
     var head =
       '<p class="dep-pr-heading">Inline review comments</p>' +
@@ -347,7 +369,7 @@
       ' on this file from <a href="' + esc(prUrl) + '" target="_blank" rel="noopener">PR #' +
       esc(cfg.pr) + "</a>" +
       " (" + anchoredCount + " anchored to text above). Authoring stays on GitHub &mdash; " +
-      '<a href="' + esc(prUrl) + '/files" target="_blank" rel="noopener">discuss inline on the PR</a>.</p>';
+      '<a href="' + esc(prUrl) + '/files" target="_blank" rel="noopener">reply inline on the PR</a>.</p>';
     var un = "";
     if (unanchored.length) {
       un = '<div class="dep-pr-unanchored"><h4>Comments not anchored to current text (' +
@@ -360,27 +382,79 @@
               esc((c.user && c.user.login) || "unknown") + ": " +
               esc(normWs(c.body).slice(0, 140)) +
               ' <a class="dep-pr-link" href="' + esc(c.html_url) +
-              '" target="_blank" rel="noopener">on GitHub &rarr;</a></li>';
+              '" target="_blank" rel="noopener">reply on the PR &rarr;</a></li>';
           }).join("");
         }).join("") + "</ul></div>";
     }
-    mount.innerHTML = head + un;
+    return head + un;
   }
 
-  function renderError(mount, cfg, err) {
-    var prUrl = "https://github.com/" + cfg.owner + "/" + cfg.repo + "/pull/" + cfg.pr;
-    var msg = err && /\b403\b/.test(String(err.message || err))
-      ? "GitHub's unauthenticated API rate limit (60/hr per IP) was hit."
-      : "Could not load PR comments.";
-    mount.innerHTML = '<p class="dep-pr-heading">Inline review comments</p>' +
-      '<p class="dep-pr-note">' + esc(msg) + " View them directly on " +
-      '<a href="' + esc(prUrl) + '/files" target="_blank" rel="noopener">PR #' +
-      esc(cfg.pr) + "</a>.</p>";
+  function rateMsg(err, what) {
+    return err && /\b403\b/.test(String(err.message || err))
+      ? "GitHub's unauthenticated API rate limit (60/hr per IP) was hit, so the " + what + " could not load."
+      : "The " + what + " could not load.";
   }
 
-  function fetchComments(cfg) {
-    var url = "https://api.github.com/repos/" + cfg.owner + "/" + cfg.repo +
-      "/pulls/" + cfg.pr + "/comments?per_page=100";
+  /* A read-only threaded discussion section (PR conversation or issue thread).
+   *   kind: "revision" (PR #pr conversation) or "design" (tracking issue).
+   * Empty + error states deep-link back to the GitHub thread. */
+  function threadHtml(cfg, kind, comments, err) {
+    var isDesign = kind === "design";
+    var title = isDesign ? "Design discussion" : "Revision discussion";
+    var num = isDesign ? cfg.issue : cfg.pr;
+    var threadUrl = isDesign
+      ? "https://github.com/" + cfg.owner + "/" + cfg.repo + "/issues/" + num
+      : "https://github.com/" + cfg.owner + "/" + cfg.repo + "/pull/" + num;
+    var replyLabel = isDesign ? "Comment on the issue" : "Comment on the PR";
+    var sub = isDesign
+      ? "Durable, open-ended debate on the tracking issue &mdash; the anchor for this DEP."
+      : "General conversation on the revision (pull request), outside the line comments above.";
+
+    // Design discussion with no tracking issue configured: prompt to start one.
+    if (isDesign && !num) {
+      var pageTitle = (document.title || "this DEP").replace(/\s*[|\u2013\-].*$/, "");
+      var newIssue = "https://github.com/" + cfg.owner + "/" + cfg.repo +
+        "/issues/new?title=" + encodeURIComponent("DEP: " + pageTitle);
+      return '<div class="dep-pr-thread dep-pr-ui"><div class="dep-pr-thread-head">' +
+        '<div><p class="dep-pr-thread-title">' + esc(title) + '</p>' +
+        '<p class="dep-pr-thread-sub">' + sub + "</p></div></div>" +
+        '<div class="dep-pr-empty">No tracking issue is linked yet. ' +
+        '<a href="' + esc(newIssue) + '" target="_blank" rel="noopener">Open a tracking issue &rarr;</a>' +
+        " to start the design discussion, then set it on the DEP.</div></div>";
+    }
+
+    var head = '<div class="dep-pr-thread dep-pr-ui"><div class="dep-pr-thread-head">' +
+      '<div><p class="dep-pr-thread-title">' + esc(title) + '</p>' +
+      '<p class="dep-pr-thread-sub">' + sub + "</p></div>" +
+      '<a class="dep-pr-action" href="' + esc(threadUrl) + '" target="_blank" rel="noopener">' +
+      esc(replyLabel) + " &rarr;</a></div>";
+
+    if (err) {
+      return head + '<div class="dep-pr-empty">' + esc(rateMsg(err, "discussion")) +
+        ' <a href="' + esc(threadUrl) + '" target="_blank" rel="noopener">Open the thread &rarr;</a></div></div>';
+    }
+    var humans = filterHumans(comments);
+    if (!humans.length) {
+      return head + '<div class="dep-pr-empty">No discussion yet. ' +
+        '<a href="' + esc(threadUrl) + '" target="_blank" rel="noopener">' + esc(replyLabel) +
+        " &rarr;</a></div></div>";
+    }
+    var list = humans.map(function (c) {
+      return '<div class="dep-pr-thread-item">' + commentHtml(c, replyLabel) + "</div>";
+    }).join("");
+    return head + list + "</div>";
+  }
+
+  /* Drop automation accounts so a discussion shows human debate, not CI chatter
+   * (copy-pr-bot, github-actions, dependabot, and the like all end in [bot]). */
+  function filterHumans(comments) {
+    return (comments || []).filter(function (c) {
+      var login = (c.user && c.user.login) || "";
+      return !/\[bot\]$/.test(login);
+    });
+  }
+
+  function ghGet(url) {
     return fetch(url, { headers: { Accept: "application/vnd.github+json" } })
       .then(function (r) {
         if (!r.ok) throw new Error("GitHub API " + r.status);
@@ -388,16 +462,38 @@
       });
   }
 
+  /* Fetch the three read-only sources in parallel; one failing source (e.g. a
+   * 403 rate-limit) must not blank the others, so use allSettled and carry a
+   * per-source error. */
+  function fetchAll(cfg) {
+    var base = "https://api.github.com/repos/" + cfg.owner + "/" + cfg.repo;
+    var jobs = [
+      ghGet(base + "/pulls/" + cfg.pr + "/comments?per_page=100"),   // inline review
+      ghGet(base + "/issues/" + cfg.pr + "/comments?per_page=100"),  // PR conversation
+      cfg.issue ? ghGet(base + "/issues/" + cfg.issue + "/comments?per_page=100")
+                : Promise.resolve([])                                // tracking issue
+    ];
+    return Promise.allSettled(jobs).then(function (res) {
+      var val = function (i) { return res[i].status === "fulfilled" ? res[i].value : []; };
+      var err = function (i) { return res[i].status === "rejected" ? res[i].reason : null; };
+      return {
+        review: val(0), reviewErr: err(0),
+        prConv: val(1), prConvErr: err(1),
+        issue: val(2), issueErr: err(2)
+      };
+    });
+  }
+
   function cacheKey(cfg) {
-    return cfg.owner + "/" + cfg.repo + "#" + cfg.pr;
+    return cfg.owner + "/" + cfg.repo + "#" + cfg.pr + "@" + cfg.issue;
   }
 
   /* Anchor + render synchronously (no await inside). cleanup() first so a
    * re-render (React node swap / SPA nav) never stacks marks on top of a prior
    * pass. Called only while `running` is held, so it can't interleave. */
-  function renderInto(mount, cfg, root, raw) {
+  function renderInto(mount, cfg, root, data) {
     cleanup();
-    var comments = (raw || []).filter(function (c) {
+    var comments = (data.review || []).filter(function (c) {
       return !cfg.path || c.path === cfg.path;
     });
 
@@ -434,14 +530,19 @@
       card.style.display = cfg.autoOpen ? "" : "none";
       card.innerHTML = '<div class="dep-pr-card-eyebrow">PR #' + esc(cfg.pr) +
         " review \u00B7 line comment</div>" +
-        g.comments.map(commentHtml).join("");
+        g.comments.map(function (c) { return commentHtml(c, "Reply on the PR"); }).join("");
       var block = blockAncestor(marks[0], root);
       block.insertAdjacentElement("afterend", card);
 
       badge.addEventListener("click", function () { toggleCard(card, badge); });
     });
 
-    renderSection(mount, cfg, comments, groups, anchored, unanchored);
+    // The mount section holds: inline-review summary, then the two read-only
+    // discussion threads (revision = PR conversation, design = tracking issue).
+    mount.innerHTML =
+      inlineSummaryHtml(cfg, comments, anchored, unanchored, data.reviewErr) +
+      threadHtml(cfg, "revision", data.prConv, data.prConvErr) +
+      threadHtml(cfg, "design", data.issue, data.issueErr);
   }
 
   function scheduleRetry() {
@@ -469,25 +570,22 @@
     var key = cacheKey(cfg);
     var pending = commentCache[key]
       ? Promise.resolve(commentCache[key])
-      : fetchComments(cfg).then(function (raw) {
-          commentCache[key] = raw || [];
-          return commentCache[key];
+      : fetchAll(cfg).then(function (data) {
+          commentCache[key] = data;
+          return data;
         });
 
-    pending.then(function (raw) {
+    pending.then(function (data) {
       try {
-        renderInto(mount, cfg, root, raw);
+        renderInto(mount, cfg, root, data);
         mount.setAttribute(DONE_ATTR, "1");
       } finally {
         running = false;
       }
-    }).catch(function (err) {
-      try {
-        renderError(mount, cfg, err);
-        mount.setAttribute(DONE_ATTR, "1");
-      } finally {
-        running = false;
-      }
+    }).catch(function () {
+      // fetchAll uses allSettled and never rejects; this only guards an
+      // unexpected render error so the single-flight lock is always released.
+      running = false;
     });
   }
 
