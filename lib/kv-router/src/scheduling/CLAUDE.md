@@ -93,7 +93,7 @@ sequenceDiagram
         G-->>A: MakeReady(id, placement)
         A->>Q: Reclassify/migrate into the physical ready class/lane
     end
-    Note over A,H: The remaining flow applies only to Ready/Defer; Bypass disarms the lease
+    Note over H,A: The remaining flow applies only to Ready/Defer, while Bypass disarms the lease
     par Lease handoff after ownership
         A->>A: Arm lease only after generation-scoped ownership exists
         A-->>H: Return armed lease acknowledgement
