@@ -368,6 +368,7 @@ func GateFrom(ctx context.Context) (Gate, bool) {
 }
 
 // MustGateFrom returns the effective feature gates or panics when none are attached.
+// Prefer it when a gate is required so broken context plumbing fails immediately.
 func MustGateFrom(ctx context.Context) Gate {
 	gate, ok := GateFrom(ctx)
 	if !ok {
