@@ -8,10 +8,10 @@ subtitle: Quickstart for deploying a model on Kubernetes with Helm and the Dynam
 Get a model running on Kubernetes in minutes.
 
 Dynamo's production path is Kubernetes-native: you install the platform with
-Helm, submit Dynamo CRDs, and let the operator reconcile inference graphs into
-pods, services, routing, model-loading, and scaling resources. The local and
-container guides remain useful for development, but Kubernetes is the canonical
-path for shared GPU clusters and multi-node serving.
+Helm, submit Dynamo custom resources, and let the operator reconcile inference
+graphs into pods, services, routing, model-loading, and scaling resources. The
+local and container guides remain useful for development, but Kubernetes is the
+canonical path for shared GPU clusters and multi-node serving.
 
 <Note>
 **Request entry.** This quickstart uses Dynamo-native Frontend routing: the Dynamo Frontend

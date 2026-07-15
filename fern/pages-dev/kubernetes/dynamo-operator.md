@@ -73,8 +73,8 @@ or uninstall the release to remove its webhook configurations. Cluster-wide admi
 Lease is deleted or expires.
 
 <Error>
-Pass `--skip-crds` and set `dynamo-operator.upgradeCRD=false`. Helm installs the chart's `crds/`
-directory before rendering templates, so the chart cannot detect a missing `--skip-crds` flag.
+Set `dynamo-operator.upgradeCRD=false`. Namespace-restricted operators use the CRDs installed and
+updated by the cluster-wide operator.
 </Error>
 
 ```bash
@@ -87,7 +87,6 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
 helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
   --namespace test-namespace \
   --create-namespace \
-  --skip-crds \
   --set dynamo-operator.namespaceRestriction.enabled=true \
   --set dynamo-operator.upgradeCRD=false \
   --set dynamo-operator.controllerManager.manager.image.tag=v2.0.0-beta
@@ -222,7 +221,7 @@ docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG \
 docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
 cd -
 
-# Install platform with custom operator image (CRDs are automatically installed by the chart)
+# Install platform with custom operator image (the operator init container applies CRDs)
 cd deploy/helm/charts
 helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \

@@ -357,7 +357,6 @@ helm install platform-operator dynamo-platform -n platform-system
 # 2. Deploy a namespace-restricted operator for team-a
 helm install team-a-operator dynamo-platform \
   -n team-a \
-  --skip-crds \
   --set dynamo-operator.namespaceRestriction.enabled=true \
   --set dynamo-operator.upgradeCRD=false
 ```
