@@ -52,6 +52,7 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 | `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | unset | Positive integer records | Optional gzip roll threshold in records. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional ZMQ PULL bind address for harness tool events. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame ZMQ topic filter when endpoint is configured. |
+| `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset (none) | Comma/whitespace-separated header names | Allowlist of HTTP request header names to record in `request_payload` rows (`payload.http_request_headers`), case-insensitive. Only listed headers are captured; unset/empty captures none. Applies to every sink. Captured values are unredacted, so avoid allowlisting credential-bearing headers. |
 
 > [!WARNING]
 > Deprecated. The legacy `jsonl` and `jsonl_gz` values for
@@ -196,7 +197,8 @@ Payload row:
 For canceled streams, gateway timeouts, and aggregation failures, the row still
 contains `payload.request`; `payload.response` is omitted. If the `otel`
 sink drops an oversized payload body, the row contains
-`payload_complete=false` and `payload_drop_reason`.
+`payload_complete=false` and `payload_drop_reason`; captured HTTP headers are
+kept in the marker unless the marker itself still exceeds the limit.
 
 Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to sinks.
 

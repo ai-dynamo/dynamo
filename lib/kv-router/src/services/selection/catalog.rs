@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use parking_lot::RwLock;
 
-use crate::protocols::WorkerId;
+use crate::protocols::{WorkerId, WorkerWithDpRank};
 
 use super::error::SelectionError;
 use super::types::{
@@ -68,7 +68,7 @@ impl WorkerCatalog {
     pub(super) fn list(
         &self,
         model_name: Option<&str>,
-        tenant_id: Option<&str>,
+        routing_group: Option<&str>,
     ) -> Vec<WorkerCatalogRecord> {
         let mut records: Vec<_> = self
             .workers
@@ -76,14 +76,15 @@ impl WorkerCatalog {
             .values()
             .filter(|record| {
                 model_name.is_none_or(|model_name| record.model_name == model_name)
-                    && tenant_id.is_none_or(|tenant_id| record.tenant_id == tenant_id)
+                    && routing_group
+                        .is_none_or(|routing_group| record.routing_group == routing_group)
             })
             .cloned()
             .collect();
         records.sort_by_key(|record| {
             (
                 record.model_name.clone(),
-                record.tenant_id.clone(),
+                record.routing_group.clone(),
                 record.worker_id,
             )
         });
@@ -94,7 +95,7 @@ impl WorkerCatalog {
         self.workers.read().values().any(|record| {
             record.lifecycle == WorkerLifecycle::Schedulable
                 && record.model_name == key.model_name
-                && record.tenant_id == key.tenant_id
+                && record.routing_group == key.routing_group
         })
     }
 
@@ -108,7 +109,7 @@ impl WorkerCatalog {
             .filter(|record| {
                 record.lifecycle == WorkerLifecycle::Schedulable
                     && record.model_name == key.model_name
-                    && record.tenant_id == key.tenant_id
+                    && record.routing_group == key.routing_group
             })
             .filter_map(|record| {
                 record
@@ -135,7 +136,24 @@ impl WorkerCatalog {
         let record = workers.get(&worker_id)?;
         if record.lifecycle != WorkerLifecycle::Schedulable
             || record.model_name != key.model_name
-            || record.tenant_id != key.tenant_id
+            || record.routing_group != key.routing_group
+        {
+            return None;
+        }
+        record.endpoint.clone()
+    }
+
+    pub(super) fn schedulable_worker_endpoint(
+        &self,
+        worker: WorkerWithDpRank,
+        key: &SelectionKey,
+    ) -> Option<String> {
+        let workers = self.workers.read();
+        let record = workers.get(&worker.worker_id)?;
+        if record.lifecycle != WorkerLifecycle::Schedulable
+            || record.model_name != key.model_name
+            || record.routing_group != key.routing_group
+            || !record.dp_ranks().any(|rank| rank == worker.dp_rank)
         {
             return None;
         }

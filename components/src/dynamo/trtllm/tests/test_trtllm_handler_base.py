@@ -4,7 +4,7 @@
 import asyncio
 import re as re_mod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 from unittest.mock import MagicMock
 
@@ -18,11 +18,13 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
+from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.llm_engine import TrtllmLLMEngine
+from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import HandlerBase
 
 pytestmark = [
@@ -30,8 +32,10 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.pre_merge,
     pytest.mark.gpu_1,
-    pytest.mark.profiled_vram_gib(0),
 ]
+
+# Intentionally omit profiled_vram_gib so this import-heavy module runs in the
+# sequential GPU stage instead of starting one TRT-LLM subprocess per test node.
 
 
 @dataclass
@@ -191,6 +195,16 @@ class TestOverrideSamplingParams:
 class TestLLMEngineOverrideSamplingParams:
     """Tests for the unified LLMEngine _override_sampling_params path."""
 
+    JSON_SCHEMA: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    JSON_SCHEMA_STRING: ClassVar[str] = (
+        '{"type":"object","properties":{"answer":{"type":"string"}},'
+        '"required":["answer"]}'
+    )
+
     def test_n_is_passed_through(self):
         sampling_params = MockSamplingParams()
         request = {"sampling_options": {"n": 2}}
@@ -208,6 +222,65 @@ class TestLLMEngineOverrideSamplingParams:
 
         assert result.n == 2
         assert result.best_of == 4
+
+    @pytest.mark.parametrize(
+        ("guided_decoding", "expected_attribute", "expected_value"),
+        [
+            ({"json": JSON_SCHEMA}, "json", JSON_SCHEMA),
+            ({"json": JSON_SCHEMA_STRING}, "json", JSON_SCHEMA_STRING),
+            ({"regex": "[0-9]+"}, "regex", "[0-9]+"),
+            (
+                {"grammar": 'root ::= "yes" | "no"'},
+                "grammar",
+                'root ::= "yes" | "no"',
+            ),
+            ({"choice": ["yes", "no", "maybe"]}, "regex", "(yes|no|maybe)"),
+        ],
+        ids=["json-object", "json-string", "regex", "grammar", "choice"],
+    )
+    def test_guided_decoding_constraints_are_converted(
+        self, guided_decoding, expected_attribute, expected_value
+    ):
+        sampling_params = MockSamplingParams()
+        request = {"sampling_options": {"guided_decoding": guided_decoding}}
+
+        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
+
+        assert not isinstance(result.guided_decoding, dict)
+        assert getattr(result.guided_decoding, expected_attribute) == expected_value
+
+    def test_guided_decoding_choice_escapes_regex_metacharacters(self):
+        sampling_params = MockSamplingParams()
+        choices = ["yes (confirmed)", "no [rejected]", "maybe?"]
+        request = {"sampling_options": {"guided_decoding": {"choice": choices}}}
+
+        result = TrtllmLLMEngine._override_sampling_params(sampling_params, request)
+
+        expected = "(" + "|".join(re_mod.escape(choice) for choice in choices) + ")"
+        assert result.guided_decoding.regex == expected
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        (None, "xgrammar"),
+        ('{"guided_decoding_backend": "llguidance"}', "llguidance"),
+    ],
+    ids=["configured", "engine-override"],
+)
+def test_unified_guided_decoding_backend_matches_legacy(override, expected):
+    argv = [
+        "--model-path",
+        "Qwen/Qwen3-0.6B",
+        "--guided-decoding-backend",
+        "xgrammar",
+    ]
+    if override is not None:
+        argv.extend(["--override-engine-args", override])
+
+    engine, _ = asyncio.run(TrtllmLLMEngine.from_args(argv))
+
+    assert engine.engine_args["guided_decoding_backend"] == expected
 
 
 class TestGuidedDecodingFromToolChoice:
@@ -564,6 +637,76 @@ class TestMultimodalGuard:
         assert result["multi_modal_data"] is None
 
 
+class TestPrefillPromptMetadata:
+    """Tests for prompt metadata in the legacy prefill handoff."""
+
+    def _make_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.multimodal_processor = MagicMock()
+        config.shutdown_event = None
+        return _ConcreteHandler(config)
+
+    def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
+        params = DisaggregatedParams(request_type="context_only")
+        output = MagicMock(disaggregated_params=params)
+        result = MagicMock(prompt=prompt, prompt_token_ids=prompt_token_ids)
+
+        return self._make_handler()._encode_and_pack_disaggregated_params(
+            output,
+            params,
+            request,
+            result,
+            processed_input,
+        )
+
+    def test_text_only_prefill_omits_prompt_metadata(self):
+        result = self._pack_metadata(
+            request={"token_ids": [1, 2, 3]},
+            processed_input=[1, 2, 3],
+            prompt="text prompt",
+            prompt_token_ids=[1, 2, 3],
+        )
+
+        assert "_epd_metadata" not in result
+
+    def test_multimodal_prefill_preserves_prompt_metadata(self):
+        result = self._pack_metadata(
+            request={
+                "token_ids": [1, 2, 3],
+                "multi_modal_data": {
+                    "image_url": [{"Url": "http://example.com/image.jpg"}]
+                },
+            },
+            processed_input={"prompt": "describe image"},
+            prompt="raw prompt",
+            prompt_token_ids=[1, 2, 3],
+        )
+
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt": "describe image",
+            "_prefill_prompt_token_ids": [1, 2, 3],
+        }
+
+    def test_epd_prefill_preserves_encoder_metadata(self):
+        result = self._pack_metadata(
+            request={
+                "token_ids": [1, 2, 3],
+                "_epd_processed_prompt": "encoder prompt",
+                "_epd_prompt_token_ids": [1, 2, 3],
+            },
+            processed_input={"prompt": "encoder prompt"},
+            prompt="engine prompt",
+            prompt_token_ids=[4, 5, 6],
+        )
+
+        assert result["_epd_metadata"] == {
+            "_prefill_prompt": "encoder prompt",
+            "_prefill_prompt_token_ids": [4, 5, 6],
+            "_epd_processed_prompt": "engine prompt",
+            "_epd_prompt_token_ids": [4, 5, 6],
+        }
+
+
 class TestDisaggRequestId:
     """Tests for disagg_request_id population in _setup_disaggregated_params_for_mode."""
 
@@ -733,6 +876,59 @@ class TestHealthCheckPriority:
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
 
     @pytest.mark.asyncio
+    async def test_default_max_tokens_uses_processed_prompt_token_ids(self):
+        """DECODE-style processed tokens size the remaining context correctly."""
+        handler = self._make_handler()
+        handler.max_seq_len = 100
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={"prompt_token_ids": list(range(40))}
+        )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": None},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert kwargs["sampling_params"].max_tokens == 60
+
+    @pytest.mark.asyncio
+    async def test_expanded_prompt_len_is_not_forwarded_to_engine(self):
+        handler = self._make_handler()
+        handler._prepare_input_for_generation = mock.AsyncMock(
+            return_value={
+                "prompt_token_ids": [1, 2, 3],
+                "expanded_prompt_len": 42,
+            }
+        )
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+        }
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks
+
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        assert "expanded_prompt_len" not in kwargs["inputs"]
+
+    @pytest.mark.asyncio
     async def test_routing_cache_salt_forwarded_to_generate_async(self):
         handler = self._make_handler()
         generation_result = self._make_mock_generation_result()
@@ -753,3 +949,294 @@ class TestHealthCheckPriority:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["cache_salt"] == "tenant-a"
+
+
+class TestDefaultMaxTokens:
+    """Unit tests for HandlerBase._default_max_tokens (omitted max_tokens sizing)."""
+
+    def test_text_fills_remaining_context(self):
+        # 100 - len([1,2,3]) = 97
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], False, None) == 97
+
+    def test_text_on_multimodal_worker_ignores_expanded(self):
+        # A text request (no images) uses len(token_ids) even if an expanded
+        # length is somehow present; it must not defer like an image request.
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], False, 40) == 97
+
+    def test_returns_none_without_max_seq_len(self):
+        assert HandlerBase._default_max_tokens(None, [1, 2, 3], False, None) is None
+
+    def test_image_uses_expanded_len(self):
+        # 100 - 40 = 60; token_ids ignored in favor of the expanded length
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], True, 40) == 60
+
+    def test_image_without_expanded_defers(self):
+        # No expanded length available -> defer to engine default (None)
+        assert HandlerBase._default_max_tokens(100, [1, 2, 3], True, None) is None
+
+    def test_image_zero_expanded_len_is_valid(self):
+        assert HandlerBase._default_max_tokens(100, [], True, 0) == 100
+
+    def test_floors_at_one(self):
+        # Prompt already at/over context -> never returns <= 0
+        assert HandlerBase._default_max_tokens(3, [1, 2, 3, 4, 5], False, None) == 1
+
+
+class TestExpandedPromptLen:
+    """Unit tests for MultimodalRequestProcessor._expanded_prompt_len."""
+
+    def _processor(self, mm_token_ids, tokens_per_image):
+        # Bypass __init__ (which would build a real input processor) and inject a mock.
+        proc = MultimodalRequestProcessor.__new__(MultimodalRequestProcessor)
+        ip = MagicMock()
+        ip.get_mm_token_ids.return_value = (
+            torch.tensor(mm_token_ids) if mm_token_ids is not None else None
+        )
+        ip.get_num_tokens_per_image.side_effect = lambda image: tokens_per_image
+        proc.input_processor = ip
+        return proc
+
+    def test_replaces_placeholders_with_image_tokens(self):
+        # token_ids has one placeholder (99); one image expands to 256 tokens.
+        # 4 tokens - 1 placeholder + 256 = 259
+        proc = self._processor(mm_token_ids=[99], tokens_per_image=256)
+        assert proc._expanded_prompt_len([1, 2, 99, 3], images=["img"]) == 259
+
+    def test_multiple_images_sum(self):
+        # Two placeholders, two images x 10 tokens: 5 - 2 + 20 = 23
+        proc = self._processor(mm_token_ids=[99], tokens_per_image=10)
+        assert proc._expanded_prompt_len([1, 99, 2, 99, 3], ["a", "b"]) == 23
+
+    def test_none_without_input_processor(self):
+        proc = MultimodalRequestProcessor.__new__(MultimodalRequestProcessor)
+        proc.input_processor = None
+        assert proc._expanded_prompt_len([1, 2, 3], ["img"]) is None
+
+    def test_none_without_images(self):
+        proc = self._processor(mm_token_ids=[99], tokens_per_image=256)
+        assert proc._expanded_prompt_len([1, 2, 3], None) is None
+
+    def test_none_on_processor_error(self):
+        proc = MultimodalRequestProcessor.__new__(MultimodalRequestProcessor)
+        ip = MagicMock()
+        ip.get_mm_token_ids.side_effect = RuntimeError("boom")
+        proc.input_processor = ip
+        assert proc._expanded_prompt_len([1, 2, 3], ["img"]) is None
+
+
+class TestRequestHasImages:
+    """Unit tests for HandlerBase._request_has_images (image-vs-text classification).
+
+    Regression coverage for the bug where a text request to a multimodal worker
+    was mis-classified as multimodal and its omitted max_tokens deferred to the
+    engine default (32) instead of filling from len(token_ids).
+    """
+
+    def test_text_request_has_no_images(self):
+        # processed_input for text on a multimodal worker: no mm keys.
+        assert HandlerBase._request_has_images({"prompt_token_ids": [1, 2, 3]}) is False
+
+    def test_multi_modal_data_is_images(self):
+        assert (
+            HandlerBase._request_has_images({"multi_modal_data": {"image": ["x"]}})
+            is True
+        )
+
+    def test_multi_modal_embeddings_is_images(self):
+        assert (
+            HandlerBase._request_has_images(
+                {"multi_modal_embeddings": {"image": ["x"]}}
+            )
+            is True
+        )
+
+    def test_empty_mm_data_is_not_images(self):
+        # mm key present but falsy (text path sets these to None) -> not images.
+        assert HandlerBase._request_has_images({"multi_modal_data": None}) is False
+
+    def test_none_is_not_images(self):
+        assert HandlerBase._request_has_images(None) is False
+
+    def test_non_dict_is_not_images(self):
+        assert HandlerBase._request_has_images([1, 2, 3]) is False
+
+
+class _FakeConversationParams:
+
+    """Stand-in for tensorrt_llm.llmapi.ConversationParams. Only ``conversation_id``
+    is read back by the assertions."""
+
+    def __init__(self, conversation_id):
+        self.conversation_id = conversation_id
+
+
+class TestConversationAffinity:
+    """Verify generate_locally's conversation-affinity branching on the legacy path.
+
+    When engine-owned conversation-affinity ADP routing is enabled, the handler
+    must (a) NOT force ``attention_dp_rank`` and (b) forward the frontend's
+    ``agent_context.session_id`` as ``ConversationParams`` to
+    ``generate_async``. When disabled, the router's ``dp_rank`` still drives
+    ``SchedulingParams`` as before.
+    """
+
+    def _make_handler(self, *, conversation_affinity: bool) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        handler = _ConcreteHandler(config)
+        handler.publisher = None
+        handler.multimodal_processor = None
+        handler.additional_metrics = None
+        handler.max_seq_len = None
+        handler.default_sampling_params = MockSamplingParams()
+        # Pre-resolve the gate so the lazy path in _generate_locally_impl is a
+        # no-op — the branching under test happens downstream.
+        handler._conversation_affinity = conversation_affinity
+        return handler
+
+    def _make_mock_generation_result(self):
+        output = MagicMock()
+        output.token_ids = [42]
+        output.finish_reason = "stop"
+        output.stop_reason = None
+        output.request_perf_metrics = None
+
+        res = MagicMock()
+        res.outputs = [output]
+        res.finished = True
+
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+
+        async def mock_aiter(self_mock):
+            yield res
+
+        generation_result.__aiter__ = mock_aiter
+        return generation_result
+
+    def _make_context(self):
+        context = MagicMock()
+        never_resolve = asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.return_value = never_resolve
+        context.id.return_value = "conv-affinity-test"
+        return context
+
+    async def _drive(self, handler, request):
+        generation_result = self._make_mock_generation_result()
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert len(chunks) > 0
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        return kwargs
+
+    @pytest.mark.asyncio
+    async def test_affinity_off_forwards_router_dp_rank(self):
+        """affinity=False + router dp_rank → SchedulingParams with that rank."""
+        handler = self._make_handler(conversation_affinity=False)
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+            },
+        )
+        scheduling_params = kwargs["scheduling_params"]
+        assert scheduling_params is not None
+        assert scheduling_params.attention_dp_rank == 3
+        assert scheduling_params.attention_dp_relax is False
+        assert "conversation_params" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_affinity_off_no_rank_leaves_scheduling_params_none(self):
+        """affinity=False + no router rank → scheduling_params=None, no conv kwarg."""
+        handler = self._make_handler(conversation_affinity=False)
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        assert "conversation_params" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_with_session_id_suppresses_rank(self, monkeypatch):
+        """affinity=True + session id → scheduling_params=None + ConversationParams."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(conversation_affinity=True)
+        # Router still stamps a rank; affinity mode must ignore it — an explicit
+        # rank would bypass the engine's ConversationAwareADPRouter.
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-42:agent-0"},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-42:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_affinity_on_without_session_id_passes_none_conversation_params(
+        self, monkeypatch
+    ):
+        """affinity=True + no session id → scheduling_params=None,
+        conversation_params kwarg present with value None (no-id balancing)."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        handler = self._make_handler(conversation_affinity=True)
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+            },
+        )
+        assert kwargs["scheduling_params"] is None
+        assert "conversation_params" in kwargs
+        assert kwargs["conversation_params"] is None
+
+    @pytest.mark.asyncio
+    async def test_lazy_resolution_raises_when_api_missing(self, monkeypatch):
+        """Startup gate: engine has affinity ON but ConversationParams API is
+        missing → RuntimeError on first request, before generate_async is called."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        # Trigger the lazy path with an engine config that enables affinity.
+        handler._conversation_affinity = None
+        handler.engine.llm.args.attention_dp_config = {
+            "kv_cache_routing_conversation_affinity": True
+        }
+        handler.engine.llm.generate_async = MagicMock()
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {"temperature": 0.7},
+        }
+        with pytest.raises(RuntimeError, match="ConversationParams API"):
+            async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+        handler.engine.llm.generate_async.assert_not_called()
