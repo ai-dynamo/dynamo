@@ -55,6 +55,7 @@ fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
 }
 
@@ -71,11 +72,13 @@ impl KvPushRouter {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
-        RouterRequestMetrics::from_component(chooser.client().endpoint.component());
+        let request_metrics =
+            RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
         Ok(KvPushRouter {
             inner,
             chooser,
+            request_metrics,
             affinity,
         })
     }
@@ -208,6 +211,7 @@ impl KvPushRouter {
         let block_size = self.chooser.block_size() as usize;
         let mut guard = RequestGuard::new(
             self.chooser.clone(),
+            self.request_metrics.clone(),
             context_id.clone(),
             request,
             selection.scheduler_tracked,
@@ -515,7 +519,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 );
                 tracker.record_router_queue_depth(self.chooser.pending_count());
             }
-            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component())
+            self.request_metrics
                 .input_sequence_tokens
                 .observe(request.token_ids.len() as f64);
             let stream_context = request.context().clone();
@@ -698,6 +702,22 @@ mod tests {
         (router, runtime)
     }
 
+    async fn track_request(
+        router: &KvPushRouter,
+        is_query_only: bool,
+    ) -> (SingleIn<PreprocessedRequest>, WorkerSelection, RequestGuard) {
+        let request = Context::new(request());
+        let (mut selection, _) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, is_query_only)
+            .await
+            .unwrap();
+        let guard = router
+            .track_selection(&request, &mut selection, is_query_only)
+            .await
+            .unwrap();
+        (request, selection, guard)
+    }
+
     #[tokio::test]
     async fn session_affinity_disabled_does_not_create_coordinator() {
         let (router, runtime) = router(None).await;
@@ -708,43 +728,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_started_counter_records_admission_before_dispatch() {
+    #[serial_test::serial]
+    async fn router_request_counters_follow_admission_and_completion_lifecycle() {
         let (router, runtime) = router(None).await;
-        let metrics = RouterRequestMetrics::get().unwrap();
+        let metrics = router.request_metrics.clone();
         let started_before = metrics.requests_started_total.get();
         let completed_before = metrics.requests_total.get();
 
-        let admitted_request = Context::new(request());
-        let (mut selection, _) = router
-            .select_with_affinity(&admitted_request, RequestPhase::Aggregated, false)
-            .await
-            .unwrap();
-        let mut guard = router
-            .track_selection(&admitted_request, &mut selection, false)
-            .await
-            .unwrap();
+        let controller = Controller::new("pre-admission-cancellation".to_string());
+        controller.stop();
+        let cancelled_request = Context::with_controller(request(), controller);
+        assert!(
+            router
+                .select_with_affinity(&cancelled_request, RequestPhase::Aggregated, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(metrics.requests_started_total.get(), started_before);
+
+        let (_, _, mut query_guard) = track_request(&router, true).await;
+        query_guard.abort().await;
+        drop(query_guard);
+        assert_eq!(metrics.requests_started_total.get(), started_before);
+
+        let (_, _, mut cancelled_guard) = track_request(&router, false).await;
 
         assert_eq!(metrics.requests_started_total.get(), started_before + 1);
         assert_eq!(metrics.requests_total.get(), completed_before);
 
         // Admission remains counted even when the request aborts before dispatch.
-        guard.abort().await;
-        drop(guard);
+        cancelled_guard.abort().await;
+        drop(cancelled_guard);
         assert_eq!(metrics.requests_started_total.get(), started_before + 1);
         assert_eq!(metrics.requests_total.get(), completed_before);
 
-        let query_request = Context::new(request());
-        let (mut query_selection, _) = router
-            .select_with_affinity(&query_request, RequestPhase::Aggregated, true)
-            .await
-            .unwrap();
-        let mut query_guard = router
-            .track_selection(&query_request, &mut query_selection, true)
-            .await
-            .unwrap();
+        let (failed_request, failed_selection, failed_dispatch_guard) =
+            track_request(&router, false).await;
+        assert!(
+            router
+                .dispatch_selection(
+                    failed_request,
+                    failed_selection,
+                    failed_dispatch_guard,
+                    true,
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(metrics.requests_started_total.get(), started_before + 2);
+        assert_eq!(metrics.requests_total.get(), completed_before);
 
-        assert_eq!(metrics.requests_started_total.get(), started_before + 1);
-        query_guard.abort().await;
+        let (_, _, mut completed_guard) = track_request(&router, false).await;
+        completed_guard.start_dispatch("aggregated");
+        completed_guard.mark_dispatched();
+        completed_guard.finish().await;
+        drop(completed_guard);
+        assert_eq!(metrics.requests_started_total.get(), started_before + 3);
+        assert_eq!(metrics.requests_total.get(), completed_before + 1);
 
         drop(router);
         runtime.shutdown();

@@ -281,33 +281,48 @@ class PrometheusAPIClient:
 
     def get_avg_request_count(self, interval: str, model_name: str):
         if self.metrics_source == "router":
+            ns = self.dynamo_namespace.replace("-", "_")
+            ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
+            router_requests_started = (
+                f"{prometheus_names.name_prefix.COMPONENT}_"
+                f"{prometheus_names.router.REQUESTS_STARTED_TOTAL}"
+            )
+            router_requests_total = (
+                f"{prometheus_names.name_prefix.COMPONENT}_"
+                f"{prometheus_names.router.REQUESTS_TOTAL}"
+            )
+            admitted_or_completed_query = (
+                "sum("
+                f"increase({router_requests_started}{{{ns_filter}}}[{interval}]) "
+                "or ignoring(__name__) "
+                f"increase({router_requests_total}{{{ns_filter}}}[{interval}])"
+                ")"
+            )
             try:
-                ns = self.dynamo_namespace.replace("-", "_")
-                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
-                router_requests_started = (
-                    f"{prometheus_names.name_prefix.COMPONENT}_"
-                    f"{prometheus_names.router.REQUESTS_STARTED_TOTAL}"
+                request_result = self.prom.custom_query(
+                    query=admitted_or_completed_query
                 )
-                started_query = (
-                    f"sum(increase({router_requests_started}"
-                    f"{{{ns_filter}}}[{interval}]))"
-                )
-                started_result = self.prom.custom_query(query=started_query)
-                if started_result:
-                    router_started_count = float(started_result[0]["value"][1])
-                    if not math.isnan(router_started_count):
-                        return router_started_count
-
-                router_requests_total = (
-                    f"{prometheus_names.name_prefix.COMPONENT}_"
-                    f"{prometheus_names.router.REQUESTS_TOTAL}"
-                )
+                if request_result:
+                    router_request_count = float(request_result[0]["value"][1])
+                    if not math.isnan(router_request_count):
+                        return router_request_count
+            except Exception as e:
                 logger.warning(
-                    "No Prometheus metric data available for %s; falling back to "
+                    "Error querying admitted router requests from %s; falling back to "
+                    "completed request count from %s, which may underestimate demand: %s",
+                    router_requests_started,
+                    router_requests_total,
+                    e,
+                )
+            else:
+                logger.warning(
+                    "No usable Prometheus metric data available for %s; falling back to "
                     "completed request count from %s, which may underestimate demand",
                     router_requests_started,
                     router_requests_total,
                 )
+
+            try:
                 completed_query = (
                     f"sum(increase({router_requests_total}{{{ns_filter}}}[{interval}]))"
                 )
@@ -323,7 +338,7 @@ class PrometheusAPIClient:
                     0 if math.isnan(router_completed_count) else router_completed_count
                 )
             except Exception as e:
-                logger.error("Error getting avg request count: %s", e)
+                logger.error("Error getting completed router request count: %s", e)
                 return 0
         # This function follows a different query pattern than the other metrics:
         # use frontend-started requests so throughput planning sees offered load,

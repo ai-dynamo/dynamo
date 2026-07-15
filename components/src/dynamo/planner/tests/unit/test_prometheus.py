@@ -15,11 +15,13 @@
 
 import logging
 import math
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from dynamo import prometheus_names
+from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
 from dynamo.planner.monitoring.traffic_metrics import (
     FrontendMetric,
     FrontendMetricContainer,
@@ -33,6 +35,22 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.planner,
 ]
+
+
+class _FixedPrefillCapacity:
+    def __init__(self, engine_rps: float):
+        self.engine_rps = engine_rps
+
+    def find_engine_capacity_rps(self, **kwargs):
+        return SimpleNamespace(rps=self.engine_rps, ttft_ms=100.0, eligible=True)
+
+
+class _ThroughputScalingHarness(ThroughputScalingMixin):
+    def __init__(self, engine_rps: float):
+        self._config = SimpleNamespace(ttft_ms=200.0, min_endpoint=1)
+        self._prefill_regression = _FixedPrefillCapacity(engine_rps)
+        self._diag_throughput_reason = None
+        self._diag_engine_rps_prefill = None
 
 
 @pytest.fixture
@@ -547,18 +565,22 @@ class TestPrometheusAPIClientRouterSource:
     def test_get_avg_request_count_uses_router_requests_started_total(
         self, router_client
     ):
-        """Router request count uses admitted requests, not completed responses."""
+        """Router count prefers admitted requests for each upgraded router."""
         result = router_client.get_avg_request_count("60s", "mymodel")
         assert result == 42.0
 
         call_args = str(router_client.prom.custom_query.call_args)
-        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_STARTED_TOTAL}"
-        assert expected_metric in call_args
+        started_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_STARTED_TOTAL}"
+        completed_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
+        assert started_metric in call_args
+        assert completed_metric in call_args
+        assert "or ignoring(__name__)" in call_args
+        assert router_client.prom.custom_query.call_count == 1
 
-    def test_router_request_count_falls_back_to_completed_when_started_missing(
+    def test_router_request_count_falls_back_when_coalesced_query_is_empty(
         self, router_client, caplog
     ):
-        """Older routers without the admitted counter still report completions."""
+        """An empty coalesced query retries the completed counter directly."""
         router_client.prom.custom_query.side_effect = [
             [],
             [{"value": [0, "17.0"]}],
@@ -578,6 +600,23 @@ class TestPrometheusAPIClientRouterSource:
             "may underestimate demand" in record.message for record in caplog.records
         )
 
+    def test_router_request_count_falls_back_when_started_query_raises(
+        self, router_client, caplog
+    ):
+        router_client.prom.custom_query.side_effect = [
+            RuntimeError("started query failed"),
+            [{"value": [0, "19.0"]}],
+        ]
+
+        with caplog.at_level(logging.WARNING):
+            result = router_client.get_avg_request_count("60s", "mymodel")
+
+        assert result == 19.0
+        assert router_client.prom.custom_query.call_count == 2
+        assert any(
+            "started query failed" in record.message for record in caplog.records
+        )
+
     def test_router_request_count_falls_back_when_started_is_nan(self, router_client):
         router_client.prom.custom_query.side_effect = [
             [{"value": [0, "NaN"]}],
@@ -591,17 +630,38 @@ class TestPrometheusAPIClientRouterSource:
     def test_router_started_count_preserves_backpressured_scale_up_signal(
         self, router_client
     ):
-        """Admitted demand can request scale-up while completions stay capped."""
+        """Admitted demand drives the Planner replica calculation under backpressure."""
+        interval_seconds = 60.0
         admitted_count = 120.0
-        current_capacity = 60.0
-        router_client.prom.custom_query.side_effect = [
-            [{"value": [0, str(admitted_count)]}],
-            [{"value": [0, str(current_capacity)]}],
+        completed_count = 60.0
+        engine_rps = 1.0
+        router_client.prom.custom_query.return_value = [
+            {"value": [0, str(admitted_count)]}
         ]
 
         observed_count = router_client.get_avg_request_count("60s", "mymodel")
+        scaling = _ThroughputScalingHarness(engine_rps)
+        admitted_replicas = scaling._compute_prefill_replicas(
+            demand_rps=observed_count / interval_seconds,
+            isl=1000,
+            osl=100,
+        )
+        completed_replicas = scaling._compute_prefill_replicas(
+            demand_rps=completed_count / interval_seconds,
+            isl=1000,
+            osl=100,
+        )
 
-        assert math.ceil(observed_count / current_capacity) == 2
+        assert admitted_replicas == 2
+        assert completed_replicas == 1
+        assert router_client.prom.custom_query.call_count == 1
+
+    def test_router_request_count_preserves_valid_zero(self, router_client):
+        router_client.prom.custom_query.return_value = [{"value": [0, "0.0"]}]
+
+        result = router_client.get_avg_request_count("60s", "mymodel")
+
+        assert result == 0.0
         assert router_client.prom.custom_query.call_count == 1
 
     def test_dynamo_namespace_filter_in_router_histogram_query(self, router_client):
