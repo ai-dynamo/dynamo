@@ -42,8 +42,8 @@ use dynamo_runtime::metrics::frontend_perf::{
 use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
-use crate::kv_router::admission_completion::{
-    ADMISSION_TOOL_SUMMARY_CONTEXT_KEY, SharedAdmissionToolSummary,
+use crate::kv_router::push_router::{
+    ADMISSION_PROGRESS_UPDATERS_CONTEXT_KEY, AdmissionProgressUpdaters,
 };
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
@@ -3390,13 +3390,19 @@ impl
 
         // repack the common completion request
         let mut common_request = context.map(|_| common_request);
-        let admission_tool_summary = common_request
-            .agent_context
-            .as_ref()
-            .map(|_| SharedAdmissionToolSummary::default());
-        if let Some(summary) = &admission_tool_summary {
-            common_request.insert(ADMISSION_TOOL_SUMMARY_CONTEXT_KEY, summary.clone());
-        }
+        let admission_progress = if common_request.agent_context.is_some() {
+            common_request.insert(
+                ADMISSION_PROGRESS_UPDATERS_CONTEXT_KEY,
+                AdmissionProgressUpdaters::default(),
+            );
+            Some(
+                common_request
+                    .get::<AdmissionProgressUpdaters>(ADMISSION_PROGRESS_UPDATERS_CONTEXT_KEY)
+                    .map_err(Error::msg)?,
+            )
+        } else {
+            None
+        };
 
         // create a stream of annotations this will be prepend to the response stream
         let annotations: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = annotations
@@ -3427,32 +3433,25 @@ impl
             prompt_injected_reasoning,
             uses_tool_call_structural_tag,
         )?;
-        let transformed_stream: Pin<
-            Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
-        > = if let Some(summary) = admission_tool_summary {
-            Box::pin(transformed_stream.map(move |response| {
-                if let Some(data) = response.data.as_ref() {
-                    for choice in &data.inner.choices {
-                        let Some(tool_calls) = choice.delta.tool_calls.as_ref() else {
-                            continue;
-                        };
-                        for tool_call in tool_calls {
-                            summary.record_tool_call(
-                                choice.index,
-                                tool_call.index,
-                                tool_call
-                                    .function
-                                    .as_ref()
-                                    .and_then(|function| function.name.as_deref()),
-                            );
-                        }
+        let transformed_stream = transformed_stream.map(move |response| {
+            if let Some(progress) = admission_progress.as_ref()
+                && let Some(data) = response.data.as_ref()
+            {
+                for choice in &data.inner.choices {
+                    for tool_call in choice.delta.tool_calls.iter().flatten() {
+                        progress.record_tool_call(
+                            choice.index,
+                            tool_call.index,
+                            tool_call
+                                .function
+                                .as_ref()
+                                .and_then(|function| function.name.as_deref()),
+                        );
                     }
                 }
-                response
-            }))
-        } else {
-            Box::pin(transformed_stream)
-        };
+            }
+            response
+        });
 
         // Apply request payload aggregation strategy.
         // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,

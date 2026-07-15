@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use rustc_hash::FxHashSet;
 use serde::Deserialize;
 
@@ -38,7 +39,7 @@ impl AdmissionId {
 /// monotonic progress without sending commands through the scheduler actor.
 #[derive(Debug, Clone)]
 pub struct RequestProgress {
-    context_tokens: Arc<AtomicUsize>,
+    state: Arc<RequestProgressState>,
 }
 
 /// Write capability paired with [`RequestProgress`].
@@ -47,13 +48,25 @@ pub struct RequestProgress {
 /// request's logical context backwards.
 #[derive(Debug, Clone)]
 pub struct RequestProgressUpdater {
-    context_tokens: Arc<AtomicUsize>,
+    state: Arc<RequestProgressState>,
+}
+
+#[derive(Debug)]
+struct RequestProgressState {
+    context_tokens: AtomicUsize,
+    tool_calls: Mutex<Vec<AdmissionToolCall>>,
+}
+
+#[derive(Debug)]
+struct AdmissionToolCall {
+    choice_index: u32,
+    tool_call_index: u32,
+    name: Option<String>,
 }
 
 /// Bounded parsed tool-call metadata from one completed request.
 ///
-/// Admission receives this only at the terminal lifecycle boundary. It is not
-/// request payload and deliberately excludes tool arguments.
+/// It deliberately excludes tool arguments and retains at most four calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdmissionToolSummary {
     tool_call_count: usize,
@@ -61,30 +74,6 @@ pub struct AdmissionToolSummary {
 }
 
 impl AdmissionToolSummary {
-    const MAX_TOOL_CALLS: usize = 4;
-    const MAX_TOOL_NAME_BYTES: usize = 128;
-
-    /// Records one distinct parsed tool call, up to the bounded summary size.
-    ///
-    /// Returns whether the call was retained, so callers can keep their
-    /// request-local deduplication state bounded as well.
-    pub fn record_tool_call(&mut self) -> bool {
-        if self.tool_call_count == Self::MAX_TOOL_CALLS {
-            return false;
-        }
-        self.tool_call_count = self.tool_call_count.saturating_add(1);
-        true
-    }
-
-    /// Records a tool name associated with a retained call.
-    pub fn record_tool_name(&mut self, name: &str) -> bool {
-        if self.tool_names.len() == Self::MAX_TOOL_CALLS || name.len() > Self::MAX_TOOL_NAME_BYTES {
-            return false;
-        }
-        self.tool_names.push(name.to_owned());
-        true
-    }
-
     pub fn tool_call_count(&self) -> usize {
         self.tool_call_count
     }
@@ -96,26 +85,68 @@ impl AdmissionToolSummary {
 
 impl RequestProgress {
     pub fn new(initial_context_tokens: usize) -> (Self, RequestProgressUpdater) {
-        let context_tokens = Arc::new(AtomicUsize::new(initial_context_tokens));
+        let state = Arc::new(RequestProgressState {
+            context_tokens: AtomicUsize::new(initial_context_tokens),
+            tool_calls: Mutex::new(Vec::new()),
+        });
         (
             Self {
-                context_tokens: Arc::clone(&context_tokens),
+                state: Arc::clone(&state),
             },
-            RequestProgressUpdater { context_tokens },
+            RequestProgressUpdater { state },
         )
     }
 
     #[inline]
     pub fn context_tokens(&self) -> usize {
-        self.context_tokens.load(Ordering::Relaxed)
+        self.state.context_tokens.load(Ordering::Relaxed)
+    }
+
+    pub fn tool_summary(&self) -> AdmissionToolSummary {
+        let tool_calls = self.state.tool_calls.lock();
+        AdmissionToolSummary {
+            tool_call_count: tool_calls.len(),
+            tool_names: tool_calls
+                .iter()
+                .filter_map(|call| call.name.clone())
+                .collect(),
+        }
     }
 }
 
 impl RequestProgressUpdater {
+    const MAX_TOOL_CALLS: usize = 4;
+    const MAX_TOOL_NAME_BYTES: usize = 128;
+
     #[inline]
     pub fn update_context_tokens(&self, context_tokens: usize) {
-        self.context_tokens
+        self.state
+            .context_tokens
             .fetch_max(context_tokens, Ordering::Relaxed);
+    }
+
+    /// Records one parsed tool call. Repeated chunks for the same call update
+    /// its name without growing the bounded summary.
+    pub fn record_tool_call(&self, choice_index: u32, tool_call_index: u32, name: Option<&str>) {
+        let mut tool_calls = self.state.tool_calls.lock();
+        let name = name
+            .filter(|name| name.len() <= Self::MAX_TOOL_NAME_BYTES)
+            .map(str::to_owned);
+        if let Some(call) = tool_calls.iter_mut().find(|call| {
+            call.choice_index == choice_index && call.tool_call_index == tool_call_index
+        }) {
+            if name.is_some() {
+                call.name = name;
+            }
+            return;
+        }
+        if tool_calls.len() < Self::MAX_TOOL_CALLS {
+            tool_calls.push(AdmissionToolCall {
+                choice_index,
+                tool_call_index,
+                name,
+            });
+        }
     }
 }
 
@@ -273,7 +304,7 @@ pub enum AdmissionDecision {
     Defer,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdmissionEvent {
     /// The backend accepted the request after the router selected and reserved
@@ -286,7 +317,6 @@ pub enum AdmissionEvent {
     Completed {
         id: AdmissionId,
         context_tokens: usize,
-        tool_summary: AdmissionToolSummary,
     },
     /// The request ended without committing a new logical context.
     Aborted { id: AdmissionId },
@@ -391,6 +421,24 @@ mod tests {
         updater.update_context_tokens(50);
 
         assert_eq!(progress.context_tokens(), 55);
+    }
+
+    #[test]
+    fn request_progress_bounds_and_deduplicates_tool_calls() {
+        let (progress, updater) = RequestProgress::new(42);
+
+        updater.record_tool_call(0, 0, Some("sh"));
+        updater.record_tool_call(0, 0, Some("shell"));
+        for index in 1..6 {
+            updater.record_tool_call(0, index, Some(&format!("tool-{index}")));
+        }
+
+        let summary = progress.tool_summary();
+        assert_eq!(summary.tool_call_count(), 4);
+        assert_eq!(
+            summary.tool_names(),
+            ["shell", "tool-1", "tool-2", "tool-3"]
+        );
     }
 
     #[test]

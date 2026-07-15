@@ -4,6 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
+use dynamo_kv_router::scheduling::RequestProgressUpdater;
 use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
@@ -14,14 +15,11 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use parking_lot::Mutex;
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{
-        KvRouter,
-        admission_completion::{ADMISSION_TOOL_SUMMARY_CONTEXT_KEY, SharedAdmissionToolSummary},
-        metrics::RouterRequestMetrics,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -42,7 +40,29 @@ use request_guard::RequestGuard;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
+pub(crate) const ADMISSION_PROGRESS_UPDATERS_CONTEXT_KEY: &str =
+    "kv_router.admission_progress_updaters";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+
+#[derive(Default)]
+pub(crate) struct AdmissionProgressUpdaters(Mutex<Vec<RequestProgressUpdater>>);
+
+impl AdmissionProgressUpdaters {
+    fn register(&self, updater: RequestProgressUpdater) {
+        self.0.lock().push(updater);
+    }
+
+    pub(crate) fn record_tool_call(
+        &self,
+        choice_index: u32,
+        tool_call_index: u32,
+        name: Option<&str>,
+    ) {
+        for updater in self.0.lock().iter() {
+            updater.record_tool_call(choice_index, tool_call_index, name);
+        }
+    }
+}
 
 fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
@@ -241,10 +261,13 @@ impl KvPushRouter {
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let block_size = self.chooser.block_size() as usize;
-        let admission_tool_summary = request
-            .get_optional::<SharedAdmissionToolSummary>(ADMISSION_TOOL_SUMMARY_CONTEXT_KEY)
-            .map_err(Error::msg)?
-            .map(|summary| summary.as_ref().clone());
+        if let Some(progress) = selection.request_progress.as_ref()
+            && let Some(updaters) = request
+                .get_optional::<AdmissionProgressUpdaters>(ADMISSION_PROGRESS_UPDATERS_CONTEXT_KEY)
+                .map_err(Error::msg)?
+        {
+            updaters.register(progress.clone());
+        }
         let mut guard = RequestGuard::new(
             self.chooser.clone(),
             self.request_metrics.clone(),
@@ -253,7 +276,6 @@ impl KvPushRouter {
             selection.scheduler_tracked,
             selection.request_progress.take(),
             selection.admission_lease.take(),
-            admission_tool_summary,
         );
 
         let record_result: Result<(), Error> = async {
@@ -680,9 +702,9 @@ mod tests {
         protocols::{ActiveLoad, ActiveSequenceEvent, RoutingConstraints},
         scheduling::{
             AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
-            LocalScheduler, NoopOverlapScoresRefresh, OverlapSignals,
+            AdmissionToolSummary, LocalScheduler, NoopOverlapScoresRefresh, OverlapSignals,
             PolicyClassAdmissionStrategies, PolicyClassAdmissionStrategy, PolicyProfile,
-            ScheduleMode, ScheduleRequest, WorkerPlacement,
+            RequestProgress, ScheduleMode, ScheduleRequest, WorkerPlacement,
         },
     };
     use dynamo_runtime::{
@@ -725,15 +747,29 @@ mod tests {
         fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
     }
 
-    struct RecordingAdmissionStrategy(Arc<Mutex<Vec<AdmissionEvent>>>);
+    struct RecordingAdmissionStrategy {
+        events: Arc<Mutex<Vec<AdmissionEvent>>>,
+        progress: HashMap<AdmissionId, RequestProgress>,
+        completed_tool_summaries: Arc<Mutex<Vec<AdmissionToolSummary>>>,
+    }
 
     impl PolicyClassAdmissionStrategy for RecordingAdmissionStrategy {
-        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+        fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
+            self.progress
+                .insert(request.id(), request.progress().clone());
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
 
         fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
-            self.0.lock().unwrap().push(event);
+            if let AdmissionEvent::Completed { id, .. } = event
+                && let Some(progress) = self.progress.remove(&id)
+            {
+                self.completed_tool_summaries
+                    .lock()
+                    .unwrap()
+                    .push(progress.tool_summary());
+            }
+            self.events.lock().unwrap().push(event);
             Vec::new()
         }
     }
@@ -775,6 +811,7 @@ mod tests {
     async fn dropping_stream_after_terminal_item_reports_admission_completed() {
         let (router, runtime) = router(None).await;
         let events = Arc::new(Mutex::new(Vec::new()));
+        let completed_tool_summaries = Arc::new(Mutex::new(Vec::new()));
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             16,
@@ -788,7 +825,11 @@ mod tests {
         let mut strategies = PolicyClassAdmissionStrategies::new();
         strategies.insert(
             "default".to_owned(),
-            Box::new(RecordingAdmissionStrategy(Arc::clone(&events))),
+            Box::new(RecordingAdmissionStrategy {
+                events: Arc::clone(&events),
+                progress: HashMap::new(),
+                completed_tool_summaries: Arc::clone(&completed_tool_summaries),
+            }),
         );
         let cancel = CancellationToken::new();
         let scheduler = LocalScheduler::new_with_policy_profile_and_admission_strategies(
@@ -838,8 +879,8 @@ mod tests {
                 .await
                 .unwrap();
             let worker = response.best_worker;
-            let tool_summary = SharedAdmissionToolSummary::default();
-            tool_summary.record_tool_call(0, 0, Some("shell"));
+            let parsed_progress = AdmissionProgressUpdaters::default();
+            parsed_progress.register(response.request_progress.as_ref().unwrap().clone());
             let mut guard = RequestGuard::new(
                 Arc::clone(&router.chooser),
                 Arc::clone(&router.request_metrics),
@@ -848,7 +889,6 @@ mod tests {
                 true,
                 response.request_progress.take(),
                 response.admission_lease.take(),
-                Some(tool_summary),
             );
             guard.mark_dispatched().await;
 
@@ -862,8 +902,12 @@ mod tests {
             );
             {
                 let monitored = monitor_response_stream(source, context, request_id.clone(), guard);
-                tokio::pin!(monitored);
-                let item = monitored.next().await.unwrap();
+                let parsed = monitored.map(move |item| {
+                    parsed_progress.record_tool_call(0, 0, Some("shell"));
+                    item
+                });
+                tokio::pin!(parsed);
+                let item = parsed.next().await.unwrap();
                 assert_eq!(
                     item.data.and_then(|output| output.finish_reason),
                     Some(finish_reason)
@@ -879,19 +923,21 @@ mod tests {
             .await
             .expect("terminal stream drop did not report admission completion");
             assert_eq!(
-                events.lock().unwrap()[index * 2],
-                AdmissionEvent::Dispatched {
-                    id: AdmissionId::new(index as u64),
-                    worker,
-                }
+                &events.lock().unwrap()[index * 2..expected_len],
+                [
+                    AdmissionEvent::Dispatched {
+                        id: AdmissionId::new(index as u64),
+                        worker,
+                    },
+                    AdmissionEvent::Completed {
+                        id: AdmissionId::new(index as u64),
+                        context_tokens: 1,
+                    },
+                ]
             );
-            let AdmissionEvent::Completed { tool_summary, .. } =
-                &events.lock().unwrap()[expected_len - 1]
-            else {
-                unreachable!("expected terminal admission completion");
-            };
-            assert_eq!(tool_summary.tool_call_count(), 1);
-            assert_eq!(tool_summary.tool_names(), ["shell"]);
+            let summaries = completed_tool_summaries.lock().unwrap();
+            assert_eq!(summaries[index].tool_call_count(), 1);
+            assert_eq!(summaries[index].tool_names(), ["shell"]);
         }
 
         assert!(
