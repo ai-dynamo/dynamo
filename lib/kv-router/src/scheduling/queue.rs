@@ -1540,14 +1540,21 @@ impl<
             }
         };
 
+        let (admission, request_progress) = match admission {
+            Some(RequestAdmission {
+                ticket,
+                progress,
+                generation,
+            }) => (Some((ticket, generation)), Some(progress)),
+            None => (None, None),
+        };
+
         let response = SchedulingResponse {
             best_worker: selection.worker,
             effective_overlap_blocks: selection.effective_overlap_blocks,
             cached_tokens: selection.cached_tokens,
             selected_worker_tiers,
-            request_progress: admission
-                .as_ref()
-                .map(|admission| admission.progress.clone()),
+            request_progress,
             admission_lease: None,
         };
 
@@ -1582,22 +1589,22 @@ impl<
             lora_name: request.lora_name.take(),
         };
         let delivered = self.book_and_respond(request, sequence_request, response);
-        if let Some(admission) = admission {
+        if let Some((ticket, generation)) = admission {
             if delivered {
                 let request_id = admission_key.expect("admitted request has a lifecycle key");
                 if let Some(tracked) = self.tracked_admissions.get_mut(&request_id) {
-                    debug_assert_eq!(tracked.ticket, admission.ticket);
+                    debug_assert_eq!(tracked.ticket, ticket);
                     tracked.queue_class_index = None;
                     tracked.worker = Some(selection.worker);
                 } else {
                     self.tracked_admissions.insert(
                         request_id,
                         TrackedAdmission {
-                            ticket: admission.ticket,
+                            ticket,
                             queue_class_index: None,
                             worker: Some(selection.worker),
                             dispatched: false,
-                            generation: admission.generation,
+                            generation,
                         },
                     );
                 }
@@ -1605,7 +1612,7 @@ impl<
                 if let Some(request_id) = admission_key.as_deref() {
                     self.clear_admission(request_id);
                 }
-                return (self.abort_admission(admission.ticket), false);
+                return (self.abort_admission(ticket), false);
             }
         }
         (false, delivered)
