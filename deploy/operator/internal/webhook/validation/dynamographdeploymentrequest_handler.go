@@ -121,15 +121,14 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateDelete(ctx context.Context
 // The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic.
 func (h *DynamoGraphDeploymentRequestHandler) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
-	validator := internalwebhook.ValidatorWithGate(h, gate)
-	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
+	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
 
 	// Wrap with metrics collection
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeploymentRequest)
 
-	webhook := admission.
+	webhook := internalwebhook.WithGate(admission.
 		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}, observedValidator).
-		WithRecoverPanic(true)
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(dynamoGraphDeploymentRequestWebhookPath, webhook)
 	return nil
 }

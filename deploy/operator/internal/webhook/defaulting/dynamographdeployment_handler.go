@@ -133,21 +133,19 @@ func (d *DGDDefaulter) isGrovePathway(ctx context.Context, dgd *nvidiacomv1beta1
 
 // RegisterWithManager registers the defaulting webhook with the manager.
 func (d *DGDDefaulter) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
-	betaDefaulter := internalwebhook.DefaulterWithGate(d, gate)
-	betaDefaulter = internalwebhook.NewLeaseAwareDefaulter(betaDefaulter, internalwebhook.GetExcludedNamespaces())
-	betaWebhook := admission.
+	betaDefaulter := internalwebhook.NewLeaseAwareDefaulter(d, internalwebhook.GetExcludedNamespaces())
+	betaWebhook := internalwebhook.WithGate(admission.
 		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeployment{}, betaDefaulter).
-		WithRecoverPanic(true)
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(dgdV1Beta1DefaultingWebhookPath, betaWebhook)
 
 	// TODO(1.5): Remove the v1alpha1 endpoint and defaulter after 1.3 is no longer
 	// a supported upgrade or rollback target.
 	alphaDefaulter := &dgdV1Alpha1Defaulter{defaulter: d}
-	alphaDefaulterWithGate := internalwebhook.DefaulterWithGate(alphaDefaulter, gate)
-	alphaDefaulterWithLease := internalwebhook.NewLeaseAwareDefaulter(alphaDefaulterWithGate, internalwebhook.GetExcludedNamespaces())
-	alphaWebhook := admission.
+	alphaDefaulterWithLease := internalwebhook.NewLeaseAwareDefaulter(alphaDefaulter, internalwebhook.GetExcludedNamespaces())
+	alphaWebhook := internalwebhook.WithGate(admission.
 		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, alphaDefaulterWithLease).
-		WithRecoverPanic(true)
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(dgdV1Alpha1DefaultingWebhookPath, alphaWebhook)
 	return nil
 }

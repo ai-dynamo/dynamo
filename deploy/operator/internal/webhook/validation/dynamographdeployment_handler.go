@@ -223,15 +223,14 @@ func (h *DynamoGraphDeploymentHandler) registerWithManager(
 	gate features.Gate,
 ) {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
-	validator = internalwebhook.ValidatorWithGate(validator, gate)
 	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
 
 	// Wrap with metrics collection
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeployment)
 
-	webhook := admission.
+	webhook := internalwebhook.WithGate(admission.
 		WithCustomValidator(mgr.GetScheme(), object, observedValidator).
-		WithRecoverPanic(true)
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(path, webhook)
 }
 

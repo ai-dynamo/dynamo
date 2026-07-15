@@ -178,13 +178,12 @@ func (h *DynamoComponentDeploymentHandler) registerWithManager(
 	validator admission.CustomValidator,
 	gate features.Gate,
 ) {
-	validator = internalwebhook.ValidatorWithGate(validator, gate)
 	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoComponentDeployment)
 
-	webhook := admission.
+	webhook := internalwebhook.WithGate(admission.
 		WithCustomValidator(mgr.GetScheme(), object, observedValidator).
-		WithRecoverPanic(true)
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(path, webhook)
 }
 

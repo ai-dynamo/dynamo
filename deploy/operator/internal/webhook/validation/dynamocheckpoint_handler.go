@@ -77,12 +77,11 @@ func (h *DynamoCheckpointHandler) ValidateDelete(ctx context.Context, obj runtim
 }
 
 func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
-	validator := internalwebhook.ValidatorWithGate(h, gate)
-	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
+	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoCheckpoint)
-	webhook := admission.
+	webhook := internalwebhook.WithGate(admission.
 		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoCheckpoint{}, observedValidator).
-		WithRecoverPanic(true)
+		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(dynamoCheckpointWebhookPath, webhook)
 	return nil
 }

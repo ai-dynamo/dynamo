@@ -45,9 +45,8 @@ func NewPodCheckpointRestoreMutator(client ctrlclient.Client, config *configv1al
 
 func (h *PodCheckpointRestoreMutator) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
 	h.scheme = mgr.GetScheme()
-	mgr.GetWebhookServer().Register(podCheckpointRestoreWebhookPath, (&admission.Webhook{
-		Handler: internalwebhook.HandlerWithGate(h, gate),
-	}).WithRecoverPanic(true))
+	webhook := internalwebhook.WithGate((&admission.Webhook{Handler: h}).WithRecoverPanic(true), gate)
+	mgr.GetWebhookServer().Register(podCheckpointRestoreWebhookPath, webhook)
 	return nil
 }
 

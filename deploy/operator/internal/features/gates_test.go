@@ -117,3 +117,12 @@ func TestGateContext(t *testing.T) {
 		t.Error("GateFromContext().Enabled(Grove) = false, want true")
 	}
 }
+
+func TestGateFromContextPanicsWithoutGate(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("GateFromContext() did not panic")
+		}
+	}()
+	GateFromContext(context.Background())
+}

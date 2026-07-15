@@ -19,6 +19,7 @@ package webhook
 
 import (
 	"context"
+	"net/http"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -71,34 +72,12 @@ type LeaseAwareDefaulter struct {
 	excludedNamespaces ExcludedNamespacesChecker
 }
 
-type gateValidator struct {
-	validator admission.CustomValidator
-	gate      features.Gate
-}
-
-type gateDefaulter struct {
-	defaulter admission.Defaulter[runtime.Object]
-	gate      features.Gate
-}
-
-type gateHandler struct {
-	handler admission.Handler
-	gate    features.Gate
-}
-
-// ValidatorWithGate makes gate available through the admission request context.
-func ValidatorWithGate(validator admission.CustomValidator, gate features.Gate) admission.CustomValidator {
-	return &gateValidator{validator: validator, gate: gate}
-}
-
-// DefaulterWithGate makes gate available through the admission request context.
-func DefaulterWithGate(defaulter admission.Defaulter[runtime.Object], gate features.Gate) admission.Defaulter[runtime.Object] {
-	return &gateDefaulter{defaulter: defaulter, gate: gate}
-}
-
-// HandlerWithGate makes gate available through the admission request context.
-func HandlerWithGate(handler admission.Handler, gate features.Gate) admission.Handler {
-	return &gateHandler{handler: handler, gate: gate}
+// WithGate makes gate available through the admission request context.
+func WithGate(webhook *admission.Webhook, gate features.Gate) *admission.Webhook {
+	webhook.WithContextFunc = func(ctx context.Context, _ *http.Request) context.Context {
+		return features.WithGate(ctx, gate)
+	}
+	return webhook
 }
 
 // NewLeaseAwareValidator creates a new LeaseAwareValidator that wraps the given validator.
@@ -156,26 +135,6 @@ func (d *LeaseAwareDefaulter) Default(ctx context.Context, obj runtime.Object) e
 		return nil
 	}
 	return d.defaulter.Default(ctx, obj)
-}
-
-func (v *gateValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	return v.validator.ValidateCreate(features.WithGate(ctx, v.gate), obj)
-}
-
-func (v *gateValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	return v.validator.ValidateUpdate(features.WithGate(ctx, v.gate), oldObj, newObj)
-}
-
-func (v *gateValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	return v.validator.ValidateDelete(features.WithGate(ctx, v.gate), obj)
-}
-
-func (d *gateDefaulter) Default(ctx context.Context, obj runtime.Object) error {
-	return d.defaulter.Default(features.WithGate(ctx, d.gate), obj)
-}
-
-func (h *gateHandler) Handle(ctx context.Context, req admission.Request) admission.Response {
-	return h.handler.Handle(features.WithGate(ctx, h.gate), req)
 }
 
 func shouldSkipAdmission(obj runtime.Object, excludedNamespaces ExcludedNamespacesChecker) bool {
