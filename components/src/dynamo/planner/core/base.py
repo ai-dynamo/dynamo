@@ -968,11 +968,16 @@ class NativePlannerBase:
                     pod.metadata.name,
                 )
             except ApiException as e:
-                if e.status in (409, 429):
+                if e.status == 409:
                     logger.debug(
-                        "Transient %d removing power annotation from pod %s; "
+                        "409 Conflict removing power annotation from pod %s; "
                         "will retry on next sweep.",
-                        e.status,
+                        pod.metadata.name,
+                    )
+                elif e.status == 429:
+                    logger.warning(
+                        "429 TooManyRequests removing power annotation from pod %s; "
+                        "no Retry-After backoff, will retry on next sweep.",
                         pod.metadata.name,
                     )
                 else:
@@ -1062,11 +1067,16 @@ class NativePlannerBase:
                     limit_str,
                 )
             except ApiException as e:
-                if e.status in (409, 429):
+                if e.status == 409:
                     logger.debug(
-                        "Transient %d patching power annotation on pod %s; "
+                        "409 Conflict patching power annotation on pod %s; "
                         "will retry on next sweep.",
-                        e.status,
+                        pod.metadata.name,
+                    )
+                elif e.status == 429:
+                    logger.warning(
+                        "429 TooManyRequests patching power annotation on pod %s; "
+                        "no Retry-After backoff, will retry on next sweep.",
                         pod.metadata.name,
                     )
                 else:
