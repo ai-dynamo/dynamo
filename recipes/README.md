@@ -288,7 +288,7 @@ resources:
 **Scaling:**
 ```yaml
 services:
-  VllmDecodeWorker:
+  decode:
     replicas: 2  # Scale to multiple workers
 ```
 

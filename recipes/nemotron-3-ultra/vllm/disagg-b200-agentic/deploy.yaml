@@ -126,7 +126,7 @@ spec:
                 claimName: nemotron-ultra-aiperf-artifacts
             - name: runtime-tmp
               emptyDir: {}
-    - name: VllmPrefillWorker
+    - name: prefill
       type: prefill
       replicas: 1
       sharedMemorySize: 64Gi
@@ -283,7 +283,7 @@ spec:
             - name: flashinfer-cubins
               emptyDir:
                 medium: Memory
-    - name: VllmDecodeWorker
+    - name: decode
       type: decode
       replicas: 1
       sharedMemorySize: 64Gi

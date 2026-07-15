@@ -28,7 +28,7 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 2

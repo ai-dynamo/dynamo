@@ -44,7 +44,7 @@ spec:
             - -c
           args:
             - python3 -m dynamo.frontend --router-mode kv --no-kv-events --http-port 8000
-    VllmWorker:
+    worker:
       componentType: worker
       envFromSecret: hf-token-secret
       replicas: 1

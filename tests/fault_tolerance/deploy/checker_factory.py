@@ -136,7 +136,7 @@ def get_results_checker(test_name: str, scenario: Scenario) -> BaseChecker:
 
     # Determine worker service name based on backend and deployment type
     if scenario.backend == "vllm":
-        worker_service_name = "VllmDecodeWorker"
+        worker_service_name = "decode"
     elif scenario.backend == "sglang":
         worker_service_name = "decode"
     elif scenario.backend == "trtllm":

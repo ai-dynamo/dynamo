@@ -64,7 +64,7 @@ spec:
           - secretRef:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 2
     sharedMemorySize: 80Gi
@@ -132,7 +132,7 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     sharedMemorySize: 80Gi

@@ -81,7 +81,7 @@ spec:
           env:
           - name: DYN_ROUTER_MODE
             value: kv
-  - name: VllmPrefillWorker
+  - name: prefill
     type: worker
     replicas: 2
     podTemplate:
@@ -97,7 +97,7 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: "1"
-  - name: VllmDecodeWorker
+  - name: decode
     type: worker
     replicas: 2
     podTemplate:
@@ -161,7 +161,7 @@ spec:
           env:
           - name: DYN_ROUTER_MODE
             value: kv
-  - name: VllmPrefillWorkerAz1
+  - name: prefill-az1
     type: worker
     replicas: 30
     podTemplate:
@@ -180,7 +180,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: VllmDecodeWorkerAz1
+  - name: decode-az1
     type: worker
     replicas: 60
     podTemplate:
@@ -199,7 +199,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: VllmPrefillWorkerAz2
+  - name: prefill-az2
     type: worker
     replicas: 30
     podTemplate:
@@ -218,7 +218,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-  - name: VllmDecodeWorkerAz2
+  - name: decode-az2
     type: worker
     replicas: 60
     podTemplate:

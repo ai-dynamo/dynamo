@@ -7,9 +7,9 @@
 #
 # Architecture:
 #   DGD gp-ctrl:      Frontend + GlobalRouter + GlobalPlanner
-#   DGD gp-prefill-0: LocalRouter + VllmPrefillWorker (TP1) + Planner
-#   DGD gp-prefill-1: LocalRouter + VllmPrefillWorker (TP2) + Planner
-#   DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
+#   DGD gp-prefill-0: LocalRouter + prefill (TP1) + Planner
+#   DGD gp-prefill-1: LocalRouter + prefill (TP2) + Planner
+#   DGD gp-decode-0:  LocalRouter + decode  (TP1) + Planner
 #
 # Prerequisites:
 #   - Cluster Prometheus deployed and scraping LocalRouter pods via PodMonitor
@@ -211,7 +211,7 @@ spec:
         - name: docker-imagepullsecret
     replicas: 1
     type: planner
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:
@@ -292,7 +292,7 @@ spec:
         - name: docker-imagepullsecret
     replicas: 1
     type: planner
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:
@@ -374,7 +374,7 @@ spec:
         - name: docker-imagepullsecret
     replicas: 1
     type: planner
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:

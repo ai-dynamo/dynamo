@@ -372,8 +372,8 @@ func TestGroveMultinodeDeployer_GMS(t *testing.T) {
 func TestGmsRCTName(t *testing.T) {
 	assert.Equal(t, "my-svc-gpu-rank-0", gmsRCTName("my-svc", 0))
 	assert.Equal(t, "llama-gpu-rank-2", gmsRCTName("llama", 2))
-	assert.Equal(t, "vllmworker-gpu-rank-0", gmsRCTName("VllmWorker", 0))
-	assert.Empty(t, validation.IsDNS1123Subdomain(gmsRCTName("VllmWorker", 0)))
+	assert.Equal(t, "worker-gpu-rank-0", gmsRCTName("worker", 0))
+	assert.Empty(t, validation.IsDNS1123Subdomain(gmsRCTName("worker", 0)))
 }
 
 func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
@@ -384,11 +384,11 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	configs, err := gmsResourceClaimTemplateConfigs("VllmWorker", gmsSpec, resources, roles)
+	configs, err := gmsResourceClaimTemplateConfigs("worker", gmsSpec, resources, roles)
 	require.NoError(t, err)
 
 	require.Len(t, configs, 1)
-	assert.Equal(t, "vllmworker-gpu-rank-0", configs[0].Name)
+	assert.Equal(t, "worker-gpu-rank-0", configs[0].Name)
 	assert.Empty(t, validation.IsDNS1123Subdomain(configs[0].Name))
 
 	req := configs[0].TemplateSpec.Spec.Devices.Requests[0]
@@ -425,10 +425,10 @@ func TestGmsResourceSharingEntries_SingleNode(t *testing.T) {
 		{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 2},
 	}
 
-	refs := gmsResourceSharingEntries("VllmWorker", roles)
+	refs := gmsResourceSharingEntries("worker", roles)
 
 	require.Len(t, refs, 1)
-	assert.Equal(t, "vllmworker-gpu-rank-0", refs[0].Name)
+	assert.Equal(t, "worker-gpu-rank-0", refs[0].Name)
 	assert.Empty(t, validation.IsDNS1123Subdomain(refs[0].Name))
 	assert.Equal(t, grovev1alpha1.ResourceSharingScopePerReplica, refs[0].Scope)
 	require.NotNil(t, refs[0].Filter)

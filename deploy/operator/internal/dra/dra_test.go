@@ -177,5 +177,5 @@ func TestGenerateResourceClaimTemplate_DisabledReturnsDelete(t *testing.T) {
 
 func TestResourceClaimTemplateName(t *testing.T) {
 	assert.Equal(t, "myapp-worker-gpu", ResourceClaimTemplateName("myapp", "Worker"))
-	assert.Equal(t, "app-vllmdecodeworker-gpu", ResourceClaimTemplateName("app", "VllmDecodeWorker"))
+	assert.Equal(t, "app-decode-gpu", ResourceClaimTemplateName("app", "decode"))
 }

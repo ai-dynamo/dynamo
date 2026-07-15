@@ -28,7 +28,7 @@ spec:
             - --router-reset-states
       replicas: 1
       subComponentType: null
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       envFromSecret: hf-token-secret
       volumeMounts:

@@ -31,7 +31,7 @@ spec:
           cpu: "1"
       subComponentType: null
 
-    VllmWorker:
+    worker:
       componentType: worker
       envFromSecret: hf-token-secret
       extraPodSpec:

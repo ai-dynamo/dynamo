@@ -44,7 +44,7 @@ spec:
           env:
             - name: OTEL_SERVICE_NAME
               value: "dynamo-frontend"
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1

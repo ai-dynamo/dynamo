@@ -122,7 +122,7 @@ metadata:
   name: vllm-disagg
 spec:
   components:
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:

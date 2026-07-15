@@ -18,7 +18,7 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -45,7 +45,7 @@ spec:
           workingDir: /workspace/examples/backends/vllm
     replicas: 2
     type: worker
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:

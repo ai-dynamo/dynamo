@@ -37,7 +37,7 @@ spec:
               value: /opt/models
             - name: HF_HUB_OFFLINE
               value: "1"
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       subComponentType: decode
       envFromSecret: hf-token-secret

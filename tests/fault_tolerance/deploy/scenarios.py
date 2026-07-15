@@ -87,8 +87,8 @@ RECOVERY_SUFFIX = f"_{TestPhase.RECOVERY.name.lower()}"
 # Worker name mapping for different backends
 WORKER_MAP = {
     "vllm": {
-        "decode": "VllmDecodeWorker",
-        "prefill": "VllmPrefillWorker",
+        "decode": "decode",
+        "prefill": "prefill",
     },
     "sglang": {
         "decode": "decode",
@@ -105,19 +105,14 @@ WORKER_MAP = {
 WORKER_READY_PATTERNS: Dict[str, Pattern] = {
     # Frontend
     "Frontend": re.compile(r"added model"),
-    # vLLM workers
-    "VllmDecodeWorker": re.compile(
-        r"VllmWorker for (?P<model_name>.*?) has been initialized"
-    ),
-    "VllmPrefillWorker": re.compile(
-        r"VllmWorker for (?P<model_name>.*?) has been initialized"
-    ),
-    # SGLang workers - look for their specific initialization messages
+    # vLLM and SGLang workers (shared short names)
     "decode": re.compile(
-        r"Model registration succeeded|Decode worker handler initialized|Worker handler initialized"
+        r"worker for (?P<model_name>.*?) has been initialized"
+        r"|Model registration succeeded|Decode worker handler initialized|Worker handler initialized"
     ),
     "prefill": re.compile(
-        r"Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
+        r"worker for (?P<model_name>.*?) has been initialized"
+        r"|Model registration succeeded|Prefill worker handler initialized|Worker handler initialized"
     ),
     # TensorRT-LLM workers
     "TRTLLMWorker": re.compile(
@@ -918,7 +913,7 @@ DEPLOYMENT_SPECS.update(_create_moe_deployments_for_backend("vllm"))
 #
 # Example:
 #
-#   "prefill_worker": [Failure(30, "VllmPrefillWorker", "dynamo.vllm", "SIGKILL")],
+#   "prefill_worker": [Failure(30, "prefill", "dynamo.vllm", "SIGKILL")],
 #
 # terminates 1 prefill worker after 30 seconds
 def _create_backend_failures(backend, deploy_type="disagg"):

@@ -109,7 +109,7 @@ spec:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
           imagePullPolicy: IfNotPresent
-  - name: VllmDecodeWorker
+  - name: decode
     type: decode
     replicas: 1
     sharedMemorySize: 2Gi
@@ -166,7 +166,7 @@ spec:
         - effect: NoSchedule
           key: nvidia.com/gpu
           operator: Exists
-  - name: VllmPrefillWorker
+  - name: prefill
     type: prefill
     replicas: 1
     sharedMemorySize: 2Gi

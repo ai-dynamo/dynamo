@@ -83,7 +83,7 @@ spec:
           args:
             - --config
             - '{"environment": "kubernetes", "backend": "vllm", "optimization_target": "sla", "ttft_ms": 200, "itl_ms": 10, "profile_results_dir": "/workspace/components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D/", "throughput_adjustment_interval_seconds": 60, "metric_reporting_prometheus_port": 9085}'
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -137,7 +137,7 @@ spec:
             - --no-enable-prefix-caching
             - --block-size
             - "128"
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

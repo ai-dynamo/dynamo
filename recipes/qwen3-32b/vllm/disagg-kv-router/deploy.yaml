@@ -35,7 +35,7 @@ spec:
         limits:
           cpu: "8"
       subComponentType: null
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       envFromSecret: hf-token-secret
       extraPodSpec:
@@ -86,7 +86,7 @@ spec:
       - name: compilation-cache
         mountPoint: /home/dynamo/.cache/vllm
         useAsCompilationCache: true
-    VllmPrefillWorker:
+    prefill:
       componentType: worker
       envFromSecret: hf-token-secret
       extraPodMetadata:

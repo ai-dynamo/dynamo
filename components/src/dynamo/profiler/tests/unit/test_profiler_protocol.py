@@ -345,7 +345,7 @@ _TOLERATION = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSched
 _BASE_DGD = {
     "spec": {
         "services": {
-            "VllmDecodeWorker": {
+            "decode": {
                 "extraPodSpec": {
                     "mainContainer": {"image": "my-image", "args": ["--model", "m"]},
                 },
@@ -359,7 +359,7 @@ _BASE_DGD = {
 _OVERRIDE_DGD = {
     "spec": {
         "services": {
-            "VllmDecodeWorker": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
+            "decode": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
             "GhostService": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
         }
     }
@@ -383,7 +383,7 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
             services[name].setdefault("extraPodSpec", {}).update(
                 service_override["extraPodSpec"]
             )
-        services["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"]["args"].append(
+        services["decode"]["extraPodSpec"]["mainContainer"]["args"].append(
             "--override-applied"
         )
         return result
@@ -470,8 +470,8 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
     assert interpolation_kwargs, "run_interpolation was never called"
     disagg_config = interpolation_kwargs["disagg_config"]
 
-    # Tolerations must be present on VllmDecodeWorker before interpolation.
-    eps = disagg_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
+    # Tolerations must be present on decode before interpolation.
+    eps = disagg_config["spec"]["services"]["decode"]["extraPodSpec"]
     assert eps["tolerations"] == [_TOLERATION]
 
     # mainContainer must be preserved (not overwritten by the tolerations merge).
@@ -485,22 +485,19 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
     assert assemble_final.call_args.args[2] == base_dgd
     assert len(override_inputs) == 2
     for override_input in override_inputs:
-        args = override_input["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        args = override_input["spec"]["services"]["decode"]["extraPodSpec"][
             "mainContainer"
         ]["args"]
         assert "--override-applied" not in args
 
     final_config = write_final.call_args.args[1]
-    final_args = final_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+    final_args = final_config["spec"]["services"]["decode"]["extraPodSpec"][
         "mainContainer"
     ]["args"]
     assert final_args.count("--override-applied") == 1
 
     # Neither merge mutates the clean picked DGD.
-    assert (
-        "tolerations"
-        not in base_dgd["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
-    )
+    assert "tolerations" not in base_dgd["spec"]["services"]["decode"]["extraPodSpec"]
 
 
 # ---------------------------------------------------------------------------

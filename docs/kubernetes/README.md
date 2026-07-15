@@ -164,7 +164,7 @@ spec:
               envFrom:
                 - secretRef:
                     name: hf-token-secret
-    - name: VllmDecodeWorker
+    - name: decode
       type: worker
       replicas: 1
       podTemplate:

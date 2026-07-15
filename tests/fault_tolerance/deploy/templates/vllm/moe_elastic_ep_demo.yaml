@@ -27,9 +27,9 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          # Update tag to match VllmDecodeWorker image below
+          # Update tag to match decode image below
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       # Single pod with 4 GPUs — elastic EP scales DP workers within this pod via Ray

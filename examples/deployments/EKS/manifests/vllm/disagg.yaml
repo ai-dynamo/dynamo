@@ -42,7 +42,7 @@ spec:
           - -c
           - |
             exec python3 -m dynamo.frontend --router-mode kv --router-reset-states
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -80,7 +80,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
               - labelSelector:
                   matchLabels:
-                    nvidia.com/dynamo-component: "VllmPrefillWorker"
+                    nvidia.com/dynamo-component: "prefill"
                 topologyKey: "kubernetes.io/hostname"
         mainContainer:
           env:
@@ -100,7 +100,7 @@ spec:
              --model Qwen/Qwen3-32B \
              --disaggregation-mode decode \
              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -138,7 +138,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
               - labelSelector:
                   matchLabels:
-                    nvidia.com/dynamo-component: "VllmDecodeWorker"
+                    nvidia.com/dynamo-component: "decode"
                 topologyKey: "kubernetes.io/hostname"
         mainContainer:
           env:

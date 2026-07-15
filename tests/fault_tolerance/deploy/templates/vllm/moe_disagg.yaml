@@ -15,7 +15,7 @@ spec:
         - name: nvcr-imagepullsecret
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -80,7 +80,7 @@ spec:
             - "10"
             - --no-enable-prefix-caching
             - --enforce-eager
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

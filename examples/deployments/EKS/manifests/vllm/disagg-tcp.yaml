@@ -19,7 +19,7 @@ spec:
                     nvidia.com/dynamo-graph-deployment-name: "vllm-disagg"
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.1
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -47,7 +47,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
               - labelSelector:
                   matchLabels:
-                    nvidia.com/dynamo-component: "VllmPrefillWorker"
+                    nvidia.com/dynamo-component: "prefill"
                 topologyKey: "kubernetes.io/hostname"
         mainContainer:
           securityContext:
@@ -64,7 +64,7 @@ spec:
              --model Qwen/Qwen3-0.6B \
              --disaggregation-mode decode \
              --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu","kv_connector_extra_config": {"backends": ["LIBFABRIC"]}}'
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -92,7 +92,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
               - labelSelector:
                   matchLabels:
-                    nvidia.com/dynamo-component: "VllmDecodeWorker"
+                    nvidia.com/dynamo-component: "decode"
                 topologyKey: "kubernetes.io/hostname"
         mainContainer:
           securityContext:

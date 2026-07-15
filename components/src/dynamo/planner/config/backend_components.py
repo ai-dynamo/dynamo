@@ -26,15 +26,15 @@ class ComponentName:
 
 
 class VllmComponentName(ComponentName):
-    prefill_worker_k8s_name = "VllmPrefillWorker"
+    # Use short k8s names to stay within Grove's 45-char resource name limit
+    # (consistent with SGLang/TRTLLm/Mocker)
+    prefill_worker_k8s_name = "prefill"
     prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
-    decode_worker_k8s_name = "VllmDecodeWorker"
+    decode_worker_k8s_name = "decode"
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
-    # Aggregated mode emits a single worker; name matches VllmWorker
-    # log identifier in dynamo.vllm.main.
-    agg_worker_k8s_name = "VllmWorker"
+    agg_worker_k8s_name = "worker"
 
 
 class SGLangComponentName(ComponentName):

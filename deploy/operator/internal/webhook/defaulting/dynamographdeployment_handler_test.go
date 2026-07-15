@@ -187,12 +187,12 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 			op:   admissionv1.Create,
 			components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				{ComponentName: "Frontend", Replicas: nil},
-				{ComponentName: "VllmWorker", Replicas: ptr.To(int32(3))},
+				{ComponentName: "worker", Replicas: ptr.To(int32(3))},
 				{ComponentName: "NewComponent", Replicas: nil},
 			},
 			wantReplicas: map[string]int32{
 				"Frontend":     1,
-				"VllmWorker":   3,
+				"worker":       3,
 				"NewComponent": 1,
 			},
 		},

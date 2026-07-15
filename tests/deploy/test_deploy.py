@@ -157,9 +157,7 @@ async def test_deployment(
     # without triggering cudaMalloc -> NVML query, which is restricted on MIG.
     # TODO (ops): remove this if CI transitions to e.g. CUDA MPS
     if framework == "vllm":
-        deployment_spec.add_arg_to_service(
-            "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
-        )
+        deployment_spec.add_arg_to_service("decode", "--gpu-memory-utilization", "0.7")
 
     model = next((s.model for s in deployment_spec.services if s.model), None)
     if not model:
@@ -285,7 +283,7 @@ async def test_gaie_deployment(
     logger.info(f"Worker image: {worker_image}")
 
     deployment_spec.set_image(frontend_image, service_name="Epp")
-    for worker in ("VllmPrefillWorker", "VllmDecodeWorker"):
+    for worker in ("prefill", "decode"):
         deployment_spec.set_image(worker_image, service_name=worker)
         deployment_spec.set_frontend_sidecar_image(frontend_image, service_name=worker)
 

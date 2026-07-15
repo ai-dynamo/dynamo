@@ -618,7 +618,7 @@ class DeploymentSpec:
         Add or override a command-line argument for a specific service
 
         Args:
-            service_name: Name of the service (e.g., "VllmDecodeWorker", "TRTLLMWorker")
+            service_name: Name of the service (e.g., "decode", "TRTLLMWorker")
             arg_name: Argument name (e.g., "--max-model-len", "--max-seq-len")
             arg_value: Argument value (e.g., "1024")
         """
@@ -1535,7 +1535,7 @@ class ManagedDeployment:
                 # Check if port is assigned
                 if port_forward.local_port == 0:
                     self._logger.debug(
-                        f"Port not yet assigned for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts})"
+                        f"Port not yet assigned for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts})"
                     )
                     continue
 
@@ -1549,7 +1549,7 @@ class ManagedDeployment:
                         return port_forward
                 except (requests.ConnectionError, requests.Timeout) as e:
                     self._logger.warning(
-                        f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
+                        f"Connection test failed for pod {pod.name} (attempt {attempt + 1}/{max_connection_attempts}): {e}"
                     )
 
                 # Restart port-forward for next attempt (except on last attempt)
