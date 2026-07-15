@@ -155,7 +155,7 @@
      * with the rest of the comment mirror. High z-index so Fern's own
      * floating toolbars don't cover the button. */
     ".dep-pr-quote-btn{position:fixed;z-index:9999;display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid var(--nv-color-green,#76b900);border-radius:999px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);font:600 12px/1 system-ui,sans-serif;box-shadow:0 3px 10px rgba(0,0,0,.15);cursor:pointer;user-select:none;}" +
-    ".dep-pr-quote-btn:hover{background:rgba(118,185,0,.12);}" +
+    ".dep-pr-quote-btn:hover{background-color:var(--pst-color-surface,#f7f7f7);background-image:linear-gradient(rgba(118,185,0,.12),rgba(118,185,0,.12));}" +
     ".dark .dep-pr-quote-btn,html[data-theme=dark] .dep-pr-quote-btn{box-shadow:0 3px 12px rgba(0,0,0,.5);}" +
     ".dep-pr-toast{position:fixed;z-index:10000;padding:8px 14px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-radius:8px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);font:600 12.5px/1.35 system-ui,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.18);opacity:0;transform:translateY(6px);transition:opacity 120ms ease,transform 120ms ease;pointer-events:none;}" +
     ".dep-pr-toast.on{opacity:1;transform:translateY(0);}" +
