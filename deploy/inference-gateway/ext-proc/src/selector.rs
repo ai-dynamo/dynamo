@@ -64,6 +64,12 @@ pub struct SelectRequest {
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    /// KV cache-isolation namespace (Dynamo's `cache_salt`, also sourced from
+    /// the `x-tenant-id` header). Mixed into block/sequence hashes so prompts
+    /// under different salts never share cached prefixes. Populated by the
+    /// request-facing router in the downstream `epp-selector-wire` branch;
+    /// `None` here selects the default (unsalted) namespace.
+    pub cache_salt: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -242,6 +248,9 @@ impl Selector {
             reservation_id: None,
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
+                // KV cache-isolation namespace; keeps EPP block hashing aligned
+                // with the Dynamo router's `cache_salt` handling.
+                cache_namespace: req.cache_salt,
                 ..Default::default()
             },
             router_config_override: None,
