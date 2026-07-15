@@ -828,12 +828,12 @@ class TestPowerAwareDcgmQueries:
 
         # Validate the regex itself against both naming shapes.
         selector = _re.compile(r"^my\-dgd-(?:[0-9]+-)?.*")
-        assert selector.match("my-dgd-0-vllmworker-86nvj"), (
-            "Grove/LWS indexed name must match"
-        )
-        assert selector.match("my-dgd-vllmdecodeworker-865f84c49-6q7s5"), (
-            "Standard Deployment name must match"
-        )
-        assert not selector.match("other-dgd-0-vllmworker-abc"), (
-            "Different DGD must not match"
-        )
+        assert selector.match(
+            "my-dgd-0-vllmworker-86nvj"
+        ), "Grove/LWS indexed name must match"
+        assert selector.match(
+            "my-dgd-vllmdecodeworker-865f84c49-6q7s5"
+        ), "Standard Deployment name must match"
+        assert not selector.match(
+            "other-dgd-0-vllmworker-abc"
+        ), "Different DGD must not match"
