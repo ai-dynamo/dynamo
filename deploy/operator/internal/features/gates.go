@@ -121,7 +121,7 @@ var allNames = [...]Name{
 	GPUDiscovery,
 }
 
-// GMSSnapshotEnvVar enables GMSSnapshot when set to "1".
+// GMSSnapshotEnvVar enables the temporary internal GMS + Snapshot feature gate when set to "1".
 const GMSSnapshotEnvVar = "DYN_OPERATOR_ALLOW_GMS_SNAPSHOT"
 
 // Gate reports whether operator features are enabled.
