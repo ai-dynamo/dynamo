@@ -16,21 +16,17 @@ print_launch_banner "Launching Disaggregated Serving + LMCache (2 GPUs)" "$MODEL
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python -m dynamo.frontend --router-mode kv &
 
-# run decode worker on GPU 0, without LMCache. --disaggregation-mode decode is
-# required under --router-mode kv (matches disagg_router.sh); without it the
-# worker registers as aggregated and breaks the disagg topology. NixlConnector
-# pairs with the prefill worker's Nixl transfer; kv-events stay prefill-only.
+# decode worker (GPU 0), no LMCache. --disaggregation-mode decode is required
+# under --router-mode kv (matches disagg_router.sh); NixlConnector pairs w/ prefill.
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disaggregation-mode decode --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # wait for decode worker to initialize
 sleep 20
 
-# run prefill worker on GPU 1 with LMCache.
-# --disable-hybrid-kv-cache-manager: PdConnector wraps LMCacheConnectorV1, which
-# doesn't support the hybrid KV cache manager, so MultiConnector requires it off.
-# Distinct system port so the prefill metrics server (where LMCache metrics live)
-# doesn't collide with the decode worker's on the harness-injected DYN_SYSTEM_PORT.
+# prefill worker (GPU 1) with LMCache.
+# --disable-hybrid-kv-cache-manager: LMCacheConnectorV1 doesn't support HMA (MultiConnector asserts).
+# Distinct DYN_SYSTEM_PORT so the prefill metrics server doesn't collide with decode's.
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 \

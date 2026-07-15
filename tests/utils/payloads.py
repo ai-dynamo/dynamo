@@ -1419,9 +1419,8 @@ class MetricCheck:
     error_msg: Callable[[str, Any], str]
     success_msg: Callable[[str, Any], str]
     multiline: bool = False
-    # When True, skip (don't fail) if the metric is absent or has no parseable
-    # numeric value. Used for worker-type-dependent gauges (e.g. decode-only KV
-    # stats that a prefill worker legitimately reports as NaN/unset).
+    # Skip (don't fail) if the metric is absent or non-numeric — for worker-type-
+    # dependent gauges (e.g. decode KV stats a prefill worker reports as NaN).
     optional: bool = False
 
 
@@ -1581,8 +1580,7 @@ class MetricsPayload(BasePayload):
                 validator=lambda value: float(value) >= 0,
                 error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
-                # Decode-side KV stat; a prefill worker has no decode block pool
-                # and reports it as NaN/unset. Validate where present, skip otherwise.
+                # Decode-side KV stat; a prefill worker reports it as NaN/unset.
                 optional=True,
             ),
             MetricCheck(

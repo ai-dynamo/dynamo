@@ -416,10 +416,7 @@ vllm_configs = {
             pytest.mark.lmcache,
             _xfail_lmcache_upstream_container(),
             pytest.mark.gpu_2,
-            # Per-GPU peak: prefill and decode run on separate GPUs (GPU1/GPU0),
-            # so each worker peaks like the single-GPU LMCache config (agg_lmcache).
-            # 2 workers + a 20s inter-worker startup sleep in disagg_lmcache.sh;
-            # generous ceiling over the ~200s single-worker LMCache runtime.
+            # 2 workers on separate GPUs + a 20s startup sleep; generous over ~200s.
             pytest.mark.timeout(700),
             pytest.mark.pre_merge,
         ],
@@ -428,8 +425,7 @@ vllm_configs = {
             chat_payload_default(),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="vllm"),
-            # LMCache runs on the prefill worker (SYSTEM2); the decode worker
-            # (SYSTEM1, default) has no LMCache metrics.
+            # LMCache lives on the prefill worker (SYSTEM2), not decode (SYSTEM1).
             metric_payload_default(
                 min_num_requests=6,
                 backend="lmcache",
