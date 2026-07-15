@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fmt;
 
 use rand::Rng;
 use rustc_hash::FxHashMap;
@@ -99,10 +100,116 @@ struct LogitWeights {
     shared_cache_multiplier: f64,
 }
 
+/// A candidate worker's score plus the cost breakdown and raw inputs that
+/// produced it, so a single log line can explain *why* a worker won without
+/// needing a separate debug line per candidate.
+#[derive(Debug, Clone, Copy)]
+struct CandidateScore {
+    logit: f64,
+    raw_prefill_blocks: f64,
+    overlap_credit_blocks: f64,
+    decode_cost_blocks: f64,
+    shared_blocks_beyond: u32,
+    // Raw inputs (not derived from the other fields above) that fed the
+    // formula for this specific candidate -- what varies worker-to-worker
+    // for the same request, as opposed to `raw_prefill_blocks` etc., which
+    // are already this worker's formula output at each stage.
+    device_overlap_blocks: f64,
+    active_prefill_tokens: usize,
+    active_decode_blocks: usize,
+}
+
+/// `worker_id`s in one deployment share a long common prefix (they're
+/// generated close together) and differ only in their last few digits --
+/// printing the full u64 for every candidate on one line is mostly repeated
+/// noise. This keeps the low decimal digits only; full precision is still
+/// available via the `chosen_worker_id` field, which is logged in full.
+const WORKER_ID_SUFFIX_MOD: u64 = 1_000_000;
+
+fn short_worker_id(id: WorkerId) -> u64 {
+    id % WORKER_ID_SUFFIX_MOD
+}
+
+/// Formats `worker_id:dp_rank:logit(overlap=.,prefill_tok=.,decode_blk=.),...`
+/// directly into the log record's buffer via `Display`, so this only runs
+/// (and only allocates whatever the subscriber's own formatting buffer
+/// needs) when a subscriber actually renders the event -- unlike building a
+/// `String` at the call site with `format!`/`collect`/`join`, which would
+/// allocate on every routing decision regardless of whether logging is
+/// enabled. This routing-decision log runs unconditionally (not
+/// DEBUG-gated), so this difference matters.
+///
+/// This whole thing is the *value* of a single `candidates` tracing field
+/// (see `select_worker`), rendered via the global fmt formatter in
+/// lib/runtime/src/logging.rs like every other tracing field in the system
+/// -- so its internal `,` separators don't collide with anything outside
+/// this value.
+///
+/// The `(overlap=.,prefill_tok=.,decode_blk=.)` part is this formula's raw
+/// per-candidate arguments (see `FORMULA_DESCRIPTION`, logged once at
+/// selector construction) -- together the two logs make a decision fully
+/// reconstructable: the formula log says what the computation IS, this says
+/// what values every candidate (not just the winner) plugged into it. A
+/// future `WorkerSelector` with a different cost function would use a
+/// different `FORMULA_DESCRIPTION` and argument set; only `worker_id`,
+/// `dp_rank`, and `logit` are guaranteed present regardless of formula.
+struct CandidatesSummary<'a>(&'a [(WorkerWithDpRank, CandidateScore)]);
+
+impl fmt::Display for CandidatesSummary<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, (worker, score)) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ",")?;
+            }
+            write!(
+                f,
+                "{}:{}:{:.3}(overlap={:.1},prefill_tok={},decode_blk={})",
+                short_worker_id(worker.worker_id),
+                worker.dp_rank,
+                score.logit,
+                score.device_overlap_blocks,
+                score.active_prefill_tokens,
+                score.active_decode_blocks,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The cost function's structure, as a fixed string -- logged once per
+/// selector (see `DefaultWorkerSelector::new`) rather than repeated on every
+/// decision. Field names here match the `CandidateScore`/`CandidatesSummary`
+/// argument names used in every "Routing decision" log, so the two are meant
+/// to be read together: this says what the formula IS, those say what
+/// arguments were plugged into it for a specific request/candidate.
+const FORMULA_DESCRIPTION: &str = "logit = prefill_load_scale * max(raw_prefill_blocks - overlap_credit_blocks, 0) + decode_cost_blocks; \
+     overlap_credit_blocks = overlap_score_credit * overlap_credit_decay * device_overlap_blocks \
+     + host_cache_hit_weight * host_overlap_blocks + disk_cache_hit_weight * disk_overlap_blocks \
+     + shared_cache_multiplier * shared_blocks_beyond";
+
 impl DefaultWorkerSelector {
     pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
+        let kv_router_config = kv_router_config.unwrap_or_default();
+
+        // One-time log of the formula's structure and weights (constant for
+        // this selector's lifetime, absent a per-request
+        // `router_config_override` -- an overridden request's own "Routing
+        // decision" line will carry whatever weight it actually used, so it
+        // remains self-describing even when it diverges from this default).
+        tracing::info!(
+            worker_type = %worker_type,
+            prefill_load_scale = kv_router_config.prefill_load_scale,
+            overlap_score_credit = kv_router_config.overlap_score_credit,
+            overlap_score_credit_decay = kv_router_config.overlap_score_credit_decay,
+            shared_cache_multiplier = kv_router_config.shared_cache_multiplier,
+            host_cache_hit_weight = kv_router_config.host_cache_hit_weight,
+            disk_cache_hit_weight = kv_router_config.disk_cache_hit_weight,
+            formula = FORMULA_DESCRIPTION,
+            "Routing formula"
+        );
+
         Self {
-            kv_router_config: kv_router_config.unwrap_or_default(),
+            kv_router_config,
             worker_type,
         }
     }
@@ -114,8 +221,7 @@ impl DefaultWorkerSelector {
         block_size: u32,
         min_active_prefill_tokens: usize,
         weights: LogitWeights,
-        formula_name: &'static str,
-    ) -> f64 {
+    ) -> CandidateScore {
         let block_size_f64 = block_size as f64;
         let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
         let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
@@ -208,33 +314,20 @@ impl DefaultWorkerSelector {
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
         let logit = prefill_cost_blocks + decode_cost_blocks;
 
-        if shared_beyond > 0 {
-            tracing::debug!(
-                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
-                 {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
-                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
-                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
-                 overlap_credit_decay: {overlap_credit_decay:.3})",
-                worker.worker_id,
-                worker.dp_rank,
-                shared_cache_multiplier = weights.shared_cache_multiplier,
-                prefill_load_scale = weights.prefill_load_scale
-            );
-        } else {
-            tracing::debug!(
-                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
-                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
-                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
-                 overlap_credit_decay: {overlap_credit_decay:.3})",
-                worker.worker_id,
-                worker.dp_rank,
-                prefill_load_scale = weights.prefill_load_scale
-            );
+        // Per-candidate detail is no longer logged here -- select_worker()
+        // logs ONE line per request with the winning candidate's breakdown
+        // plus a compact summary of every candidate, keyed by request_id so
+        // it's joinable. See that log call for the replacement.
+        CandidateScore {
+            logit,
+            raw_prefill_blocks,
+            overlap_credit_blocks,
+            decode_cost_blocks,
+            shared_blocks_beyond: shared_beyond,
+            device_overlap_blocks,
+            active_prefill_tokens: worker_load.active_prefill_tokens,
+            active_decode_blocks: worker_load.active_decode_blocks,
         }
-
-        logit
     }
 }
 
@@ -302,24 +395,35 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
 
             let min_active_prefill_tokens = request.worker_load_for(worker).active_prefill_tokens;
-            let logit = self.worker_logit(
+            let score = self.worker_logit(
                 request,
                 worker,
                 block_size,
                 min_active_prefill_tokens,
                 weights,
-                "Pinned formula",
             );
             let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
             let cached_tokens = request.effective_cached_tokens_for(worker);
 
             tracing::info!(
-                "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
-                self.worker_type,
-                worker.worker_id,
-                worker.dp_rank,
-                logit,
-                effective_overlap_blocks,
+                request_id = request.mode.request_id().unwrap_or("unknown"),
+                router_mode = "kv",
+                worker_type = %self.worker_type,
+                isl_tokens = request.isl_tokens,
+                pinned = true,
+                num_candidates = 1,
+                chosen_worker_id = worker.worker_id,
+                chosen_dp_rank = worker.dp_rank,
+                chosen_logit = score.logit,
+                raw_prefill_blocks = score.raw_prefill_blocks,
+                overlap_credit_blocks = score.overlap_credit_blocks,
+                decode_cost_blocks = score.decode_cost_blocks,
+                shared_blocks_beyond = score.shared_blocks_beyond,
+                device_overlap_blocks = score.device_overlap_blocks,
+                active_prefill_tokens = score.active_prefill_tokens,
+                active_decode_blocks = score.active_decode_blocks,
+                effective_cached_blocks = effective_overlap_blocks,
+                "Routing decision"
             );
 
             return Ok(WorkerSelectionResult {
@@ -346,63 +450,79 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             } else {
                 0
             };
-        let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let base_score = self.worker_logit(
+        let get_score = |worker: WorkerWithDpRank| -> CandidateScore {
+            let mut score = self.worker_logit(
                 request,
                 worker,
                 block_size,
                 min_active_prefill_tokens,
                 weights,
-                "Formula",
             );
-            let Some(config) = workers.get(&worker.worker_id) else {
-                return base_score;
-            };
-            match request
-                .routing_constraints
-                .preferred_taint_multiplier(config.taints())
+            if let Some(config) = workers.get(&worker.worker_id)
+                && let Some(multiplier) = request
+                    .routing_constraints
+                    .preferred_taint_multiplier(config.taints())
             {
-                Some(multiplier) => base_score * multiplier,
-                None => base_score,
+                score.logit *= multiplier;
             }
+            score
         };
 
-        let (best_worker, best_logit) = if temperature == 0.0 {
-            let mut best_worker = None;
-            let mut best_logit = f64::INFINITY;
+        // Collected up front (candidate sets here are small -- a handful of
+        // eligible workers) so the winner can be picked with the exact same
+        // tie-break semantics as before, while still letting the log line
+        // below report every candidate's logit and how close the runner-up
+        // was, not just the winner.
+        let mut candidates: Vec<(WorkerWithDpRank, CandidateScore)> = Vec::new();
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            candidates.push((worker, get_score(worker)));
+        });
+        let num_candidates = candidates.len();
+
+        let (best_worker, best_score, tie_count) = if temperature == 0.0 {
+            let mut best: Option<(WorkerWithDpRank, CandidateScore)> = None;
             let mut tie_count = 0usize;
             let mut rng = rand::rng();
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                let score = get_score(worker);
-                if score < best_logit {
-                    best_worker = Some(worker);
-                    best_logit = score;
-                    tie_count = 1;
-                    return;
-                }
-
-                if score == best_logit {
-                    tie_count += 1;
-                    // Reservoir sampling keeps tied minima uniform without collecting workers.
-                    if rng.random_range(0..tie_count) == 0 {
-                        best_worker = Some(worker);
+            for &(worker, score) in &candidates {
+                match best {
+                    Some((_, b)) if score.logit > b.logit => {}
+                    Some((_, b)) if score.logit == b.logit => {
+                        tie_count += 1;
+                        // Reservoir sampling keeps tied minima uniform without collecting workers.
+                        if rng.random_range(0..tie_count) == 0 {
+                            best = Some((worker, score));
+                        }
+                    }
+                    _ => {
+                        best = Some((worker, score));
+                        tie_count = 1;
                     }
                 }
-            });
-
-            (
-                best_worker.expect("eligible worker rank non-empty"),
-                best_logit,
-            )
+            }
+            let (worker, score) = best.expect("eligible worker rank non-empty");
+            (worker, score, tie_count)
         } else {
-            let mut worker_logits = FxHashMap::default();
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                let score = get_score(worker);
-                worker_logits.insert(worker, score);
-            });
-
-            softmax_sample(&worker_logits, temperature)
+            // Probabilistic sampling, not a discrete tie-break -- tie_count
+            // doesn't apply here, logged as 0 to mean "not applicable".
+            let worker_logits: FxHashMap<WorkerWithDpRank, f64> =
+                candidates.iter().map(|(w, s)| (*w, s.logit)).collect();
+            let (worker, _logit) = softmax_sample(&worker_logits, temperature);
+            let score = candidates
+                .iter()
+                .find(|(w, _)| *w == worker)
+                .map(|(_, s)| *s)
+                .expect("softmax-sampled worker must be among scored candidates");
+            (worker, score, 0)
         };
+
+        // How decisive the pick was: 0.0 means a tie (broken by reservoir
+        // sampling above), +inf means there was only one eligible candidate.
+        let margin = candidates
+            .iter()
+            .filter(|(w, _)| *w != best_worker)
+            .map(|(_, s)| s.logit)
+            .fold(f64::INFINITY, f64::min)
+            - best_score.logit;
 
         let best_host_pinned_overlap_blocks = request
             .overlap
@@ -421,14 +541,27 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         if self.worker_type == "decode" {
             tracing::info!(
+                request_id = request.mode.request_id().unwrap_or("unknown"),
                 router_mode = "kv",
-                worker_id = best_worker.worker_id,
                 worker_type = %self.worker_type,
-                dp_rank = ?best_worker.dp_rank,
-                logit = best_logit,
+                isl_tokens = request.isl_tokens,
+                num_candidates,
+                chosen_worker_id = best_worker.worker_id,
+                chosen_dp_rank = best_worker.dp_rank,
+                chosen_logit = best_score.logit,
+                margin,
+                tie_count,
+                raw_prefill_blocks = best_score.raw_prefill_blocks,
+                overlap_credit_blocks = best_score.overlap_credit_blocks,
+                decode_cost_blocks = best_score.decode_cost_blocks,
+                shared_blocks_beyond = best_score.shared_blocks_beyond,
+                device_overlap_blocks = best_score.device_overlap_blocks,
+                active_prefill_tokens = best_score.active_prefill_tokens,
+                active_decode_blocks = best_score.active_decode_blocks,
                 host_pinned_blocks = best_host_pinned_overlap_blocks,
                 disk_blocks = best_disk_overlap_blocks,
-                "Selected worker"
+                candidates = %CandidatesSummary(&candidates),
+                "Routing decision"
             );
             let effective_overlap_blocks = request.effective_overlap_blocks_for(best_worker);
             let cached_tokens = request.effective_cached_tokens_for(best_worker);
@@ -449,16 +582,29 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .and_then(|cfg| cfg.total_kv_blocks());
 
         tracing::info!(
+            request_id = request.mode.request_id().unwrap_or("unknown"),
             router_mode = "kv",
-            worker_id = best_worker.worker_id,
             worker_type = %self.worker_type,
-            dp_rank = ?best_worker.dp_rank,
-            logit = best_logit,
+            isl_tokens = request.isl_tokens,
+            num_candidates,
+            chosen_worker_id = best_worker.worker_id,
+            chosen_dp_rank = best_worker.dp_rank,
+            chosen_logit = best_score.logit,
+            margin,
+            tie_count,
+            raw_prefill_blocks = best_score.raw_prefill_blocks,
+            overlap_credit_blocks = best_score.overlap_credit_blocks,
+            decode_cost_blocks = best_score.decode_cost_blocks,
+            shared_blocks_beyond = best_score.shared_blocks_beyond,
+            device_overlap_blocks = best_score.device_overlap_blocks,
+            active_prefill_tokens = best_score.active_prefill_tokens,
+            active_decode_blocks = best_score.active_decode_blocks,
             effective_cached_blocks = best_overlap,
             host_pinned_blocks = best_host_pinned_overlap_blocks,
             disk_blocks = best_disk_overlap_blocks,
             total_kv_blocks = ?total_kv_blocks,
-            "Selected worker"
+            candidates = %CandidatesSummary(&candidates),
+            "Routing decision"
         );
 
         Ok(WorkerSelectionResult {
@@ -1277,13 +1423,17 @@ mod tests {
         };
 
         assert_eq!(
-            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            selector
+                .worker_logit(&request, worker, 16, 0, weights)
+                .logit,
             7.0
         );
 
         request.track_prefill_tokens = false;
         assert_eq!(
-            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            selector
+                .worker_logit(&request, worker, 16, 0, weights)
+                .logit,
             5.0
         );
     }
