@@ -1554,6 +1554,7 @@ def _test_bootstrap_prefill_rejection_gates_decode(
     frontend_port: int,
     prefill_system_port: int,
     test_payload: dict[str, Any],
+    request_timeout_seconds: float,
 ) -> None:
     """Verify rejected prefill admission fails before a decode hop is dispatched."""
 
@@ -1766,18 +1767,41 @@ def _test_bootstrap_prefill_rejection_gates_decode(
                     f"{probe_status}: {probe_body}"
                 )
 
-                # Give any wrongly-detached decode dispatch time to add a
-                # second request-plane send, then prove only prefill was attempted.
-                await asyncio.sleep(0.25)
-                frontend_send_after_probe = await metric(
+                expected_frontend_sends = frontend_send_before_probe + 1
+                frontend_send_after_probe = await wait_for_metric(
                     frontend_metrics_url,
                     "dynamo_request_plane_send_seconds_count",
+                    lambda value: value >= expected_frontend_sends,
+                    timeout=request_timeout_seconds,
                 )
-                assert frontend_send_after_probe == frontend_send_before_probe + 1, (
+                assert frontend_send_after_probe == expected_frontend_sends, (
                     "rejected prefill dispatched an extra request-plane send: "
                     f"before={frontend_send_before_probe}, "
                     f"after={frontend_send_after_probe}"
                 )
+
+                # A detached decode dispatch may outlive the rejected prefill
+                # response. Keep polling for the complete TCP request-timeout
+                # window and fail as soon as another send appears.
+                quiet_period_deadline = (
+                    asyncio.get_running_loop().time() + request_timeout_seconds
+                )
+                while True:
+                    frontend_send_after_probe = await metric(
+                        frontend_metrics_url,
+                        "dynamo_request_plane_send_seconds_count",
+                    )
+                    assert frontend_send_after_probe == expected_frontend_sends, (
+                        "rejected prefill dispatched an extra request-plane send: "
+                        f"before={frontend_send_before_probe}, "
+                        f"after={frontend_send_after_probe}"
+                    )
+                    remaining = (
+                        quiet_period_deadline - asyncio.get_running_loop().time()
+                    )
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(0.05, remaining))
             finally:
                 if first_response is not None:
                     first_response.close()

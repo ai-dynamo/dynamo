@@ -977,6 +977,7 @@ def test_router_decisions_disagg(
     )
 
 
+@pytest.mark.sglang
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 @pytest.mark.timeout(120)
@@ -1006,7 +1007,9 @@ def test_bootstrap_prefill_rejection_gates_decode(
     before opening HTTP 200. The first request also proves that accepted
     bootstrap traffic still overlaps prefill and decode.
     """
-    monkeypatch.setenv("DYN_TCP_REQUEST_TIMEOUT", "2")
+    request_timeout_seconds = 2
+    monkeypatch.setenv("DYN_TCP_REQUEST_TIMEOUT", str(request_timeout_seconds))
+    monkeypatch.delenv("DYN_EVENT_PLANE", raising=False)
 
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
@@ -1046,7 +1049,6 @@ def test_bootstrap_prefill_rejection_gates_decode(
         num_decode_mockers=1,
         enable_disagg_bootstrap=True,
         request_plane=request_plane,
-        event_plane="nats",
         prefill_env_overrides=prefill_env,
         decode_env_overrides=decode_env,
     ) as (_prefill_workers, _decode_workers):
@@ -1062,6 +1064,7 @@ def test_bootstrap_prefill_rejection_gates_decode(
                 frontend_port=frontend_port,
                 prefill_system_port=prefill_system_port,
                 test_payload=TEST_PAYLOAD,
+                request_timeout_seconds=request_timeout_seconds,
             )
 
 

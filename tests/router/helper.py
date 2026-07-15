@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
+from prometheus_client.parser import text_string_to_metric_families
 
 from dynamo.llm import KvRouter
 from dynamo.runtime import DistributedRuntime
@@ -31,22 +32,15 @@ def prometheus_metric_value(
 ) -> float:
     """Return the sum of exact matching Prometheus samples, or zero when absent."""
     total = 0.0
-    for line in metrics_text.splitlines():
-        if not (
-            line.startswith(f"{metric_name} ") or line.startswith(f"{metric_name}{{")
-        ):
-            continue
-        sample, _, raw_value = line.rpartition(" ")
-        if not sample or not raw_value:
-            continue
-        if labels and not all(
-            f'{key}="{value}"' in sample for key, value in labels.items()
-        ):
-            continue
-        try:
-            total += float(raw_value)
-        except ValueError:
-            continue
+    for family in text_string_to_metric_families(metrics_text):
+        for sample in family.samples:
+            if sample.name != metric_name:
+                continue
+            if labels and not all(
+                sample.labels.get(key) == value for key, value in labels.items()
+            ):
+                continue
+            total += sample.value
     return total
 
 
