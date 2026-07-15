@@ -927,9 +927,7 @@ def _assert_engine_generate_span_exported(collector) -> None:
 @pytest.mark.profiled_vram_gib(3.7)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(360)
-# TODO: revert to pytest.mark.nightly after pre_merge validation
-# on this PR (see .ai/ci-guidelines.md).
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.unified
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_aggregated_otel_exports_engine_generate_span(
