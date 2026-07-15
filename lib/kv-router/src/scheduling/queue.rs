@@ -1463,6 +1463,7 @@ impl<
             selected_worker_tiers,
             request_progress,
             lifecycle_lease: None,
+            potential_decode_blocks: selection.potential_decode_blocks,
         };
 
         if !request.mode.is_tracked() {
@@ -1826,6 +1827,8 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
+                potential_decode_blocks: request
+                    .potential_decode_blocks_after_admission(worker, block_size),
             })
         }
     }
