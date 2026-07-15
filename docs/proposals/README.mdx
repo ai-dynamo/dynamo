@@ -85,6 +85,8 @@ Comments are hosted by GitHub, not by the docs site. The rendered page is a read
 
 Each request uses the `application/vnd.github.full+json` Accept header, so comment bodies come back pre-rendered as GitHub's `body_html` (sanitized before injection) — bold, italic, inline code, fenced code blocks, links, lists, and blockquotes render as they do on github.com.
 
+**Highlight to comment.** Selecting text anywhere in a DEP page's prose surfaces a floating "💬 Comment on GitHub" button. Clicking it copies a markdown blockquote of the selection to your clipboard and opens the DEP's PR "Files changed" view (or its tracking issue when no PR is configured) in a new tab, so you paste-and-reply on GitHub with the quote already loaded. The page itself never posts — this is a deep-link shortcut, not a comment editor.
+
 Because DEPs live in `ai-dynamo/enhancements`, the **cross-repo case is the default**: pages point their mount at `owner="ai-dynamo" repo="enhancements"`, so the mirror pulls from the enhancements PR/issue rather than this repo. Automation accounts (anything ending in `[bot]`, plus `copy-pr-bot` and `github-actions`) are filtered out of every surface so the page shows human review only. Each thread has a "Comment on the PR/issue" deep-link, and the design section shows an "open a tracking issue" prompt when no issue is linked. Set the sources per page:
 
 ```mdx

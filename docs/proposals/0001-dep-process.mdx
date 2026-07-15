@@ -1,0 +1,417 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DEP-0001: The Dynamo Enhancement Proposal (DEP) Process"
+subtitle: "How Dynamo proposes, reviews, discusses, and ratifies cross-cutting design and process decisions."
+pr: 11687
+tracking-issue:
+---
+
+{/*
+  DRAFT MIRROR of DEP-0001. The authoritative source lives at:
+      https://github.com/ai-dynamo/dynamo-tpm  (private / internal)
+  and will be published to ai-dynamo/enhancements once the DEP-0001 PR
+  is opened. Until then, this page renders the current draft on the
+  docs preview so reviewers can leave line-level comments HERE — via
+  the <PrInlineComments> mount at the bottom, which points at this
+  Dynamo repo's PR #11687 and its `docs/proposals/0001-dep-process.mdx`
+  path so comments land on this file.
+
+  Section vocabulary is DEP-0001's own; the file is not summarized. The
+  in-body Field/Value metadata table from the source is dropped here
+  because <DepMetadata> below renders that surface.
+*/}
+
+import { DepMetadata } from "@/components/DepMetadata";
+import { PrInlineComments } from "@/components/PrInlineComments";
+
+<DepMetadata
+  dep="0001"
+  status="Draft"
+  category="Process"
+  authors="Dan Gil"
+  requiredReviewers="Dynamo maintainers — engineering leadership and docs owners"
+  owner="ai-dynamo"
+  repo="dynamo"
+  pr={11687}
+/>
+
+> [!WARNING]
+> **Status: Draft.** This DEP proposes the DEP process itself and is under active discussion. It is not yet a ratified decision — the lifecycle, front-matter, roles, and phases below are the proposed starting point and will be finalized in review. Leave line-level review by highlighting text on this page (see the "💬 Comment on GitHub" affordance) or on [PR #11687](https://github.com/ai-dynamo/dynamo/pull/11687) directly.
+
+## Summary
+
+I recommend Dynamo adopt one DEP process: proposals live in the dedicated `ai-dynamo/enhancements` repository, and each one renders as a page on the Dynamo docs site (Fern, `docs.nvidia.com/dynamo`) with a one-way mirror of its GitHub review. The mirror surfaces line-level review comments anchored on the exact text, the pull-request conversation, and the tracking-issue thread, each with a deep-link back to GitHub to reply.
+
+Dynamo is a multi-product, multi-repo project. Most DEPs cut across the Router, the Planner, KVBM, Deploy, the LLM engine, and OPS, so no single code repository is their natural home. A dedicated proposals repository is the model that projects with our topology use — Rust, Kubernetes, React, Swift, Python, Vue — for exactly that reason. As Dynamo adopts SIG-based governance (Special Interest Groups, or SIGs, the Kubernetes governance model), a SIG owns a DEP, not a code repo, so the dedicated repo is the right structure, not a compromise. The historical cost of a dedicated repository was weaker visibility and no line-level design discussion. We built the fix and proved it. On the live docs preview, a real 509-line DEP (Nova, `ai-dynamo/enhancements` PR #61) rendered with the majority of its human line-level review anchored inline on the exact text and the remainder in a graceful fallback panel, plus the PR conversation and the tracking-issue thread, in both light and dark mode. Bot and CI comments are filtered out.
+
+Net: keep the dedicated-repo model that fits a multi-repo project, and add the rendering and discussion layer that gives it public visibility and inline design review. Authoring stays GitHub-native and low-burden. Readers get one clean, shareable, cross-linked page.
+
+**The ask:** ratify the DEP model in this proposal — proposals in `ai-dynamo/enhancements`, rendered on the docs site with the one-way comment mirror; keep `ai-dynamo/enhancements` as the DEP home; and ship the Proposals-tab render and comment mirror (draft PR `ai-dynamo/dynamo#11687`). The lifecycle, front-matter, roles, and phases below are the proposed starting point, to be finalized during DEP review.
+
+## Motivation
+
+Neelay Shah raised the need for a formal DEP process. Dynamo had no agreed way to propose a cross-cutting design or process change, discuss it in the open, and record the decision. Design content, line-level review, and open-ended debate lived in three places at once: a separate repository, pull-request threads, and meetings. A reader had no single place to find a proposal's current state, and a contributor without repository access had no way to weigh in.
+
+Three constraints came out of that discussion, and any process we adopt has to meet all three:
+
+* **Shareability.** Harry Kim asked for maximum shareability — a clean, public link a PM or partner can open without a GitHub account or repo access.
+* **Line-level design discussion.** Neelay Shah noted that GitHub issues track work well but are poor for line-level design discussion; reviewers need to comment on specific lines of a proposal.
+* **Discoverability with the code.** David Zier flagged that storing planning docs away from the code leads to confusion and missed documentation. Proposals have to stay easy to find and cross-linked to the code they affect.
+
+{/* Editorial note: before this DEP goes public, reframe the named attributions (David Zier, Neelay Shah, Harry Kim here; Ryan Olson in Validation) as "raised in the originating discussion" rather than naming individuals. */}
+
+The team moved to issue-based DEP tracking early, before governance and SIGs were in place — arguably ahead of the structure that gives a DEP an owner and a review path. Now that Dynamo is standing up SIGs, we can run the process properly, which is what this DEP proposes.
+
+The tension is real: a dedicated repository is the right home for cross-cutting proposals, but a plain dedicated repository is exactly what scores worst on shareability and discoverability. This DEP resolves that tension with a rendering and mirror layer, described in the Proposal.
+
+### Goals
+
+* Give cross-cutting DEPs one canonical home that fits a multi-repo project.
+* Render every DEP on the public docs site with an unambiguous status.
+* Preserve line-level design review and surface it on the rendered page.
+* Keep authoring and review GitHub-native, so the burden matches a normal PR.
+* Keep GitHub the source of truth; the docs page is a read-only mirror.
+
+### Non Goals
+
+* Replacing GitHub issues or pull requests as the place where discussion happens.
+* Building a new comment system on the docs site.
+* Migrating every existing `ai-dynamo/enhancements` DEP on day one. Backfill is a later phase.
+* Defining per-component code ownership or review routing. That is CODEOWNERS work, not this DEP.
+
+### Requirements
+
+#### REQ 1: Cross-Cutting DEPs Must Have a Single Home
+
+A DEP that spans repositories **MUST** have one canonical location. The process **MUST NOT** require a copy of a proposal per code repository.
+
+#### REQ 2: Every DEP Must Render Publicly With Unambiguous Status
+
+Every DEP **MUST** render on the public docs site and **MUST** show its status prominently. An in-flight DEP **MUST NOT** read as ratified.
+
+#### REQ 3: Design Discussion Must Support Line-Level Review
+
+Reviewers **MUST** be able to comment on specific lines of a proposal. That review **SHOULD** be visible on the rendered page, anchored to the text it discusses.
+
+#### REQ 4: Authoring and Review Must Stay GitHub-Native
+
+Opening and reviewing a DEP **MUST NOT** require any tool beyond a GitHub pull request and issue. DCO sign-off and GPG signing already enforced on the repository **MUST** apply unchanged.
+
+#### REQ 5: GitHub Must Remain the Source of Truth
+
+The rendered page **MUST** be read-only. Every reply **MUST** happen on GitHub. Community participation **SHOULD NOT** require repository write access; any authenticated GitHub user can join on the issue or PR.
+
+## Proposal
+
+The process has two parts: a home and a rendering layer.
+
+**The home is `ai-dynamo/enhancements`.** A DEP is a markdown file under `deps/`, added by a pull request, following the KEP-style layout the repository already uses. As proposed, a SIG owns each DEP, not a code repo, so a cross-cutting DEP has a clear owner even though its implementation lands across many `ai-dynamo/*` repos (see Precedent). Two GitHub objects back each DEP, each doing the job it is best at:
+
+* The **pull request** that adds or edits the markdown is the revision. Reviewers leave line-level comments on the exact text, plus general conversation on the PR.
+* The **tracking issue** is the stable anchor and the home for durable, open-ended design discussion. Any GitHub user can join it without repository write access.
+
+**The rendering layer publishes each DEP to the Dynamo docs site.** A cross-repo renderer reads the markdown from `ai-dynamo/enhancements` and publishes it as a page under a Proposals tab on `docs.nvidia.com/dynamo`. The same page mirrors the DEP's GitHub review, read-only, from three sources:
+
+1. Inline pull-request review comments, anchored on the exact quoted text they discuss, with expandable cards.
+2. The pull-request conversation, as a "Revision discussion" thread.
+3. The tracking-issue thread, as a "Design discussion" thread.
+
+Every card deep-links back to GitHub to reply. The page never posts. GitHub stays the source of truth (REQ 5), and readers get one shareable link with the full proposal and its design discussion in one view.
+
+Net: this takes the dedicated-repo model — correct for a multi-repo project — and adds the visibility and line-level discussion a plain dedicated repo lacks. Authoring and review stay where engineers already work; readers and non-repo participants get a clean public page.
+
+### The Strongest Objection, Answered
+
+The strongest argument against a dedicated repository is David Zier's: planning docs stored away from the code lead to confusion and missed documentation. That is a real risk, and it is the reason single-repo projects colocate proposals with code.
+
+The rendering layer answers it head-on. Rendered DEPs live on the same docs site as every other piece of Dynamo documentation, cross-linked to the repositories and components they affect, and indexed alongside the rest of the docs. A reader finds a DEP the same way they find any Dynamo doc — by searching or browsing one site. Compare that to the alternative the objection implies: proposal folders scattered across the Router, Planner, Deploy, LLM-engine, and OPS repositories, each with its own path and none holding the cross-cutting ones. Discoverability is higher with one rendered, indexed home than with per-repo folders. The residual risk — that a DEP goes stale after the code moves on — exists in any location; the status lifecycle below handles it, not the choice of repository.
+
+### Native PR ↔ Issue Linking Is Preserved
+
+One reason DEP-as-issues appealed to us was the native PR to issue linking GitHub and Linear give for free: type `Fixes #123` in a PR and the issue closes itself, and the issue shows the PR that resolved it. That convenience is real, but it is almost entirely a same-repository feature. GitHub's keyword auto-close and its linked-pull-requests panel only work when the PR and issue live in the same repo; across repositories, a closing keyword produces a cross-reference, not a reliable auto-close. Dynamo's implementation PRs land across many repos, so it would not have worked cross-repo even if the DEP were an issue inside one code repo.
+
+We keep the linking we actually need by giving each DEP a Linear issue (`DYN-####`) for internal execution rollup. Linear links any PR in any connected repo to that issue by its id in the branch, title, or description, and drives status automatically — the multi-repo rollup GitHub's native linking cannot provide. Implementation PRs also cross-reference the DEP doc and its tracking issue in the enhancements repo, so the design record and the code stay navigable in both directions.
+
+### Tracking a DEP Across Repos
+
+As proposed, each DEP has three artifacts:
+
+* **The DEP doc** in `ai-dynamo/enhancements` — the versioned design record.
+* **A canonical tracking issue** in `ai-dynamo/enhancements` — the human hub for status, owned by the DEP's SIG.
+* **A Linear issue (`DYN-####`)** — the internal execution rollup that spans repos.
+
+Implementation PRs in any `ai-dynamo/*` repo carry the `DYN-####` id (branch, title, or description) and cross-reference `ai-dynamo/enhancements#N`. The tracking issue closes by hand, or by a small scheduled Action, not by a cross-repo `Fixes` keyword, since GitHub's keyword auto-close does not fire reliably across repositories.
+
+The split is deliberate. Linear gives NVIDIANs a repo-agnostic execution rollup, but it is internal-only — external contributors cannot see it. So Linear carries internal execution tracking, and the public-facing layer is the DEP doc and its tracking issue in the public `ai-dynamo/enhancements` repo, rendered on the docs site with the comment mirror. That public layer is what external contributors read and engage with; Linear cannot fill that role.
+
+### DEP Lifecycle
+
+The lifecycle below is the proposed model, shown as an example. Exact state names get finalized during DEP review — the current dynamo docs README banner uses a slightly different enum ("Approved", and no "Implemented" state) that we would reconcile. As proposed, a DEP moves through these states, and the banner and the `status` header carry the current one:
+
+* **Draft.** Opened as a PR to `ai-dynamo/enhancements`. Shape is under discussion. The PR may merge early so the DEP is discoverable and rendered; merging as Draft does not imply acceptance.
+* **Under Review.** The author requests a decision. The owning SIG's approvers engage on the PR (line-level) and the tracking issue (design).
+* **Accepted** or **Rejected** or **Deferred.** Maintainers record the decision in a short follow-up PR that updates the status.
+* **Implemented.** The work items have merged. The DEP names the shipping release.
+* **Replaced.** A later DEP supersedes this one. A significant change after acceptance gets a new DEP; maintainers mark the original Replaced.
+
+Proposed roles, aligned to the SIG model:
+
+* **Owning SIG.** The SIG that owns and sponsors the DEP. Ownership sits at the SIG level and spans repos.
+* **Author.** Writes and revises the DEP.
+* **Approvers.** The owning SIG's chairs or technical leads. They speak for the SIG and decide when the DEP is accepted, so they are the proposed required reviewers.
+* **Maintainers.** Record the Accepted, Rejected, or Deferred decision on the SIG's behalf.
+
+How a DEP would be opened, discussed, accepted, and rendered, as proposed:
+
+* **Opened** by a PR to `ai-dynamo/enhancements` adding `deps/NNNN-slug.md`, plus a tracking issue for durable design discussion.
+* **Discussed** on the PR (line-level review and revision conversation) and the tracking issue (open-ended debate, open to the community).
+* **Accepted** when the owning SIG's approvers approve and maintainers set the status to Accepted in a follow-up PR.
+* **Rendered** by the cross-repo renderer, which publishes the markdown to the Proposals tab and mirrors the PR and issue comments onto the page.
+
+### Front-Matter Specification
+
+Each DEP would carry front-matter like the example below. The keys are proposed and match the docs-site template so a DEP stays portable between the repository and the rendered page; the final set gets settled in review.
+
+| Key | Meaning |
+| :--- | :--- |
+| `number` | DEP number, zero-padded to four digits (`0001`). |
+| `title` | Full title, prefixed with the DEP number on the rendered page. |
+| `status` | One of Draft, Under Review, Accepted, Rejected, Deferred, Implemented, Replaced. |
+| `category` | Architecture, Process, or a category the maintainers add. |
+| `owning-sig` | The SIG that owns the DEP. Mirrors Kubernetes' `owning-sig`. |
+| `participating-sigs` | Other SIGs involved or impacted (optional). Mirrors Kubernetes' `participating-sigs`. |
+| `authors` | Author name or team. |
+| `sponsor` | The owning SIG, or a maintainer shepherding on its behalf. |
+| `required-reviewers` | The owning SIG's approvers (chairs or technical leads). |
+| `review-date` | Target date for the decision. |
+| `tracking-issue` | URL of the anchor issue in `ai-dynamo/enhancements`. |
+| `pr` | The pull request that adds or edits the DEP. Drives the inline review and revision mirror. |
+
+As proposed, the `status` value maps to the docs-site banner: Draft to a warning callout, Under Review to an info callout, Accepted or Implemented to a note callout, and Rejected, Deferred, or Replaced to an error callout. Keep the `status` header and the banner in sync.
+
+## Implementation Details
+
+The render and mirror already exist on draft PR `ai-dynamo/dynamo#11687`. It adds a Proposals tab, a `DepMetadata` component for the status pill and metadata card, a `PrInlineComments` component that renders a mount div, and the client runtime `fern/js/dep-pr-comments.js`, injected site-wide. The runtime reads the DEP's `pr` and `issue` from the mount and fetches three sources from GitHub's public REST API:
+
+* `GET /repos/{owner}/{repo}/pulls/{pr}/comments` — inline review, anchored to the quoted text.
+* `GET /repos/{owner}/{repo}/issues/{pr}/comments` — the PR conversation (Revision discussion).
+* `GET /repos/{owner}/{repo}/issues/{issue}/comments` — the tracking-issue thread (Design discussion).
+
+For this DEP process, the renderer points `{owner}/{repo}` at `ai-dynamo/enhancements`, so the cross-repo case is the default, not an exception. The runtime filters bot and CI accounts from every surface — inline review and both discussion threads — so the page shows human review only.
+
+### Validation
+
+We validated the render and mirror on the live Fern preview against a real DEP: Nova, "Active Messaging as a Foundational Network Primitive," `ai-dynamo/enhancements` PR #61 by Ryan Olson, `deps/0000-nova.md`, about 509 lines.
+
+* The DEP's 62 human line-level review comments all rendered. The majority anchored inline on the exact text; the remainder (9 on the current preview) fell to the graceful fallback panel and were still shown.
+* Bot and CI accounts — Copilot, copy-pr-bot, github-actions — are filtered from every surface, so the page shows human review only (authors dzier, ryanolson, brminich, oandreeva-nv, nv-kmcgill53, richardhuo-nv).
+* The PR conversation rendered in the Revision discussion, and the tracking-issue empty state rendered with its deep-link.
+* Verified in light and dark mode.
+
+### Deferred to Implementation
+
+* **Bake comments at build time for production.** The live fetch is unauthenticated and subject to GitHub's ~60-requests/hour/IP limit. Production should bake the mirrored comments in at docs build time so a high-traffic page never hits the limit.
+* **Remove the Nova demo page before launch.** The current Nova page is demo content and must come out before the tab ships.
+* **Automated numbering and index.** DEP numbering and an auto-generated index are manual today.
+* **Backfill existing enhancements DEPs** into the rendered tab.
+
+## Implementation Phases
+
+The phase breakdown below is proposed, not committed. Release targets and work items are placeholders to be set during review.
+
+### Phase 0: Scaffold
+
+**Release Target**: TBD
+
+**Effort Estimate**: Small. One engineer, docs-only. Landed on draft PR `ai-dynamo/dynamo#11687`.
+
+**Work Items**: `ai-dynamo/dynamo#11687`
+
+**Supported API / Behavior**:
+
+* Proposals tab, DEP template, status-banner convention, `DepMetadata` and `PrInlineComments` components, and the comment-mirror runtime, validated against a real DEP.
+
+**Not Supported**:
+
+* Cross-repo rendering pointed at `ai-dynamo/enhancements` in production, and build-time comment baking.
+
+### Phase 1: Cross-Repo Production Render
+
+**Release Target**: TBD
+
+**Effort Estimate**: Small to medium. One engineer.
+
+**Work Items**: TBD
+
+**Supported API / Behavior**:
+
+* Render DEPs from `ai-dynamo/enhancements` on the production Proposals tab, with comments baked in at build time. Remove the Nova demo page.
+
+**Not Supported**:
+
+* Automated DEP numbering and index generation.
+
+### Phase 2: Backfill and Index
+
+**Release Target**: TBD
+
+**Effort Estimate**: Medium.
+
+**Work Items**: TBD
+
+**Supported API / Behavior**:
+
+* Backfill existing enhancements DEPs onto the tab and generate a DEP index.
+
+## Risks and Qualifiers
+
+* **One-way mirror.** The page cannot post to GitHub, by design. A reader has to click through to reply. This keeps GitHub the source of truth and keeps us out of running a comment system.
+* **Rate limit.** The unauthenticated fetch can hit GitHub's ~60-requests/hour/IP limit on a hot page and 403. The live section degrades to a notice plus a link; the production fix is build-time baking (see Deferred to Implementation).
+* **Anchor drift.** When someone edits a reviewed line later, its inline comment can no longer anchor and falls to the unanchored panel. A minority land there — 9 on the current Nova preview — and the page still shows each one; only its inline position is lost.
+* **Demo content.** The current Nova page is a demo and must be removed before launch.
+
+## Open Questions
+
+These are open for DEP review to settle. This proposal does not decide them.
+
+* **Relationship to `deps/0000-dep-process.md`.** `ai-dynamo/enhancements` already holds an approved `0000-dep-process`. Whether DEP-0001 extends and formalizes it, or supersedes it, is undecided here. The review picks one.
+* **Lifecycle state names.** The proposed states (Draft, Under Review, Accepted, Rejected, Deferred, Implemented, Replaced) need reconciling with the current dynamo docs README banner enum, which differs.
+* **Front-matter keys and roles.** The proposed front-matter and reviewer roles are a starting point, not a fixed schema.
+* **Phase plan.** The phases, targets, and effort estimates are illustrative and get set during review.
+* **SIG rollout dependency.** DEP-0001 references SIGs as the ownership layer but does not define them. Standing up SIGs — their names, chairs, and scope — is a separate governance effort this process depends on.
+
+## Related Proposals
+
+* `ai-dynamo/enhancements` [`deps/0000-dep-process.md`](https://github.com/ai-dynamo/enhancements/blob/main/deps/0000-dep-process.md) — the existing DEP process. How this DEP relates to it is an open question (see Open Questions).
+* The docs-site DEP template and worked example on draft PR `ai-dynamo/dynamo#11687`.
+
+## Alternate Solutions
+
+### Alt 1: Google Docs
+
+**Pros**:
+
+* Familiar to everyone; commenting is easy.
+
+**Cons**:
+
+* Off-platform and not versioned with the code.
+* NVIDIA's public-by-default policy for a public open-source project blocks it.
+
+**Reason Rejected**:
+
+* Policy plus off-platform. A public project cannot anchor its design record in an internal document.
+
+### Alt 2: GitHub Issues Only
+
+**Pros**:
+
+* Zero setup. The community can join without repo access.
+
+**Cons**:
+
+* No line-level design discussion. A long proposal in an issue body cannot be reviewed line by line.
+
+**Reason Rejected**:
+
+* Fails REQ 3. Issues track work well but are the wrong surface for reviewing a design document precisely.
+
+### Alt 3: Colocate DEPs Inside Each Code Repository
+
+**Pros**:
+
+* Proposals sit next to the code they describe.
+
+**Cons**:
+
+* No home for a cross-cutting DEP that spans the Router, Planner, Deploy, LLM engine, and OPS.
+* Duplication and drift when someone copies a proposal across repositories.
+
+**Reason Rejected**:
+
+* Fails REQ 1. This is the single-repo pattern (OpenTofu, TiDB, NumPy, and the now-deprecated CockroachDB RFC process), and Dynamo is not a single repo. The rendering layer answers the discoverability motive behind it (see The Strongest Objection, Answered).
+
+### Alt 4: Dedicated Enhancements Repo, GitHub-Native Only
+
+**Pros**:
+
+* Right home for cross-cutting proposals. Low authoring burden. DCO and GPG already enforced.
+
+**Cons**:
+
+* Weak public visibility and shareability — there is no clean link to hand a PM or partner.
+* PR diffs hide the design discussion from anyone not watching the repo.
+
+**Reason Rejected**:
+
+* Fails REQ 2. This is the status quo, and its visibility cost is the exact gap the rendering layer removes. It is the recommended option minus the render and mirror.
+
+### The Recommended Option's Own Downside
+
+The recommended option is not free. It adds a rendering layer to maintain, a one-way mirror that cannot post, a rate limit to engineer around, and a fallback for anchor drift. Risks and Qualifiers names those costs. I recommend it anyway, because the authoring and review path stays a normal GitHub PR, and the only new burden falls on the docs pipeline, not on DEP authors.
+
+## Background
+
+### Precedent
+
+The closest template is Kubernetes. Kubernetes organizes ownership into Special Interest Groups (SIGs), defined in the `kubernetes/community` repo, and each SIG owns its enhancement proposals (KEPs) in the dedicated `kubernetes/enhancements` repo while the implementation lands across many `kubernetes/*` code repos. A KEP lives under `keps/sig-<name>/NNNN-title/` with a `kep.yaml` that carries `owning-sig`, optional `participating-sigs`, and a `status`, and the owning SIG's approvers move it through the lifecycle. That is Dynamo's situation exactly: proposals owned at the group level, implemented across many repos.
+
+Dynamo is moving to the same SIG model, which is what makes a dedicated proposals repo the right structure, not a compromise: a SIG owns a DEP, not a code repo. Other projects with our topology keep proposals in a dedicated repository for the same reason. Single-repo projects colocate them with code. Dynamo matches the first group.
+
+| Model | Projects | Fit for Dynamo |
+| :--- | :--- | :--- |
+| Dedicated proposals repository | Rust (`rust-lang/rfcs`), Kubernetes (`kubernetes/enhancements`), React (`reactjs/rfcs`), Swift (`swiftlang/swift-evolution`), Python (`python/peps`), Vue (`vuejs/rfcs`) | Matches. Kubernetes SIGs own KEPs in the dedicated repo; `ai-dynamo/enhancements` already mirrors that model. |
+| In-repo proposals | OpenTofu (`rfc/`), TiDB (`docs/design/`), NumPy (`doc/neps/`), CockroachDB (`docs/RFCS/`, deprecated) | Does not match. These are single-repo products. |
+
+### SIGs Map onto Existing Ownership
+
+SIG ownership is not net-new bureaucracy. `ai-dynamo/dynamo` already has 22 first-class owned areas, defined as Infrastructure-as-Code in [`.github/codeowners/areas.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/areas.yaml), each backed by an `@ai-dynamo/dynamo-<area>-codeowners` GitHub team — among them router, kv-memory, planner, runtime, the SGLang, TensorRT-LLM, and vLLM backends, operator, ops, docs, and process, plus an XPU file-level overlay. As proposed, SIGs map onto these areas: the taxonomy is the substrate a SIG scopes to, so a SIG formalizes an ownership boundary the repo already enforces instead of inventing a new one.
+
+Ownership also has to span repos, because the org is genuinely multi-product. Under `ai-dynamo`, the inference framework (`dynamo`) sits alongside `aiperf` for benchmarking, `nixl` for the NIXL transfer library, `grove` for Kubernetes gang scheduling and autoscaling, `modelexpress`, `aiconfigurator`, and others, plus the public `enhancements` repo where DEPs live and a `governance` repo, consistent with standing up SIG governance. A DEP for disaggregated serving or KV routing routinely touches several of these at once, so no single code repo can be its home.
+
+### References
+
+* [Kubernetes Enhancement Proposals (KEPs)](https://github.com/kubernetes/enhancements)
+* [Kubernetes KEP process and `kep.yaml` metadata](https://github.com/kubernetes/enhancements/blob/master/keps/sig-architecture/0000-kep-process/README.md)
+* [Kubernetes SIGs (`kubernetes/community`)](https://github.com/kubernetes/community)
+* [Rust RFCs](https://github.com/rust-lang/rfcs)
+* [Python PEPs](https://github.com/python/peps)
+* [RFC 2119: Key words for use in RFCs](https://datatracker.ietf.org/doc/html/rfc2119)
+* [`ai-dynamo/enhancements` DEP process](https://github.com/ai-dynamo/enhancements/blob/main/deps/0000-dep-process.md)
+* [`ai-dynamo/dynamo` CODEOWNERS area taxonomy (`.github/codeowners/areas.yaml`)](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/areas.yaml)
+
+### Terminology and Definitions
+
+| Term | Definition |
+| :--- | :--- |
+| **Anchor drift** | When someone edits a reviewed line after review, so its inline comment can no longer attach and falls to the unanchored panel. |
+| **DEP** | Dynamo Enhancement Proposal. A design or process decision plus its motivation. |
+| **Design discussion** | The durable, open-ended debate on a DEP, hosted on its tracking issue. |
+| **Owning SIG** | The Special Interest Group that owns and sponsors a DEP and provides its approvers. |
+| **Revision discussion** | The pull-request conversation on the DEP markdown. |
+| **SIG** | Special Interest Group. A cross-repo ownership group, following the Kubernetes model. |
+| **Tracking issue** | The GitHub issue that anchors a DEP and hosts its design discussion. |
+
+### Acronyms and Abbreviations
+
+**DEP**: Dynamo Enhancement Proposal
+
+**KEP**: Kubernetes Enhancement Proposal
+
+**KVBM**: Key-Value Block Manager
+
+**SIG**: Special Interest Group
+
+{/* Cross-repo comment mirror: this page lives in ai-dynamo/dynamo (draft
+    PR #11687), so we point the mirror at THIS repo's PR and filter by
+    this file's path so only comments on this DEP page show up here. No
+    tracking issue yet — the empty-state "open a tracking issue" prompt
+    below is expected until one is filed. */}
+
+<PrInlineComments
+  owner="ai-dynamo"
+  repo="dynamo"
+  pr={11687}
+  path="docs/proposals/0001-dep-process.mdx"
+/>

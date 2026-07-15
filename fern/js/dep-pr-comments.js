@@ -146,7 +146,20 @@
     ".dep-pr-empty{padding:11px 13px;border:1px dashed var(--border,var(--grayscale-a5,#cfcfcf));border-radius:8px;font-size:13px;color:var(--pst-color-text-muted,#777);}" +
     ".dep-pr-empty a{color:var(--nv-color-green,#76b900);font-weight:600;text-decoration:none;}" +
     ".dep-pr-empty a:hover{text-decoration:underline;}" +
-    ".dep-pr-quote{color:var(--pst-color-text-muted,#777);font-style:italic;}";
+    ".dep-pr-quote{color:var(--pst-color-text-muted,#777);font-style:italic;}" +
+    /* Highlight-to-comment: a small floating button that appears at the
+     * end of a text selection inside .fern-prose. On click it copies a
+     * blockquote of the selection to the clipboard and opens the DEP's
+     * GitHub review surface in a new tab. The toast is a transient
+     * confirmation. Both use theme vars so light + dark stay consistent
+     * with the rest of the comment mirror. High z-index so Fern's own
+     * floating toolbars don't cover the button. */
+    ".dep-pr-quote-btn{position:fixed;z-index:9999;display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid var(--nv-color-green,#76b900);border-radius:999px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);font:600 12px/1 system-ui,sans-serif;box-shadow:0 3px 10px rgba(0,0,0,.15);cursor:pointer;user-select:none;}" +
+    ".dep-pr-quote-btn:hover{background:rgba(118,185,0,.12);}" +
+    ".dark .dep-pr-quote-btn,html[data-theme=dark] .dep-pr-quote-btn{box-shadow:0 3px 12px rgba(0,0,0,.5);}" +
+    ".dep-pr-toast{position:fixed;z-index:10000;padding:8px 14px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-radius:8px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);font:600 12.5px/1.35 system-ui,sans-serif;box-shadow:0 3px 12px rgba(0,0,0,.18);opacity:0;transform:translateY(6px);transition:opacity 120ms ease,transform 120ms ease;pointer-events:none;}" +
+    ".dep-pr-toast.on{opacity:1;transform:translateY(0);}" +
+    ".dark .dep-pr-toast,html[data-theme=dark] .dep-pr-toast{box-shadow:0 3px 14px rgba(0,0,0,.6);}";
 
   function ensureStyles() {
     if (document.getElementById(STYLE_ID)) return;
@@ -598,6 +611,64 @@
     return s;
   }
 
+  /* ------------------------------------------------------------------ *
+   * Pure helpers for the "highlight and click to comment on GitHub"    *
+   * affordance. Kept at module scope (not inside the event handlers)   *
+   * so the Node test file can extract and unit-test them directly —    *
+   * the DOM plumbing that uses them is exercised only in the browser.  *
+   * ------------------------------------------------------------------ */
+
+  /** Turn selected plain text into a markdown blockquote.
+   *
+   *   "hello" -> "> hello"
+   *   "a\nb"  -> "> a\n> b"
+   *
+   * CRLF and stray CR are normalised to LF, runs of blank lines are
+   * collapsed to a single quoted blank ("> \n>\n> " -> "> \n>\n> "),
+   * and the whole thing is truncated at 1500 chars with an ellipsis
+   * so pasting a huge selection doesn't dump 20 KB into the reply.
+   * Content is plain text; markdown/HTML metacharacters are preserved
+   * verbatim so GitHub still renders exactly what the reader selected.
+   */
+  function buildBlockquote(text) {
+    var BLOCKQUOTE_MAX = 1500;
+    if (text == null) return "";
+    var s = String(text).replace(/\r\n?/g, "\n");
+    if (!s.replace(/\s/g, "")) return "";
+    var truncated = false;
+    if (s.length > BLOCKQUOTE_MAX) {
+      s = s.slice(0, BLOCKQUOTE_MAX);
+      truncated = true;
+    }
+    // Collapse runs of blank lines to a single blank so the resulting
+    // blockquote reads cleanly on GitHub.
+    s = s.replace(/\n{2,}/g, "\n\n");
+    var lines = s.split("\n").map(function (line) {
+      // A blank line inside a blockquote is "> " with only whitespace
+      // -- render as ">" (no trailing space) so mobile clients don't
+      // strip the empty quoted line.
+      return line.length === 0 ? ">" : "> " + line;
+    });
+    var out = lines.join("\n");
+    if (truncated) out += "…";
+    return out;
+  }
+
+  /** Deep-link URL for the GitHub review surface associated with a mount.
+   *
+   * Prefers the PR "Files changed" view (`/pull/N/files`) because that is
+   * the surface that supports line-level comments. Falls back to the
+   * tracking issue when no PR is configured. Returns "" when neither
+   * signal is available — the caller uses that to hide the button.
+   */
+  function buildGitHubUrl(cfg) {
+    if (!cfg || !cfg.owner || !cfg.repo) return "";
+    var base = "https://github.com/" + cfg.owner + "/" + cfg.repo;
+    if (cfg.pr) return base + "/pull/" + cfg.pr + "/files";
+    if (cfg.issue) return base + "/issues/" + cfg.issue;
+    return "";
+  }
+
   /* Fetch the three read-only sources in parallel; one failing source (e.g. a
    * 403 rate-limit) must not blank the others, so use allSettled and carry a
    * per-source error. */
@@ -775,8 +846,291 @@
     /* SPA navigation: the previous mount div is detached. Clear stale marks and
      * force a fresh anchoring pass against the new page's mount (if any). */
     cleanup();
+    // The quote button is infrastructure (not tagged .dep-pr-ui, so
+    // cleanup doesn't touch it), but any stashed selection from the
+    // outgoing page is no longer valid — dismiss.
+    if (typeof hideQuoteBtn === "function") hideQuoteBtn();
     retryCount = 0;
     scheduleScan();
+  }
+
+  /* ================================================================== *
+   *  Highlight-to-comment affordance (MVP)                              *
+   *                                                                     *
+   * A DEP page is a READ-ONLY mirror; we cannot post to GitHub from     *
+   * here. But we can shorten the reviewer's path from "spot the line I  *
+   * want to comment on" to "reply on GitHub with the quote already in   *
+   * my clipboard". On mouseup with a non-empty selection inside the    *
+   * anchoring root, we pop up a floating "💬 Comment on GitHub" button. *
+   * Clicking it: builds a markdown blockquote of the selection, copies  *
+   * it to the clipboard, opens the DEP's GitHub review surface in a     *
+   * new tab, and shows a transient toast so the reader knows the       *
+   * clipboard is loaded. All state is per-page-load; no persistence.    *
+   *                                                                     *
+   * Scoping is deliberate: the button only appears when the selection  *
+   * lives INSIDE the anchoring root (`resolveRoot`) and outside our    *
+   * own comment cards / mount. That keeps it from firing on nav text,  *
+   * on the sidebar, or on the rendered comments themselves.            *
+   * ================================================================== */
+
+  var quoteBtnEl = null;
+  var toastEl = null;
+  var quoteBtnScrollListener = null;
+  var quoteBtnHideTimeout = null;
+
+  /** Return the mount config from the first (only) mount on the page,
+   *  or null if there is no DEP mount rendered. The highlight-to-comment
+   *  affordance is only meaningful on pages that already show comments. */
+  function activeMountConfig() {
+    var mount = document.getElementById(MOUNT_ID);
+    if (!mount) return null;
+    return readConfig(mount);
+  }
+
+  function ensureQuoteBtn() {
+    // Reattach if a prior cleanup() blew the node away, or if Fern's
+    // hydration swapped the body element. The button is INFRASTRUCTURE
+    // (not tagged .dep-pr-ui) so cleanup() doesn't remove it by default,
+    // but SPA teardown can still detach it.
+    if (quoteBtnEl && quoteBtnEl.isConnected) return quoteBtnEl;
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "dep-pr-quote-btn";
+    b.setAttribute("aria-label", "Comment on GitHub with this quote");
+    b.style.display = "none";
+    // The label carries the 💬 glyph inline (no innerHTML with user data).
+    b.appendChild(document.createTextNode("\uD83D\uDCAC Comment on GitHub"));
+    b.addEventListener("click", onQuoteBtnClick);
+    document.body.appendChild(b);
+    quoteBtnEl = b;
+    return b;
+  }
+
+  function ensureToast() {
+    if (toastEl && toastEl.isConnected) return toastEl;
+    var t = document.createElement("div");
+    t.className = "dep-pr-toast";
+    t.setAttribute("role", "status");
+    document.body.appendChild(t);
+    toastEl = t;
+    return t;
+  }
+
+  function showToast(msg) {
+    var t = ensureToast();
+    // Text-only content: never innerHTML user-derived data.
+    t.textContent = String(msg == null ? "" : msg);
+    // Anchor to viewport bottom-center; simple, avoids collision with
+    // the floating quote button which sits inline with the selection.
+    t.style.left = "50%";
+    t.style.bottom = "24px";
+    t.style.top = "auto";
+    t.style.transform = "translateX(-50%)";
+    // Force reflow so the "on" transition always plays even for
+    // back-to-back toast calls.
+    /* eslint-disable-next-line no-unused-expressions */
+    t.offsetWidth;
+    t.classList.add("on");
+    if (t._hideTimer) clearTimeout(t._hideTimer);
+    t._hideTimer = setTimeout(function () {
+      t.classList.remove("on");
+    }, 2200);
+  }
+
+  function hideQuoteBtn() {
+    if (!quoteBtnEl) return;
+    quoteBtnEl.style.display = "none";
+    quoteBtnEl.__depBtnSelection = null;
+    if (quoteBtnHideTimeout) {
+      clearTimeout(quoteBtnHideTimeout);
+      quoteBtnHideTimeout = null;
+    }
+  }
+
+  /** Copy text to the clipboard. Prefers the async Clipboard API;
+   *  falls back to a temp <textarea> + execCommand("copy") when the
+   *  Clipboard API is unavailable or blocked (older browsers, HTTP
+   *  contexts, iframes with restrictive permissions). Returns a
+   *  Promise<boolean> that resolves to `true` on success. */
+  function copyToClipboard(text) {
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.clipboard &&
+      typeof navigator.clipboard.writeText === "function"
+    ) {
+      return navigator.clipboard.writeText(text).then(
+        function () { return true; },
+        function () { return _copyFallback(text); }
+      );
+    }
+    return Promise.resolve(_copyFallback(text));
+  }
+  function _copyFallback(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand && document.execCommand("copy");
+      document.body.removeChild(ta);
+      return !!ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** Is the given DOM node inside our own comment UI? We must never fire
+   *  the highlight button when the reader is selecting text inside an
+   *  already-rendered card (that would create a confusing loop). */
+  function insideOwnUi(node) {
+    var el = node && node.nodeType === 3 ? node.parentNode : node;
+    while (el && el.nodeType === 1) {
+      if (el.id === MOUNT_ID) return true;
+      if (el.classList && el.classList.contains("dep-pr-ui")) return true;
+      el = el.parentNode;
+    }
+    return false;
+  }
+
+  function selectionInsideProse(sel) {
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+    var range = sel.getRangeAt(0);
+    if (insideOwnUi(range.startContainer)) return null;
+    if (insideOwnUi(range.endContainer)) return null;
+    // Resolve the same root the anchoring uses. If we can't find a
+    // prose container, the button has no meaningful scope — skip.
+    var root = resolveRoot(null);
+    if (!root) return null;
+    // Require the selection to be contained in the prose root; otherwise
+    // it's in the sidebar / nav / footer, which is not commentable.
+    if (!root.contains(range.commonAncestorContainer)) return null;
+    return range;
+  }
+
+  function positionQuoteBtn(range) {
+    var rects = range.getClientRects();
+    var last = rects && rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+    if (!last || (!last.width && !last.height)) return false;
+    var btn = ensureQuoteBtn();
+    btn.style.display = "";
+    // Measure after making it visible.
+    var bw = btn.offsetWidth || 160;
+    var bh = btn.offsetHeight || 30;
+    var top = last.bottom + 8;
+    var left = last.right - bw / 2;
+    var vw = window.innerWidth || document.documentElement.clientWidth;
+    var vh = window.innerHeight || document.documentElement.clientHeight;
+    if (left < 8) left = 8;
+    if (left + bw > vw - 8) left = vw - bw - 8;
+    if (top + bh > vh - 8) top = last.top - bh - 8;
+    btn.style.top = top + "px";
+    btn.style.left = left + "px";
+    btn.style.transform = "";
+    return true;
+  }
+
+  function onQuoteBtnClick() {
+    var btn = ensureQuoteBtn();
+    var stored = btn.__depBtnSelection;
+    var text = stored && stored.text ? stored.text : "";
+    var cfg = stored && stored.cfg ? stored.cfg : null;
+    hideQuoteBtn();
+    if (!text || !cfg) return;
+    var url = buildGitHubUrl(cfg);
+    var quote = buildBlockquote(text);
+    copyToClipboard(quote).then(function (copied) {
+      if (url) {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
+      showToast(
+        copied
+          ? "Quote copied \u2014 paste it in your GitHub comment."
+          : "Opened GitHub \u2014 clipboard copy blocked; select and copy manually."
+      );
+    });
+  }
+
+  function onDocumentMouseUp(evt) {
+    // A click on the button itself is not a "select-in-prose" event;
+    // let the click handler do its thing without immediately hiding.
+    if (quoteBtnEl && evt && quoteBtnEl.contains(evt.target)) return;
+    // Give the browser a beat to finalise the selection object.
+    setTimeout(function () {
+      var sel = window.getSelection && window.getSelection();
+      var range = selectionInsideProse(sel);
+      if (!range) {
+        hideQuoteBtn();
+        return;
+      }
+      var cfg = activeMountConfig();
+      if (!cfg) {
+        hideQuoteBtn();
+        return;
+      }
+      var url = buildGitHubUrl(cfg);
+      if (!url) {
+        // No PR and no tracking issue — no meaningful place to hand
+        // off to. Silently skip.
+        hideQuoteBtn();
+        return;
+      }
+      var text = sel.toString();
+      if (!text || !text.trim()) {
+        hideQuoteBtn();
+        return;
+      }
+      if (!positionQuoteBtn(range)) {
+        hideQuoteBtn();
+        return;
+      }
+      quoteBtnEl.__depBtnSelection = { text: text, cfg: cfg };
+    }, 10);
+  }
+
+  function onDocumentMouseDown(evt) {
+    // Click outside the button clears the selection UI. Do NOT hide when
+    // clicking the button itself (its own click handler manages state).
+    if (quoteBtnEl && evt && quoteBtnEl.contains(evt.target)) return;
+    hideQuoteBtn();
+  }
+
+  function onSelectionChange() {
+    var sel = window.getSelection && window.getSelection();
+    if (!sel || sel.isCollapsed) {
+      // Debounce a bit: a click on the button collapses the selection
+      // between mousedown and click; hiding immediately would kill the
+      // handler. onQuoteBtnClick runs its own cleanup.
+      if (quoteBtnHideTimeout) return;
+      quoteBtnHideTimeout = setTimeout(function () {
+        quoteBtnHideTimeout = null;
+        var s = window.getSelection && window.getSelection();
+        if (!s || s.isCollapsed) hideQuoteBtn();
+      }, 60);
+    }
+  }
+
+  function onQuoteBtnEscape(evt) {
+    if (evt && evt.key === "Escape") hideQuoteBtn();
+  }
+
+  function attachQuoteBtn() {
+    if (window.__depQuoteBtnBound) return;
+    window.__depQuoteBtnBound = true;
+    // ensureQuoteBtn() wires the button's own click handler on first
+    // create; document-level listeners live here.
+    ensureQuoteBtn();
+    document.addEventListener("mouseup", onDocumentMouseUp);
+    document.addEventListener("mousedown", onDocumentMouseDown);
+    document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("keydown", onQuoteBtnEscape);
+    // Scroll invalidates the anchored position; simpler to hide than
+    // to reflow.
+    quoteBtnScrollListener = hideQuoteBtn;
+    window.addEventListener("scroll", quoteBtnScrollListener, true);
+    window.addEventListener("resize", quoteBtnScrollListener);
   }
 
   function boot() {
@@ -784,6 +1138,7 @@
     var mo = new MutationObserver(scheduleScan);
     mo.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("popstate", onNav);
+    attachQuoteBtn();
   }
 
   if (document.readyState === "loading") {

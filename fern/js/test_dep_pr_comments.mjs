@@ -60,6 +60,8 @@ function extractFn(name) {
 }
 
 const sanitizeHtml = extractFn("sanitizeHtml");
+const buildBlockquote = extractFn("buildBlockquote");
+const buildGitHubUrl = extractFn("buildGitHubUrl");
 
 let passes = 0;
 let fails = 0;
@@ -218,6 +220,108 @@ test("neutralizes URIs with leading whitespace before scheme", () => {
   const html = '<a href="   javascript:alert(1)">c</a>';
   const out = sanitizeHtml(html);
   assert.ok(!/javascript:/i.test(out), `whitespace-prefixed js: survived: ${out}`);
+});
+
+console.log("");
+console.log("buildBlockquote — turn selected text into a markdown quote");
+
+test("prefixes single line with '> '", () => {
+  assert.equal(buildBlockquote("hello world"), "> hello world");
+});
+
+test("prefixes each line of multi-line text", () => {
+  assert.equal(
+    buildBlockquote("line1\nline2\nline3"),
+    "> line1\n> line2\n> line3"
+  );
+});
+
+test("empty / whitespace-only input yields empty string", () => {
+  assert.equal(buildBlockquote(""), "");
+  assert.equal(buildBlockquote("   \n\n  "), "");
+  assert.equal(buildBlockquote(null), "");
+});
+
+test("normalizes CRLF and stray CR to LF before prefixing", () => {
+  // Selections that cross Windows-line-endings or copy in a stray \r must
+  // not produce "> \r" runs.
+  assert.equal(
+    buildBlockquote("a\r\nb\rc"),
+    "> a\n> b\n> c"
+  );
+});
+
+test("collapses runs of blank lines into a single quoted blank", () => {
+  // A selection that spans a paragraph break has multiple blank lines;
+  // GitHub renders "> \n> \n> " as several quoted blanks. Collapse to one.
+  const out = buildBlockquote("para1\n\n\n\npara2");
+  assert.equal(out, "> para1\n>\n> para2");
+});
+
+test("truncates over the 1500-char sensible limit with a marker", () => {
+  const big = "x".repeat(3000);
+  const out = buildBlockquote(big);
+  assert.ok(out.length < 1700, `over-cap: ${out.length}`);
+  assert.ok(out.endsWith("…"), `no ellipsis: ${out.slice(-10)}`);
+});
+
+test("does not inject markdown or HTML into the quote content", () => {
+  // Quote content is opaque plain text — HTML/markdown metacharacters
+  // in the selection must not turn into structure once pasted.
+  const out = buildBlockquote("<script>alert(1)</script>\n**bold**");
+  // The `<` still leads its line but is inside a quote line — GitHub
+  // renders it literally. What we DO NOT want is a stripped tag; assert
+  // the original characters survive as text.
+  assert.ok(out.includes("<script>"));
+  assert.ok(out.includes("**bold**"));
+});
+
+console.log("");
+console.log("buildGitHubUrl — deep-link target from mount config");
+
+test("prefers PR /files view for line-level comments when pr is set", () => {
+  const url = buildGitHubUrl({
+    owner: "ai-dynamo",
+    repo: "enhancements",
+    pr: 61,
+  });
+  assert.equal(
+    url,
+    "https://github.com/ai-dynamo/enhancements/pull/61/files"
+  );
+});
+
+test("prefers PR /files even when both pr and issue are set", () => {
+  // Line-level comments require the diff view; the issue is the fallback,
+  // not an alternative when the PR exists.
+  const url = buildGitHubUrl({
+    owner: "ai-dynamo",
+    repo: "enhancements",
+    pr: 61,
+    issue: 999,
+  });
+  assert.ok(url.endsWith("/pull/61/files"), url);
+});
+
+test("falls back to the tracking issue when no pr is set", () => {
+  const url = buildGitHubUrl({
+    owner: "ai-dynamo",
+    repo: "enhancements",
+    issue: 42,
+  });
+  assert.equal(url, "https://github.com/ai-dynamo/enhancements/issues/42");
+});
+
+test("returns empty string when neither pr nor issue is set", () => {
+  // The caller uses "" as a signal to hide the button — there's no
+  // meaningful GitHub target if the mount div has no pr and no issue.
+  assert.equal(buildGitHubUrl({ owner: "ai-dynamo", repo: "dynamo" }), "");
+});
+
+test("returns empty string when owner or repo is missing", () => {
+  assert.equal(buildGitHubUrl({ repo: "dynamo", pr: 1 }), "");
+  assert.equal(buildGitHubUrl({ owner: "ai-dynamo", pr: 1 }), "");
+  assert.equal(buildGitHubUrl({}), "");
 });
 
 console.log("");
