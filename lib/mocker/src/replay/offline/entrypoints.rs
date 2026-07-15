@@ -10,8 +10,8 @@ use std::collections::VecDeque;
 
 use aisimulate_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, ProviderSpec, ReplayAdapters, ReplayCaptureOptions,
-    ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec, ReplayTopology,
-    Replayer, WorkerPoolSpec,
+    ReplayDeterminism, ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec,
+    ReplayTopology, Replayer, WorkerPoolSpec,
 };
 use anyhow::Result;
 
@@ -25,8 +25,9 @@ use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, Sglang
 use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayWorkerArtifacts,
-    SlaThresholds, TraceSimulationReport,
+    OfflineDisaggReplayConfig, ReplayKvObservationMode, ReplayPrefillLoadEstimator,
+    ReplayRouterMode, ReplaySessionAffinityMode, ReplayWorkerArtifacts, SlaThresholds,
+    TraceSimulationReport, session_affinity::ReplaySessionSimulationOptions,
 };
 use crate::scheduler::RouterEventVisibility;
 
@@ -112,6 +113,7 @@ fn run_aggregated(
         capture_options,
         max_sim_time_ms,
         sla,
+        ReplaySessionSimulationOptions::default(),
         scaling_policy,
     )
 }
@@ -128,6 +130,7 @@ fn run_aggregated_with_capture_options(
     capture_options: ReplayCaptureOptions,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
+    session_options: ReplaySessionSimulationOptions,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
@@ -163,7 +166,8 @@ fn run_aggregated_with_capture_options(
                 router_config,
                 prefill_load_estimator,
                 scaling_policy,
-            ),
+            )
+            .with_session_options(session_options),
         )?
         .with_capture_options(capture_options)
         .with_runtime_input(input)
@@ -489,6 +493,45 @@ pub(crate) fn simulate_trace_workload_with_capture_options(
         capture_options,
         max_sim_time_ms,
         sla,
+        ReplaySessionSimulationOptions::default(),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_session_affinity_workload_with_options(
+    args: MockEngineArgs,
+    router_config: Option<ReplayKvRouterConfig>,
+    trace: Trace,
+    num_workers: usize,
+    session_affinity_mode: ReplaySessionAffinityMode,
+    kv_observation_mode: ReplayKvObservationMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    let driver = trace_workload_driver(trace, args.block_size, ReplayRouterMode::KvRouter, false)?;
+    let capture_options = ReplayCaptureOptions {
+        capture_per_request: record_per_request,
+        determinism: if cfg!(feature = "replay-bench") {
+            ReplayDeterminism::CanonicalV1
+        } else {
+            ReplayDeterminism::Random
+        },
+        ..Default::default()
+    };
+    run_aggregated_with_capture_options(
+        args,
+        router_config,
+        None,
+        ReplayRuntimeInput::Workload(driver),
+        num_workers,
+        None,
+        ReplayRouterMode::KvRouter,
+        capture_options,
+        None,
+        sla,
+        ReplaySessionSimulationOptions::new(session_affinity_mode, kv_observation_mode),
         None,
     )
 }

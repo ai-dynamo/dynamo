@@ -39,6 +39,10 @@ use crate::replay::router_shared::{
     ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
     replay_slots, replay_worker_config, replay_workers_with_configs,
 };
+use crate::replay::session_affinity::{
+    ReplayKvObservationMode, ReplaySessionAffinity, ReplaySessionAffinityMode,
+    ReplaySessionSimulationOptions,
+};
 use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use aisimulate_core::replay::{
     Placement, PlacementCacheSample, PlacementDecision, PlacementEffects, PlacementPolicy,
@@ -261,6 +265,7 @@ struct PendingRequest {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    pinned_worker: Option<WorkerWithDpRank>,
 }
 
 impl PendingRequest {
@@ -272,6 +277,7 @@ impl PendingRequest {
         &self,
         block_size: usize,
         worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        pinned_worker: Option<WorkerWithDpRank>,
     ) -> SchedulingRequest {
         let effective_overlap_blocks = self
             .overlaps
@@ -310,7 +316,7 @@ impl PendingRequest {
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
-            pinned_worker: None,
+            pinned_worker,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -331,6 +337,8 @@ pub(crate) struct OfflineReplayRouter {
     pending: PolicyQueue<PendingRequest>,
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    session_affinity: ReplaySessionAffinity,
+    kv_observation_mode: ReplayKvObservationMode,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
 }
@@ -347,17 +355,49 @@ impl KvRouterPlacement {
         num_workers: usize,
         selector_seed: Option<u64>,
     ) -> Result<Self> {
-        let router = match selector_seed {
-            Some(seed) => OfflineReplayRouter::new_with_selector_seed(
+        Self::new_with_selector_seed_and_session_options(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            selector_seed,
+            ReplaySessionSimulationOptions::default(),
+        )
+    }
+
+    pub(in crate::replay) fn new_with_selector_seed_and_session_options(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+        selector_seed: Option<u64>,
+        session_options: ReplaySessionSimulationOptions,
+    ) -> Result<Self> {
+        let router = if session_options == ReplaySessionSimulationOptions::default() {
+            match selector_seed {
+                Some(seed) => OfflineReplayRouter::new_with_selector_seed(
+                    args,
+                    router_config,
+                    prefill_load_estimator,
+                    num_workers,
+                    Some(seed),
+                )?,
+                None => OfflineReplayRouter::new(
+                    args,
+                    router_config,
+                    prefill_load_estimator,
+                    num_workers,
+                )?,
+            }
+        } else {
+            OfflineReplayRouter::new_with_selector_seed_and_session_options(
                 args,
                 router_config,
                 prefill_load_estimator,
                 num_workers,
-                Some(seed),
-            )?,
-            None => {
-                OfflineReplayRouter::new(args, router_config, prefill_load_estimator, num_workers)?
-            }
+                selector_seed,
+                session_options,
+            )?
         };
         Ok(Self { router })
     }
@@ -534,12 +574,51 @@ impl OfflineReplayRouter {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_session_affinity(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+        session_affinity_mode: ReplaySessionAffinityMode,
+    ) -> Result<Self> {
+        Self::new_with_selector_seed_and_session_options(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            None,
+            ReplaySessionSimulationOptions::new(
+                session_affinity_mode,
+                ReplayKvObservationMode::Complete,
+            ),
+        )
+    }
+
     pub(crate) fn new_with_selector_seed(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
         selector_seed: Option<u64>,
+    ) -> Result<Self> {
+        Self::new_with_selector_seed_and_session_options(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            selector_seed,
+            ReplaySessionSimulationOptions::default(),
+        )
+    }
+
+    pub(crate) fn new_with_selector_seed_and_session_options(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        num_workers: usize,
+        selector_seed: Option<u64>,
+        session_options: ReplaySessionSimulationOptions,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
         let tracking_hash = TrackingHashContext::from_config(&config)?;
@@ -563,6 +642,8 @@ impl OfflineReplayRouter {
             pending: PolicyQueue::new(profile),
             indexer: SyncReplayIndexer::new(args.block_size as u32),
             prefill_load_estimator,
+            session_affinity: ReplaySessionAffinity::new(session_options.affinity_mode),
+            kv_observation_mode: session_options.kv_observation_mode,
             // This is only a base Instant for converting replay `now_ms` values into
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
             // time derived from this epoch, not wall-clock progression.
@@ -606,9 +687,48 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending =
+        let mut pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
+        if self.session_affinity.is_enabled() {
+            let candidates = self.session_candidates();
+            pending.pinned_worker =
+                if let Some(max_regret) = self.session_affinity.max_cost_regret_blocks() {
+                    let preferred = self
+                        .session_affinity
+                        .preferred_target(pending.session_id.as_deref(), &candidates);
+                    match preferred {
+                        Some(preferred) => {
+                            let worker_loads = self
+                                .slots
+                                .project_worker_loads(pending.token_seq.as_deref(), decay_now);
+                            let scheduling_request = pending.scheduling_request(
+                                self.block_size as usize,
+                                worker_loads,
+                                None,
+                            );
+                            let regret = self.selector.cost_regret_for_worker(
+                                &self.workers_with_configs,
+                                &scheduling_request,
+                                scheduling_request.eligibility(),
+                                self.block_size,
+                                preferred,
+                            )?;
+                            regret
+                                .filter(|regret| *regret <= max_regret)
+                                .map(|_| preferred)
+                        }
+                        None => None,
+                    }
+                } else {
+                    self.session_affinity.preferred_target_with_overlap(
+                        pending.session_id.as_deref(),
+                        &candidates,
+                        &pending.overlaps,
+                        self.block_size,
+                    )
+                };
+        }
         let (class_index, snapshot) = match self
             .profile
             .direct_class_index(pending.policy_class.as_deref())
@@ -627,12 +747,17 @@ impl OfflineReplayRouter {
         };
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
-            && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
+            && (self.pending.has_backlog(class_index)
+                || self.request_target_busy(class, pending.pinned_worker, decay_now));
 
         if should_queue {
             let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
+            let placement = pending
+                .pinned_worker
+                .map(WorkerPlacement::Exact)
+                .unwrap_or(WorkerPlacement::Any);
             self.pending
                 .enqueue(
                     class_index,
@@ -643,7 +768,7 @@ impl OfflineReplayRouter {
                     now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
-                    WorkerPlacement::Any,
+                    placement,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
@@ -667,6 +792,9 @@ impl OfflineReplayRouter {
 
     pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
         for event in events {
+            if !self.observes_worker_event_stream(&event) {
+                continue;
+            }
             let worker_id = event.worker_id;
             let event_id = event.event.event_id;
             let dp_rank = event.event.dp_rank;
@@ -678,6 +806,26 @@ impl OfflineReplayRouter {
             })?;
         }
         Ok(RouterEffects::default())
+    }
+
+    fn observes_worker_event_stream(&self, event: &RouterEvent) -> bool {
+        let keep_percent = match self.kv_observation_mode {
+            ReplayKvObservationMode::Complete => return true,
+            ReplayKvObservationMode::DropAll => return false,
+            ReplayKvObservationMode::DeterministicWorkerEventKeepPercent(percent) => {
+                percent.min(100)
+            }
+        };
+        const OBSERVATION_DOMAIN_SEED: u64 = 0x9e37_79b9_7f4a_7c1c;
+        let mut key = OBSERVATION_DOMAIN_SEED
+            ^ event.worker_id
+            ^ u64::from(event.event.dp_rank).rotate_left(33);
+        key ^= key >> 30;
+        key = key.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        key ^= key >> 27;
+        key = key.wrapping_mul(0x94d0_49bb_1331_11eb);
+        key ^= key >> 31;
+        key % 100 < u64::from(keep_percent)
     }
 
     pub(crate) fn on_prefill_completed(
@@ -721,6 +869,11 @@ impl OfflineReplayRouter {
 
     /// Register a new worker with the router without disturbing existing slot state.
     pub(crate) fn add_worker(&mut self, worker_id: usize) -> Result<()> {
+        if self.session_affinity.is_enabled() {
+            return Err(anyhow!(
+                "offline session-affinity replay currently requires static worker topology"
+            ));
+        }
         let wid = worker_id as WorkerId;
         if self
             .workers_with_configs
@@ -750,6 +903,11 @@ impl OfflineReplayRouter {
     /// Stale slot and indexer state is harmless — the selector and
     /// `all_workers_busy` both skip workers absent from `workers_with_configs`.
     pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
+        if self.session_affinity.is_enabled() {
+            return Err(anyhow!(
+                "offline session-affinity replay currently requires static worker topology"
+            ));
+        }
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
         Ok(())
@@ -905,7 +1063,19 @@ impl OfflineReplayRouter {
             strict_priority,
             policy_class: request.policy_class.clone(),
             session_id,
+            pinned_worker: None,
         })
+    }
+
+    fn session_candidates(&self) -> Vec<WorkerWithDpRank> {
+        self.workers_with_configs
+            .iter()
+            .flat_map(|(&worker_id, config)| {
+                let start = config.data_parallel_start_rank();
+                (start..start + config.data_parallel_size())
+                    .map(move |dp_rank| WorkerWithDpRank::new(worker_id, dp_rank))
+            })
+            .collect()
     }
 
     fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
@@ -920,10 +1090,13 @@ impl OfflineReplayRouter {
         request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
+        let session_id = request.session_id.clone();
+        let pinned_worker = request.pinned_worker;
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
+        let scheduling_request =
+            request.scheduling_request(self.block_size as usize, worker_loads, pinned_worker);
         let eligibility = scheduling_request.eligibility();
         let selection = self.selector.select_worker(
             &self.workers_with_configs,
@@ -964,6 +1137,8 @@ impl OfflineReplayRouter {
                 decay_now,
             )
             .map_err(anyhow::Error::from)?;
+        self.session_affinity
+            .observe_selection(session_id.as_deref(), selection.worker);
 
         Ok(AdmitOutcome {
             worker_idx,
@@ -974,11 +1149,17 @@ impl OfflineReplayRouter {
 
     fn drain_pending(&mut self, decay_now: Instant) -> Result<Vec<WorkerAdmission>> {
         let mut admissions = Vec::new();
+        self.pending.recheck_all_workers();
         loop {
             let active_tokens = self.slots.active_tokens(decay_now);
             let workers = &self.workers_with_configs;
-            let Some(popped) = self.pending.pop_next(|_, class, _| {
-                !Self::all_workers_busy_with(&active_tokens, workers, class)
+            let Some(popped) = self.pending.pop_next(|_, class, request| {
+                !Self::request_target_busy_with(
+                    &active_tokens,
+                    workers,
+                    class,
+                    request.pinned_worker,
+                )
             }) else {
                 break;
             };
@@ -996,9 +1177,38 @@ impl OfflineReplayRouter {
         Ok(admissions)
     }
 
-    fn all_workers_busy(&self, class: &PolicyClassConfig, decay_now: Instant) -> bool {
+    fn request_target_busy(
+        &self,
+        class: &PolicyClassConfig,
+        pinned_worker: Option<WorkerWithDpRank>,
+        decay_now: Instant,
+    ) -> bool {
         let active_tokens = self.slots.active_tokens(decay_now);
-        Self::all_workers_busy_with(&active_tokens, &self.workers_with_configs, class)
+        Self::request_target_busy_with(
+            &active_tokens,
+            &self.workers_with_configs,
+            class,
+            pinned_worker,
+        )
+    }
+
+    fn request_target_busy_with(
+        active_tokens: &HashMap<WorkerWithDpRank, usize>,
+        workers_with_configs: &HashMap<WorkerId, ReplayWorkerConfig>,
+        class: &PolicyClassConfig,
+        pinned_worker: Option<WorkerWithDpRank>,
+    ) -> bool {
+        let Some(pinned_worker) = pinned_worker else {
+            return Self::all_workers_busy_with(active_tokens, workers_with_configs, class);
+        };
+        let Some(config) = workers_with_configs.get(&pinned_worker.worker_id) else {
+            return true;
+        };
+        let max_batched = config
+            .max_num_batched_tokens()
+            .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+        let tokens = active_tokens.get(&pinned_worker).copied().unwrap_or(0);
+        class.worker_is_busy(tokens, max_batched)
     }
 
     fn all_workers_busy_with(
@@ -1091,7 +1301,7 @@ mod tests {
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
-    use crate::replay::ReplayPrefillLoadEstimator;
+    use crate::replay::{ReplayPrefillLoadEstimator, ReplaySessionAffinityMode};
     use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
 
     struct FixedPrefillLoadEstimator {
@@ -1247,7 +1457,7 @@ mod tests {
                 Some("session-a".to_string()),
             )
             .unwrap();
-        let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
+        let scheduling_request = pending.scheduling_request(64, FxHashMap::default(), None);
 
         assert_eq!(
             scheduling_request
@@ -1905,6 +2115,64 @@ policy_classes:
             router.debug_snapshot(0.0).active_tokens_by_worker,
             vec![(0, 64), (1, 64)]
         );
+    }
+
+    #[test]
+    fn exact_session_lane_rechecks_after_its_target_completes() {
+        let mut router = OfflineReplayRouter::new_with_session_affinity(
+            &queueing_args(),
+            Some(queueing_router_config()),
+            None,
+            2,
+            ReplaySessionAffinityMode::Local,
+        )
+        .unwrap();
+
+        let first = router
+            .on_request_arrival_for_session(
+                &request(1, 7),
+                None,
+                Some("session-a".to_string()),
+                0.0,
+            )
+            .unwrap()
+            .admissions[0];
+        let unrelated = router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap()
+            .admissions[0];
+        assert_ne!(first.worker_idx, unrelated.worker_idx);
+
+        let queued = router
+            .on_request_arrival_for_session(
+                &request(3, 9),
+                None,
+                Some("session-a".to_string()),
+                0.0,
+            )
+            .unwrap();
+        assert!(queued.admissions.is_empty());
+        assert_eq!(router.pending_count(), 1);
+
+        let unrelated_completion = router
+            .on_request_completed(Uuid::from_u128(2), 1.0)
+            .unwrap();
+        assert!(unrelated_completion.admissions.is_empty());
+        assert_eq!(router.pending_count(), 1);
+
+        let target_completion = router
+            .on_request_completed(Uuid::from_u128(1), 2.0)
+            .unwrap();
+        assert_eq!(
+            target_completion.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(3),
+                worker_idx: first.worker_idx,
+                overlap_blocks: 0,
+                isl_blocks: 1,
+            }]
+        );
+        assert_eq!(router.pending_count(), 0);
     }
 
     #[test]
