@@ -18,6 +18,12 @@ Restyle of the reference light-theme breakdown bar into Dynamo Dark:
       data-plane weight load); the JIT-cache warmup cluster carries the gold
       "warmup" role, matching fig-4; setup phases recede to grey
     - real seconds x-axis so the minute ticks align exactly to the bar
+    - the three leading grey setup phases (imports + engine config + worker
+      spawn = 58 s) are grouped by a bracket drawn under that stretch of the
+      timeline; the bracket carries the group total and a compact breakdown of
+      the three parts, replacing the old full eight-row legend. The wide gold
+      warmup phases stay labeled in-bar and MX P2P keeps its green above-bar
+      callout, so nothing else needs a legend.
 
 Data (durations in seconds) is the source of truth; percentages are derived.
 
@@ -48,25 +54,27 @@ TOTAL_SEC = 420  # observed total, start -> Application startup complete (7m)
 #            fig-4's warmup phase; coral stays reserved for a baseline/slow path,
 #            which this single optimized run does not contain
 # Phases in time order. `place`: "in" = label inside the bar; "above" = leader
-# line + marker + duration above the bar (used for the narrow phases).
+# line + marker + duration above the bar (the narrow MX P2P win + the API tick);
+# "group" = no individual callout -- represented instead by the startup bracket
+# and its breakdown drawn below the timeline.
 SEGMENTS = [
     {
         "name": "Python & vLLM imports & others",
         "dur": 27,
         "role": "setup",
-        "place": "above",
+        "place": "group",
     },
     {
         "name": "Engine config & core spawn",
         "dur": 14,
         "role": "setup",
-        "place": "above",
+        "place": "group",
     },
     {
         "name": "Worker spawn & distributed init",
         "dur": 17,
         "role": "setup",
-        "place": "above",
+        "place": "group",
     },
     {"name": "Model load via MX P2P", "dur": 11, "role": "win", "place": "above"},
     {
@@ -93,25 +101,23 @@ SEGMENTS = [
     {"name": "API server ready", "dur": 1, "role": "setup", "place": "above"},
 ]
 
-# Two-column legend order matches the reference (reading down each column).
-LEGEND_LEFT = [
-    "Python & vLLM imports & others",
-    "Worker spawn & distributed init",
-    "Memory profiling (JIT wave)",
-    "CUDA graph capture",
-]
-LEGEND_RIGHT = [
-    "Engine config & core spawn",
-    "Model load via MX P2P",
-    "JIT warmup (DeepGEMM compile)",
-    "API server ready",
-]
+# The three leading grey setup phases collapse into one logical "startup"
+# segment, grouped by a bracket + breakdown below the timeline (replaces the
+# old eight-row legend). They are the first three SEGMENTS, in time order.
+STARTUP_PARTS = [s["name"] for s in SEGMENTS[:3]]
+STARTUP_SEC = sum(s["dur"] for s in SEGMENTS[:3])  # 58s -> 0..58 on the timeline
 
 # ---- geometry (data coords: x = seconds [0,420]; y = paper-equivalent [0,1]) ----
 BAR_Y0, BAR_Y1 = 0.500, 0.650
 LABEL_Y_HIGH, LABEL_Y_LOW = 0.760, 0.705
 TICK_Y0, TICK_Y1 = 0.470, 0.500
 TICK_LABEL_Y = 0.435
+
+# ---- startup bracket + breakdown (below the axis, aligned to the 0..58s span) ----
+BRACKET_LINE_Y = 0.380  # horizontal underline of the bracket
+BRACKET_ARM_TOP = 0.408  # short arms rise from the line toward the bar/axis
+GROUP_LABEL_Y = 0.350  # bracket total + share, just under the underline
+BREAKDOWN_ROW_YS = [0.262, 0.185, 0.108]  # one row per grouped part
 
 
 def main() -> None:
@@ -361,82 +367,116 @@ def main() -> None:
             )
         )
 
-    # ---- legend table (two columns, swatch + name + right-aligned dur + pct) ----
-    sw_w, sw_h = 13 / 1504, 13 / 617  # visually square swatch in paper units
-    cols = [
-        {
-            "names": LEGEND_LEFT,
-            "sw_x": 0.0,
-            "name_x": 0.020,
-            "dur_x": 0.400,
-            "pct_x": 0.460,
-        },
-        {
-            "names": LEGEND_RIGHT,
-            "sw_x": 0.510,
-            "name_x": 0.530,
-            "dur_x": 0.910,
-            "pct_x": 0.970,
-        },
-    ]
-    row_ys = [0.300, 0.213, 0.126, 0.039]
-    for col in cols:
-        for name, ry in zip(col["names"], row_ys):
-            shapes.append(
-                dict(
-                    type="rect",
-                    xref="paper",
-                    yref="paper",
-                    x0=col["sw_x"],
-                    x1=col["sw_x"] + sw_w,
-                    y0=ry - sw_h / 2,
-                    y1=ry + sw_h / 2,
-                    fillcolor=seg_color[name],
-                    line=dict(width=0),
-                    layer="above",
-                )
+    # ---- startup bracket: one grey "⊔" grouping the first three phases ----
+    # A squared bracket (horizontal underline + short arms rising toward the
+    # bar) spanning 0..58s, drawn in the same grey as the setup fills so it
+    # reads as "these three grey segments are one logical startup step."
+    shapes.append(
+        dict(
+            type="line",
+            xref="x",
+            yref="y",
+            x0=0,
+            x1=STARTUP_SEC,
+            y0=BRACKET_LINE_Y,
+            y1=BRACKET_LINE_Y,
+            line=dict(color=grey, width=1.5),
+            layer="above",
+        )
+    )
+    for arm_x in (0, STARTUP_SEC):
+        shapes.append(
+            dict(
+                type="line",
+                xref="x",
+                yref="y",
+                x0=arm_x,
+                x1=arm_x,
+                y0=BRACKET_LINE_Y,
+                y1=BRACKET_ARM_TOP,
+                line=dict(color=grey, width=1.5),
+                layer="above",
             )
-            annotations.append(
-                dict(
-                    xref="paper",
-                    yref="paper",
-                    x=col["name_x"],
-                    y=ry,
-                    xanchor="left",
-                    yanchor="middle",
-                    text=name,
-                    showarrow=False,
-                    font=dict(family=font_sans, size=15, color=text_secondary),
-                )
+        )
+
+    # ---- bracket label: the group name + its total time + share of 420s ----
+    annotations.append(
+        dict(
+            xref="paper",
+            yref="paper",
+            x=0.0,
+            y=GROUP_LABEL_Y,
+            xanchor="left",
+            yanchor="top",
+            text=(
+                f"Process & worker startup · "
+                f'<b><span style="color:{text_primary}">{STARTUP_SEC}s</span></b>'
+                f' · <span style="color:{text_muted}">{pct(STARTUP_SEC)}%</span>'
+            ),
+            showarrow=False,
+            font=dict(family=font_sans, size=16, color=text_secondary),
+        )
+    )
+
+    # ---- breakdown: how the 58s splits across the three grouped parts ----
+    # Compact left-aligned list (swatch + name + right-aligned seconds + share),
+    # scoped to the startup group -- not the old full-figure legend.
+    sw_w, sw_h = 13 / 1504, 13 / 620  # visually square swatch in paper units
+    for name, ry in zip(STARTUP_PARTS, BREAKDOWN_ROW_YS):
+        dur = seg_dur[name]
+        shapes.append(
+            dict(
+                type="rect",
+                xref="paper",
+                yref="paper",
+                x0=0.0,
+                x1=sw_w,
+                y0=ry - sw_h / 2,
+                y1=ry + sw_h / 2,
+                fillcolor=seg_color[name],
+                line=dict(width=0),
+                layer="above",
             )
-            annotations.append(
-                dict(
-                    xref="paper",
-                    yref="paper",
-                    x=col["dur_x"],
-                    y=ry,
-                    xanchor="right",
-                    yanchor="middle",
-                    text=f"{seg_dur[name]}s",
-                    showarrow=False,
-                    font=dict(
-                        family=font_mono, size=15, color=text_primary, weight=500
-                    ),
-                )
+        )
+        annotations.append(
+            dict(
+                xref="paper",
+                yref="paper",
+                x=0.024,
+                y=ry,
+                xanchor="left",
+                yanchor="middle",
+                text=name,
+                showarrow=False,
+                font=dict(family=font_sans, size=15, color=text_secondary),
             )
-            annotations.append(
-                dict(
-                    xref="paper",
-                    yref="paper",
-                    x=col["pct_x"],
-                    y=ry,
-                    xanchor="right",
-                    yanchor="middle",
-                    text=f"{pct(seg_dur[name])}%",
-                    showarrow=False,
-                    font=dict(family=font_mono, size=14, color=text_muted),
-                )
+        )
+        annotations.append(
+            dict(
+                xref="paper",
+                yref="paper",
+                x=0.360,
+                y=ry,
+                xanchor="right",
+                yanchor="middle",
+                text=f"{dur}s",
+                showarrow=False,
+                font=dict(family=font_mono, size=15, color=text_primary, weight=500),
             )
+        )
+        annotations.append(
+            dict(
+                xref="paper",
+                yref="paper",
+                x=0.420,
+                y=ry,
+                xanchor="right",
+                yanchor="middle",
+                text=f"{pct(dur)}%",
+                showarrow=False,
+                font=dict(family=font_mono, size=14, color=text_muted),
+            )
+        )
 
     fig.update_layout(
         template=template,
