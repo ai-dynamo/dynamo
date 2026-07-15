@@ -5,7 +5,7 @@ use anyhow::Result;
 use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 
-use super::PrefillRouter;
+use super::{InnerPrefillRouter, PrefillRouter};
 use crate::protocols::common::llm_backend::PreprocessedRequest;
 use crate::session_affinity::AffinityTarget;
 
@@ -15,6 +15,10 @@ pub(super) struct ConditionalDisaggDecodeDecision {
     pub worker: WorkerWithDpRank,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
+}
+
+fn decode_gate_allows_bypass(policy_says_bypass: bool, decode_busy: Option<bool>) -> bool {
+    policy_says_bypass && decode_busy != Some(true)
 }
 
 impl PrefillRouter {
@@ -129,13 +133,19 @@ impl PrefillRouter {
                 routing_constraints,
             )
             .await?;
-        let (worker, overlap_blocks, cached_tokens) = match outcome {
+        let (worker, overlap_blocks, cached_tokens, potential_decode_blocks) = match outcome {
             crate::kv_router::FindBestMatchOutcome::Routed {
                 worker,
                 overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks,
                 ..
-            } => (worker, overlap_blocks, cached_tokens),
+            } => (
+                worker,
+                overlap_blocks,
+                cached_tokens,
+                potential_decode_blocks,
+            ),
             crate::kv_router::FindBestMatchOutcome::QueueRejected { .. } => {
                 return Ok(None);
             }
@@ -144,14 +154,57 @@ impl PrefillRouter {
         let block_size = decode_router.block_size() as usize;
         let prompt_tokens = routing_token_ids.len();
 
-        let input = ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens);
+        let mut input = ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens);
+        if self.conditional_disagg_policy.needs_prefill_worker_busy() {
+            let busy = self.peek_prefill_chosen_worker_busy(req).await;
+            tracing::debug!(
+                request_id,
+                prefill_chosen_worker_busy = ?busy,
+                "Conditional disagg prefill-load condition inspected selected prefill worker"
+            );
+            input = input.with_prefill_chosen_worker_busy(busy);
+        }
         let net_new_tokens = input.net_new_tokens();
         let overlap_tokens = (overlap_blocks as usize) * block_size;
 
-        let bypass = self
+        let policy_says_bypass = self
             .conditional_disagg_policy
             .should_bypass_remote_prefill(input)
             .await;
+
+        // This gate is advisory, not a decode-capacity reservation. Normal
+        // decode routing books scheduler state before returning a routing
+        // decision; conditional-disagg is still deciding whether to enter that
+        // decode path, so booking here would double-count unless we added a
+        // reservation handoff to the downstream decode router. Use the selected
+        // worker's projected decode load, including this request, but allow for
+        // concurrent bypass decisions to race the same threshold.
+        let decode_busy = if policy_says_bypass {
+            self.conditional_disagg_decode_busy_threshold
+                .and_then(|threshold| {
+                    decode_router.projected_decode_load_exceeds(
+                        worker,
+                        potential_decode_blocks,
+                        threshold,
+                    )
+                })
+        } else {
+            None
+        };
+        input = input.with_decode_chosen_worker_busy(decode_busy);
+
+        let bypass = decode_gate_allows_bypass(policy_says_bypass, decode_busy);
+        let decode_gate_decision = if !policy_says_bypass {
+            "bypass_declined_by_policy"
+        } else if self.conditional_disagg_decode_busy_threshold.is_none() {
+            "bypass_allowed_decode_gate_disabled"
+        } else if decode_busy.is_none() {
+            "bypass_allowed_decode_busy_unknown"
+        } else if decode_busy == Some(true) {
+            "bypass_denied_decode_busy"
+        } else {
+            "bypass_allowed_decode_not_busy"
+        };
 
         tracing::debug!(
             request_id,
@@ -160,7 +213,12 @@ impl PrefillRouter {
             prompt_tokens,
             net_new_tokens,
             overlap_tokens,
+            prefill_chosen_worker_busy = ?input.prefill_chosen_worker_busy,
+            decode_chosen_worker_busy = ?decode_busy,
             cached_tokens,
+            potential_decode_blocks,
+            decode_busy_threshold = ?self.conditional_disagg_decode_busy_threshold,
+            decode_gate_decision,
             bypass,
             "Conditional disagg decision"
         );
@@ -174,5 +232,103 @@ impl PrefillRouter {
         }
 
         Ok(None)
+    }
+
+    async fn peek_prefill_chosen_worker_busy(&self, req: &PreprocessedRequest) -> Option<bool> {
+        let threshold = self.conditional_disagg_prefill_busy_threshold?;
+        let prefill_router = self.prefill_router.get()?;
+        let router = match prefill_router {
+            InnerPrefillRouter::KvRouter(router) => router,
+            InnerPrefillRouter::SimpleRouter(_) => return None,
+        };
+
+        let lora_name = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_name.clone());
+        let cache_namespace = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.cache_namespace.clone());
+        let priority_jump = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.priority_jump)
+            .unwrap_or(0.0);
+        let strict_priority = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.strict_priority)
+            .unwrap_or(0);
+        let expected_output_tokens = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.expected_output_tokens);
+        let allowed_worker_ids = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.allowed_worker_ids.clone());
+        let routing_constraints = req
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.routing_constraints.clone())
+            .unwrap_or_default();
+        let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
+
+        let outcome = router
+            .chooser
+            .find_best_match_details_without_admission(
+                None,
+                routing_token_ids,
+                block_mm_infos,
+                req.router_config_override.as_ref(),
+                false,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                expected_output_tokens,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await
+            .ok()?;
+
+        let worker = match outcome {
+            crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => worker,
+            crate::kv_router::FindBestMatchOutcome::QueueRejected { .. } => return Some(true),
+        };
+
+        router
+            .chooser
+            .worker_is_prefill_busy(worker, tokio::time::Instant::now(), threshold)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_gate_allows_bypass;
+
+    #[test]
+    fn decode_gate_calm_and_policy_bypass_allows_bypass() {
+        assert!(decode_gate_allows_bypass(true, Some(false)));
+    }
+
+    #[test]
+    fn decode_gate_busy_vetoes_policy_bypass() {
+        assert!(!decode_gate_allows_bypass(true, Some(true)));
+    }
+
+    #[test]
+    fn decode_gate_does_not_bypass_when_policy_declines() {
+        assert!(!decode_gate_allows_bypass(false, Some(false)));
+        assert!(!decode_gate_allows_bypass(false, Some(true)));
+        assert!(!decode_gate_allows_bypass(false, None));
+    }
+
+    #[test]
+    fn decode_gate_signal_unavailable_does_not_block_bypass() {
+        assert!(decode_gate_allows_bypass(true, None));
     }
 }

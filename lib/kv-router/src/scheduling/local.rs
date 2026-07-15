@@ -509,6 +509,30 @@ where
         self.queue_updates.subscribe()
     }
 
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.queue
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
+    pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
+        self.queue.worker_is_decode_busy(worker, threshold)
+    }
+
+    pub fn projected_decode_load_exceeds(
+        &self,
+        worker: WorkerWithDpRank,
+        projected_blocks: usize,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.queue
+            .projected_decode_load_exceeds(worker, projected_blocks, threshold)
+    }
+
     pub fn add_output_block(
         &self,
         request_id: &str,

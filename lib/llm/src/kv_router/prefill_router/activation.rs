@@ -44,6 +44,8 @@ impl PrefillRouter {
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             conditional_disagg_policy: make_conditional_disagg_policy(None),
+            conditional_disagg_prefill_busy_threshold: None,
+            conditional_disagg_decode_busy_threshold: None,
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -70,6 +72,13 @@ impl PrefillRouter {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
+        let conditional_disagg_prefill_busy_threshold = kv_router_config.as_ref().and_then(|c| {
+            c.conditional_disagg_prefill_busy_threshold
+                .or(c.router_queue_threshold)
+        });
+        let conditional_disagg_decode_busy_threshold = kv_router_config
+            .as_ref()
+            .and_then(|c| c.conditional_disagg_decode_busy_threshold);
 
         let router = Arc::new(Self {
             prefill_router,
@@ -81,6 +90,8 @@ impl PrefillRouter {
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             conditional_disagg_policy,
+            conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold,
             prefill_load_estimator,
             model_name,
             namespace,
