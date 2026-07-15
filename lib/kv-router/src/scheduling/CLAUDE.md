@@ -67,6 +67,15 @@ PolicyClassQueue("agents")
 - `round_cursor` marks where the next quantum-granting DRR pass begins. `carry_class` lets one class spend residual deficit before that pass; it is revalidated through `next_dispatchable` and never grants another quantum when the carried candidate is blocked or too expensive.
 - Worker lanes contain head-of-line blocking to one exact worker. A blocked Worker 7 root cannot hide a ready Worker 9 root or an unpinned root.
 
+## Policy-class admission lifecycle
+
+- `SchedulerQueueActor` is the sole authority for admission state, physical queue accounting, and worker booking. Do not mutate or free admission-managed state outside the actor.
+- `EnqueueLeased` transfers the lease with the request and arms it only after the actor establishes generation-scoped lifecycle ownership. Preserve this handoff across cancellation paths and request-ID reuse.
+- Lease drops append terminal cleanup to the lock-free `SegQueue` and coalesce bounded actor wakeups. Cleanup drains to quiescence so no wake is lost; do not replace this with an unbounded channel or task-per-drop cleanup. Any bounded/interleaved drain must preserve wake correctness and be benchmarked.
+- Strategy ownership and physical queue class are separate. Exact placement may reclassify and migrate queue storage/accounting while lifecycle callbacks remain with the strategy that admitted the request.
+- Per-class queue limits gate new arrivals; they are not strict occupancy invariants after reclassification or worker-count changes. Adding strict migration limits requires an explicit rejected-`MakeReady` contract.
+- Dispatch currently has a required two-step protocol: `AdmissionLease::mark_dispatched()` records the cancellation fallback, then `LocalScheduler::mark_dispatched(request_id)` sends the live actor event. Preserve this order until the lease becomes the single generation-aware dispatch authority.
+
 ## Guardrails
 
 - A request ID identifies at most one active scheduler request. Do not reuse it until the prior request reaches terminal cleanup; cancellation and admission lifecycle state intentionally key by request ID.
