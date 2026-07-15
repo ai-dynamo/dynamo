@@ -242,6 +242,8 @@ class KubernetesConnector(PlannerConnector):
                 deployment,
                 require_prefill=require_prefill,
                 require_decode=require_decode,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
             )
         except PlannerError as e:
             errors.append(str(e))
@@ -255,6 +257,8 @@ class KubernetesConnector(PlannerConnector):
         deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> str:
         """Get the model name from the deployment"""
         try:
@@ -271,12 +275,14 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_model_name = prefill_service.get_model_name()
             if require_decode:
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_model_name = decode_service.get_model_name()
 
@@ -321,6 +327,8 @@ class KubernetesConnector(PlannerConnector):
         deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> tuple[int, int]:
         """Get the GPU counts for prefill and decode components from the deployment.
 
@@ -328,6 +336,9 @@ class KubernetesConnector(PlannerConnector):
             deployment: Optional deployment dict, fetched if not provided
             require_prefill: Whether to require a prefill component
             require_decode: Whether to require a decode component
+            prefill_component_name: Explicit DGD component name for prefill lookup
+            decode_component_name: Explicit DGD component name for decode lookup
+                (required for agg mode where the worker is not typed as decode)
 
         Returns:
             Tuple of (prefill_gpu_count, decode_gpu_count)
@@ -347,6 +358,7 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_gpu_count = prefill_service.get_total_gpu_count()
             except (PlannerError, ValueError) as e:
@@ -357,6 +369,7 @@ class KubernetesConnector(PlannerConnector):
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_gpu_count = decode_service.get_total_gpu_count()
             except (PlannerError, ValueError) as e:
@@ -516,9 +529,9 @@ class KubernetesConnector(PlannerConnector):
         if active_prefill_tokens_threshold is not None:
             body["active_prefill_tokens_threshold"] = active_prefill_tokens_threshold
         if active_prefill_tokens_threshold_frac is not None:
-            body[
-                "active_prefill_tokens_threshold_frac"
-            ] = active_prefill_tokens_threshold_frac
+            body["active_prefill_tokens_threshold_frac"] = (
+                active_prefill_tokens_threshold_frac
+            )
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.post(url, json=body)
@@ -620,7 +633,10 @@ class KubernetesConnector(PlannerConnector):
         return entries
 
     def _resolve_dgd_service(
-        self, sub_component_type: SubComponentType, backend: str
+        self,
+        sub_component_type: SubComponentType,
+        backend: str,
+        component_name_override: Optional[str] = None,
     ) -> tuple[Optional[str], str]:
         """Return (dgd_service_name, component_name_for_filter).
 
@@ -639,6 +655,10 @@ class KubernetesConnector(PlannerConnector):
            :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
            ``"backend"``).
 
+        ``component_name_override`` is the DGD component name to use as the
+        explicit-name fallback when type-only resolution fails (e.g. agg mode
+        where the single worker is typed as ``worker``, not ``decode``).
+
         Note: the DGD component name (``service.name``) must NOT be used for
         filtering -- it is typically PascalCase (``"VllmPrefillWorker"``) and
         would never match the lowercase value the worker writes to MDC.
@@ -647,7 +667,9 @@ class KubernetesConnector(PlannerConnector):
         expected_component = defaults.component_name or ""
         try:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
-            service = get_component_from_type_or_name(deployment, sub_component_type)
+            service = get_component_from_type_or_name(
+                deployment, sub_component_type, component_name=component_name_override
+            )
             user_component = service.get_component_name_from_endpoint_arg()
             if user_component:
                 expected_component = user_component
@@ -659,16 +681,20 @@ class KubernetesConnector(PlannerConnector):
         self,
         sub_component_type: SubComponentType,
         backend: str = "vllm",
+        component_name: Optional[str] = None,
     ) -> WorkerInfo:
         """Get WorkerInfo for a sub-component, trying MDC first, then fallbacks.
 
         Args:
             sub_component_type: PREFILL or DECODE
             backend: Backend framework name (for default fallback)
+            component_name: Explicit DGD component name to use as fallback when
+                type-only resolution fails (e.g. agg mode — see
+                ``_resolve_dgd_service``).
         """
         entries = self._extract_mdc_entries()
         dgd_service_name, expected_component = self._resolve_dgd_service(
-            sub_component_type, backend
+            sub_component_type, backend, component_name_override=component_name
         )
 
         def _dgd_model_name() -> Optional[str]:
@@ -677,7 +703,7 @@ class KubernetesConnector(PlannerConnector):
                     self.graph_deployment_name
                 )
                 service = get_component_from_type_or_name(
-                    deployment, sub_component_type
+                    deployment, sub_component_type, component_name=component_name
                 )
                 return service.get_model_name()
             except PlannerError:
@@ -690,7 +716,7 @@ class KubernetesConnector(PlannerConnector):
                 sub_component_type,
                 backend=backend,
                 model_name_fallback=_dgd_model_name,
-                k8s_name_override=dgd_service_name,
+                k8s_name_override=dgd_service_name or component_name,
             )
             if not info.model_name:
                 logger.warning(
@@ -708,9 +734,11 @@ class KubernetesConnector(PlannerConnector):
             f"No DynamoWorkerMetadata CR found for {sub_component_type.value}. "
             f"Workers may not be registered yet. Falling back to defaults."
         )
-        info = build_worker_info_from_defaults(backend, sub_component_type)
-        if dgd_service_name is not None:
-            info.k8s_name = dgd_service_name
+        info = build_worker_info_from_defaults(
+            backend,
+            sub_component_type,
+            k8s_name_override=dgd_service_name or component_name,
+        )
         arg_model = _dgd_model_name()
         if arg_model:
             info.model_name = arg_model

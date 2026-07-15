@@ -317,6 +317,7 @@ class GlobalPlannerConnector(PlannerConnector):
         self,
         sub_component_type: SubComponentType,
         backend: str = "vllm",
+        component_name: "str | None" = None,
     ) -> WorkerInfo:
         """Resolve per-worker capabilities from the pool's own MDC/DGD.
 
@@ -328,8 +329,14 @@ class GlobalPlannerConnector(PlannerConnector):
         """
         local = self._get_local_k8s_connector()
         if local is not None:
-            return local.get_worker_info(sub_component_type, backend)
-        return build_worker_info_from_defaults(backend, sub_component_type)
+            if component_name is None:
+                return local.get_worker_info(sub_component_type, backend)
+            return local.get_worker_info(
+                sub_component_type, backend, component_name=component_name
+            )
+        return build_worker_info_from_defaults(
+            backend, sub_component_type, k8s_name_override=component_name
+        )
 
     def get_model_name(self, **kwargs) -> str:
         """

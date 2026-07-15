@@ -88,3 +88,34 @@ WORKER_COMPONENT_NAMES: dict[str, type[ComponentName]] = {
     "trtllm": TrtllmComponentName,
     "mocker": MockerComponentName,
 }
+
+
+def get_planner_k8s_component_names(
+    backend: str, mode: str
+) -> tuple["str | None", "str | None"]:
+    """Return the DGD/K8s component names for prefill and decode roles.
+
+    In agg mode the single worker is registered under ``agg_worker_k8s_name``
+    (e.g. ``"VllmWorker"``), not ``decode_worker_k8s_name``.  This function
+    centralises that resolution so every callsite — validate_deployment,
+    get_gpu_counts, get_worker_info, _initialize_gpu_counts, and the annotation
+    sweep — uses the same name without duplicating the ``if mode == "agg"``
+    logic.
+
+    Returns:
+        (prefill_k8s_name, decode_k8s_name), either of which may be None if
+        the backend is unknown.
+    """
+    defaults = WORKER_COMPONENT_NAMES.get(backend)
+    if defaults is None:
+        return None, None
+    prefill = defaults.prefill_worker_k8s_name or None
+    if mode == "agg":
+        decode = (
+            getattr(defaults, "agg_worker_k8s_name", None)
+            or defaults.decode_worker_k8s_name
+            or None
+        )
+    else:
+        decode = defaults.decode_worker_k8s_name or None
+    return prefill, decode

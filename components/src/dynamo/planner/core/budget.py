@@ -299,12 +299,18 @@ def _initialize_gpu_counts(
     connector,
     require_prefill: bool,
     require_decode: bool,
+    prefill_component_name: "str | None" = None,
+    decode_component_name: "str | None" = None,
 ) -> None:
     """Initialize GPU counts from DGD (Kubernetes) or config (virtual).
 
     In Kubernetes mode: reads from DGD, falls back to CLI flags if not found
     (useful for mockers that don't specify GPU resources).
     In virtual mode: requires CLI flags, errors if not provided.
+
+    ``prefill_component_name`` / ``decode_component_name`` are the DGD
+    component names to use for lookup (required in agg mode where the worker
+    is not typed as decode).
 
     Raises:
         DeploymentValidationError: If GPU counts cannot be determined
@@ -315,6 +321,8 @@ def _initialize_gpu_counts(
             prefill_gpu, decode_gpu = connector.get_gpu_counts(
                 require_prefill=require_prefill,
                 require_decode=require_decode,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
             )
             config.prefill_engine_num_gpu = prefill_gpu
             config.decode_engine_num_gpu = decode_gpu

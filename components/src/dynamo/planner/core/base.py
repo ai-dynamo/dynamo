@@ -26,7 +26,7 @@ from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
 from prometheus_client import start_http_server
 
-from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
+from dynamo.planner.config.backend_components import get_planner_k8s_component_names
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
@@ -309,18 +309,21 @@ class NativePlannerBase:
         if hasattr(self, "connector") and hasattr(self.connector, "_async_init"):
             await self.connector._async_init()
 
-        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
+        # Resolve DGD component names once for this backend+mode and store
+        # them so _refresh_worker_info_from_connector can reuse them without
+        # recomputing.  In agg mode the decode slot resolves to the agg worker
+        # name (e.g. VllmWorker) rather than the disagg decode name.
+        self._prefill_k8s_name, self._decode_k8s_name = get_planner_k8s_component_names(
+            self.config.backend, self.config.mode
+        )
+
         logger.info("Validating deployment...")
         await self.connector.validate_deployment(
             prefill_component_name=(
-                defaults.prefill_worker_k8s_name
-                if self.require_prefill and defaults
-                else None
+                self._prefill_k8s_name if self.require_prefill else None
             ),
             decode_component_name=(
-                defaults.decode_worker_k8s_name
-                if self.require_decode and defaults
-                else None
+                self._decode_k8s_name if self.require_decode else None
             ),
             require_prefill=self.require_prefill,
             require_decode=self.require_decode,
@@ -331,6 +334,12 @@ class NativePlannerBase:
             self.connector,
             require_prefill=self.require_prefill,
             require_decode=self.require_decode,
+            prefill_component_name=self._prefill_k8s_name
+            if self.require_prefill
+            else None,
+            decode_component_name=self._decode_k8s_name
+            if self.require_decode
+            else None,
         )
         await self.connector.wait_for_deployment_ready(include_planner=False)
         await self._refresh_runtime_namespace()
@@ -384,6 +393,8 @@ class NativePlannerBase:
             connector=connector,
             config_model_name=getattr(self.config, "model_name", ""),
             no_operation=False,
+            prefill_component_name=getattr(self, "_prefill_k8s_name", None),
+            decode_component_name=getattr(self, "_decode_k8s_name", None),
         )
         self.model_name = (
             self.decode_worker_info.model_name or self.prefill_worker_info.model_name
@@ -499,8 +510,20 @@ class NativePlannerBase:
         for worker_info, sub_type in targets:
             if worker_info.max_num_batched_tokens is not None:
                 continue
+            component_name = (
+                getattr(self, "_prefill_k8s_name", None)
+                if sub_type == SubComponentType.PREFILL
+                else getattr(self, "_decode_k8s_name", None)
+            )
             try:
-                fresh = self.connector.get_worker_info(sub_type, self.config.backend)
+                if component_name is None:
+                    fresh = self.connector.get_worker_info(
+                        sub_type, self.config.backend
+                    )
+                else:
+                    fresh = self.connector.get_worker_info(
+                        sub_type, self.config.backend, component_name=component_name
+                    )
             except Exception as e:
                 logger.debug(
                     f"get_worker_info refresh for {sub_type.value} failed: {e}"
@@ -904,17 +927,9 @@ class NativePlannerBase:
             deployment = connector.kube_api.get_graph_deployment(
                 connector.graph_deployment_name
             )
-            defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
-            prefill_name = defaults.prefill_worker_k8s_name if defaults else None
-            decode_name = None
-            if defaults is not None:
-                if self.config.mode == "agg":
-                    decode_name = (
-                        getattr(defaults, "agg_worker_k8s_name", None)
-                        or defaults.decode_worker_k8s_name
-                    )
-                else:
-                    decode_name = defaults.decode_worker_k8s_name
+            prefill_name, decode_name = get_planner_k8s_component_names(
+                self.config.backend, self.config.mode
+            )
 
             pods_to_clean: list = []
             if self.require_prefill:
@@ -995,26 +1010,15 @@ class NativePlannerBase:
                 connector.graph_deployment_name
             )
 
-            # Fallback component names for the explicit-name resolution path,
-            # so aggregated (mode=agg) DGDs — whose single worker is labelled
-            # ``type: worker`` and thus doesn't match the PREFILL/DECODE role —
-            # still get annotated. For agg the worker is named
-            # ``agg_worker_k8s_name`` (e.g. ``VllmWorker``), NOT
-            # ``decode_worker_k8s_name`` (``VllmDecodeWorker``), so the explicit
-            # name must be the agg one or resolution finds nothing. The fallback
-            # is a no-op for disagg (the role matches by type, so the name is
-            # ignored).
-            defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
-            prefill_name = defaults.prefill_worker_k8s_name if defaults else None
-            decode_name = None
-            if defaults is not None:
-                if self.config.mode == "agg":
-                    decode_name = (
-                        getattr(defaults, "agg_worker_k8s_name", None)
-                        or defaults.decode_worker_k8s_name
-                    )
-                else:
-                    decode_name = defaults.decode_worker_k8s_name
+            # Fallback component names so aggregated (mode=agg) DGDs — whose
+            # single worker is labelled ``type: worker`` rather than
+            # ``type: prefill/decode`` — still get annotated.  In agg mode the
+            # worker is named e.g. ``VllmWorker`` (agg_worker_k8s_name), not
+            # ``VllmDecodeWorker``; the fallback is a no-op for disagg (the
+            # role matches by type and the explicit name is ignored).
+            prefill_name, decode_name = get_planner_k8s_component_names(
+                self.config.backend, self.config.mode
+            )
 
             pods_and_limits: list[tuple] = []
             if self.require_prefill:

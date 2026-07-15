@@ -51,6 +51,7 @@ def mock_kube_api():
     mock_api.update_graph_replicas = AsyncMock()
     mock_api.wait_for_graph_deployment_ready = AsyncMock()
     mock_api.is_deployment_ready = Mock()
+    mock_api.custom_api.list_namespaced_custom_object.return_value = {"items": []}
     return mock_api
 
 
@@ -1586,3 +1587,104 @@ class TestResolveFrontendHttpPort:
         assert (
             KubernetesConnector.resolve_frontend_http_port(pod, fallback=9999) == 8000
         )
+
+
+# ---------------------------------------------------------------------------
+# Aggregated (mode=agg) component resolution
+# ---------------------------------------------------------------------------
+
+
+def _agg_deployment(model_name="test-model", gpu=4):
+    """DGD with a single VllmWorker typed as 'worker' — the agg topology."""
+    return _deployment(
+        _component(
+            "VllmWorker",
+            "worker",
+            replicas=1,
+            args=["--served-model-name", model_name],
+            gpu=gpu,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_validate_deployment_agg_mode(kubernetes_connector, mock_kube_api):
+    """validate_deployment must pass and resolve model name from VllmWorker in agg mode."""
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment()
+
+    # Must not raise — both the component-existence check and model-name lookup
+    # must use the explicit agg component name rather than type-only resolution.
+    await kubernetes_connector.validate_deployment(
+        prefill_component_name=None,
+        decode_component_name="VllmWorker",
+        require_prefill=False,
+        require_decode=True,
+    )
+
+
+def test_get_gpu_counts_agg_mode(kubernetes_connector, mock_kube_api):
+    """get_gpu_counts must return the GPU count from the agg worker, not fall back to CLI."""
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment(gpu=4)
+
+    prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts(
+        require_prefill=False,
+        require_decode=True,
+        decode_component_name="VllmWorker",
+    )
+
+    assert prefill_gpu == 0
+    assert decode_gpu == 4
+
+
+def test_get_worker_info_agg_mode_sets_k8s_name(kubernetes_connector, mock_kube_api):
+    """get_worker_info must set k8s_name to VllmWorker for agg mode (not VllmDecodeWorker)."""
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment()
+
+    info = kubernetes_connector.get_worker_info(
+        sub_component_type=SubComponentType.DECODE,
+        backend="vllm",
+        component_name="VllmWorker",
+    )
+
+    assert info.k8s_name == "VllmWorker"
+
+
+# Static fallback path (connector=None) — covers build_worker_info_from_defaults
+def test_resolve_worker_info_static_fallback_respects_decode_component_name():
+    """resolve_worker_info with connector=None must honour decode_component_name."""
+    from dynamo.planner.monitoring.worker_info import resolve_worker_info
+
+    _, decode_info = resolve_worker_info(
+        backend="vllm",
+        require_prefill=False,
+        require_decode=True,
+        connector=None,
+        config_model_name="some-model",
+        decode_component_name="VllmWorker",
+    )
+
+    assert decode_info.k8s_name == "VllmWorker"
+
+
+def test_initialize_gpu_counts_agg_mode_reads_from_dgd(
+    kubernetes_connector, mock_kube_api
+):
+    """_initialize_gpu_counts must set decode_engine_num_gpu from DGD in agg mode
+    without requiring a CLI flag."""
+    from dynamo.planner.core.budget import _initialize_gpu_counts
+
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment(gpu=4)
+
+    config = Mock()
+    config.prefill_engine_num_gpu = None
+    config.decode_engine_num_gpu = None
+
+    _initialize_gpu_counts(
+        config,
+        kubernetes_connector,
+        require_prefill=False,
+        require_decode=True,
+        decode_component_name="VllmWorker",
+    )
+
+    assert config.decode_engine_num_gpu == 4

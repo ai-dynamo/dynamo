@@ -113,6 +113,7 @@ class VirtualConnector(PlannerConnector):
         self,
         sub_component_type: SubComponentType,
         backend: str = "vllm",
+        component_name: "str | None" = None,
     ) -> WorkerInfo:
         """Populate WorkerInfo from discovery-sourced MDCs, with defaults fallback.
 
@@ -136,7 +137,9 @@ class VirtualConnector(PlannerConnector):
                 info.model_name = self.model_name
             return info
 
-        info = build_worker_info_from_defaults(backend, sub_component_type)
+        info = build_worker_info_from_defaults(
+            backend, sub_component_type, k8s_name_override=component_name
+        )
         info.model_name = self.model_name
         return info
 
@@ -227,9 +230,6 @@ class VirtualConnector(PlannerConnector):
         """Wait for the deployment to be ready"""
         await self._wait_for_scaling_completion()
 
-    async def get_model_name(
-        self, require_prefill: bool = True, require_decode: bool = True
-    ) -> str:
+    async def get_model_name(self, **_kwargs) -> str:
         """Get the model name from the deployment"""
-        del require_prefill, require_decode
         return self.model_name

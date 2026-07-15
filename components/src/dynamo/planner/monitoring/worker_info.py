@@ -71,21 +71,28 @@ class WorkerInfo:
 
 
 def build_worker_info_from_defaults(
-    backend: str, sub_component_type: SubComponentType
+    backend: str,
+    sub_component_type: SubComponentType,
+    k8s_name_override: "str | None" = None,
 ) -> WorkerInfo:
-    """Build a WorkerInfo populated only from hard-coded backend defaults."""
+    """Build a WorkerInfo populated only from hard-coded backend defaults.
+
+    ``k8s_name_override`` replaces the default DGD component name when the
+    caller already knows the correct name — e.g. agg mode where the single
+    worker is ``VllmWorker`` rather than ``VllmDecodeWorker``.
+    """
     names = WORKER_COMPONENT_NAMES.get(backend)
     if names is None:
-        return WorkerInfo()
+        return WorkerInfo(k8s_name=k8s_name_override)
     if sub_component_type == SubComponentType.PREFILL:
         return WorkerInfo(
-            k8s_name=names.prefill_worker_k8s_name,
+            k8s_name=k8s_name_override or names.prefill_worker_k8s_name,
             component_name=names.prefill_worker_component_name,
             endpoint=names.prefill_worker_endpoint,
         )
     else:
         return WorkerInfo(
-            k8s_name=names.decode_worker_k8s_name,
+            k8s_name=k8s_name_override or names.decode_worker_k8s_name,
             component_name=names.decode_worker_component_name,
             endpoint=names.decode_worker_endpoint,
         )
@@ -98,6 +105,8 @@ def resolve_worker_info(
     connector: Any = None,
     config_model_name: str = "",
     no_operation: bool = False,
+    prefill_component_name: "str | None" = None,
+    decode_component_name: "str | None" = None,
 ) -> tuple[WorkerInfo, WorkerInfo]:
     """Build WorkerInfo for prefill/decode and resolve model name.
 
@@ -120,17 +129,39 @@ def resolve_worker_info(
 
     if can_query_mdc:
         if require_prefill:
-            prefill_info = connector.get_worker_info(SubComponentType.PREFILL, backend)
+            if prefill_component_name is None:
+                prefill_info = connector.get_worker_info(
+                    SubComponentType.PREFILL, backend
+                )
+            else:
+                prefill_info = connector.get_worker_info(
+                    SubComponentType.PREFILL,
+                    backend,
+                    component_name=prefill_component_name,
+                )
         if require_decode:
-            decode_info = connector.get_worker_info(SubComponentType.DECODE, backend)
+            if decode_component_name is None:
+                decode_info = connector.get_worker_info(
+                    SubComponentType.DECODE, backend
+                )
+            else:
+                decode_info = connector.get_worker_info(
+                    SubComponentType.DECODE,
+                    backend,
+                    component_name=decode_component_name,
+                )
     else:
         if require_prefill:
             prefill_info = build_worker_info_from_defaults(
-                backend, SubComponentType.PREFILL
+                backend,
+                SubComponentType.PREFILL,
+                k8s_name_override=prefill_component_name,
             )
         if require_decode:
             decode_info = build_worker_info_from_defaults(
-                backend, SubComponentType.DECODE
+                backend,
+                SubComponentType.DECODE,
+                k8s_name_override=decode_component_name,
             )
 
     if require_prefill:
@@ -167,10 +198,15 @@ def resolve_worker_info(
             model_name = mdc_model
             logger.info(f"Using model name from MDC: {model_name}")
         elif can_query_mdc:
-            model_name = connector.get_model_name(
-                require_prefill=require_prefill,
-                require_decode=require_decode,
-            )
+            get_model_name_kwargs = {
+                "require_prefill": require_prefill,
+                "require_decode": require_decode,
+            }
+            if prefill_component_name is not None:
+                get_model_name_kwargs["prefill_component_name"] = prefill_component_name
+            if decode_component_name is not None:
+                get_model_name_kwargs["decode_component_name"] = decode_component_name
+            model_name = connector.get_model_name(**get_model_name_kwargs)
             logger.info(f"Detected model name from DGD container args: {model_name}")
         elif config_model_name:
             model_name = config_model_name
