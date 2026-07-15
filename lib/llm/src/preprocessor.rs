@@ -80,7 +80,7 @@ use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInpu
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 pub use crate::protocols::common::metrics::{
-    ANNOTATION_LLM_METRICS, ANNOTATION_PAYLOAD_USAGE, LLMMetricAnnotation,
+    ANNOTATION_LLM_METRICS, ANNOTATION_PAYLOAD_USAGE, ImageTokenSkipReason, LLMMetricAnnotation,
 };
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
@@ -210,6 +210,53 @@ impl MultimodalCounts {
             video: count("video_url"),
             audio: count("audio_url"),
         }
+    }
+}
+
+/// Per-request analytic image-token usage, carried from preprocessing to the
+/// metrics annotation alongside [`MultimodalCounts`]. Image-only; detached from
+/// the MM-routing *decision* (sourced from the per-image counts computed for
+/// every fetched image, not the routing-gated `n_total`), though it still
+/// requires the `mm-routing` feature's counter to exist. `Default` (both `None`)
+/// means "nothing to record": text-only, no counter, or a non-mm-routing build.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImageTokenUsage {
+    /// Trusted summed vision-token count, or `None` when withheld/not applicable.
+    pub tokens: Option<usize>,
+    /// Set only when an image-bearing request's count was withheld; drives the
+    /// skip counter. `None` for text-only or successfully-counted requests.
+    pub skip_reason: Option<ImageTokenSkipReason>,
+}
+
+// Only the mm-routing path constructs a non-default `ImageTokenUsage`; without
+// the feature these constructors are unused (the type is still threaded as
+// `Default`). Gate them so the default build stays warning-clean under `-D warnings`.
+#[cfg(feature = "mm-routing")]
+impl ImageTokenUsage {
+    fn counted(tokens: usize) -> Self {
+        Self {
+            tokens: Some(tokens),
+            skip_reason: None,
+        }
+    }
+    fn skipped(reason: ImageTokenSkipReason) -> Self {
+        Self {
+            tokens: None,
+            skip_reason: Some(reason),
+        }
+    }
+}
+
+/// `true` when a JSON value carries no request-level override worth distrusting:
+/// `null`, `{}`, or `[]`. Used to decide whether `mm_processor_kwargs` should
+/// force an image-token skip.
+#[cfg(feature = "mm-routing")]
+fn is_empty_json_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(m) => m.is_empty(),
+        serde_json::Value::Array(a) => a.is_empty(),
+        _ => false,
     }
 }
 
@@ -792,8 +839,12 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
     ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
-        self.preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
-            .await
+        // Image-token usage is only consumed by the streaming/metrics path in
+        // `preprocess_request` (below); this convenience wrapper drops it.
+        let (req, annotations, prompt_injected_reasoning, _image_token_usage) = self
+            .preprocess_request_with_options(request, tracker, PreprocessRequestOptions::default())
+            .await?;
+        Ok((req, annotations, prompt_injected_reasoning))
     }
 
     async fn preprocess_request_with_options<
@@ -809,7 +860,12 @@ impl OpenAIPreprocessor {
         request: &R,
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
-    ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+    ) -> Result<(
+        PreprocessedRequest,
+        HashMap<String, String>,
+        bool,
+        ImageTokenUsage,
+    )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
         let mut builder = self.builder(request)?;
@@ -839,7 +895,7 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        let _mm_image_entries = self
+        let (_mm_image_entries, image_token_usage) = self
             .gather_multi_modal_data(
                 request,
                 &mut builder,
@@ -912,7 +968,12 @@ impl OpenAIPreprocessor {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
         }
 
-        Ok((preprocessed, annotations, prompt_injected_reasoning))
+        Ok((
+            preprocessed,
+            annotations,
+            prompt_injected_reasoning,
+            image_token_usage,
+        ))
     }
 
     pub fn builder<
@@ -1216,7 +1277,7 @@ impl OpenAIPreprocessor {
         // forwarding on the same placeholder-count precondition as
         // `gather_mm_exact_routing_info`, so the two never diverge.
         token_ids: &[crate::protocols::TokenIdType],
-    ) -> Result<Vec<MmImageEntry>> {
+    ) -> Result<(Vec<MmImageEntry>, ImageTokenUsage)> {
         // `token_ids` is only consumed by the mm-routing `mm_hashes` gate below.
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
@@ -1229,6 +1290,14 @@ impl OpenAIPreprocessor {
         // Cleared and returned to the caller; empty for non-image / text-only requests.
         #[cfg(feature = "mm-routing")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
+        // Sum of per-image analytic vision-token counts for the images whose
+        // dimensions resolved. Accumulated from the same `count_tokens` calls the
+        // routing path makes below, but independent of the routing *decision*
+        // (placeholder-match / block-size gates) — so a valid count isn't dropped
+        // just because MM-aware routing didn't engage. Surfaced as image-token
+        // usage after the fetch loops (guarded by `resolve_image_token_usage`).
+        #[cfg(feature = "mm-routing")]
+        let mut image_tokens_acc: usize = 0;
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
         // `mm_hashes` forwarding time: if `mm_image_entries.len()` is
@@ -1250,7 +1319,7 @@ impl OpenAIPreprocessor {
         let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), ImageTokenUsage::default()));
         };
         let has_media_loader = self.media_loader.is_some();
 
@@ -1344,6 +1413,7 @@ impl OpenAIPreprocessor {
                         };
                         if let Some(counter) = self.image_token_counter.as_ref() {
                             let n = counter.count_tokens(w, h);
+                            image_tokens_acc += n;
                             tracing::debug!(
                                 target: "mm_routing",
                                 model = counter.model_id(),
@@ -1387,6 +1457,7 @@ impl OpenAIPreprocessor {
                     Ok((w, h)) => {
                         if let Some(counter) = self.image_token_counter.as_ref() {
                             let n = counter.count_tokens(w, h);
+                            image_tokens_acc += n;
                             tracing::debug!(
                                 target: "mm_routing",
                                 model = counter.model_id(),
@@ -1511,9 +1582,58 @@ impl OpenAIPreprocessor {
         }
 
         #[cfg(feature = "mm-routing")]
-        return Ok(mm_image_entries);
+        let image_token_usage = self.resolve_image_token_usage(
+            request,
+            total_image_count,
+            mm_image_entries.len(),
+            image_tokens_acc,
+        );
+        #[cfg(feature = "mm-routing")]
+        return Ok((mm_image_entries, image_token_usage));
         #[cfg(not(feature = "mm-routing"))]
-        Ok(Vec::new())
+        Ok((Vec::new(), ImageTokenUsage::default()))
+    }
+
+    /// Decide whether the accumulated analytic image-token count is trustworthy
+    /// enough to emit as a usage figure, or which skip reason to record. Image
+    /// only; see [`ImageTokenUsage`]. Never bumps skip for text-only requests.
+    #[cfg(feature = "mm-routing")]
+    fn resolve_image_token_usage<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        total_image_count: usize,
+        resolved_image_count: usize,
+        image_tokens_acc: usize,
+    ) -> ImageTokenUsage {
+        // No images -> nothing to record (text-only). Never a skip.
+        if total_image_count == 0 {
+            return ImageTokenUsage::default();
+        }
+        // Counter absent (model unsupported by the registry, or no config): the
+        // count was never computed. Unverified rather than a misleading 0.
+        let Some(counter) = self.image_token_counter.as_ref() else {
+            return ImageTokenUsage::skipped(ImageTokenSkipReason::UnverifiedFamily);
+        };
+        // Family/config not provably equal to the backend's tokenization.
+        if counter.token_count_trust() != lightseek_mm::TokenCountTrust::Trusted {
+            return ImageTokenUsage::skipped(ImageTokenSkipReason::UnverifiedFamily);
+        }
+        // A per-request resize override the analytic counter can't see. Any
+        // non-empty `mm_processor_kwargs` is grounds to distrust the estimate —
+        // we don't enumerate keys, since the counter has no channel to receive
+        // any of them.
+        if request
+            .mm_processor_kwargs()
+            .is_some_and(|v| !is_empty_json_value(v))
+        {
+            return ImageTokenUsage::skipped(ImageTokenSkipReason::RequestOverride);
+        }
+        // Some image's dimensions didn't resolve (URL-passthrough header-fetch
+        // failure); a summed count would be a plausible-but-wrong partial total.
+        if resolved_image_count != total_image_count {
+            return ImageTokenUsage::skipped(ImageTokenSkipReason::PartialResolution);
+        }
+        ImageTokenUsage::counted(image_tokens_acc)
     }
 
     /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
@@ -2235,6 +2355,7 @@ impl OpenAIPreprocessor {
         Ok(transformed_stream)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn transform_postprocessor_stream<S, Resp>(
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
@@ -2243,6 +2364,7 @@ impl OpenAIPreprocessor {
         trace_tokens_enabled: bool,
         trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         mm_counts: MultimodalCounts,
+        image_token_usage: ImageTokenUsage,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -2267,6 +2389,7 @@ impl OpenAIPreprocessor {
             trace_tokens_enabled: bool,
             trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
             mm_counts: MultimodalCounts,
+            image_token_usage: ImageTokenUsage,
         }
 
         let state = State {
@@ -2283,6 +2406,7 @@ impl OpenAIPreprocessor {
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             mm_counts,
+            image_token_usage,
         };
 
         // transform the common response stream into a chat response stream
@@ -2397,6 +2521,8 @@ impl OpenAIPreprocessor {
                         image_count: inner.mm_counts.image,
                         video_count: inner.mm_counts.video,
                         audio_count: inner.mm_counts.audio,
+                        image_tokens: inner.image_token_usage.tokens,
+                        image_tokens_skip_reason: inner.image_token_usage.skip_reason,
                         prefill_worker_id,
                         prefill_dp_rank,
                         prefill_worker_type,
@@ -2477,6 +2603,8 @@ impl OpenAIPreprocessor {
                             image_count: inner.mm_counts.image,
                             video_count: inner.mm_counts.video,
                             audio_count: inner.mm_counts.audio,
+                            image_tokens: inner.image_token_usage.tokens,
+                            image_tokens_skip_reason: inner.image_token_usage.skip_reason,
                             prefill_worker_id,
                             prefill_dp_rank,
                             prefill_worker_type,
@@ -3333,7 +3461,7 @@ impl
         };
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning) = self
+        let (mut common_request, annotations, prompt_injected_reasoning, image_token_usage) = self
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
@@ -3393,6 +3521,7 @@ impl
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             mm_counts,
+            image_token_usage,
         );
 
         let transformed_stream = self.postprocessor_parsing_stream(
@@ -3574,6 +3703,7 @@ impl
             trace_tokens_enabled,
             trace_finish_reason_metadata,
             MultimodalCounts::default(),
+            ImageTokenUsage::default(),
         );
 
         let stream = crate::request_trace::wrap_completion_request_end_stream(

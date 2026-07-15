@@ -71,12 +71,102 @@ static REGISTRY: LazyLock<VisionProcessorRegistry> =
     LazyLock::new(VisionProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
+/// Whether this model's analytic `count_tokens` output can be trusted as a
+/// usage/billing figure — i.e. it provably equals what the backend tokenizes.
+///
+/// The `llm-multimodal` crate computes the count differently per family:
+/// Qwen3 rebuilds its processor from the loaded config (honors it), but Kimi's
+/// `calculate_num_tokens` *ignores* the passed config and uses the processor's
+/// hardcoded defaults. So a count is trustworthy only when the crate's math is
+/// actually driven by (or coincides with) the model's real config. See the
+/// DIS-2313 scoping finding for the cross-version experiment behind these rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenCountTrust {
+    /// `count_tokens` matches the backend's tokenization; safe to emit.
+    Trusted,
+    /// Family/config not verified against the backend; caller should skip
+    /// emission and bump `image_tokens_skipped_total{reason="unverified_family"}`.
+    Unverified,
+}
+
+// `llm-multimodal 1.7.0` KimiK25Processor defaults (private in the crate; the
+// counter uses these, ignoring per-model config). A Kimi model is only trusted
+// when its real `media_proc_cfg` equals every one of these — else the crate
+// would silently count with the wrong values. Bump the crate => re-verify here.
+const KIMI_CRATE_IN_PATCH_LIMIT: u64 = 16384;
+const KIMI_CRATE_PATCH_LIMIT_ON_ONE_SIDE: u64 = 512;
+const KIMI_CRATE_PATCH_SIZE: u64 = 14;
+const KIMI_CRATE_MERGE_SIZE: u64 = 2;
+
+/// Resolve token-count trust once at construction from the family + parsed config.
+fn resolve_token_count_trust(
+    model_id: &str,
+    model_type: Option<&str>,
+    config: &PreProcessorConfig,
+) -> TokenCountTrust {
+    // Classify by the authoritative `model_type` (from config.json) when present;
+    // fall back to `model_id` only when it's absent. `model_id` can be an
+    // arbitrary local path (`mdc.source_path()`), so its directory names must NOT
+    // drive trust — e.g. a Kimi model under `/models/qwen3-tests/` must not inherit
+    // Qwen3's blanket trust and skip the Kimi config check.
+    let hint = match model_type {
+        Some(mt) if !mt.trim().is_empty() => mt.to_ascii_lowercase(),
+        _ => model_id.to_ascii_lowercase(),
+    };
+
+    // Kimi first — the fragile family: the crate IGNORES its config and counts with
+    // hardcoded defaults, so trust iff the model's real `media_proc_cfg` equals
+    // those defaults exactly. Verified for nvidia/Kimi-K2.5-NVFP4 and Kimi-K2.6-NVFP4
+    // — both `model_type kimi_k25`, identical `media_proc_cfg` on all 4 params, and
+    // byte-identical `media_utils.py` (the resize/token math). `media_proc_cfg` lands
+    // in `config.extra` via serde(flatten); missing => Unverified (conservative).
+    if hint.contains("kimi") {
+        let media = config.extra.get("media_proc_cfg");
+        let get = |k: &str| media.and_then(|m| m.get(k)).and_then(|v| v.as_u64());
+        let matches = get("in_patch_limit") == Some(KIMI_CRATE_IN_PATCH_LIMIT)
+            && get("patch_limit_on_one_side") == Some(KIMI_CRATE_PATCH_LIMIT_ON_ONE_SIDE)
+            && get("patch_size") == Some(KIMI_CRATE_PATCH_SIZE)
+            && get("merge_kernel_size") == Some(KIMI_CRATE_MERGE_SIZE)
+            // The crate has no `fixed_output_tokens` field, so a non-null value
+            // would diverge. `null`/absent is the only trustworthy case.
+            && media
+                .and_then(|m| m.get("fixed_output_tokens"))
+                .map(|v| v.is_null())
+                .unwrap_or(true);
+        return if matches {
+            TokenCountTrust::Trusted
+        } else {
+            TokenCountTrust::Unverified
+        };
+    }
+    // Qwen3 / Qwen3.5 (incl. qwen3_vl, qwen3_5_moe): the crate honors the config
+    // AND its built-in defaults coincide with the shipped `size.{shortest,longest}_edge`,
+    // so the count is robust even if a config strips the limits.
+    if hint.contains("qwen3") {
+        return TokenCountTrust::Trusted;
+    }
+    // Qwen2 / Qwen2.5: the crate honors the config, but its defaults differ from
+    // HF's, so the count is right only when the config explicitly pins the limits.
+    if hint.contains("qwen2") {
+        return if config.min_pixels.is_some() && config.max_pixels.is_some() {
+            TokenCountTrust::Trusted
+        } else {
+            TokenCountTrust::Unverified
+        };
+    }
+
+    // LLaVA / Llama-4 / Phi-3 / unknown families: token-math parity not verified
+    // for usage purposes — skip rather than emit a possibly-wrong number.
+    TokenCountTrust::Unverified
+}
+
 /// Maps `(width, height) → num_image_tokens` for a single model using the
 /// model's HF `preprocessor_config.json`.
 pub struct LightseekMmCounter {
     processor: &'static dyn VisionPreProcessor,
     config: PreProcessorConfig,
     model_id: String,
+    token_count_trust: TokenCountTrust,
 }
 
 impl LightseekMmCounter {
@@ -114,10 +204,13 @@ impl LightseekMmCounter {
             )
         })?;
 
+        let token_count_trust = resolve_token_count_trust(model_id, model_type, &config);
+
         Ok(Self {
             processor,
             config,
             model_id: model_id.to_string(),
+            token_count_trust,
         })
     }
 
@@ -128,6 +221,11 @@ impl LightseekMmCounter {
 
     pub fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    /// Whether this model's `count_tokens` output is a trustworthy usage figure.
+    pub fn token_count_trust(&self) -> TokenCountTrust {
+        self.token_count_trust
     }
 }
 
@@ -403,6 +501,87 @@ mod tests {
              Either pick up an upstream release that registers these, or trim \
              the supported-families list in docs.",
             missing
+        );
+    }
+
+    /// The image-token trust gate that PR2's usage metric depends on. Kimi is the
+    /// sharp case: the crate ignores its config, so trust hinges on the real
+    /// `media_proc_cfg` matching the crate defaults exactly.
+    #[test]
+    fn token_count_trust_gates_by_family_and_config() {
+        let cfg = |json: &str| PreProcessorConfig::from_json(json).unwrap();
+
+        // Kimi with config == crate defaults (nvidia/Kimi-K2.5-NVFP4) -> Trusted.
+        let kimi_ok = cfg(
+            r#"{"media_proc_cfg":{"in_patch_limit":16384,"patch_size":14,
+                "merge_kernel_size":2,"patch_limit_on_one_side":512,
+                "fixed_output_tokens":null}}"#,
+        );
+        assert_eq!(
+            resolve_token_count_trust("moonshotai/Kimi-K2.5", Some("kimi_k25"), &kimi_ok),
+            TokenCountTrust::Trusted
+        );
+
+        // k2.6 ships the identical config + processor (model_type still kimi_k25),
+        // so the same matching config is trusted with no code change.
+        assert_eq!(
+            resolve_token_count_trust("nvidia/Kimi-K2.6-NVFP4", Some("kimi_k25"), &kimi_ok),
+            TokenCountTrust::Trusted
+        );
+
+        // Kimi whose in_patch_limit drifts from the crate default -> Unverified
+        // (the crate would silently count with 16384 anyway).
+        let kimi_drift = cfg(r#"{"media_proc_cfg":{"in_patch_limit":8192,"patch_size":14,
+                "merge_kernel_size":2,"patch_limit_on_one_side":512}}"#);
+        assert_eq!(
+            resolve_token_count_trust("moonshotai/Kimi-K2.6", Some("kimi_k25"), &kimi_drift),
+            TokenCountTrust::Unverified
+        );
+
+        // A Kimi model whose local dir path contains "qwen3" must still be
+        // Kimi-gated (classified by the authoritative model_type, not the
+        // arbitrary source path) — a drifted config is NOT falsely trusted.
+        assert_eq!(
+            resolve_token_count_trust(
+                "/models/qwen3-tests/kimi-k2.5",
+                Some("kimi_k25"),
+                &kimi_drift
+            ),
+            TokenCountTrust::Unverified
+        );
+
+        // Kimi that pins fixed_output_tokens -> Unverified (crate can't represent it).
+        let kimi_fixed = cfg(
+            r#"{"media_proc_cfg":{"in_patch_limit":16384,"patch_size":14,
+                "merge_kernel_size":2,"patch_limit_on_one_side":512,
+                "fixed_output_tokens":256}}"#,
+        );
+        assert_eq!(
+            resolve_token_count_trust("kimi-k2", Some("kimi_k25"), &kimi_fixed),
+            TokenCountTrust::Unverified
+        );
+
+        // Qwen3/3.5: crate honors config and defaults coincide -> always Trusted.
+        assert_eq!(
+            resolve_token_count_trust("Qwen/Qwen3.5-397B", Some("qwen3_5_moe"), &cfg("{}")),
+            TokenCountTrust::Trusted
+        );
+
+        // Qwen2.5: Trusted only with explicit pixel limits.
+        let qwen2_pixels = cfg(r#"{"min_pixels":3136,"max_pixels":12845056}"#);
+        assert_eq!(
+            resolve_token_count_trust("Qwen/Qwen2.5-VL-7B", Some("qwen2_5_vl"), &qwen2_pixels),
+            TokenCountTrust::Trusted
+        );
+        assert_eq!(
+            resolve_token_count_trust("Qwen/Qwen2.5-VL-7B", Some("qwen2_5_vl"), &cfg("{}")),
+            TokenCountTrust::Unverified
+        );
+
+        // Unknown / unverified family -> Unverified.
+        assert_eq!(
+            resolve_token_count_trust("llava-hf/llava-1.5-7b-hf", Some("llava"), &cfg("{}")),
+            TokenCountTrust::Unverified
         );
     }
 }

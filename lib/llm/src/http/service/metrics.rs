@@ -26,7 +26,7 @@ use std::{
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
-    common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
+    common::metrics::{ANNOTATION_LLM_METRICS, ImageTokenSkipReason, LLMMetricAnnotation},
     openai::chat_completions::NvCreateChatCompletionStreamResponse,
 };
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
@@ -392,6 +392,14 @@ pub struct Metrics {
     videos_per_request: HistogramVec,
     audio_per_request: HistogramVec,
 
+    // Analytic vision-token usage. The histogram is observed only for requests
+    // whose count is provably correct (its `_sum` is the cumulative vision-token
+    // volume — no separate `_total` counter, mirroring the count histograms). The
+    // skip counter (labeled model + reason) captures image-bearing requests whose
+    // count was withheld — not derivable from the histogram.
+    image_tokens_per_request: HistogramVec,
+    image_tokens_skipped: IntCounterVec,
+
     // Runtime configuration metrics. Note: Some of these metrics represent counter-like values from
     // source systems, but are implemented as gauges because they are copied/synchronized from upstream
     // counter values rather than being directly incremented.
@@ -535,11 +543,19 @@ pub struct ResponseMetricCollector {
     images_per_request: prometheus::Histogram,
     videos_per_request: prometheus::Histogram,
     audio_per_request: prometheus::Histogram,
+    // Per-model image-token histogram handle + the skip counter (kept as the Vec
+    // because its `reason` label varies per observation; labeled with `self.model`).
+    image_tokens_per_request: prometheus::Histogram,
+    image_tokens_skipped: IntCounterVec,
     // Latched per-request counts (for the tracing span fields recorded in `Drop`).
     image_count_val: usize,
     video_count_val: usize,
     audio_count_val: usize,
     multimodal_counts_observed: bool,
+    // Latched image-token value for the span field in `Drop`; `None` when the
+    // count was skipped or not applicable. `observed` guards once-per-request.
+    image_tokens_val: Option<usize>,
+    image_tokens_observed: bool,
     start_time: Instant,
     // we use is_first_token to distinguish TTFT from ITL. It is true by default and
     // flipped to false when the first token is returned and TTFT is published.
@@ -842,6 +858,34 @@ impl Metrics {
         )
         .unwrap();
 
+        // Vision-token buckets: power-of-two from 4 (a 28x28 image) through 65536,
+        // covering single-image counts (~4..16384) and multi-image sums. Explicit
+        // vector (not generate_log_buckets, which drops the supplied minimum).
+        let image_token_buckets = vec![
+            0.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0,
+            16384.0, 32768.0, 65536.0,
+        ];
+        let image_tokens_per_request = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::IMAGE_TOKENS_PER_REQUEST),
+                "Analytic vision-token count per request (emitted only when \
+                 provably equal to the backend tokenization)",
+            )
+            .buckets(image_token_buckets),
+            &["model"],
+        )
+        .unwrap();
+
+        let image_tokens_skipped = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::IMAGE_TOKENS_SKIPPED),
+                "Image-bearing requests whose analytic image-token count was \
+                 withheld, by reason",
+            ),
+            &["model", "reason"],
+        )
+        .unwrap();
+
         let cached_tokens = HistogramVec::new(
             HistogramOpts::new(
                 frontend_metric_name(frontend_service::CACHED_TOKENS),
@@ -977,6 +1021,8 @@ impl Metrics {
             images_per_request,
             videos_per_request,
             audio_per_request,
+            image_tokens_per_request,
+            image_tokens_skipped,
             model_total_kv_blocks,
             model_max_num_seqs,
             model_max_num_batched_tokens,
@@ -1132,6 +1178,8 @@ impl Metrics {
         registry.register(Box::new(self.inter_token_latency.clone()))?;
         registry.register(Box::new(self.embedding_latency.clone()))?;
         registry.register(Box::new(self.images_per_request.clone()))?;
+        registry.register(Box::new(self.image_tokens_per_request.clone()))?;
+        registry.register(Box::new(self.image_tokens_skipped.clone()))?;
         registry.register(Box::new(self.videos_per_request.clone()))?;
         registry.register(Box::new(self.audio_per_request.clone()))?;
 
@@ -1552,6 +1600,12 @@ impl ResponseMetricCollector {
         let images_per_request = metrics.images_per_request.with_label_values(&[&model]);
         let videos_per_request = metrics.videos_per_request.with_label_values(&[&model]);
         let audio_per_request = metrics.audio_per_request.with_label_values(&[&model]);
+        let image_tokens_per_request = metrics
+            .image_tokens_per_request
+            .with_label_values(&[&model]);
+        // Skip counter's `reason` label varies per observation, so keep the Vec
+        // and label it (with `model`) at observe time.
+        let image_tokens_skipped = metrics.image_tokens_skipped.clone();
         ResponseMetricCollector {
             metrics,
             model,
@@ -1564,10 +1618,14 @@ impl ResponseMetricCollector {
             images_per_request,
             videos_per_request,
             audio_per_request,
+            image_tokens_per_request,
+            image_tokens_skipped,
             image_count_val: 0,
             video_count_val: 0,
             audio_count_val: 0,
             multimodal_counts_observed: false,
+            image_tokens_val: None,
+            image_tokens_observed: false,
             is_first_token: true,
             last_response_time: None,
             start_time: Instant::now(),
@@ -1695,6 +1753,34 @@ impl ResponseMetricCollector {
         self.images_per_request.observe(image_count as f64);
         self.videos_per_request.observe(video_count as f64);
         self.audio_per_request.observe(audio_count as f64);
+    }
+
+    /// Record the request's analytic image-token usage, once. A trusted count is
+    /// observed on the histogram; a withheld count bumps the skip counter with its
+    /// reason. Text-only / not-applicable requests (both `None`) record nothing
+    /// and don't latch, so they never appear in either series.
+    pub fn observe_image_tokens(
+        &mut self,
+        image_tokens: Option<usize>,
+        skip_reason: Option<ImageTokenSkipReason>,
+    ) {
+        if self.image_tokens_observed {
+            return;
+        }
+        match (image_tokens, skip_reason) {
+            (Some(n), _) => {
+                self.image_tokens_observed = true;
+                self.image_tokens_val = Some(n);
+                self.image_tokens_per_request.observe(n as f64);
+            }
+            (None, Some(reason)) => {
+                self.image_tokens_observed = true;
+                self.image_tokens_skipped
+                    .with_label_values(&[self.model.as_str(), reason.as_str()])
+                    .inc();
+            }
+            (None, None) => {}
+        }
     }
 
     /// Observe tokenize/detokenize latencies in milliseconds.
@@ -1871,6 +1957,11 @@ impl Drop for ResponseMetricCollector {
             span.record("video_count", self.video_count_val as u32);
             span.record("audio_count", self.audio_count_val as u32);
         }
+        // Independent of the count latch: image_tokens can be absent (skipped /
+        // not applicable) even when counts were observed, and vice versa.
+        if let Some(image_tokens) = self.image_tokens_val {
+            span.record("image_tokens", image_tokens as u64);
+        }
         if let Some(ttft_ms) = self.ttft_ms {
             span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
         }
@@ -1950,6 +2041,7 @@ fn observe_llm_metrics(
         metrics.video_count,
         metrics.audio_count,
     );
+    response_collector.observe_image_tokens(metrics.image_tokens, metrics.image_tokens_skip_reason);
     response_collector.observe_tokenize_latencies(
         metrics.tokenize_latency,
         metrics.detokenize_total_latency,
@@ -2595,6 +2687,51 @@ mod tests {
         let img = metrics.images_per_request.with_label_values(&[model]);
         assert_eq!(img.get_sample_count(), 1);
         assert_eq!(img.get_sample_sum(), 0.0);
+    }
+
+    #[test]
+    fn test_image_tokens_observed_once_and_skip_reason() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        // Trusted count: histogram observed exactly once, `_sum` == the value,
+        // even though the same annotation arrives on every streamed chunk.
+        let model = "img-tok-model";
+        let mut collector = metrics.clone().create_response_collector(model);
+        collector.observe_image_tokens(Some(1290), None);
+        collector.observe_image_tokens(Some(1290), None);
+        collector.observe_image_tokens(Some(9999), None); // must not override
+        let hist = metrics.image_tokens_per_request.with_label_values(&[model]);
+        assert_eq!(hist.get_sample_count(), 1, "observed once");
+        assert_eq!(hist.get_sample_sum(), 1290.0);
+
+        // Skipped count: bumps the reason-labeled counter once, no histogram sample.
+        let skip_model = "img-tok-skip-model";
+        let mut c2 = metrics.clone().create_response_collector(skip_model);
+        c2.observe_image_tokens(None, Some(ImageTokenSkipReason::UnverifiedFamily));
+        c2.observe_image_tokens(None, Some(ImageTokenSkipReason::UnverifiedFamily));
+        let skipped = metrics
+            .image_tokens_skipped
+            .with_label_values(&[skip_model, "unverified_family"]);
+        assert_eq!(skipped.get(), 1, "skip counter bumped once");
+        let skip_hist = metrics
+            .image_tokens_per_request
+            .with_label_values(&[skip_model]);
+        assert_eq!(
+            skip_hist.get_sample_count(),
+            0,
+            "no histogram sample on skip"
+        );
+
+        // Text-only / not-applicable (both None): records nothing on either series.
+        let text_model = "img-tok-text-model";
+        let mut c3 = metrics.clone().create_response_collector(text_model);
+        c3.observe_image_tokens(None, None);
+        let text_hist = metrics
+            .image_tokens_per_request
+            .with_label_values(&[text_model]);
+        assert_eq!(text_hist.get_sample_count(), 0);
     }
 
     #[test]

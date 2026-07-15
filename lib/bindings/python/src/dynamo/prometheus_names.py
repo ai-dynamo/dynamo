@@ -120,6 +120,12 @@ class frontend_service:
     VIDEOS_PER_REQUEST = "videos_per_request"
     # Number of `audio_url` content parts per request (histogram)
     AUDIO_PER_REQUEST = "audio_per_request"
+    # Analytic vision-token count per request (histogram), emitted only when
+    # provably equal to the backend tokenization; `_sum` = cumulative volume.
+    IMAGE_TOKENS_PER_REQUEST = "image_tokens_per_request"
+    # Image-bearing requests whose analytic image-token count was withheld, by
+    # `reason` (counter); not derivable from the histogram.
+    IMAGE_TOKENS_SKIPPED = "image_tokens_skipped_total"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model

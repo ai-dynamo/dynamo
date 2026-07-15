@@ -241,6 +241,17 @@ pub mod frontend_service {
     /// Number of `audio_url` content parts per request (histogram)
     pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
 
+    /// Analytic vision-token count per request (histogram), emitted only when the
+    /// count is provably equal to the backend's tokenization. `_sum` = cumulative
+    /// vision-token volume, `_count` = requests with a trusted count (complemented
+    /// by `image_tokens_skipped_total`, not all image requests).
+    pub const IMAGE_TOKENS_PER_REQUEST: &str = "image_tokens_per_request";
+
+    /// Image-bearing requests whose analytic image-token count was withheld,
+    /// labeled by `reason` (counter). Not derivable from the histogram (a skipped
+    /// request produces no sample).
+    pub const IMAGE_TOKENS_SKIPPED: &str = "image_tokens_skipped_total";
+
     /// Model configuration metrics
     ///
     /// Runtime config metrics (from ModelRuntimeConfig):

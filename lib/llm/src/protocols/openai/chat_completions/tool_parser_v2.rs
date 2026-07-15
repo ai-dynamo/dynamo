@@ -460,6 +460,8 @@ mod tests {
             image_count: 0,
             video_count: 0,
             audio_count: 0,
+            image_tokens: None,
+            image_tokens_skip_reason: None,
             prefill_worker_id: None,
             prefill_dp_rank: None,
             prefill_worker_type: None,

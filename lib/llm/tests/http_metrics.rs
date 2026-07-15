@@ -143,6 +143,7 @@ impl
                     image_count,
                     video_count,
                     audio_count,
+                    image_tokens: Some(1290),
                     ..Default::default()
                 };
                 if let Ok(ann) = metrics.to_annotation::<NvCreateChatCompletionStreamResponse>() {
@@ -477,6 +478,18 @@ async fn test_multimodal_count_metrics_exposed() {
         assert!(
             metrics_body.contains("dynamo_frontend_audio_per_request_sum{model=\"mmmodel\"} 0\n"),
             "audio_per_request_sum should be 0; got:\n{metrics_body}"
+        );
+        // Analytic image-token usage (mock emits Some(1290)): latched once, so
+        // `_count` == 1 and `_sum` == the trusted vision-token total.
+        assert!(
+            metrics_body
+                .contains("dynamo_frontend_image_tokens_per_request_count{model=\"mmmodel\"} 1\n"),
+            "image_tokens_per_request_count should be 1; got:\n{metrics_body}"
+        );
+        assert!(
+            metrics_body
+                .contains("dynamo_frontend_image_tokens_per_request_sum{model=\"mmmodel\"} 1290\n"),
+            "image_tokens_per_request_sum should be 1290; got:\n{metrics_body}"
         );
 
         cancel_token.cancel();
