@@ -130,16 +130,12 @@ def test_worker_config_accepts_media_configuration():
     )
 
 
-def test_worker_config_validates_request_concurrency_override():
-    backend.WorkerConfig(
-        namespace="dynamo",
-        rejection_frontend_request_concurrency_limit=17,
-    )
-
-    with pytest.raises(ValueError, match="must be >= 1"):
+def test_worker_config_defers_request_concurrency_override_validation_to_run():
+    """Worker.run owns validation; the binding only carries the value."""
+    for limit in (0, 17):
         backend.WorkerConfig(
             namespace="dynamo",
-            rejection_frontend_request_concurrency_limit=0,
+            rejection_frontend_request_concurrency_limit=limit,
         )
 
 

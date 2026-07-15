@@ -909,7 +909,9 @@ pub struct ModelDeploymentCard {
     /// frontend-admitted requests for this model. When set, it takes
     /// precedence over the frontend's global
     /// `--rejection-frontend-request-concurrency-limit` for this model.
-    /// Registration validates >= 1.
+    /// Registration validates >= 1. The value participates in `mdcsum` as
+    /// static WorkerSet identity; all workers in one namespace/role WorkerSet
+    /// must advertise the same value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub rejection_frontend_request_concurrency_limit: Option<u64>,
@@ -1106,9 +1108,11 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(blake3::hash(&bytes).as_bytes());
                 }
 
-                // A concurrency override changes frontend admission behavior,
-                // so it must split the WorkerSet during a rolling update. Omit
-                // the field when unset to preserve pre-field checksums.
+                // A concurrency override is part of the static WorkerSet
+                // identity. Workers targeting the same namespace/role must
+                // agree on it; changing it requires a new namespace or a full
+                // drain before replacements register. Omit the field when
+                // unset to preserve pre-field checksums.
                 if let Some(limit) = self.rejection_frontend_request_concurrency_limit {
                     bytes_to_hash.extend(b"rejection_frontend_request_concurrency_limit\0");
                     bytes_to_hash.extend(limit.to_be_bytes());
@@ -3073,6 +3077,9 @@ mod worker_type_tests {
         );
     }
 
+    /// The frontend concurrency override is static WorkerSet identity. A
+    /// changed value must produce a different checksum so workers cannot join
+    /// an existing namespace/role WorkerSet with conflicting admission policy.
     #[test]
     fn mdcsum_covers_frontend_concurrency_override() {
         fn hash(limit: Option<u64>) -> String {
@@ -3086,11 +3093,11 @@ mod worker_type_tests {
         let capped_at_two = hash(Some(2));
         assert_ne!(
             baseline, capped_at_one,
-            "adding the limit must change mdcsum"
+            "adding the limit must change WorkerSet identity"
         );
         assert_ne!(
             capped_at_one, capped_at_two,
-            "changing the limit must change mdcsum"
+            "changing the limit must change WorkerSet identity"
         );
     }
 

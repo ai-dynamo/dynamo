@@ -642,11 +642,12 @@ impl Model {
 
     /// Per-model frontend admission concurrency override supplied at model
     /// registration (on the MDC), used ahead of the frontend-global
-    /// `--rejection-frontend-request-concurrency-limit`. During a rolling
-    /// update, multiple WorkerSets can briefly advertise different values; the
-    /// most restrictive value wins deterministically until the old set drains.
-    /// Zero is out of contract (registration validates >= 1) and is treated as
-    /// absent so it cannot reject all traffic.
+    /// `--rejection-frontend-request-concurrency-limit`. The override is static
+    /// WorkerSet identity: workers in one namespace/role must agree on it. A
+    /// rollout under a new namespace can briefly coexist with the old
+    /// WorkerSet; the most restrictive value wins deterministically until the
+    /// old set drains. Zero is out of contract (registration validates >= 1)
+    /// and is treated as absent so it cannot reject all traffic.
     pub fn request_concurrency_limit_override(&self) -> Option<u64> {
         self.worker_sets
             .iter()

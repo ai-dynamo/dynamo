@@ -1,14 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Integration tests for the frontend admission gates (DIS-2186):
+//! Integration tests for the frontend admission gates from DEP #9755:
 //! `--rejection-frontend-request-concurrency-limit`,
 //! `--rejection-frontend-runtime-task-limit`, and
 //! `--rejection-frontend-request-plane-connection-limit`.
 
 use anyhow::Error;
 use async_stream::stream;
+use dynamo_llm::discovery::UNKNOWN_METRIC_MODEL;
 use dynamo_llm::frontend_config::AdmissionGateConfig;
+use dynamo_llm::http::service::metrics::Endpoint;
 use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::{
@@ -198,6 +200,10 @@ async fn test_concurrency_gate_rejects_over_limit_per_model() {
         body.contains("rejection-frontend-request-concurrency-limit"),
         "rejection body should name the knob: {body}"
     );
+    assert!(
+        body.contains("frontend-global"),
+        "rejection body should identify the global limit source: {body}"
+    );
     assert_eq!(
         metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, "slow"),
         1
@@ -210,6 +216,19 @@ async fn test_concurrency_gate_rejects_over_limit_per_model() {
     // Unregistered models are exempt from the gate and keep their 404.
     let unknown = post_chat(svc.port, &chat_request("no-such-model", 1)).await;
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+
+    // A literal request for the bounded unknown-model metrics sentinel must
+    // also retain the normal 404, even when its shared inflight count exceeds
+    // the configured gate limit.
+    let sentinel_holder = metrics.clone().create_inflight_guard(
+        UNKNOWN_METRIC_MODEL,
+        Endpoint::ChatCompletions,
+        false,
+        "sentinel-collision-test",
+    );
+    let sentinel = post_chat(svc.port, &chat_request(UNKNOWN_METRIC_MODEL, 1)).await;
+    assert_eq!(sentinel.status(), StatusCode::NOT_FOUND);
+    drop(sentinel_holder);
 
     finish_held_request(holder, &metrics, "slow").await;
     let after = post_chat(svc.port, &chat_request("slow", 1)).await;
@@ -233,16 +252,19 @@ async fn assert_second_request(
     metrics: &dynamo_llm::http::service::Metrics,
     model: &str,
     expect_reject: bool,
-) {
+) -> String {
     let holder = hold_request(port, metrics, model).await;
     let second = post_chat(port, &chat_request(model, 1)).await;
+    let status = second.status();
+    let body = second.text().await.unwrap();
     let expected = if expect_reject {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::OK
     };
-    assert_eq!(second.status(), expected, "unexpected status for {model}");
+    assert_eq!(status, expected, "unexpected status for {model}: {body}");
     finish_held_request(holder, metrics, model).await;
+    body
 }
 
 #[tokio::test]
@@ -257,8 +279,12 @@ async fn test_concurrency_gate_mdc_override_activates_without_global_default() {
     add_model_with_override(manager, "capped", 1);
     let metrics = svc.state.metrics_clone();
 
-    assert_second_request(svc.port, &metrics, "capped", true).await;
-    assert_second_request(svc.port, &metrics, "fast", false).await;
+    let rejection = assert_second_request(svc.port, &metrics, "capped", true).await;
+    assert!(
+        rejection.contains("per-model MDC override"),
+        "rejection body should identify the MDC limit source: {rejection}"
+    );
+    let _ = assert_second_request(svc.port, &metrics, "fast", false).await;
     assert_eq!(
         metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, "capped"),
         1
@@ -277,8 +303,12 @@ async fn test_concurrency_gate_mdc_override_wins_over_global_default() {
     add_model_with_override(manager, "roomy", 3);
     let metrics = svc.state.metrics_clone();
 
-    assert_second_request(svc.port, &metrics, "roomy", false).await;
-    assert_second_request(svc.port, &metrics, "fast", true).await;
+    let _ = assert_second_request(svc.port, &metrics, "roomy", false).await;
+    let rejection = assert_second_request(svc.port, &metrics, "fast", true).await;
+    assert!(
+        rejection.contains("frontend-global"),
+        "rejection body should identify the global limit source: {rejection}"
+    );
 }
 
 #[tokio::test]

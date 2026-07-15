@@ -113,7 +113,7 @@ def test_fpm_trace_help_lists_flag_and_env(monkeypatch):
     assert "DYN_FPM_TRACE" in help_text
 
 
-# --- Per-model frontend admission override (DIS-2186) ---
+# --- Per-model frontend admission override (DEP #9755) ---
 
 
 @pytest.fixture()

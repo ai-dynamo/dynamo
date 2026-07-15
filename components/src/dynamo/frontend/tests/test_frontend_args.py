@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Frontend admission gate knob parsing and validation (DIS-2186)."""
+"""Frontend admission gate knob parsing and validation (DEP #9755)."""
 
 import argparse
 

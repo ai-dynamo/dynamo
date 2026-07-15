@@ -402,11 +402,6 @@ impl WorkerConfig {
                 )));
             }
         };
-        if rejection_frontend_request_concurrency_limit == Some(0) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "rejection_frontend_request_concurrency_limit must be >= 1",
-            ));
-        }
         Ok(Self {
             inner: RsWorkerConfig {
                 namespace,

@@ -196,7 +196,8 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Per-model frontend admission concurrency override carried on the MDC.
+    /// Static per-model/WorkerSet frontend admission concurrency override
+    /// carried on the MDC and included in its checksum.
     pub fn rejection_frontend_request_concurrency_limit(
         &mut self,
         limit: Option<u64>,
