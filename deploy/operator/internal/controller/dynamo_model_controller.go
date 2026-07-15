@@ -130,6 +130,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		model.Status.Endpoints = nil
 		model.Status.TotalEndpoints = 0
 		model.Status.ReadyEndpoints = 0
+		model.Status.LoRAFallbackCoveredEndpoints = 0
 		if err := r.Status().Update(ctx, model); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -141,11 +142,12 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	allEndpoints, probeErr := r.EndpointClient.LoadLoRA(ctx, candidates, model)
 
 	// Determine if we need to requeue based on model type
-	// For LoRA models: requeue if there were probe errors OR if not all endpoints are ready
+	// For LoRA models: requeue if there were probe errors OR if not all endpoints
+	// are directly ready or covered by a capable prefill during a rolling upgrade.
 	// For base models: only requeue if there were probe errors (Ready is expected to be false)
 	hasFailures := probeErr != nil
 	if model.IsLoRA() {
-		hasFailures = hasFailures || countReadyEndpoints(allEndpoints) < len(allEndpoints)
+		hasFailures = hasFailures || countServingEndpoints(allEndpoints) < len(allEndpoints)
 	}
 
 	if probeErr != nil {
@@ -167,18 +169,21 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	model.Status.Endpoints = allEndpoints
 	model.Status.TotalEndpoints = len(allEndpoints)
 	model.Status.ReadyEndpoints = countReadyEndpoints(allEndpoints)
+	model.Status.LoRAFallbackCoveredEndpoints = countLoRAFallbackCoveredEndpoints(allEndpoints)
 
 	// Update conditions based on model type
 	if model.IsLoRA() {
-		// For LoRA models, check readiness - condition is True only when ALL endpoints are ready
-		if model.Status.ReadyEndpoints == model.Status.TotalEndpoints && model.Status.TotalEndpoints > 0 {
+		// For LoRA models, the model is ready only when every endpoint is
+		// directly ready or a legacy prefill is covered by a capable peer. Keep
+		// ReadyEndpoints truthful: it counts only endpoints that serve directly.
+		if countServingEndpoints(allEndpoints) == model.Status.TotalEndpoints && model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonAllEndpointsReady,
-				fmt.Sprintf("All %d endpoint(s) are ready", model.Status.TotalEndpoints))
+				fmt.Sprintf("All %d endpoint(s) are ready or covered by a capable prefill", model.Status.TotalEndpoints))
 			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsReady",
-				"All %d endpoints ready for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
+				"All %d endpoints ready or fallback-covered for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else if model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNotReady,
-				fmt.Sprintf("Found %d ready endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.TotalEndpoints))
+				fmt.Sprintf("Found %d ready endpoint(s) and %d fallback-covered endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.LoRAFallbackCoveredEndpoints, model.Status.TotalEndpoints))
 			r.Recorder.Eventf(model, corev1.EventTypeWarning, "NotReady",
 				"Only %d of %d endpoints ready for base model %s", model.Status.ReadyEndpoints, model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else {
@@ -225,6 +230,25 @@ func countReadyEndpoints(endpoints []v1alpha1.EndpointInfo) int {
 		}
 	}
 	return count
+}
+
+// countLoRAFallbackCoveredEndpoints counts legacy prefill endpoints covered by
+// a capable prefill during a rolling upgrade. These are intentionally separate
+// from ready endpoints because they do not serve the adapter themselves.
+func countLoRAFallbackCoveredEndpoints(endpoints []v1alpha1.EndpointInfo) int {
+	count := 0
+	for _, ep := range endpoints {
+		if ep.LoRAFallbackCovered {
+			count++
+		}
+	}
+	return count
+}
+
+// countServingEndpoints counts endpoints ready to serve directly plus legacy
+// prefill endpoints covered by a capable prefill in the same topology.
+func countServingEndpoints(endpoints []v1alpha1.EndpointInfo) int {
+	return countReadyEndpoints(endpoints) + countLoRAFallbackCoveredEndpoints(endpoints)
 }
 
 func markLoRAManagementUnavailableFallbackEligible(

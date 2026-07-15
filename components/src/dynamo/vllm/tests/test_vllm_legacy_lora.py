@@ -192,6 +192,39 @@ async def test_legacy_prefill_unload_skips_engine_removal_for_metadata_only_adap
 
 
 @pytest.mark.asyncio
+async def test_legacy_prefill_unload_removes_request_activated_adapter(monkeypatch):
+    handler = _make_prefill_handler()
+    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    handler._track_lora_request_activation(handler._resolve_lora_request("adapterA"))
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+
+    results = [
+        result async for result in handler.unload_lora({"lora_name": "adapterA"})
+    ]
+
+    assert results[-1]["status"] == "success"
+    handler.engine_client.remove_lora.assert_awaited_once_with(123)
+
+
+@pytest.mark.asyncio
+async def test_legacy_prefill_unload_treats_missing_request_adapter_as_idempotent(
+    monkeypatch,
+):
+    handler = _make_prefill_handler()
+    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    handler._engine_loaded_loras = {"adapterA"}
+    handler.engine_client.remove_lora.side_effect = RuntimeError("adapter not found")
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+
+    results = [
+        result async for result in handler.unload_lora({"lora_name": "adapterA"})
+    ]
+
+    assert results[-1]["status"] == "success"
+    assert "adapterA" not in handler.loaded_loras
+
+
+@pytest.mark.asyncio
 async def test_legacy_unload_unregister_failure_preserves_engine_state(monkeypatch):
     handler = _make_prefill_handler()
     original = LoRAInfo(id=123, path="/cache/adapter")
