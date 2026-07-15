@@ -331,7 +331,11 @@ async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl(
     let coordinator = coordinator();
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let mut stream = operation
-        .into_stream(target(7, Some(0)), cancelled_response_stream())
+        .into_stream(
+            target(7, Some(0)),
+            RequestPhase::Aggregated,
+            cancelled_response_stream(),
+        )
         .unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
     assert!(stream.next().await.is_none());
@@ -598,7 +602,11 @@ async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
     let selected_target = target(7, Some(0));
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let stream = operation
-        .into_stream(selected_target, response_stream(1))
+        .into_stream(
+            selected_target,
+            RequestPhase::Aggregated,
+            response_stream(1),
+        )
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();
@@ -621,7 +629,11 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
     let replicated_target = target(7, Some(0));
     let operation = origin.acquire(&session_id(), None).await.unwrap();
     let stream = operation
-        .into_stream(replicated_target, response_stream(1))
+        .into_stream(
+            replicated_target,
+            RequestPhase::Aggregated,
+            response_stream(1),
+        )
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();

@@ -4,6 +4,7 @@
 mod coordinator;
 mod push_router;
 mod replica_sync;
+mod trace;
 
 use std::time::Duration;
 
