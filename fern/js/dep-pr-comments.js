@@ -756,12 +756,22 @@
     // while tolerating soft-wrap and MDX-rendering differences.
     var needle = nq.slice(0, Math.min(nq.length, 60));
     if (!needle) return null;
+    // Require the needle to hit exactly one non-blank source line. A
+    // confidently-wrong anchor (matching the second bullet in a list of
+    // similar bullets, e.g.) is a worse UX than the top-of-file
+    // fallback: the reader ends up staring at the wrong span with no
+    // signal that we guessed. When ambiguous, return null so the
+    // caller falls back to the no-anchor URL.
+    var found = null;
     for (var i = 0; i < sourceLines.length; i++) {
       var nl = normWs(stripMarkdown(sourceLines[i]));
       if (!nl) continue;
-      if (nl.indexOf(needle) !== -1) return i + 1;
+      if (nl.indexOf(needle) !== -1) {
+        if (found !== null) return null;
+        found = i + 1;
+      }
     }
-    return null;
+    return found;
   }
 
   /* Per-PR caches for the line-anchor path. Populated lazily on the first
@@ -1276,19 +1286,36 @@
     if (!text || !cfg) return;
     var fallbackUrl = buildGitHubUrl(cfg);
     var quote = buildBlockquote(text);
-    // Kick off clipboard copy and URL resolution in parallel — the
-    // clipboard copy MUST always work regardless of whether we can
-    // resolve a line-anchored URL. `resolveLineAnchoredUrl` never
-    // rejects; it resolves to "" on any failure, and we then use the
-    // no-anchor `fallbackUrl` so the tab always opens somewhere useful.
+    // Popup-blocker discipline: `window.open` MUST be called
+    // synchronously inside this click handler so the browser sees the
+    // user-gesture activation. `resolveLineAnchoredUrl` awaits two
+    // network fetches (PR head + raw source), and Chrome / Safari drop
+    // the transient activation after a fetch resolves — a
+    // `window.open(...)` call from inside `Promise.all([...]).then(...)`
+    // gets popup-blocked. So: open the fallback tab now, keep the
+    // handle, and steer it to the line-anchored URL later. Clipboard
+    // writeText is dispatched sync inside `copyToClipboard`, so its
+    // async-permission check also lands inside the gesture window.
     var copyP = copyToClipboard(quote);
+    // Intentionally omit the "noopener" feature so we retain the
+    // reference and can navigate the tab once the line URL resolves.
+    // Defensively drop `opener` on the opened window; same-origin
+    // this severs reach-back, cross-origin (github.com) the write
+    // silently no-ops but github.com will not exploit `window.opener`.
+    var opened = fallbackUrl
+      ? window.open(fallbackUrl, "_blank")
+      : null;
+    if (opened) {
+      try { opened.opener = null; } catch (e) { /* noop */ }
+    }
     var urlP = resolveLineAnchoredUrl(cfg, text);
     Promise.all([copyP, urlP]).then(function (results) {
       var copied = results[0];
       var lineUrl = results[1];
-      var target = lineUrl || fallbackUrl;
-      if (target) {
-        window.open(target, "_blank", "noopener,noreferrer");
+      if (lineUrl && opened && !opened.closed) {
+        // Cross-origin nav via opener is allowed; use `replace` so
+        // the fallback URL doesn't get an entry in the tab's history.
+        try { opened.location.replace(lineUrl); } catch (e) { /* noop */ }
       }
       showToast(
         copied

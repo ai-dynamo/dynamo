@@ -482,6 +482,39 @@ test("skips blank source lines (does not return a line number for empty match)",
   assert.equal(findSourceLine(src, "actual"), 3);
 });
 
+test("returns null when the needle matches multiple non-blank source lines (ambiguous)", () => {
+  // Two source lines share the same 60-char prefix. A confidently-wrong
+  // anchor (matching the first hit) is a worse UX than the plain
+  // top-of-file fallback — the caller expects null so it uses the
+  // no-anchor URL instead of guessing.
+  const dupSrc = [
+    "Nova provides a transport-agnostic active messaging layer.",
+    "",
+    "Some intervening line that will not match.",
+    "",
+    "Nova provides a transport-agnostic active messaging layer.",
+  ];
+  assert.equal(
+    findSourceLine(dupSrc, "Nova provides a transport-agnostic active messaging layer."),
+    null
+  );
+});
+
+test("still returns a line when only one non-blank source line matches", () => {
+  // Guard against the ambiguity check false-positiving on blank lines
+  // between the sole match and unrelated content.
+  const src = [
+    "",
+    "Nova provides a transport-agnostic active messaging layer.",
+    "",
+    "Some other paragraph.",
+  ];
+  assert.equal(
+    findSourceLine(src, "Nova provides a transport-agnostic active messaging layer."),
+    2
+  );
+});
+
 console.log("");
 console.log("sha256Hex — hex-encoded SHA-256, used for the diff-file hash");
 
@@ -514,6 +547,57 @@ await testAsync("returns null when crypto.subtle is unavailable", async () => {
   )(undefined);
   const result = await noCrypto("anything");
   assert.equal(result, null);
+});
+
+console.log("");
+console.log("onQuoteBtnClick — popup-blocker discipline");
+
+test("opens the tab synchronously before awaiting Promise.all (popup-blocker fix)", () => {
+  // The transient user-gesture activation Chrome / Safari require for
+  // `window.open` is CONSUMED at the first microtask boundary after a
+  // fetched Promise resolves. That means any `window.open()` call
+  // inside `Promise.all([...]).then(...)` after `resolveLineAnchoredUrl`
+  // (which awaits two network fetches) gets popup-blocked.
+  //
+  // Structural check: `window.open(` must appear inside the
+  // synchronous body of `onQuoteBtnClick` BEFORE the `Promise.all(`
+  // call, so the fallback tab is opened while the gesture is still
+  // live. The line-anchored URL is applied via `opened.location`
+  // later; it never gates the initial open.
+  const src = extractFnSource("onQuoteBtnClick");
+  const openIdx = src.indexOf("window.open(");
+  const promiseAllIdx = src.indexOf("Promise.all(");
+  assert.notEqual(openIdx, -1, "onQuoteBtnClick must call window.open");
+  assert.notEqual(promiseAllIdx, -1, "onQuoteBtnClick must await Promise.all");
+  assert.ok(
+    openIdx < promiseAllIdx,
+    "window.open must be called BEFORE Promise.all to preserve the " +
+    `user-gesture window (open at ${openIdx}, Promise.all at ${promiseAllIdx})`
+  );
+});
+
+test("does not pass 'noopener' to window.open (keeps the tab handle for later redirect)", () => {
+  // With `noopener` in the feature string, `window.open` returns null
+  // and we lose the ability to steer the tab to the line-anchored URL
+  // once resolveLineAnchoredUrl completes. We compensate by nulling
+  // `opened.opener` on the returned window — see the guarding
+  // `opened.opener = null` in the source.
+  const src = extractFnSource("onQuoteBtnClick");
+  // The `window.open(fallbackUrl, "_blank")` call must NOT carry the
+  // "noopener" feature. Detect the anti-pattern textually.
+  assert.doesNotMatch(
+    src,
+    /window\.open\([^)]*noopener/,
+    "window.open in onQuoteBtnClick must not pass 'noopener' — the " +
+    "returned handle is required to navigate the tab to the line-anchored URL"
+  );
+  // But the mitigation MUST be present: `opened.opener = null`.
+  assert.match(
+    src,
+    /opened\.opener\s*=\s*null/,
+    "onQuoteBtnClick must null `opened.opener` to compensate for the " +
+    "missing 'noopener' feature"
+  );
 });
 
 console.log("");
