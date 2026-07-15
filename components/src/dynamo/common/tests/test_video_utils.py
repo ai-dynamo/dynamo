@@ -240,6 +240,40 @@ class TestEncodeVideoValidation:
             encode_video(np.zeros((2, 4, 4, 3), np.float32), hw_accel="nvenc")
 
 
+class TestEncodeVideoContainerCodec:
+    """encode_video rejects incompatible container/codec combinations."""
+
+    def test_rejects_unknown_container(self):
+        with pytest.raises(ValueError, match="Unsupported container"):
+            encode_video(canonical_frames(), hw_accel="nvenc", container="avi")
+
+    def test_rejects_h264_in_webm(self):
+        with pytest.raises(ValueError, match="not compatible"):
+            encode_video(
+                canonical_frames(), hw_accel="nvenc", container="webm", codec="h264"
+            )
+
+    def test_rejects_vp9_in_mp4(self):
+        with pytest.raises(ValueError, match="not compatible"):
+            encode_video(
+                canonical_frames(), hw_accel="nvenc", container="mp4", codec="vp9"
+            )
+
+    def test_accepts_compatible_non_default_codec(self):
+        with patch(
+            "dynamo.common.utils.video_utils._encode_video_imageio",
+            return_value=b"x",
+        ) as m_imageio:
+            encode_video(
+                canonical_frames(), hw_accel="nvenc", container="mp4", codec="hevc"
+            )
+        m_imageio.assert_called_once()
+
+    def test_rejects_unknown_hw_accel(self):
+        with pytest.raises(ValueError, match="Unsupported hw_accel"):
+            encode_video(canonical_frames(), hw_accel="foo")
+
+
 # ---------------------------------------------------------------------------
 # encode_video — dispatch and control resolution
 # ---------------------------------------------------------------------------
@@ -370,6 +404,24 @@ class TestFfmpegCliPath:
             with pytest.raises(RuntimeError, match="ffmpeg not found"):
                 encode_video(canonical_frames(), fps=8, hw_accel="xpu")
 
+    def test_cpu_path_forces_yuv420p(self):
+        """Software encoding must emit 4:2:0 so the output is broadly playable."""
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.stderr = b""
+        with patch(
+            "dynamo.common.utils.video_utils.shutil.which",
+            return_value="/usr/bin/ffmpeg",
+        ), patch(
+            "dynamo.common.utils.video_utils.subprocess.run", return_value=proc
+        ) as m_run:
+            encode_video(canonical_frames(), fps=12, container="mp4", hw_accel="cpu")
+
+        cmd = m_run.call_args[0][0]
+        # The output pix_fmt (after -c:v), not the rawvideo input pix_fmt.
+        out_pix_fmt = cmd.index("-pix_fmt", cmd.index("-c:v"))
+        assert cmd[out_pix_fmt + 1] == "yuv420p"
+
 
 # ---------------------------------------------------------------------------
 # Real encode -> decode round-trip (the one bitstream-touching test)
@@ -409,6 +461,7 @@ def _psnr(a: np.ndarray, b: np.ndarray) -> float:
 class TestEncodeVideoRoundTrip:
     """Encode a realistic synthetic clip, decode it, and check fidelity."""
 
+    @pytest.mark.timeout(30)
     def test_cpu_mp4_roundtrip(self):
         if shutil.which("ffmpeg") is None:
             pytest.skip("ffmpeg CLI not available")
