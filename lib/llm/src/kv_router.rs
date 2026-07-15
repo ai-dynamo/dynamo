@@ -78,11 +78,18 @@ pub enum FindBestMatchOutcome {
         overlap_blocks: u32,
         effective_overlap_blocks: f64,
         cached_tokens: usize,
+        potential_decode_blocks: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
     },
+}
+
+#[derive(Clone, Copy)]
+enum FindBestMatchAdmission {
+    WithAdmission,
+    WithoutAdmission,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -517,6 +524,45 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_details_without_admission(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_impl(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            false,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            None,
+            None,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            FindBestMatchAdmission::WithoutAdmission,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match_details_with_policy_class(
         &self,
         context_id: Option<&str>,
@@ -536,12 +582,56 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_impl(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            FindBestMatchAdmission::WithAdmission,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn find_best_match_details_with_policy_class_impl(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        admission: FindBestMatchAdmission,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let start = Instant::now();
 
-        if update_states && context_id.is_none() {
+        let with_admission = matches!(admission, FindBestMatchAdmission::WithAdmission);
+        if with_admission && update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states {
+        let mode = if with_admission && update_states {
             ScheduleMode::Tracked {
                 request_id: context_id.expect("validated above").to_string(),
             }
@@ -575,7 +665,7 @@ where
         });
         let seq_hash_elapsed = start.elapsed();
 
-        let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
+        let supports_overlap_refresh = with_admission && self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
 
         let TieredLookupResult {
@@ -626,29 +716,40 @@ where
             pinned_worker.as_ref(),
         );
 
-        let response = match self
-            .scheduler
-            .schedule_request(ScheduleRequest {
-                mode,
-                token_seq: maybe_seq_hashes,
-                block_hashes: block_hashes_for_refresh,
-                isl_tokens,
-                overlap,
-                router_config_override: router_config_override.cloned(),
-                lora_name,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                session_id,
-                expected_output_tokens,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                shared_cache_hits,
-            })
-            .instrument(tracing::info_span!("kv_router.schedule"))
-            .await
-        {
+        let schedule_request = ScheduleRequest {
+            mode,
+            token_seq: maybe_seq_hashes,
+            block_hashes: block_hashes_for_refresh,
+            isl_tokens,
+            overlap,
+            router_config_override: router_config_override.cloned(),
+            lora_name,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            shared_cache_hits,
+        };
+        let schedule_span = tracing::info_span!("kv_router.schedule");
+        let response_result = match admission {
+            FindBestMatchAdmission::WithAdmission => {
+                self.scheduler
+                    .schedule_request(schedule_request)
+                    .instrument(schedule_span)
+                    .await
+            }
+            FindBestMatchAdmission::WithoutAdmission => {
+                self.scheduler
+                    .select_without_admission(schedule_request)
+                    .instrument(schedule_span)
+                    .await
+            }
+        };
+        let response = match response_result {
             Ok(response) => response,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
                 return Ok(FindBestMatchOutcome::QueueRejected { rejection });
@@ -697,6 +798,7 @@ where
             overlap_blocks: response.effective_overlap_blocks.round() as u32,
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
+            potential_decode_blocks: response.potential_decode_blocks,
             routing_hashes,
         })
     }
@@ -1303,6 +1405,9 @@ mod tests {
                 required_blocks: request.isl_tokens.div_ceil(block_size as usize) as u64,
                 effective_overlap_blocks: 0.0,
                 cached_tokens: 0,
+                potential_decode_blocks: request
+                    .worker_load_for(self.selected_worker)
+                    .potential_decode_blocks(),
             })
         }
     }

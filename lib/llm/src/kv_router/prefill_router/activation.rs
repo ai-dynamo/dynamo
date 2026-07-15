@@ -7,7 +7,10 @@ use std::sync::atomic::Ordering;
 use anyhow::Result;
 use tokio::sync::oneshot;
 
-use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
+use dynamo_kv_router::{
+    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
+    config::KvRouterConfig,
+};
 use dynamo_runtime::{
     component::{Client, Endpoint},
     pipeline::{PushRouter, RouterMode},
@@ -17,7 +20,7 @@ use dynamo_runtime::{
 use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::ModelManager,
-    kv_router::KvPushRouter,
+    kv_router::{KvPushRouter, KvRouter},
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
@@ -33,11 +36,14 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
+            decode_router: None,
+            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            conditional_disagg_policy: make_conditional_disagg_policy(None),
             prefill_load_estimator: None,
             model_name: String::new(), // Not used for disabled router
             namespace: String::new(),  // Not used for disabled router
@@ -53,6 +59,7 @@ impl PrefillRouter {
         router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
+        decode_router: Option<Arc<KvRouter>>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         model_name: String,
@@ -62,14 +69,18 @@ impl PrefillRouter {
     ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
 
         let router = Arc::new(Self {
             prefill_router,
+            decode_router,
+            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             endpoint_id: std::sync::OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            conditional_disagg_policy,
             prefill_load_estimator,
             model_name,
             namespace,

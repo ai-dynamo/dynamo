@@ -321,6 +321,14 @@ where
         self.update_queue_metrics();
     }
 
+    /// Select a worker from current scheduler state without queue admission or booking.
+    pub async fn select_without_admission(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.inner.select_without_admission(request).await
+    }
+
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         self.inner.register_workers(worker_ids);
     }

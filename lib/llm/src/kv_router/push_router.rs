@@ -17,7 +17,9 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+    },
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -67,7 +69,14 @@ impl KvPushRouter {
         let affinity = session_affinity_ttl
             .map(AffinityCoordinator::new)
             .transpose()?;
+        Self::new_with_affinity(inner, chooser, affinity)
+    }
 
+    pub(crate) fn new_with_affinity(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        chooser: Arc<KvRouter>,
+        affinity: Option<AffinityCoordinator>,
+    ) -> Result<Self, Error> {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
@@ -301,6 +310,7 @@ impl KvPushRouter {
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
+        let bypassed_remote_prefill = request.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION);
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
@@ -328,6 +338,7 @@ impl KvPushRouter {
                 dp_rank = selection.dp_rank,
                 overlap_blocks = selection.overlap_amount,
                 phase = ?phase,
+                bypassed = bypassed_remote_prefill,
             )),
         )
         .await

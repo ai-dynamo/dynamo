@@ -51,6 +51,58 @@ where
     Sel: WorkerSelector<C> + Send + Sync + 'static,
     RF: OverlapScoresRefresh + 'static,
 {
+    fn make_scheduling_request(
+        &self,
+        request: ScheduleRequest,
+        resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
+    ) -> (SchedulingRequest, Option<Vec<LocalBlockHash>>) {
+        let track_prefill_tokens = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.track_prefill_tokens_default);
+        let ScheduleRequest {
+            mode,
+            token_seq,
+            block_hashes,
+            isl_tokens,
+            lora_name,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            router_config_override,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            overlap,
+            shared_cache_hits,
+        } = request;
+        let request = SchedulingRequest {
+            mode,
+            token_seq,
+            isl_tokens,
+            lora_name,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            router_config_override,
+            track_prefill_tokens,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            overlap,
+            shared_cache_hits,
+            worker_loads: FxHashMap::default(),
+            resp_tx,
+        };
+
+        (request, block_hashes)
+    }
+
     fn worker_dp_ranges(workers: &HashMap<WorkerId, C>) -> Vec<WorkerDpRange> {
         workers
             .iter()
@@ -235,49 +287,7 @@ where
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let track_prefill_tokens = request
-            .router_config_override
-            .as_ref()
-            .and_then(|cfg| cfg.track_prefill_tokens)
-            .unwrap_or(self.track_prefill_tokens_default);
-        let ScheduleRequest {
-            mode,
-            token_seq,
-            block_hashes,
-            isl_tokens,
-            lora_name,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            router_config_override,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            overlap,
-            shared_cache_hits,
-        } = request;
-        let request = SchedulingRequest {
-            mode,
-            token_seq,
-            isl_tokens,
-            lora_name,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            router_config_override,
-            track_prefill_tokens,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            overlap,
-            shared_cache_hits,
-            worker_loads: FxHashMap::default(),
-            resp_tx: Some(resp_tx),
-        };
+        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
 
         self.queue
             .enqueue_with_block_hashes(request, block_hashes)
@@ -286,6 +296,15 @@ where
         resp_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+    }
+
+    /// Select a worker from current scheduler state without queue admission or booking.
+    pub async fn select_without_admission(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let (request, _block_hashes) = self.make_scheduling_request(request, None);
+        self.queue.select_without_admission(request).await
     }
 
     #[expect(clippy::too_many_arguments)]
