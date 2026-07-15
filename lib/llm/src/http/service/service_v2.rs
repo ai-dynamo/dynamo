@@ -941,7 +941,7 @@ impl HttpServiceConfigBuilder {
                 nvext_enabled,
             },
         ));
-        super::admission::announce_enabled_gates(&admission_gate_config, &state.metrics_clone());
+        super::admission::announce_enabled_gates(&admission_gate_config);
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);

@@ -89,10 +89,8 @@ Frontend-owned request rejection gates evaluated before tokenization. Every
 gate is disabled by default and active only when explicitly configured; a
 request that would exceed a configured limit is rejected with HTTP 503.
 Rejections are counted in the `dynamo_frontend_admission_rejection_total` metric
-(labeled by `gate` and `model`) and enabled limits are exported as
-`dynamo_frontend_admission_gate_limit` (also labeled by `gate` and `model`). An
-empty model label denotes a frontend-global or frontend-local limit; a named
-model denotes that model's current MDC override.
+(labeled by `gate` and `model`). An empty model label denotes a frontend-local
+gate; a named model identifies a per-model concurrency rejection.
 
 The per-model concurrency gate covers HTTP inference request/response endpoints,
 including `/inference/v1/generate`. It does not count `/v1/realtime` WebSocket

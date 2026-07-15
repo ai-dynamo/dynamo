@@ -59,20 +59,13 @@ pub(crate) fn evaluate_model_concurrency_gate(
     model: &str,
     metric_model: &str,
 ) -> Option<String> {
-    let metrics = state.metrics_clone();
     if model != metric_model {
-        // A model removed after advertising an override must not leave its
-        // current-state limit metric behind.
-        metrics.remove_admission_gate_limit(admission_gate::REQUEST_CONCURRENCY, model);
         return None;
     }
     let model_override = state.manager().request_concurrency_limit_override(model);
-    // Discovery normally publishes this before the first request; keep the
-    // request path as a backstop for embedded/manual model managers.
-    metrics.sync_model_admission_gate_limit(metric_model, model_override);
     let limit =
         model_override.or_else(|| state.admission_gate_config().request_concurrency_limit())?;
-    let inflight = metrics.get_inflight_count(metric_model);
+    let inflight = state.metrics_clone().get_inflight_count(metric_model);
     if inflight >= 0 && inflight as u64 > limit {
         return Some(reject(
             state,
@@ -161,9 +154,8 @@ pub(crate) async fn enforce_frontend_local_gates(
     next.run(request).await
 }
 
-/// Log enabled gates and export their configured limits as gauges. Called
-/// once at HTTP service construction.
-pub(crate) fn announce_enabled_gates(config: &AdmissionGateConfig, metrics: &super::Metrics) {
+/// Log enabled gates once at HTTP service construction.
+pub(crate) fn announce_enabled_gates(config: &AdmissionGateConfig) {
     let gates = [
         (
             admission_gate::REQUEST_CONCURRENCY,
@@ -177,7 +169,6 @@ pub(crate) fn announce_enabled_gates(config: &AdmissionGateConfig, metrics: &sup
     ];
     for (gate, limit) in gates {
         if let Some(limit) = limit {
-            metrics.set_admission_gate_limit(gate, "", limit);
             tracing::info!(gate, limit, "frontend admission gate enabled");
         }
     }

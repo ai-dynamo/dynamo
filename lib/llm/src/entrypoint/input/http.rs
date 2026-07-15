@@ -268,7 +268,6 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) {
                 service.enable_model_endpoint(endpoint_type, false);
             }
         }
-        ModelUpdate::Changed(_) => {}
     }
 }
 
@@ -278,38 +277,27 @@ fn update_model_metrics(
     metrics: Arc<crate::http::service::metrics::Metrics>,
     manager: &ModelManager,
 ) {
-    let (model_name, aliases) = match &model_type {
-        ModelUpdate::Added(card) | ModelUpdate::Removed(card) | ModelUpdate::Changed(card) => {
-            (card.display_name.clone(), card.aliases.clone())
-        }
-    };
     match model_type {
         ModelUpdate::Added(card) => {
             tracing::debug!("Updating metrics for added model: {}", card.display_name);
             if let Err(err) = metrics.update_metrics_from_mdc(&card) {
                 tracing::warn!(%err, model_name=card.display_name, "update_metrics_from_mdc failed");
             }
+            for served_name in std::iter::once(card.display_name).chain(card.aliases) {
+                if let Some(limit) = manager.request_concurrency_limit_override(&served_name) {
+                    tracing::info!(
+                        gate = admission_gate::REQUEST_CONCURRENCY,
+                        model = %served_name,
+                        limit,
+                        "frontend admission gate enabled for model"
+                    );
+                }
+            }
         }
         ModelUpdate::Removed(card) => {
             tracing::debug!(model_name = card.display_name, "Model removed");
-        }
-        ModelUpdate::Changed(card) => {
-            tracing::debug!(model_name = card.display_name, "Model metadata changed");
-        }
-    }
-    // Multiple WorkerSets (P/D/Encode or a rolling update) can coexist for
-    // one served model. Recompute from the manager so one card's Added event
-    // cannot overwrite another card's more restrictive active override.
-    for served_name in std::iter::once(model_name).chain(aliases) {
-        let effective_limit = manager.request_concurrency_limit_override(&served_name);
-        metrics.sync_model_admission_gate_limit(&served_name, effective_limit);
-        if let Some(limit) = effective_limit {
-            tracing::info!(
-                gate = admission_gate::REQUEST_CONCURRENCY,
-                model = %served_name,
-                limit,
-                "frontend admission gate enabled for model"
-            );
+            // Note: Metrics are typically not removed to preserve historical data
+            // This matches the behavior in the polling task
         }
     }
 }

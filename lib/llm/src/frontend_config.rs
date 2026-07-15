@@ -213,13 +213,6 @@ impl AdmissionGateConfig {
         self.request_plane_connection_limit
     }
 
-    /// True when no gate is configured, i.e. admission control is fully off.
-    pub fn is_disabled(&self) -> bool {
-        self.request_concurrency_limit.is_none()
-            && self.runtime_task_limit.is_none()
-            && self.request_plane_connection_limit.is_none()
-    }
-
     /// Read a gate limit from the environment for direct Rust callers.
     /// Unset means disabled; unparsable or zero values disable the gate with
     /// a warning because every gate must be enabled explicitly and `0` would
@@ -361,16 +354,12 @@ mod tests {
     }
 
     #[test]
-    fn admission_gate_optional_limits_return_none_when_all_unspecified() {
+    fn admission_gate_optional_limits_validate_and_preserve_values() {
         assert_eq!(
             AdmissionGateConfig::from_optional_limits(None, None, None)
                 .expect("unspecified limits should be valid"),
             None
         );
-    }
-
-    #[test]
-    fn admission_gate_optional_limits_preserve_partial_values() {
         let config = AdmissionGateConfig::from_optional_limits(Some(8), None, Some(512))
             .expect("positive limits should be valid")
             .expect("partial limits should produce a config");
@@ -378,11 +367,7 @@ mod tests {
         assert_eq!(config.request_concurrency_limit(), Some(8));
         assert_eq!(config.runtime_task_limit(), None);
         assert_eq!(config.request_plane_connection_limit(), Some(512));
-        assert!(!config.is_disabled());
-    }
 
-    #[test]
-    fn admission_gate_programmatic_limits_reject_zero() {
         for (request, runtime, request_plane, field) in [
             (Some(0), None, None, "request_concurrency_limit"),
             (None, Some(0), None, "runtime_task_limit"),
@@ -395,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_gate_default_is_disabled_without_env() {
+    fn admission_gate_defaults_follow_env_contract() {
         temp_env::with_vars(
             [
                 (
@@ -409,13 +394,13 @@ mod tests {
                 ),
             ],
             || {
-                assert!(AdmissionGateConfig::default().is_disabled());
+                let config = AdmissionGateConfig::default();
+                assert_eq!(config.request_concurrency_limit(), None);
+                assert_eq!(config.runtime_task_limit(), None);
+                assert_eq!(config.request_plane_connection_limit(), None);
             },
         );
-    }
 
-    #[test]
-    fn admission_gate_default_reads_env_for_direct_rust_callers() {
         temp_env::with_vars(
             [
                 (
@@ -438,10 +423,7 @@ mod tests {
                 assert_eq!(config.request_plane_connection_limit(), Some(1024));
             },
         );
-    }
 
-    #[test]
-    fn admission_gate_env_zero_or_garbage_stays_disabled() {
         for bad in ["0", "-1", "lots"] {
             temp_env::with_var(
                 env_llm::DYN_REJECTION_FRONTEND_REQUEST_CONCURRENCY_LIMIT,

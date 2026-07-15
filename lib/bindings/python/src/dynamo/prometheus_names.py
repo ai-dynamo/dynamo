@@ -159,9 +159,6 @@ class frontend_service:
     # Total number of requests rejected by a configured frontend admission
     # gate, labeled by gate and model (model is empty for frontend-local gates)
     ADMISSION_REJECTION_TOTAL = "admission_rejection_total"
-    # Configured frontend admission gate limit, labeled by gate and model.
-    # The model label is empty for frontend-local gates and global defaults.
-    ADMISSION_GATE_LIMIT = "admission_gate_limit"
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
     WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"

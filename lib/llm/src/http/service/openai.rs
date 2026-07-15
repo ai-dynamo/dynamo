@@ -37,7 +37,7 @@ use super::{
     error::HttpError,
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
+        CancellationLabels, Endpoint, ErrorType, EventConverter, InflightGuard,
         process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
@@ -151,6 +151,19 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 /// Extract ErrorType from ErrorResponse for metrics
 fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     classify_error_for_metrics(response.0, &response.1.message)
+}
+
+/// Apply the per-model request concurrency gate after the inflight guard has
+/// incremented its gauge, recording a rejected request with the matching error type.
+fn check_model_concurrency_admission(
+    state: &Arc<service_v2::State>,
+    model: &str,
+    metric_model: &str,
+    inflight: &mut InflightGuard,
+) -> Result<(), ErrorResponse> {
+    super::admission::check_model_concurrency_gate(state, model, metric_model).inspect_err(
+        |err_response| inflight.mark_error(extract_error_type_from_response(err_response)),
+    )
 }
 
 /// Match `InvalidArgument` at top-level OR under `Backend()`.
@@ -747,15 +760,7 @@ async fn completions_single(
         &request_id,
     );
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge so concurrent arrivals
-    // cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, &model, &metric_model)
-    {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, &model, &metric_model, &mut inflight_guard)?;
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -913,15 +918,7 @@ async fn completions_batch(
         &request_id,
     );
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge so concurrent arrivals
-    // cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, &model, &metric_model)
-    {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, &model, &metric_model, &mut inflight_guard)?;
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -1155,15 +1152,7 @@ async fn embeddings(
         &request_id,
     );
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge so concurrent arrivals
-    // cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, model, &metric_model)
-    {
-        inflight.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, model, &metric_model, &mut inflight)?;
 
     // Create http_queue_guard early - tracks time waiting to be processed
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -1891,15 +1880,7 @@ async fn chat_completions(
         &request_id,
     );
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge so concurrent arrivals
-    // cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, &model, &metric_model)
-    {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, &model, &metric_model, &mut inflight_guard)?;
 
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -2361,15 +2342,7 @@ async fn responses(
         request.id(),
     );
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge so concurrent arrivals
-    // cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, &model, &metric_model)
-    {
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, &model, &metric_model, &mut inflight_guard)?;
 
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -3065,15 +3038,7 @@ async fn images(
         &request_id,
     );
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge (labeled by `model` here)
-    // so concurrent arrivals cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, &model, &model)
-    {
-        inflight.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, &model, &model, &mut inflight)?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -3195,15 +3160,7 @@ async fn videos(
         &request_id,
     );
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge (labeled by `model` here)
-    // so concurrent arrivals cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, &model, &model)
-    {
-        inflight.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, &model, &model, &mut inflight)?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -3316,15 +3273,7 @@ async fn video_stream(
             .metrics_clone()
             .create_inflight_guard(&model, Endpoint::Videos, true, request.id());
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge (labeled by `model` here)
-    // so concurrent arrivals cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, &model, &model)
-    {
-        inflight.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, &model, &model, &mut inflight)?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
@@ -3516,15 +3465,7 @@ async fn audio_speech(
         &request_id,
     );
 
-    // Frontend admission gate: per-model request concurrency. Checked after
-    // the guard above increments the inflight gauge (labeled by `model` here)
-    // so concurrent arrivals cannot slip past the limit.
-    if let Err(err_response) =
-        super::admission::check_model_concurrency_gate(&state, &model, &model)
-    {
-        inflight.mark_error(extract_error_type_from_response(&err_response));
-        return Err(err_response);
-    }
+    check_model_concurrency_admission(&state, &model, &model, &mut inflight)?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 

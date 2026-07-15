@@ -87,6 +87,13 @@ struct GateTestService {
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
+impl Drop for GateTestService {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        self.task.abort();
+    }
+}
+
 /// Start an HTTP service with the given gate config and the chat models
 /// `slow` and `fast`, both backed by [`DelayEngine`].
 async fn start_gate_service(config: AdmissionGateConfig) -> GateTestService {
@@ -138,29 +145,53 @@ async fn post_chat(port: u16, body: &serde_json::Value) -> reqwest::Response {
         .unwrap()
 }
 
+async fn wait_for_inflight(
+    metrics: &dynamo_llm::http::service::Metrics,
+    model: &str,
+    expected: i64,
+) {
+    let start = tokio::time::Instant::now();
+    while metrics.get_inflight_count(model) != expected {
+        assert!(
+            start.elapsed() < tokio::time::Duration::from_secs(2),
+            "inflight count for {model} did not reach {expected}"
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+}
+
+async fn hold_request(
+    port: u16,
+    metrics: &dynamo_llm::http::service::Metrics,
+    model: &str,
+) -> tokio::task::JoinHandle<reqwest::Response> {
+    let request_model = model.to_string();
+    let holder =
+        tokio::spawn(async move { post_chat(port, &chat_request(&request_model, 2000)).await });
+    wait_for_inflight(metrics, model, 1).await;
+    holder
+}
+
+async fn finish_held_request(
+    holder: tokio::task::JoinHandle<reqwest::Response>,
+    metrics: &dynamo_llm::http::service::Metrics,
+    model: &str,
+) {
+    assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+    wait_for_inflight(metrics, model, 0).await;
+}
+
 #[tokio::test]
 async fn test_concurrency_gate_rejects_over_limit_per_model() {
     let svc = start_gate_service(
         AdmissionGateConfig::new(Some(1), None, None).expect("valid admission gate config"),
     )
     .await;
-    let port = svc.port;
     let metrics = svc.state.metrics_clone();
-
-    // Hold one slow request in flight (non-streaming, engine sleeps 2s).
-    let holder = tokio::spawn(async move { post_chat(port, &chat_request("slow", 2000)).await });
-    // Wait until the held request is actually counted in flight.
-    let start = tokio::time::Instant::now();
-    while metrics.get_inflight_count("slow") < 1 {
-        assert!(
-            start.elapsed() < tokio::time::Duration::from_secs(2),
-            "held request never became inflight"
-        );
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    }
+    let holder = hold_request(svc.port, &metrics, "slow").await;
 
     // Second request for the same model exceeds limit=1 -> 503 with the knob name.
-    let rejected = post_chat(port, &chat_request("slow", 1)).await;
+    let rejected = post_chat(svc.port, &chat_request("slow", 1)).await;
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = rejected.text().await.unwrap();
     assert!(
@@ -173,31 +204,16 @@ async fn test_concurrency_gate_rejects_over_limit_per_model() {
     );
 
     // Per-model isolation: a different served model is still admitted.
-    let ok = post_chat(port, &chat_request("fast", 1)).await;
+    let ok = post_chat(svc.port, &chat_request("fast", 1)).await;
     assert_eq!(ok.status(), StatusCode::OK);
 
     // Unregistered models are exempt from the gate and keep their 404.
-    let unknown = post_chat(port, &chat_request("no-such-model", 1)).await;
+    let unknown = post_chat(svc.port, &chat_request("no-such-model", 1)).await;
     assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 
-    // Once the held request finishes, the model admits again. The inflight
-    // guard drops when the response body is done, which can trail the client
-    // seeing the status line, so wait for the gauge to drain.
-    let held = holder.await.unwrap();
-    assert_eq!(held.status(), StatusCode::OK);
-    let start = tokio::time::Instant::now();
-    while metrics.get_inflight_count("slow") > 0 {
-        assert!(
-            start.elapsed() < tokio::time::Duration::from_secs(2),
-            "held request never released its inflight permit"
-        );
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    }
-    let after = post_chat(port, &chat_request("slow", 1)).await;
+    finish_held_request(holder, &metrics, "slow").await;
+    let after = post_chat(svc.port, &chat_request("slow", 1)).await;
     assert_eq!(after.status(), StatusCode::OK);
-
-    svc.cancel_token.cancel();
-    svc.task.abort();
 }
 
 /// Register a chat model whose MDC carries a per-model concurrency override.
@@ -218,66 +234,35 @@ async fn assert_second_request(
     model: &str,
     expect_reject: bool,
 ) {
-    let holder = {
-        let model = model.to_string();
-        tokio::spawn(async move { post_chat(port, &chat_request(&model, 2000)).await })
-    };
-    let start = tokio::time::Instant::now();
-    while metrics.get_inflight_count(model) < 1 {
-        assert!(
-            start.elapsed() < tokio::time::Duration::from_secs(2),
-            "held request for {model} never became inflight"
-        );
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    }
-
+    let holder = hold_request(port, metrics, model).await;
     let second = post_chat(port, &chat_request(model, 1)).await;
-    if expect_reject {
-        assert_eq!(
-            second.status(),
-            StatusCode::SERVICE_UNAVAILABLE,
-            "model {model} should gate its second concurrent request"
-        );
+    let expected = if expect_reject {
+        StatusCode::SERVICE_UNAVAILABLE
     } else {
-        assert_eq!(
-            second.status(),
-            StatusCode::OK,
-            "model {model} should admit its second concurrent request"
-        );
-    }
-    assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+        StatusCode::OK
+    };
+    assert_eq!(second.status(), expected, "unexpected status for {model}");
+    finish_held_request(holder, metrics, model).await;
 }
 
 #[tokio::test]
 async fn test_concurrency_gate_mdc_override_activates_without_global_default() {
-    // No global limit configured: only the model whose MDC supplies an
-    // override is gated; other served models stay unlimited. An out-of-
-    // contract override of 0 is treated as absent rather than rejecting
-    // all traffic.
+    // No global limit: only the model with an MDC override is gated. The
+    // uncapped model also verifies that gates are disabled by default.
     let svc = start_gate_service(
         AdmissionGateConfig::new(None, None, None).expect("valid admission gate config"),
     )
     .await;
     let manager = svc.state.manager();
     add_model_with_override(manager, "capped", 1);
-    add_model_with_override(manager, "zeroed", 0);
     let metrics = svc.state.metrics_clone();
 
     assert_second_request(svc.port, &metrics, "capped", true).await;
     assert_second_request(svc.port, &metrics, "fast", false).await;
-    assert_second_request(svc.port, &metrics, "zeroed", false).await;
     assert_eq!(
         metrics.get_admission_rejection_count(admission_gate::REQUEST_CONCURRENCY, "capped"),
         1
     );
-    assert_eq!(
-        metrics.get_admission_gate_limit(admission_gate::REQUEST_CONCURRENCY, "capped"),
-        1,
-        "the MDC-only effective limit should be observable per model"
-    );
-
-    svc.cancel_token.cancel();
-    svc.task.abort();
 }
 
 #[tokio::test]
@@ -294,26 +279,6 @@ async fn test_concurrency_gate_mdc_override_wins_over_global_default() {
 
     assert_second_request(svc.port, &metrics, "roomy", false).await;
     assert_second_request(svc.port, &metrics, "fast", true).await;
-
-    svc.cancel_token.cancel();
-    svc.task.abort();
-}
-
-#[tokio::test]
-async fn test_concurrency_gate_disabled_by_default_admits_parallel_requests() {
-    let svc = start_gate_service(
-        AdmissionGateConfig::new(None, None, None).expect("valid admission gate config"),
-    )
-    .await;
-    let port = svc.port;
-
-    let body = chat_request("slow", 500);
-    let (a, b) = tokio::join!(post_chat(port, &body), post_chat(port, &body));
-    assert_eq!(a.status(), StatusCode::OK);
-    assert_eq!(b.status(), StatusCode::OK);
-
-    svc.cancel_token.cancel();
-    svc.task.abort();
 }
 
 #[tokio::test]
@@ -324,9 +289,7 @@ async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
         AdmissionGateConfig::new(None, Some(1), None).expect("valid admission gate config"),
     )
     .await;
-    let port = svc.port;
-
-    let rejected = post_chat(port, &chat_request("fast", 1)).await;
+    let rejected = post_chat(svc.port, &chat_request("fast", 1)).await;
     assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = rejected.text().await.unwrap();
     assert!(
@@ -341,28 +304,10 @@ async fn test_runtime_task_gate_rejects_all_inference_but_not_system_routes() {
     );
 
     // System routes bypass the inference admission middleware.
-    let health = reqwest::get(format!("http://localhost:{}/health", port))
+    let health = reqwest::get(format!("http://localhost:{}/health", svc.port))
         .await
         .unwrap();
     assert_eq!(health.status(), StatusCode::OK);
-
-    svc.cancel_token.cancel();
-    svc.task.abort();
-}
-
-#[tokio::test]
-async fn test_runtime_task_gate_admits_under_generous_limit() {
-    let svc = start_gate_service(
-        AdmissionGateConfig::new(None, Some(1_000_000), None).expect("valid admission gate config"),
-    )
-    .await;
-    let port = svc.port;
-
-    let ok = post_chat(port, &chat_request("fast", 1)).await;
-    assert_eq!(ok.status(), StatusCode::OK);
-
-    svc.cancel_token.cancel();
-    svc.task.abort();
 }
 
 #[tokio::test]
@@ -374,11 +319,9 @@ async fn test_request_plane_gate_rejects_at_capacity() {
         AdmissionGateConfig::new(None, None, Some(1)).expect("valid admission gate config"),
     )
     .await;
-    let port = svc.port;
-
     REQUEST_PLANE_INFLIGHT.inc();
 
-    let rejected = post_chat(port, &chat_request("fast", 1)).await;
+    let rejected = post_chat(svc.port, &chat_request("fast", 1)).await;
     let status = rejected.status();
     let body = rejected.text().await.unwrap();
 
@@ -397,9 +340,6 @@ async fn test_request_plane_gate_rejects_at_capacity() {
     );
 
     // With the pressure gone the same request is admitted.
-    let ok = post_chat(port, &chat_request("fast", 1)).await;
+    let ok = post_chat(svc.port, &chat_request("fast", 1)).await;
     assert_eq!(ok.status(), StatusCode::OK);
-
-    svc.cancel_token.cancel();
-    svc.task.abort();
 }

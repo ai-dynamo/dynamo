@@ -15,8 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dynamo_runtime::metrics::{
-    MetricsHierarchy, PrometheusExpositionFormatCallback, create_metric,
-    prometheus_names::{kvstats, labels, lifecycle, model_info},
+    MetricsHierarchy, PrometheusExpositionFormatCallback, create_metric, prometheus_names::labels,
 };
 
 use crate::engine::EngineConfig;
@@ -130,17 +129,17 @@ impl LifecycleGauges {
                 .map_err(|e| gauge_err(name, e))
         };
         let cleanup = build(
-            lifecycle::CLEANUP_TIME_SECONDS,
+            "cleanup_time_seconds",
             "Time spent releasing engine resources during shutdown. Set \
              by the framework once after engine.cleanup() returns.",
         )?;
         let drain = build(
-            lifecycle::DRAIN_TIME_SECONDS,
+            "drain_time_seconds",
             "Time spent draining in-flight work before cleanup. Stays at \
              0 for engines without a drain hook.",
         )?;
         let model_load = build(
-            model_info::LOAD_TIME_SECONDS,
+            "model_load_time_seconds",
             "Time engine.start() took to return. Set once at Worker setup.",
         )?;
         model_load.set(model_load_time_seconds);
@@ -210,15 +209,15 @@ impl ComponentGauges {
             .map_err(|e| gauge_err(name, e))
         };
         let total_blocks = build_int(
-            kvstats::TOTAL_BLOCKS,
+            "total_blocks",
             "Total number of KV cache blocks available on the worker.",
         )?;
         let gpu_cache_usage_percent = build_f64(
-            kvstats::GPU_CACHE_USAGE_PERCENT,
+            "gpu_cache_usage_percent",
             "GPU cache usage as a percentage (0.0-1.0).",
         )?;
         let kv_cache_hit_rate = build_f64(
-            kvstats::KV_CACHE_HIT_RATE,
+            "kv_cache_hit_rate",
             "Prefix cache hit rate (0.0-1.0). Portable across engines.",
         )?;
         for &rank in dp_ranks {

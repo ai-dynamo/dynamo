@@ -281,10 +281,6 @@ pub mod frontend_service {
     /// gate, labeled by gate and model (model is empty for frontend-local gates)
     pub const ADMISSION_REJECTION_TOTAL: &str = "admission_rejection_total";
 
-    /// Configured frontend admission gate limit, labeled by gate and model.
-    /// The model label is empty for frontend-local gates and global defaults.
-    pub const ADMISSION_GATE_LIMIT: &str = "admission_gate_limit";
-
     /// Active decode blocks (KV cache blocks) per worker
     /// Gauge metric tracking current KV cache block utilization for each worker
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";
@@ -377,8 +373,7 @@ pub mod frontend_service {
         pub const UNARY: &str = "unary";
     }
 
-    /// Admission gate label values for `admission_rejection_total` /
-    /// `admission_gate_limit`
+    /// Admission gate label values for `admission_rejection_total`
     pub mod admission_gate {
         /// Per-served-model request concurrency gate
         pub const REQUEST_CONCURRENCY: &str = "request_concurrency";
