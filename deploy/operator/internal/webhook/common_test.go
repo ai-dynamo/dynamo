@@ -67,7 +67,7 @@ func TestLeaseAwareDefaulterWithoutChecker(t *testing.T) {
 func TestWithGate(t *testing.T) {
 	webhook := WithGate(&admission.Webhook{}, features.Gates{Grove: true})
 	ctx := webhook.WithContextFunc(context.Background(), &http.Request{})
-	if !features.GateFromContext(ctx).Enabled(features.Grove) {
+	if !features.MustGateFrom(ctx).Enabled(features.Grove) {
 		t.Fatal("Grove gate missing from webhook context")
 	}
 }

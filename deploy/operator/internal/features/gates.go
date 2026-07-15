@@ -361,9 +361,15 @@ func WithGate(ctx context.Context, gate Gate) context.Context {
 	return context.WithValue(ctx, gateContextKey{}, gate)
 }
 
-// GateFromContext returns the effective feature gates from a request context.
-func GateFromContext(ctx context.Context) Gate {
+// GateFrom returns the effective feature gates from a request context.
+func GateFrom(ctx context.Context) (Gate, bool) {
 	gate, ok := ctx.Value(gateContextKey{}).(Gate)
+	return gate, ok
+}
+
+// MustGateFrom returns the effective feature gates or panics when none are attached.
+func MustGateFrom(ctx context.Context) Gate {
+	gate, ok := GateFrom(ctx)
 	if !ok {
 		panic("feature gate missing from context")
 	}

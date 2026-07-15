@@ -104,7 +104,7 @@ func (v *DynamoGraphDeploymentRequestValidator) validateGPUHardwareInfo(ctx cont
 		return nil
 	}
 
-	if features.GateFromContext(ctx).Enabled(features.GPUDiscovery) {
+	if features.MustGateFrom(ctx).Enabled(features.GPUDiscovery) {
 		return nil
 	}
 

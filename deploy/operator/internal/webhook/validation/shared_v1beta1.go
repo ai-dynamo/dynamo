@@ -220,7 +220,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 	}
 
 	if experimental.Checkpoint != nil && experimental.Checkpoint.Enabled &&
-		experimental.GPUMemoryService != nil && !features.GateFromContext(v.ctx).Enabled(features.GMSSnapshot) {
+		experimental.GPUMemoryService != nil && !features.MustGateFrom(v.ctx).Enabled(features.GMSSnapshot) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("checkpoint"),
 			"GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",

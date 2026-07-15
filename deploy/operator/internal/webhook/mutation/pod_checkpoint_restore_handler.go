@@ -58,7 +58,7 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 	if req.Operation != admissionv1.Create {
 		return admission.Allowed("not a pod create")
 	}
-	if !features.GateFromContext(ctx).Enabled(features.Checkpoint) {
+	if !features.MustGateFrom(ctx).Enabled(features.Checkpoint) {
 		return admission.Allowed("checkpoint disabled")
 	}
 	if excluded := internalwebhook.GetExcludedNamespaces(); excluded != nil && excluded.Contains(req.Namespace) {

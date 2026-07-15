@@ -88,7 +88,7 @@ func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager, gate 
 
 func validateDynamoCheckpointGMSSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
 	// A DynamoCheckpoint is itself a Snapshot resource; service specs pass checkpoint.enabled instead.
-	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, features.GateFromContext(ctx)); err != nil {
+	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, features.MustGateFrom(ctx)); err != nil {
 		return err
 	}
 	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {

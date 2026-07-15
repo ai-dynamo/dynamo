@@ -112,17 +112,23 @@ func TestAPIGroupServesVersion(t *testing.T) {
 
 func TestGateContext(t *testing.T) {
 	want := Gates{Grove: true}
-	got := GateFromContext(WithGate(context.Background(), want))
+	got, ok := GateFrom(WithGate(context.Background(), want))
+	if !ok {
+		t.Fatal("GateFrom() did not find gate")
+	}
 	if !got.Enabled(Grove) {
-		t.Error("GateFromContext().Enabled(Grove) = false, want true")
+		t.Error("GateFrom().Enabled(Grove) = false, want true")
 	}
 }
 
-func TestGateFromContextPanicsWithoutGate(t *testing.T) {
+func TestMustGateFromPanicsWithoutGate(t *testing.T) {
+	if _, ok := GateFrom(context.Background()); ok {
+		t.Fatal("GateFrom() found unexpected gate")
+	}
 	defer func() {
 		if recover() == nil {
-			t.Fatal("GateFromContext() did not panic")
+			t.Fatal("MustGateFrom() did not panic")
 		}
 	}()
-	GateFromContext(context.Background())
+	MustGateFrom(context.Background())
 }

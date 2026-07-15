@@ -127,7 +127,7 @@ func (d *DGDDefaulter) defaultV1Beta1(
 }
 
 func (d *DGDDefaulter) isGrovePathway(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	return features.GateFromContext(ctx).Enabled(features.Grove) && (dgd.Annotations == nil ||
+	return features.MustGateFrom(ctx).Enabled(features.Grove) && (dgd.Annotations == nil ||
 		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
