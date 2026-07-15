@@ -14,8 +14,7 @@ from dynamo.vllm.benchmark_points import (
     normalize_benchmark_points,
 )
 
-
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge]
+pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
 def _valid_points() -> dict:

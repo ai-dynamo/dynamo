@@ -10,7 +10,6 @@ import json
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
-
 BENCHMARK_POINTS_SCHEMA_VERSION = 1
 
 BenchmarkMode = Literal["prefill", "decode", "agg"]
