@@ -17,7 +17,11 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{
+        KvRouter,
+        admission_completion::{ADMISSION_TOOL_SUMMARY_CONTEXT_KEY, SharedAdmissionToolSummary},
+        metrics::RouterRequestMetrics,
+    },
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
@@ -237,6 +241,10 @@ impl KvPushRouter {
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let block_size = self.chooser.block_size() as usize;
+        let admission_tool_summary = request
+            .get_optional::<SharedAdmissionToolSummary>(ADMISSION_TOOL_SUMMARY_CONTEXT_KEY)
+            .map_err(Error::msg)?
+            .map(|summary| summary.as_ref().clone());
         let mut guard = RequestGuard::new(
             self.chooser.clone(),
             self.request_metrics.clone(),
@@ -245,6 +253,7 @@ impl KvPushRouter {
             selection.scheduler_tracked,
             selection.request_progress.take(),
             selection.admission_lease.take(),
+            admission_tool_summary,
         );
 
         let record_result: Result<(), Error> = async {
@@ -829,6 +838,8 @@ mod tests {
                 .await
                 .unwrap();
             let worker = response.best_worker;
+            let tool_summary = SharedAdmissionToolSummary::default();
+            tool_summary.record_tool_call(0, 0, Some("shell"));
             let mut guard = RequestGuard::new(
                 Arc::clone(&router.chooser),
                 Arc::clone(&router.request_metrics),
@@ -837,6 +848,7 @@ mod tests {
                 true,
                 response.request_progress.take(),
                 response.admission_lease.take(),
+                Some(tool_summary),
             );
             guard.mark_dispatched().await;
 
@@ -867,18 +879,19 @@ mod tests {
             .await
             .expect("terminal stream drop did not report admission completion");
             assert_eq!(
-                &events.lock().unwrap()[index * 2..expected_len],
-                [
-                    AdmissionEvent::Dispatched {
-                        id: AdmissionId::new(index as u64),
-                        worker,
-                    },
-                    AdmissionEvent::Completed {
-                        id: AdmissionId::new(index as u64),
-                        context_tokens: 1,
-                    },
-                ]
+                events.lock().unwrap()[index * 2],
+                AdmissionEvent::Dispatched {
+                    id: AdmissionId::new(index as u64),
+                    worker,
+                }
             );
+            let AdmissionEvent::Completed { tool_summary, .. } =
+                &events.lock().unwrap()[expected_len - 1]
+            else {
+                unreachable!("expected terminal admission completion");
+            };
+            assert_eq!(tool_summary.tool_call_count(), 1);
+            assert_eq!(tool_summary.tool_names(), ["shell"]);
         }
 
         assert!(

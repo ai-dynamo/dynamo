@@ -21,9 +21,9 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
-    AdmissionAction, AdmissionDecision, AdmissionTicket, ClassAdmissionAction,
-    PolicyClassAdmissionController, PolicyClassAdmissionStrategies, RequestProgressUpdater,
-    WorkerEligibility, WorkerEligibilitySnapshot, WorkerPlacement,
+    AdmissionAction, AdmissionDecision, AdmissionTicket, AdmissionToolSummary,
+    ClassAdmissionAction, PolicyClassAdmissionController, PolicyClassAdmissionStrategies,
+    RequestProgressUpdater, WorkerEligibility, WorkerEligibilitySnapshot, WorkerPlacement,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -178,7 +178,18 @@ impl std::fmt::Debug for AdmissionLease {
 
 impl AdmissionLease {
     pub fn mark_completed(&mut self, context_tokens: usize) {
-        self.outcome = RequestOutcome::Completed { context_tokens };
+        self.mark_completed_with_tool_summary(context_tokens, AdmissionToolSummary::default());
+    }
+
+    pub fn mark_completed_with_tool_summary(
+        &mut self,
+        context_tokens: usize,
+        tool_summary: AdmissionToolSummary,
+    ) {
+        self.outcome = RequestOutcome::Completed {
+            context_tokens,
+            tool_summary,
+        };
     }
 
     pub fn mark_aborted(&mut self) {
@@ -209,7 +220,7 @@ impl Drop for AdmissionLease {
         if self.cleanup.enqueue(AdmissionCleanupEntry {
             generation: self.generation,
             request_id,
-            outcome: self.outcome,
+            outcome: self.outcome.clone(),
             dispatched: self.dispatched,
         }) {
             let _ = self.actor_tx.try_send(AdmissionCommand::Cleanup);
@@ -1214,15 +1225,23 @@ impl<
 
     fn finish_admission(&mut self, ticket: AdmissionTicket, outcome: RequestOutcome) -> bool {
         match outcome {
-            RequestOutcome::Completed { context_tokens } => {
-                self.complete_admission(ticket, context_tokens)
-            }
+            RequestOutcome::Completed {
+                context_tokens,
+                tool_summary,
+            } => self.complete_admission(ticket, context_tokens, tool_summary),
             RequestOutcome::Aborted => self.abort_admission(ticket),
         }
     }
 
-    fn complete_admission(&mut self, ticket: AdmissionTicket, context_tokens: usize) -> bool {
-        let actions = self.admission.completed(ticket, context_tokens);
+    fn complete_admission(
+        &mut self,
+        ticket: AdmissionTicket,
+        context_tokens: usize,
+        tool_summary: AdmissionToolSummary,
+    ) -> bool {
+        let actions = self
+            .admission
+            .completed(ticket, context_tokens, tool_summary);
         self.apply_admission_actions(actions)
     }
 
@@ -2425,7 +2444,9 @@ mod tests {
                     state.dispatched.push(worker);
                     Vec::new()
                 }
-                AdmissionEvent::Completed { id, context_tokens } => {
+                AdmissionEvent::Completed {
+                    id, context_tokens, ..
+                } => {
                     if state.deferred == Some(id) {
                         state.deferred = None;
                     }

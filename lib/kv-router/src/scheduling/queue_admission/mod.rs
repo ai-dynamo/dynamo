@@ -50,6 +50,50 @@ pub struct RequestProgressUpdater {
     context_tokens: Arc<AtomicUsize>,
 }
 
+/// Bounded parsed tool-call metadata from one completed request.
+///
+/// Admission receives this only at the terminal lifecycle boundary. It is not
+/// request payload and deliberately excludes tool arguments.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdmissionToolSummary {
+    tool_call_count: usize,
+    tool_names: Vec<String>,
+}
+
+impl AdmissionToolSummary {
+    const MAX_TOOL_CALLS: usize = 4;
+    const MAX_TOOL_NAME_BYTES: usize = 128;
+
+    /// Records one distinct parsed tool call, up to the bounded summary size.
+    ///
+    /// Returns whether the call was retained, so callers can keep their
+    /// request-local deduplication state bounded as well.
+    pub fn record_tool_call(&mut self) -> bool {
+        if self.tool_call_count == Self::MAX_TOOL_CALLS {
+            return false;
+        }
+        self.tool_call_count = self.tool_call_count.saturating_add(1);
+        true
+    }
+
+    /// Records a tool name associated with a retained call.
+    pub fn record_tool_name(&mut self, name: &str) -> bool {
+        if self.tool_names.len() == Self::MAX_TOOL_CALLS || name.len() > Self::MAX_TOOL_NAME_BYTES {
+            return false;
+        }
+        self.tool_names.push(name.to_owned());
+        true
+    }
+
+    pub fn tool_call_count(&self) -> usize {
+        self.tool_call_count
+    }
+
+    pub fn tool_names(&self) -> &[String] {
+        &self.tool_names
+    }
+}
+
 impl RequestProgress {
     pub fn new(initial_context_tokens: usize) -> (Self, RequestProgressUpdater) {
         let context_tokens = Arc::new(AtomicUsize::new(initial_context_tokens));
@@ -229,7 +273,7 @@ pub enum AdmissionDecision {
     Defer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdmissionEvent {
     /// The backend accepted the request after the router selected and reserved
@@ -242,6 +286,7 @@ pub enum AdmissionEvent {
     Completed {
         id: AdmissionId,
         context_tokens: usize,
+        tool_summary: AdmissionToolSummary,
     },
     /// The request ended without committing a new logical context.
     Aborted { id: AdmissionId },

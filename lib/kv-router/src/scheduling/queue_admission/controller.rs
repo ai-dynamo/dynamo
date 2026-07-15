@@ -8,7 +8,8 @@ use tokio::time::Instant;
 
 use super::{
     AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
-    PolicyClassAdmissionStrategy, RequestProgress, RequestProgressUpdater, WorkerEligibility,
+    AdmissionToolSummary, PolicyClassAdmissionStrategy, RequestProgress, RequestProgressUpdater,
+    WorkerEligibility,
 };
 use crate::protocols::WorkerWithDpRank;
 use crate::scheduling::policy_config::PolicyProfile;
@@ -134,12 +135,14 @@ impl PolicyClassAdmissionController {
         &mut self,
         ticket: AdmissionTicket,
         context_tokens: usize,
+        tool_summary: AdmissionToolSummary,
     ) -> Vec<ClassAdmissionAction> {
         self.event(
             ticket,
             AdmissionEvent::Completed {
                 id: ticket.id,
                 context_tokens,
+                tool_summary,
             },
         )
     }

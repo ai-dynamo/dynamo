@@ -42,6 +42,9 @@ use dynamo_runtime::metrics::frontend_perf::{
 use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
+use crate::kv_router::admission_completion::{
+    ADMISSION_TOOL_SUMMARY_CONTEXT_KEY, SharedAdmissionToolSummary,
+};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
@@ -3386,7 +3389,14 @@ impl
         }
 
         // repack the common completion request
-        let common_request = context.map(|_| common_request);
+        let mut common_request = context.map(|_| common_request);
+        let admission_tool_summary = common_request
+            .agent_context
+            .as_ref()
+            .map(|_| SharedAdmissionToolSummary::default());
+        if let Some(summary) = &admission_tool_summary {
+            common_request.insert(ADMISSION_TOOL_SUMMARY_CONTEXT_KEY, summary.clone());
+        }
 
         // create a stream of annotations this will be prepend to the response stream
         let annotations: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = annotations
@@ -3417,6 +3427,32 @@ impl
             prompt_injected_reasoning,
             uses_tool_call_structural_tag,
         )?;
+        let transformed_stream: Pin<
+            Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>,
+        > = if let Some(summary) = admission_tool_summary {
+            Box::pin(transformed_stream.map(move |response| {
+                if let Some(data) = response.data.as_ref() {
+                    for choice in &data.inner.choices {
+                        let Some(tool_calls) = choice.delta.tool_calls.as_ref() else {
+                            continue;
+                        };
+                        for tool_call in tool_calls {
+                            summary.record_tool_call(
+                                choice.index,
+                                tool_call.index,
+                                tool_call
+                                    .function
+                                    .as_ref()
+                                    .and_then(|function| function.name.as_deref()),
+                            );
+                        }
+                    }
+                }
+                response
+            }))
+        } else {
+            Box::pin(transformed_stream)
+        };
 
         // Apply request payload aggregation strategy.
         // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,

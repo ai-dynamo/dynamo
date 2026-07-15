@@ -858,7 +858,9 @@ impl<P: WorkerCapacityProvider> PolicyClassAdmissionStrategy for SessionAwareAdm
                 self.dispatched(id, worker);
                 Vec::new()
             }
-            AdmissionEvent::Completed { id, context_tokens } => self.completed(id, context_tokens),
+            AdmissionEvent::Completed {
+                id, context_tokens, ..
+            } => self.completed(id, context_tokens),
             AdmissionEvent::Aborted { id } => self.aborted(id),
             AdmissionEvent::Reconcile => self.reconcile(),
             _ => Vec::new(),
@@ -884,6 +886,8 @@ fn sort_backend_caps(capacities: &mut [(WorkerWithDpRank, usize)]) {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    use dynamo_kv_router::scheduling::AdmissionToolSummary;
 
     use super::*;
 
@@ -1021,6 +1025,7 @@ mod tests {
         strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
             context_tokens: 150,
+            tool_summary: AdmissionToolSummary::default(),
         });
         assert!(strategy.programs["a"].is_idle_resident());
         assert_eq!(strategy.programs["a"].footprint(), 150);
@@ -1095,6 +1100,7 @@ mod tests {
         strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
             context_tokens: 150,
+            tool_summary: AdmissionToolSummary::default(),
         });
 
         *current.lock().unwrap() = capacities(&[(2, 1_000)]);
@@ -1135,6 +1141,7 @@ mod tests {
         strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
             context_tokens: 150,
+            tool_summary: AdmissionToolSummary::default(),
         });
 
         available.store(false, Ordering::Relaxed);
@@ -1183,6 +1190,7 @@ mod tests {
         strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
             context_tokens: 150,
+            tool_summary: AdmissionToolSummary::default(),
         });
 
         current.lock().unwrap().clear();
@@ -1206,6 +1214,7 @@ mod tests {
         strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
             context_tokens: 140,
+            tool_summary: AdmissionToolSummary::default(),
         });
         assert!(strategy.programs["a"].is_idle_resident());
         assert_eq!(strategy.programs["a"].footprint(), 140);
@@ -1235,6 +1244,7 @@ mod tests {
         strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
             context_tokens: 140,
+            tool_summary: AdmissionToolSummary::default(),
         });
         assert!(strategy.programs["a"].is_idle_resident());
         assert_eq!(strategy.programs["a"].footprint(), 140);
@@ -1343,6 +1353,7 @@ mod tests {
             strategy.on_event(AdmissionEvent::Completed {
                 id: AdmissionId::new(id),
                 context_tokens: input + output,
+                tool_summary: AdmissionToolSummary::default(),
             });
         }
 
@@ -1513,6 +1524,7 @@ mod tests {
         strategy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
             context_tokens: 150,
+            tool_summary: AdmissionToolSummary::default(),
         });
         assert!(strategy.programs["same"].is_idle_resident());
         assert_eq!(strategy.programs["same"].footprint(), 150);

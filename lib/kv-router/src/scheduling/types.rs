@@ -18,7 +18,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
-use crate::scheduling::queue_admission::RequestProgressUpdater;
+use crate::scheduling::queue_admission::{AdmissionToolSummary, RequestProgressUpdater};
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -80,9 +80,12 @@ pub struct SchedulingResponse {
     pub admission_lease: Option<super::queue::AdmissionLease>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestOutcome {
-    Completed { context_tokens: usize },
+    Completed {
+        context_tokens: usize,
+        tool_summary: AdmissionToolSummary,
+    },
     Aborted,
 }
 

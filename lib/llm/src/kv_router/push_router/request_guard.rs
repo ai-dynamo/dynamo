@@ -3,14 +3,18 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::scheduling::{AdmissionLease, RequestOutcome, RequestProgressUpdater};
+use dynamo_kv_router::scheduling::{
+    AdmissionLease, AdmissionToolSummary, RequestOutcome, RequestProgressUpdater,
+};
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
 };
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics},
+    kv_router::{
+        KvRouter, admission_completion::SharedAdmissionToolSummary, metrics::RouterRequestMetrics,
+    },
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -56,9 +60,10 @@ impl RequestCleanup {
     async fn finish(&mut self, outcome: RequestOutcome) {
         let result = if let Some(mut lease) = self.admission_lease.take() {
             match outcome {
-                RequestOutcome::Completed { context_tokens } => {
-                    lease.mark_completed(context_tokens)
-                }
+                RequestOutcome::Completed {
+                    context_tokens,
+                    tool_summary,
+                } => lease.mark_completed_with_tool_summary(context_tokens, tool_summary),
                 RequestOutcome::Aborted => lease.mark_aborted(),
             }
             // AdmissionLease reports the terminal outcome to the scheduler actor.
@@ -321,6 +326,7 @@ pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
+    admission_tool_summary: Option<SharedAdmissionToolSummary>,
     initial_context_tokens: usize,
     prefill_marked: bool,
 }
@@ -334,6 +340,7 @@ impl RequestGuard {
         scheduler_tracked: bool,
         request_progress: Option<RequestProgressUpdater>,
         admission_lease: Option<AdmissionLease>,
+        admission_tool_summary: Option<SharedAdmissionToolSummary>,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -366,6 +373,7 @@ impl RequestGuard {
                 block_size,
                 expected_output_tokens,
             ),
+            admission_tool_summary,
             initial_context_tokens: isl_tokens,
             prefill_marked: false,
         }
@@ -469,8 +477,15 @@ impl RequestGuard {
         let context_tokens = self
             .observability
             .context_tokens(self.initial_context_tokens);
+        let tool_summary = self.admission_tool_summary.as_ref().map_or_else(
+            AdmissionToolSummary::default,
+            SharedAdmissionToolSummary::snapshot,
+        );
         self.cleanup
-            .finish(RequestOutcome::Completed { context_tokens })
+            .finish(RequestOutcome::Completed {
+                context_tokens,
+                tool_summary,
+            })
             .await;
     }
 

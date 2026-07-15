@@ -43,6 +43,7 @@ pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
+pub(crate) mod admission_completion;
 pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
