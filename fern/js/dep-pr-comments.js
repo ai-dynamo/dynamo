@@ -86,18 +86,47 @@
     ".dark .dep-pr-mark,html[data-theme=dark] .dep-pr-mark{background:rgba(118,185,0,.34);}" +
     ".dep-pr-badge{display:inline-flex;align-items:center;gap:3px;vertical-align:super;margin:0 2px;padding:0 6px;height:17px;border:0;border-radius:9px;background:var(--nv-color-green,#76b900);color:#111;font:700 10px/17px system-ui,sans-serif;cursor:pointer;user-select:none;}" +
     ".dep-pr-badge:hover{filter:brightness(1.05);}" +
-    ".dep-pr-card{margin:6px 0 12px;padding:9px 11px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-left:3px solid var(--nv-color-green,#76b900);border-radius:8px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);}" +
-    ".dep-pr-card-eyebrow{font:700 10px/1 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--nv-color-green,#76b900);margin-bottom:6px;}" +
+    /* Density: cards were previously sized for 2-3 lines of plaintext.
+     * Now that body_html renders markdown (headings, code, lists,
+     * blockquotes) the card body carries its own internal rhythm, so the
+     * outer chrome (card padding, eyebrow gap, comment separators, link
+     * margin) is aggressively tightened here. Kept theme-aware via the
+     * same --pst-color-* vars used elsewhere. See fern/main.css for the
+     * NVIDIA-theme variable definitions. */
+    ".dep-pr-card{margin:2px 0 8px;padding:8px 11px 7px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-left:3px solid var(--nv-color-green,#76b900);border-radius:8px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);}" +
+    ".dep-pr-card-eyebrow{font:700 10px/1 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--nv-color-green,#76b900);margin-bottom:3px;}" +
     ".dep-pr-comment{color:var(--pst-color-text-base,#1a1a1a);}" +
-    ".dep-pr-comment + .dep-pr-comment{margin-top:9px;padding-top:9px;border-top:1px solid var(--border,var(--grayscale-a5,#e2e2e2));}" +
-    ".dep-pr-comment-head{display:flex;align-items:center;gap:8px;margin-bottom:3px;}" +
+    ".dep-pr-comment + .dep-pr-comment{margin-top:6px;padding-top:6px;border-top:1px solid var(--border,var(--grayscale-a5,#e2e2e2));}" +
+    ".dep-pr-comment-head{display:flex;align-items:center;gap:8px;margin-bottom:1px;}" +
     ".dep-pr-avatar{border-radius:50%;}" +
     ".dep-pr-author{font-weight:700;font-size:13px;color:var(--pst-color-text-base,#1a1a1a);}" +
     ".dep-pr-date{font-size:11px;color:var(--pst-color-text-muted,#777);}" +
-    ".dep-pr-body{font-size:13px;line-height:1.45;color:var(--pst-color-text-base,#1a1a1a);}" +
-    ".dep-pr-body p{margin:0 0 4px;}" +
+    ".dep-pr-body{font-size:13px;line-height:1.4;color:var(--pst-color-text-base,#1a1a1a);}" +
+    ".dep-pr-body p{margin:0 0 3px;}" +
     ".dep-pr-body p:last-child{margin-bottom:0;}" +
-    ".dep-pr-link{display:inline-block;margin-top:4px;font-size:12px;font-weight:600;color:var(--nv-color-green,#76b900);text-decoration:none;}" +
+    /* Rendered markdown from body_html: keep headings and code compact so
+     * a comment card stays visually distinct from the DEP prose around it.
+     * Themed via --pst-color-* so light/dark both work without a per-theme
+     * selector. */
+    ".dep-pr-body h1,.dep-pr-body h2,.dep-pr-body h3,.dep-pr-body h4,.dep-pr-body h5,.dep-pr-body h6{margin:6px 0 3px;font-weight:700;line-height:1.25;color:var(--pst-color-heading,inherit);}" +
+    ".dep-pr-body h1{font-size:15px;}.dep-pr-body h2{font-size:14px;}.dep-pr-body h3,.dep-pr-body h4,.dep-pr-body h5,.dep-pr-body h6{font-size:13px;}" +
+    ".dep-pr-body ul,.dep-pr-body ol{margin:0 0 3px;padding-left:1.25em;}" +
+    ".dep-pr-body li{margin:1px 0;}" +
+    ".dep-pr-body li p{margin:0;}" +
+    ".dep-pr-body blockquote{margin:2px 0 3px;padding:0 0 0 9px;border-left:3px solid var(--border,var(--grayscale-a5,#cfcfcf));color:var(--pst-color-text-muted,#555);}" +
+    ".dep-pr-body blockquote p{margin:0 0 2px;}" +
+    ".dep-pr-body code{padding:0 4px;border-radius:3px;background:rgba(118,185,0,.10);color:var(--pst-color-inline-code,inherit);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em;}" +
+    ".dark .dep-pr-body code,html[data-theme=dark] .dep-pr-body code{background:rgba(118,185,0,.16);}" +
+    ".dep-pr-body pre{margin:3px 0 4px;padding:8px 10px;overflow:auto;border-radius:6px;background:var(--pst-color-on-background,#0f0f0f);color:var(--pst-color-text-base,#eee);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.4;}" +
+    ".dep-pr-body pre code{padding:0;background:none;color:inherit;font-size:inherit;}" +
+    ".dep-pr-body a{color:var(--nv-color-green,#76b900);text-decoration:underline;text-underline-offset:2px;}" +
+    ".dep-pr-body img{max-width:100%;height:auto;}" +
+    /* GitHub's fenced-code wrapper: .highlight is emitted around <pre>
+     * with per-language variants. Keep it flush so the internal <pre>
+     * carries the padding. */
+    ".dep-pr-body .highlight{margin:3px 0 4px;}" +
+    ".dep-pr-body .highlight pre{margin:0;}" +
+    ".dep-pr-link{display:inline-block;margin-top:2px;font-size:12px;font-weight:600;color:var(--nv-color-green,#76b900);text-decoration:none;}" +
     ".dep-pr-link:hover{text-decoration:underline;}" +
     "#dep-pr-comments{display:block;margin-top:2.5rem;padding-top:1.25rem;border-top:1px solid var(--border,var(--grayscale-a4,#e5e5e5));}" +
     ".dep-pr-heading{font-size:1.15rem;font-weight:600;margin-bottom:.15rem;color:var(--pst-color-heading,inherit);}" +
@@ -304,8 +333,21 @@
   function commentHtml(c, replyLabel) {
     var login = (c.user && c.user.login) || "unknown";
     var avatar = (c.user && c.user.avatar_url) || "";
-    var body = String(c.body || "").split(/\n{2,}/)
-      .map(function (p) { return "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>"; }).join("");
+    /* Prefer GitHub's server-rendered `body_html` (requested via the
+     * "full" media type in ghGet) so markdown — bold, inline code, fenced
+     * code, blockquotes, lists, headings, links — renders as HTML. It
+     * matches what commenters see on github.com and needs no in-tree
+     * markdown parser. Sanitize before injection; hardenLinks() below
+     * runs post-parse to add target/rel to every anchor. Fall back to a
+     * conservative plaintext-in-<p> wrapper when `body_html` is absent
+     * (older/edge payloads, offline fixtures, etc.). */
+    var body;
+    if (typeof c.body_html === "string" && c.body_html) {
+      body = sanitizeHtml(c.body_html);
+    } else {
+      body = String(c.body || "").split(/\n{2,}/)
+        .map(function (p) { return "<p>" + esc(p).replace(/\n/g, "<br>") + "</p>"; }).join("");
+    }
     var av = avatar
       ? '<img class="dep-pr-avatar" src="' + esc(avatar) + '" alt="" width="20" height="20">'
       : "";
@@ -317,6 +359,29 @@
       '<div class="dep-pr-body">' + body + '</div>' +
       '<a class="dep-pr-link" href="' + esc(c.html_url) + '" target="_blank" rel="noopener">' + esc(label) + ' &rarr;</a>' +
       '</div>';
+  }
+
+  /* Post-innerHTML DOM pass: force every anchor rendered from body_html
+   * to open in a new tab with a safe rel value. Doing this after the
+   * browser has parsed the HTML is stricter than string surgery — every
+   * <a> in the subtree ends up with the same policy regardless of how
+   * GitHub emitted it (some anchors have rel="nofollow", some are user
+   * mentions with data-*, etc.). Called from renderInto() at the end of
+   * each render pass, scoped to the mount + inline cards. */
+  function hardenLinks(root) {
+    if (!root || !root.querySelectorAll) return;
+    var anchors = root.querySelectorAll(".dep-pr-body a");
+    for (var i = 0; i < anchors.length; i++) {
+      var a = anchors[i];
+      // Belt-and-suspenders scheme check in case the regex missed
+      // a weirdly-encoded URI on the string pass.
+      var href = a.getAttribute("href") || "";
+      if (/^\s*(javascript|data|vbscript)\s*:/i.test(href)) {
+        a.setAttribute("href", "#");
+      }
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    }
   }
 
   function cleanup() {
@@ -461,11 +526,62 @@
   }
 
   function ghGet(url) {
-    return fetch(url, { headers: { Accept: "application/vnd.github+json" } })
+    /* Request the "full" media type so each comment payload carries
+     * `body_html` alongside `body`. GitHub does the markdown -> HTML render
+     * on their end (server-side, same renderer as their UI), which keeps
+     * this runtime dependency-free and guarantees fidelity with what the
+     * commenter sees on github.com. `body_html` is sanitized before we
+     * inject it (see sanitizeHtml + hardenLinks). */
+    return fetch(url, { headers: { Accept: "application/vnd.github.full+json" } })
       .then(function (r) {
         if (!r.ok) throw new Error("GitHub API " + r.status);
         return r.json();
       });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * sanitizeHtml — defense-in-depth pass over GitHub's server-rendered  *
+   * `body_html` before it hits innerHTML. GitHub already emits well-    *
+   * formed HTML from a trusted renderer; this pass hardens against a   *
+   * compromised upstream or MITM by stripping executable surfaces:     *
+   *   - <script>, <iframe>, <object>, <embed>, <style>, <link>, <meta>,*
+   *     <base>, <svg>, <math>, <form>                                  *
+   *   - inline event-handler attributes (on*=...)                      *
+   *   - javascript:/data: URIs on href / src                           *
+   * target="_blank" rel="noopener noreferrer" is added to <a> tags in  *
+   * hardenLinks() below (that pass touches the parsed DOM, not the     *
+   * string, so external links open correctly and non-http links stay   *
+   * safe).                                                             *
+   * ------------------------------------------------------------------ */
+  function sanitizeHtml(html) {
+    if (html == null) return "";
+    var s = String(html);
+    // Strip whole dangerous elements including any body they carry. The
+    // outer group covers both `<x>...</x>` and self-closing `<x .../>`.
+    var BLOCK_ELEMENTS = [
+      "script", "iframe", "object", "embed", "style", "link",
+      "meta", "base", "svg", "math", "form"
+    ];
+    for (var i = 0; i < BLOCK_ELEMENTS.length; i++) {
+      var tag = BLOCK_ELEMENTS[i];
+      // paired: <tag ...>...</tag> (non-greedy body)
+      s = s.replace(new RegExp("<" + tag + "\\b[\\s\\S]*?</" + tag + "\\s*>", "gi"), "");
+      // self-closing or unclosed: <tag ...> up to the next '>'
+      s = s.replace(new RegExp("<" + tag + "\\b[^>]*>", "gi"), "");
+    }
+    // Strip inline event-handler attributes: on* with =. Value can be
+    // double-quoted, single-quoted, or unquoted (up to whitespace or >).
+    s = s.replace(/\son[a-z0-9_-]+\s*=\s*"[^"]*"/gi, "");
+    s = s.replace(/\son[a-z0-9_-]+\s*=\s*'[^']*'/gi, "");
+    s = s.replace(/\son[a-z0-9_-]+\s*=\s*[^\s>]+/gi, "");
+    // Neutralize javascript: and data: URIs on href/src. Point them at
+    // "#" so the anchor still renders (as a no-op link) rather than
+    // detonating on click. `\s*` between colon and payload catches
+    // whitespace-obfuscated forms; leading whitespace before the value
+    // is tolerated in HTML parsers.
+    var badUri = /(\s(?:href|src|xlink:href)\s*=\s*)("|')\s*(?:javascript|data|vbscript)\s*:[^"']*\2/gi;
+    s = s.replace(badUri, '$1$2#$2');
+    return s;
   }
 
   /* Fetch the three read-only sources in parallel; one failing source (e.g. a
@@ -566,6 +682,13 @@
       inlineSummaryHtml(cfg, comments, anchored, unanchored, data.reviewErr) +
       threadHtml(cfg, "revision", data.prConv, data.prConvErr) +
       threadHtml(cfg, "design", data.issue, data.issueErr);
+
+    // Force target/rel on every anchor rendered from body_html — both in
+    // the mount (revision + design threads) and in the per-anchor inline
+    // cards that were inserted into the prose above.
+    hardenLinks(mount);
+    var inlineCards = document.querySelectorAll(".dep-pr-card.dep-pr-ui");
+    for (var ci = 0; ci < inlineCards.length; ci++) hardenLinks(inlineCards[ci]);
   }
 
   function scheduleRetry() {
