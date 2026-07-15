@@ -116,14 +116,14 @@ The dcgm-exporter service in the Docker Compose network is configured to use por
 ### Configuration Files
 
 The following configuration files are located in the `dev/observability/` directory:
-- [docker-compose.yml](../../dev/docker-compose.yml): Defines NATS and etcd services
-- [docker-observability.yml](../../dev/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
-- [prometheus.yml](../../dev/observability/prometheus.yml): Contains Prometheus scraping configuration
-- [grafana-datasources.yml](../../dev/observability/grafana-datasources.yml): Contains Grafana datasource configuration
-- [otel-collector.yaml](../../dev/observability/otel-collector.yaml): OpenTelemetry Collector configuration (routes traces to Tempo, logs to Loki)
-- [loki.yaml](../../dev/observability/loki.yaml): Loki log aggregation configuration
-- [loki-datasource.yml](../../dev/observability/loki-datasource.yml): Grafana Loki datasource with trace ID linking to Tempo
-- [grafana_dashboards/dashboard-providers.yml](../../dev/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/dynamo.json](../../dev/observability/grafana_dashboards/dynamo.json): Engine-agnostic per-model dashboard covering frontend, KV-router, and worker metrics. Filterable by `model`. See the [per-model dashboard guide](prometheus-grafana.md#per-model-dynamo-dashboard) for details.
-- [grafana_dashboards/dcgm-metrics.json](../../dev/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/kvbm.json](../../dev/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics
+- [docker-compose.yml](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/docker-compose.yml): Defines NATS and etcd services
+- [docker-observability.yml](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
+- [prometheus.yml](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/prometheus.yml): Contains Prometheus scraping configuration
+- [grafana-datasources.yml](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/grafana-datasources.yml): Contains Grafana datasource configuration
+- [otel-collector.yaml](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/otel-collector.yaml): OpenTelemetry Collector configuration (routes traces to Tempo, logs to Loki)
+- [loki.yaml](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/loki.yaml): Loki log aggregation configuration
+- [loki-datasource.yml](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/loki-datasource.yml): Grafana Loki datasource with trace ID linking to Tempo
+- [grafana_dashboards/dashboard-providers.yml](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/dynamo.json](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/grafana_dashboards/dynamo.json): Engine-agnostic per-model dashboard covering frontend, KV-router, and worker metrics. Filterable by `model`. See the [per-model dashboard guide](prometheus-grafana.md#per-model-dynamo-dashboard) for details.
+- [grafana_dashboards/dcgm-metrics.json](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/kvbm.json](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/deploy/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics

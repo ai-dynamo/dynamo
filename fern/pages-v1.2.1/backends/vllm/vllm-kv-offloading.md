@@ -38,7 +38,7 @@ For configuration details, see the [KVBM Guide](../../components/kvbm/kvbm-guide
 
 | Deployment                                | Launch Script                                                                                                                       |
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Aggregated (MP sidecar — recommended)     | [`agg_lmcache_mp.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/examples/backends/vllm/launch/agg_lmcache_mp.sh)                 |
+| Aggregated (MP sidecar — recommended)     | [`agg_lmcache_mp.sh`](https://github.com/ai-dynamo/dynamo/blob/c226999a8ff96077dd6a2768743eb3b45b3a4523/examples/backends/vllm/launch/agg_lmcache_mp.sh)                 |
 | Aggregated (legacy, in-process)           | [`agg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/examples/backends/vllm/launch/agg_lmcache.sh)                       |
 | Aggregated (legacy, multiprocess metrics) | [`agg_lmcache_multiproc.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)   |
 | Disaggregated                             | [`disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/examples/backends/vllm/launch/disagg_lmcache.sh)                 |

@@ -48,7 +48,7 @@ the navigation in `docs/index.yml`, and running `fern check` to validate.
 
 | Skill | Description |
 |-------|-------------|
-| [dynamo-docs](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/.agents/contributor-skills/dynamo-docs/SKILL.md) | Add, update, move, or remove a docs page |
+| [dynamo-docs](https://github.com/ai-dynamo/dynamo/releases/tag/v1.2.1) | Add, update, move, or remove a docs page |
 
 ---
 

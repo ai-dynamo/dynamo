@@ -18,7 +18,7 @@ Integrate Dynamo with the Gateway API Inference Extension, also known as Inferen
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](https://github.com/ai-dynamo/dynamo/tree/v1.2.1/recipes/qwen3-0.6b/vllm/agg/gaie).
+- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](https://github.com/ai-dynamo/dynamo/tree/4d7d18ee4d1e10e8d4f435bba89b93ee2f347179/recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
@@ -83,7 +83,7 @@ spec:
       mode: SIMPLE
 ```
 
-Replace `<dgd-name>` with your DynamoGraphDeployment name and `<namespace>` with the namespace where the EPP is deployed. See [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](../../recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml) for an example.
+Replace `<dgd-name>` with your DynamoGraphDeployment name and `<namespace>` with the namespace where the EPP is deployed. See [`recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml`](https://github.com/ai-dynamo/dynamo/blob/4d7d18ee4d1e10e8d4f435bba89b93ee2f347179/recipes/qwen3-0.6b/vllm/agg/gaie/dr.yaml) for an example.
 
 ### 3. Setup secrets ###
 
