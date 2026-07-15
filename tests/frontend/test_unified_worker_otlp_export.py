@@ -27,7 +27,7 @@ from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.otel import wait_for_engine_generate_count
 
-pytest_plugins = ("tests.utils.otel",)
+pytest_plugins = ("tests.utils.otel_plugin",)
 
 TEST_MODEL = QWEN
 

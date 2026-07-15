@@ -49,7 +49,7 @@ from tests.utils.payloads import (
 
 logger = logging.getLogger(__name__)
 
-pytest_plugins = ("tests.utils.otel",)
+pytest_plugins = ("tests.utils.otel_plugin",)
 
 
 def _is_cuda13() -> bool:

@@ -7,9 +7,6 @@ from __future__ import annotations
 
 import threading
 import time
-from concurrent import futures
-
-import pytest
 
 
 class InProcOtlpCollector:
@@ -65,20 +62,3 @@ def wait_for_engine_generate_count(
             return count
         time.sleep(0.5)
     return len(collector.engine_generate_spans())
-
-
-@pytest.fixture
-def otlp_collector():
-    """Run an in-process OTLP/gRPC server on an ephemeral port."""
-    import grpc
-    from opentelemetry.proto.collector.trace.v1 import trace_service_pb2_grpc
-
-    collector = InProcOtlpCollector()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    trace_service_pb2_grpc.add_TraceServiceServicer_to_server(collector, server)
-    port = server.add_insecure_port("127.0.0.1:0")
-    server.start()
-    try:
-        yield collector, port
-    finally:
-        server.stop(grace=1)
