@@ -1296,14 +1296,22 @@ class TestConversationAffinity:
         self, monkeypatch
     ):
         """DYN_ENGINE_CONV_AFFINITY override=True + engine detection disabled →
-        dp_rank suppressed, conversation_params forwarded."""
+        dp_rank suppressed, conversation_params forwarded on first request."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            True,
+        )
         monkeypatch.setattr(
             "dynamo.trtllm.conversation_affinity.ConversationParams",
             _FakeConversationParams,
         )
-        # Engine detection returns False (no engine-side affinity config).
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.engine_conversation_affinity_enabled",
+            lambda _: False,
+        )
         handler = self._make_handler(conversation_affinity=False)
-        # Simulate DYN_ENGINE_CONV_AFFINITY=true wired through RequestHandlerConfig.
+        # Reset to None so lazy init runs on first request and folds in the override.
+        handler._conversation_affinity = None
         handler._engine_conversation_affinity_override = True
         kwargs = await self._drive(
             handler,
@@ -1326,12 +1334,14 @@ class TestConversationAffinity:
         self, monkeypatch
     ):
         """DYN_ENGINE_CONV_AFFINITY=true on a build without ConversationParams →
-        RuntimeError on first request (guard in _generate_locally_impl)."""
+        RuntimeError on first request during lazy init."""
         monkeypatch.setattr(
             "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
             False,
         )
         handler = self._make_handler(conversation_affinity=False)
+        # Reset to None so lazy init runs and hits the guard.
+        handler._conversation_affinity = None
         handler._engine_conversation_affinity_override = True
         handler.engine.llm.generate_async = MagicMock()
 

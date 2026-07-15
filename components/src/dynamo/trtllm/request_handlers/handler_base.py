@@ -1115,8 +1115,18 @@ class HandlerBase(BaseGenerativeHandler):
         # initialized by first request). When on, the engine's ConversationAwareADPRouter
         # picks the attention-DP rank from the conversation id, so we must NOT force a rank.
         if self._conversation_affinity is None:
-            self._conversation_affinity = engine_conversation_affinity_enabled(
-                self.engine.llm
+            if (
+                self._engine_conversation_affinity_override
+                and not CONVERSATION_PARAMS_AVAILABLE
+            ):
+                raise RuntimeError(
+                    "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                    "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                    "release newer than 1.3.0rc20)."
+                )
+            self._conversation_affinity = (
+                self._engine_conversation_affinity_override
+                or engine_conversation_affinity_enabled(self.engine.llm)
             )
             if self._conversation_affinity and not CONVERSATION_PARAMS_AVAILABLE:
                 raise RuntimeError(
@@ -1124,18 +1134,7 @@ class HandlerBase(BaseGenerativeHandler):
                     "the installed TensorRT-LLM build has no ConversationParams API (requires a "
                     "release newer than 1.3.0rc20)."
                 )
-        conv_affinity = (
-            self._conversation_affinity or self._engine_conversation_affinity_override
-        )
-        if (
-            self._engine_conversation_affinity_override
-            and not CONVERSATION_PARAMS_AVAILABLE
-        ):
-            raise RuntimeError(
-                "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
-                "the installed TensorRT-LLM build has no ConversationParams API (requires a "
-                "release newer than 1.3.0rc20)."
-            )
+        conv_affinity = self._conversation_affinity
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
