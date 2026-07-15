@@ -32,11 +32,20 @@ pub struct DynamicSubscriber {
 
 impl DynamicSubscriber {
     pub fn new(discovery: Arc<dyn Discovery>, query: DiscoveryQuery, topic: String) -> Self {
+        Self::with_cancel_token(discovery, query, topic, CancellationToken::new())
+    }
+
+    pub fn with_cancel_token(
+        discovery: Arc<dyn Discovery>,
+        query: DiscoveryQuery,
+        topic: String,
+        cancel_token: CancellationToken,
+    ) -> Self {
         Self {
             discovery,
             query,
             topic,
-            cancel_token: CancellationToken::new(),
+            cancel_token,
         }
     }
 
@@ -423,5 +432,45 @@ mod tests {
         timeout(Duration::from_secs(1), backend_stopped.notified())
             .await
             .expect("discovery backend should receive cancellation");
+    }
+
+    #[tokio::test]
+    async fn dropping_returned_stream_cancels_idle_discovery_watch() {
+        let backend_stopped = Arc::new(Notify::new());
+        let discovery = Arc::new(CancellationAwareDiscovery {
+            backend_stopped: Arc::clone(&backend_stopped),
+        });
+        let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+            "test-ns",
+            "test-component",
+            "kv-events",
+        ));
+        let parent_token = CancellationToken::new();
+        let subscriber = Arc::new(DynamicSubscriber::with_cancel_token(
+            discovery,
+            query,
+            "kv-events".to_string(),
+            parent_token.child_token(),
+        ));
+        let weak_subscriber = Arc::downgrade(&subscriber);
+        let stream = subscriber.start_zmq().await.unwrap();
+
+        assert!(
+            weak_subscriber.upgrade().is_some(),
+            "returned stream should retain the dynamic subscriber"
+        );
+        drop(stream);
+        assert!(
+            weak_subscriber.upgrade().is_none(),
+            "dropping the returned stream should release the dynamic subscriber"
+        );
+        assert!(
+            !parent_token.is_cancelled(),
+            "dropping a subscriber must not cancel its parent token"
+        );
+
+        timeout(Duration::from_secs(1), backend_stopped.notified())
+            .await
+            .expect("dropping the stream should cancel the discovery backend");
     }
 }
