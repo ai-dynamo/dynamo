@@ -14,7 +14,7 @@ cargo build --release -p dynamo-sglang-remote
 ```
 
 Distribution and container packaging for the executable are intentionally
-outside the scope of this crate.
+deferred to a follow-up change.
 
 ## SGLang-managed process contract
 
