@@ -2096,7 +2096,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Remove a loaded LoRA adapter from discovery."""
         if self.generate_endpoint is None:
             logger.debug(
-                f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
+                "Cannot unregister LoRA '%s': generate_endpoint=%s",
+                lora_name, self.generate_endpoint,
             )
             return
         await unregister_model(
