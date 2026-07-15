@@ -131,6 +131,9 @@ impl AdmissionCleanup {
             return Vec::new();
         }
 
+        // Drain to a quiescent point to preserve the coalesced-wake handoff. A large burst of
+        // already-armed lease drops can delay actor commands; any bounded or interleaved drain
+        // must preserve wake correctness and be benchmarked.
         let mut dirty = Vec::new();
         loop {
             while let Some(cleanup) = self.dirty.pop() {

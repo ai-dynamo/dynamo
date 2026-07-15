@@ -8,8 +8,8 @@ use dynamo_runtime::{
     error::{ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
-        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
-        SingleIn, async_trait,
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
+        ResponseStream, SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
 };
@@ -50,6 +50,54 @@ fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error
     }
     if let Some(operation) = operation.take() {
         operation.invalidate();
+    }
+}
+
+fn monitor_response_stream(
+    mut response_stream: ManyOut<Annotated<LLMEngineOutput>>,
+    context: Arc<dyn AsyncEngineContext>,
+    context_id: String,
+    mut guard: RequestGuard,
+) -> impl futures::Stream<Item = Annotated<LLMEngineOutput>> + Send {
+    async_stream::stream! {
+        // Keep one cancellation future alive for the whole response stream. Calling
+        // `stopped()` for every item repeatedly clones and polls a watch receiver.
+        let stopped = context.stopped();
+        tokio::pin!(stopped);
+
+        let mut failed = false;
+        let completed = loop {
+            tokio::select! {
+                biased;
+
+                _ = &mut stopped => {
+                    tracing::debug!("Request {context_id} cancelled, ending stream");
+                    break false;
+                }
+
+                item = response_stream.next() => {
+                    let Some(item) = item else {
+                        break true;
+                    };
+                    failed |= response_item_failed(&item);
+                    guard.on_item(&item).await;
+                    let completed_terminal = !failed && response_item_completed(&item);
+                    if completed_terminal {
+                        guard.mark_completed_terminal();
+                    }
+                    yield item;
+                    if completed_terminal {
+                        break true;
+                    }
+                }
+            }
+        };
+
+        if completed && !failed {
+            guard.finish().await;
+        } else {
+            guard.abort().await;
+        }
     }
 }
 
@@ -328,7 +376,7 @@ impl KvPushRouter {
         )
         .await
         .and_then(|result| result);
-        let mut response_stream = match dispatch_result {
+        let response_stream = match dispatch_result {
             Ok(stream) => stream,
             Err(error) => {
                 guard.abort().await;
@@ -339,47 +387,12 @@ impl KvPushRouter {
         guard.mark_dispatched().await;
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
-        let wrapped_stream = Box::pin(async_stream::stream! {
-            let mut guard = guard;
-            // Keep one cancellation future alive for the whole response stream. Calling
-            // `stopped()` for every item repeatedly clones and polls a watch receiver.
-            let stopped = context_for_monitoring.stopped();
-            tokio::pin!(stopped);
-
-            let mut failed = false;
-            let completed = loop {
-                tokio::select! {
-                    biased;
-
-                    _ = &mut stopped => {
-                        tracing::debug!("Request {context_id} cancelled, ending stream");
-                        break false;
-                    }
-
-                    item = response_stream.next() => {
-                        let Some(item) = item else {
-                            break true;
-                        };
-                        failed |= response_item_failed(&item);
-                        guard.on_item(&item).await;
-                        let completed_terminal = !failed && response_item_completed(&item);
-                        if completed_terminal {
-                            guard.mark_completed_terminal();
-                        }
-                        yield item;
-                        if completed_terminal {
-                            break true;
-                        }
-                    }
-                }
-            };
-
-            if completed && !failed {
-                guard.finish().await;
-            } else {
-                guard.abort().await;
-            }
-        });
+        let wrapped_stream = Box::pin(monitor_response_stream(
+            response_stream,
+            context_for_monitoring,
+            context_id,
+            guard,
+        ));
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
 
@@ -655,11 +668,26 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc, time::Duration};
+    use std::{
+        collections::HashMap,
+        future,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
-    use dynamo_kv_router::{DefaultWorkerSelector, config::KvRouterConfig};
+    use dynamo_kv_router::{
+        ActiveSequencesMultiWorker, DefaultWorkerSelector, SequencePublisher,
+        config::{KvRouterConfig, RouterQueuePolicy},
+        protocols::{ActiveLoad, ActiveSequenceEvent, RoutingConstraints},
+        scheduling::{
+            AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
+            LocalScheduler, NoopOverlapScoresRefresh, OverlapSignals,
+            PolicyClassAdmissionStrategies, PolicyClassAdmissionStrategy, PolicyProfile,
+            ScheduleMode, ScheduleRequest, WorkerPlacement,
+        },
+    };
     use dynamo_runtime::{
-        DistributedRuntime, Runtime,
+        CancellationToken, DistributedRuntime, Runtime,
         distributed::DistributedConfig,
         error::{ErrorType, match_error_chain},
         pipeline::{AsyncEngineContext, Context, PushRouter, RouterMode, context::Controller},
@@ -681,6 +709,34 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap()
+    }
+
+    struct NoopSequencePublisher;
+
+    impl SequencePublisher for NoopSequencePublisher {
+        fn publish_event(
+            &self,
+            _event: &ActiveSequenceEvent,
+        ) -> impl future::Future<Output = anyhow::Result<()>> + Send {
+            future::ready(Ok(()))
+        }
+
+        fn publish_load(&self, _load: ActiveLoad) {}
+
+        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+    }
+
+    struct RecordingAdmissionStrategy(Arc<Mutex<Vec<AdmissionEvent>>>);
+
+    impl PolicyClassAdmissionStrategy for RecordingAdmissionStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Ready(WorkerPlacement::Any)
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            self.0.lock().unwrap().push(event);
+            Vec::new()
+        }
     }
 
     #[test]
@@ -713,6 +769,135 @@ mod tests {
             ..Default::default()
         };
         assert!(!response_item_completed(&Annotated::from_data(output)));
+    }
+
+    #[tokio::test]
+    async fn dropping_stream_after_terminal_item_reports_admission_completed() {
+        let (router, runtime) = router(None).await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            16,
+            HashMap::from([(7, (0, 1))]),
+            false,
+            0,
+            "decode",
+        ));
+        let (_config_tx, config_rx) =
+            watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert(
+            "default".to_owned(),
+            Box::new(RecordingAdmissionStrategy(Arc::clone(&events))),
+        );
+        let cancel = CancellationToken::new();
+        let scheduler = LocalScheduler::new_with_policy_profile_and_admission_strategies(
+            Arc::clone(&slots),
+            config_rx,
+            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+            16,
+            DefaultWorkerSelector::new(None, "decode"),
+            None,
+            None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
+            Duration::from_secs(60),
+            true,
+            cancel.clone(),
+            "decode",
+            false,
+            strategies,
+        )
+        .unwrap();
+
+        for (index, finish_reason) in [FinishReason::Stop, FinishReason::EoS, FinishReason::Length]
+            .into_iter()
+            .enumerate()
+        {
+            let request_id = format!("terminal-drop-{index}");
+            let mut response = scheduler
+                .schedule_request(ScheduleRequest {
+                    mode: ScheduleMode::TrackedWithAdmission {
+                        request_id: request_id.clone(),
+                    },
+                    token_seq: Some(vec![1]),
+                    block_hashes: None,
+                    isl_tokens: 1,
+                    lora_name: None,
+                    expected_output_tokens: None,
+                    pinned_worker: None,
+                    allowed_worker_ids: None,
+                    routing_constraints: RoutingConstraints::default(),
+                    router_config_override: None,
+                    priority_jump: 0.0,
+                    strict_priority: 0,
+                    policy_class: None,
+                    session_id: None,
+                    overlap: OverlapSignals::default(),
+                    shared_cache_hits: None,
+                })
+                .await
+                .unwrap();
+            let worker = response.best_worker;
+            let mut guard = RequestGuard::new(
+                Arc::clone(&router.chooser),
+                request_id.clone(),
+                &request(),
+                true,
+                response.request_progress.take(),
+                response.admission_lease.take(),
+            );
+            guard.mark_dispatched().await;
+
+            let context = Context::new(()).context();
+            let source = ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(LLMEngineOutput {
+                    finish_reason: Some(finish_reason.clone()),
+                    ..Default::default()
+                })])),
+                Arc::clone(&context),
+            );
+            {
+                let monitored = monitor_response_stream(source, context, request_id.clone(), guard);
+                tokio::pin!(monitored);
+                let item = monitored.next().await.unwrap();
+                assert_eq!(
+                    item.data.and_then(|output| output.finish_reason),
+                    Some(finish_reason)
+                );
+            }
+
+            let expected_len = (index + 1) * 2;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while events.lock().unwrap().len() < expected_len {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("terminal stream drop did not report admission completion");
+            assert_eq!(
+                &events.lock().unwrap()[index * 2..expected_len],
+                [
+                    AdmissionEvent::Dispatched {
+                        id: AdmissionId::new(index as u64),
+                        worker,
+                    },
+                    AdmissionEvent::Completed {
+                        id: AdmissionId::new(index as u64),
+                        context_tokens: 1,
+                    },
+                ]
+            );
+        }
+
+        assert!(
+            slots
+                .active_request_counts()
+                .values()
+                .all(|count| *count == 0)
+        );
+        cancel.cancel();
+        drop(router);
+        runtime.shutdown();
     }
 
     async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
