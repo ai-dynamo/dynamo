@@ -11,6 +11,7 @@ import os
 import struct
 import tempfile
 import time
+from types import SimpleNamespace
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
@@ -1069,6 +1070,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.model_config = model_config
+        # Default names used by base _resolve_lora_request(); specialized
+        # handlers can override these fields after super().__init__.
+        self._served_model_name = config.served_model_name or config.model
+        self.engine_args = getattr(config, "engine_args", None) or SimpleNamespace(
+            model=config.model
+        )
         self._lora_state = LoRAState()
         # Keep historical attribute names for compatibility with existing code.
         self.loaded_loras = self._lora_state.loaded_loras
@@ -1135,6 +1142,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # frees the encoder's GPU memory in the meantime. Ordering the encoder
         # after all other fallible setup removes that window by construction.
         self._load_custom_encoder(config)
+
+    def _lora_enabled(self) -> bool:
+        """Conservative default for handlers that don't override LoRA policy.
+
+        LoRA is considered enabled only when the engine args flag is set and a
+        LoRA manager is available.
+        """
+        enable_lora = bool(getattr(self.engine_args, "enable_lora", False))
+        return enable_lora and (get_lora_manager() is not None)
 
     def _load_custom_encoder(self, config: Config) -> None:
         """Import, instantiate, and load the --custom-encoder-class encoder."""
