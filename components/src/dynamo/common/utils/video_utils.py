@@ -273,6 +273,13 @@ _FFMPEG_ENCODERS = {
 # Default logical codec per container.
 _DEFAULT_CODEC = {"mp4": "h264", "webm": "vp9"}
 
+# Logical codecs each container can legally mux. Used to reject incompatible
+# (container, codec) combinations before invoking the encoder.
+_CONTAINER_CODECS = {
+    "mp4": ("h264", "hevc"),
+    "webm": ("vp9",),
+}
+
 
 def _video_codec() -> str | None:
     """Codec override from ``DYN_VIDEO_CODEC`` (e.g. ``h264`` / ``hevc`` / ``vp9``)."""
@@ -316,11 +323,40 @@ def _running_on_xpu() -> bool:
 def _resolve_ffmpeg_encoder(container: str, codec: str | None, hw_accel: str) -> str:
     """Map (container, logical codec, hw path) to an ffmpeg encoder name.
 
-    A codec value that is already an ffmpeg encoder name passes through.
+    ``container`` / ``codec`` / ``hw_accel`` are assumed already validated by
+    ``encode_video``. Raises ``ValueError`` if no encoder entry exists for the
+    resolved (hw_accel, codec) pair -- i.e. the lookup tables are inconsistent.
     """
-    codec = codec or _DEFAULT_CODEC.get(container, "h264")
-    table = _FFMPEG_ENCODERS.get(hw_accel, _FFMPEG_ENCODERS["nvenc"])
-    return table.get(codec, codec)
+    codec = codec or _DEFAULT_CODEC[container]
+    table = _FFMPEG_ENCODERS[hw_accel]
+    encoder = table.get(codec)
+    if encoder is None:
+        raise ValueError(
+            f"No ffmpeg encoder for codec {codec!r} on {hw_accel!r}; "
+            f"available: {sorted(table)}"
+        )
+    return encoder
+
+
+def _validate_container_codec(container: str, codec: str | None) -> None:
+    """Reject container/codec pairs that are not muxing-compatible.
+
+    A ``codec`` of ``None`` means "use the container's default", which is
+    compatible by construction. Raises ``ValueError`` for an unknown container
+    or a codec the container cannot carry (e.g. H.264 in webm).
+    """
+    allowed = _CONTAINER_CODECS.get(container)
+    if allowed is None:
+        raise ValueError(
+            f"Unsupported container {container!r}; "
+            f"supported: {sorted(_CONTAINER_CODECS)}"
+        )
+    effective = codec or _DEFAULT_CODEC[container]
+    if effective not in allowed:
+        raise ValueError(
+            f"Codec {effective!r} is not compatible with container "
+            f"{container!r}; supported: {list(allowed)}"
+        )
 
 
 def drop_alpha(frames: np.ndarray) -> np.ndarray:
@@ -386,11 +422,11 @@ def _encode_video_imageio(
     except ImportError:
         try:
             import imageio as iio  # type: ignore[no-redef]
-        except ImportError:
+        except ImportError as err:
             raise ImportError(
                 "imageio is required for video encoding. "
                 "Install with: pip install imageio[ffmpeg]"
-            )
+            ) from err
 
     encoder = _resolve_ffmpeg_encoder(container, codec, "nvenc")
     buffer = io.BytesIO()
@@ -449,6 +485,11 @@ def _encode_video_ffmpeg_cli(
         if hw_accel == "xpu":
             cmd += ["-vf", "format=nv12,hwupload"]
         cmd += ["-c:v", encoder]
+        if hw_accel == "cpu":
+            # Software encoders default to yuv444p from rgb24 input, which most
+            # players (browsers, mobile) cannot decode; force widely-compatible
+            # 4:2:0. The XPU path already gets 4:2:0 via the nv12 hwupload above.
+            cmd += ["-pix_fmt", "yuv420p"]
         if container == "mp4":
             cmd += ["-movflags", "+faststart"]
         cmd += ["-f", container, output_path]
@@ -507,6 +548,8 @@ def encode_video(
         container: ``mp4`` / ``webm`` (env: ``DYN_VIDEO_CONTAINER``).
         codec: Logical codec ``h264`` / ``hevc`` / ``vp9`` (env: ``DYN_VIDEO_CODEC``).
         hw_accel: ``auto`` / ``nvenc`` / ``xpu`` / ``cpu`` (env: ``DYN_VIDEO_HW_ACCEL``).
+            ``auto`` picks a hardware encoder (XPU if present, else NVENC) and
+            never selects CPU -- request ``cpu`` explicitly for software encoding.
         device: HW device / DRM render node (env: ``DYN_VIDEO_DEVICE``).
 
     Returns:
@@ -519,9 +562,20 @@ def encode_video(
 
     container = (container or _video_container()).lower()
     codec = codec.lower() if codec else _video_codec()
+    _validate_container_codec(container, codec)
+
     hw_accel = (hw_accel or _video_hw_accel()).lower()
     if hw_accel == "auto":
+        # "auto" selects a hardware encoder only: XPU when present, otherwise
+        # NVENC. It never resolves to CPU -- software encoding is slow and must
+        # be requested explicitly (hw_accel="cpu" / DYN_VIDEO_HW_ACCEL=cpu). A
+        # deployment with neither NVIDIA nor XPU is unsupported by design.
         hw_accel = "xpu" if _running_on_xpu() else "nvenc"
+    if hw_accel not in _FFMPEG_ENCODERS:
+        raise ValueError(
+            f"Unsupported hw_accel {hw_accel!r}; "
+            f"supported: {sorted(_FFMPEG_ENCODERS)} (or 'auto')"
+        )
 
     logger.info(
         "Encoding %d frames -> %s (hw=%s codec=%s) at %d fps",

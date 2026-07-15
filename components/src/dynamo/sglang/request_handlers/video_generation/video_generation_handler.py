@@ -257,7 +257,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
 
         # Convert to canonical frames, then encode via the shared unified encoder.
         canonical = to_canonical(frames)
-        video_bytes = await asyncio.to_thread(encode_video, canonical, fps)
+        video_bytes = await asyncio.to_thread(
+            encode_video, canonical, fps, container="mp4"
+        )
         return video_bytes
 
     def _parse_size(self, size_str: str) -> tuple[int, int]:

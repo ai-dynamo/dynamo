@@ -254,8 +254,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                 # the frames to host memory as canonical (T, H, W, 3) uint8.
                 frames_np = to_canonical(output.video)
                 logger.info(
-                    f"Request {request_id}: encoding video output "
-                    f"(shape={frames_np.shape}) to MP4 at {fps} fps"
+                    "Request %s: encoding video output (shape=%s) to MP4 at %d fps",
+                    request_id,
+                    frames_np.shape,
+                    fps,
                 )
                 video_bytes = await asyncio.to_thread(
                     encode_video,

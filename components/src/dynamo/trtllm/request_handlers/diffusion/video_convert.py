@@ -15,7 +15,8 @@ def to_canonical(video) -> np.ndarray:
     (uint8) since TRT-LLM rc9. The batch dim is squeezed and the tensor moved to
     host memory before canonicalizing.
     """
-    assert (
-        video.ndim == 5 and video.shape[0] == 1
-    ), f"Expected video shape (1, T, H, W, C), got {tuple(video.shape)}"
+    if video.ndim != 5 or video.shape[0] != 1:
+        raise ValueError(
+            f"Expected video shape (1, T, H, W, C), got {tuple(video.shape)}"
+        )
     return ensure_uint8_rgb(video[0].cpu().numpy())
