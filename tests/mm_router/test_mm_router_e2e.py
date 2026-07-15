@@ -121,7 +121,10 @@ class TRTLLMWorkerProcess(ManagedProcess):
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", _check_ready)
             ],
-            timeout=900,
+            # Worker load + engine warmup is ~150-180s with the token-capped KV
+            # pool; 360 keeps ~2x margin for slow runners without bloating the
+            # test-level timeout budget.
+            timeout=360,
             straggler_commands=["-m dynamo.trtllm"],
             log_dir=_prepare_log_dir(request, "trtllm-worker"),
             **_COMMON_PROCESS_KWARGS,
@@ -281,9 +284,22 @@ def _send_request_get_overlap(
 
 
 @pytest.mark.pre_merge
-@pytest.mark.profiled_vram_gib(20.0)
-@pytest.mark.requested_trtllm_vram_gib(20.0)
-@pytest.mark.timeout(1800)
+# Cap the KV pool with the token-based lever (the codebase-standard control for
+# TRT-LLM KV tests; every passing serve/router trtllm test uses it). This bounds
+# the worker's KV allocation to a fixed size independent of free GPU memory,
+# unlike the byte-based requested_trtllm_vram_gib -> max_gpu_total_bytes path,
+# which combines with TRT-LLM's greedy free_gpu_memory_fraction=0.9 default and
+# lets the worker's startup footprint balloon toward the full card. On a 22 GiB
+# GPU shared with concurrently-scheduled fillers that pushed a ~20 GiB peak, that
+# tipped over into an OOM-shaped worker exit during startup (OPS-7716). 32768
+# tokens (1024 blocks) is ~2x the worst-case single request (~520 blocks /
+# 16640 tokens per THREE_IMAGE_TOTAL_BLOCKS_RANGE), leaving ample reuse headroom.
+@pytest.mark.profiled_vram_gib(12.0)  # measured device peak ~11 GiB w/ token cap
+@pytest.mark.requested_trtllm_kv_tokens(32768)
+# ~3x the measured deterministic runtime (~311s w/ the token cap, at 8 and 16
+# slots). Clears the worst-case fixture startup budget (worker 360 + router 240
+# + frontend 240) plus the ~150s of scenarios.
+@pytest.mark.timeout(960)
 def test_trtllm_mm_overlap_all(start_trtllm_mm_services, predownload_models):
     """Run all TRT-LLM MM overlap scenarios under one worker startup."""
     _check_text_only_overlap_repeated_prompt(

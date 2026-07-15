@@ -609,7 +609,7 @@ pub mod routing_overhead {
     pub const SHARED_CACHE_ERRORS_TOTAL: &str = "shared_cache_errors_total";
 }
 
-/// Router request metrics (component-scoped aggregate histograms + counter)
+/// Router request metrics (component-scoped aggregate histograms + counters)
 ///
 /// These constants are the suffix portions of full metric names, combined with
 /// [`name_prefix::COMPONENT`] to form the complete name, e.g.
@@ -617,6 +617,9 @@ pub mod routing_overhead {
 ///
 /// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod router {
+    /// Total number of requests admitted by the router scheduler
+    pub const REQUESTS_STARTED_TOTAL: &str = "router_requests_started_total";
+
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
