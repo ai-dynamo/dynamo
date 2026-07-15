@@ -37,7 +37,7 @@ SGLANG_GRPC_PORT="${SGLANG_GRPC_PORT:-30001}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-print_launch_banner "Launching SGLang Native-gRPC Remote Backend (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_launch_banner "Launching SGLang Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT"
 
 python3 -m dynamo.frontend &
 
@@ -51,7 +51,7 @@ python3 -m sglang.launch_server \
     "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    dynamo-sglang-remote \
+    dynamo-sglang-sidecar \
     --sglang-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
 
 wait_any_exit

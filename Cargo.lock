@@ -2880,7 +2880,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-sglang-remote"
+name = "dynamo-sglang-sidecar"
 version = "1.3.0"
 dependencies = [
  "anyhow",

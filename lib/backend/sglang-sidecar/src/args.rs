@@ -1,16 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Command-line arguments and transport configuration for the SGLang remote backend.
+//! Command-line arguments and transport configuration for the SGLang sidecar.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Parsed remote-backend arguments.
+/// Parsed sidecar arguments.
 #[derive(clap::Parser, Debug, Clone)]
 #[command(
-    name = "dynamo-sglang-remote",
-    about = "Dynamo remote backend for an out-of-process SGLang native gRPC server."
+    name = "dynamo-sglang-sidecar",
+    about = "Dynamo sidecar for an out-of-process SGLang native gRPC server."
 )]
 pub struct Args {
     /// `host:port` (or URL) of SGLang's native `sglang.runtime.v1` service.
@@ -90,7 +90,7 @@ impl Default for TransportConfig {
 
 /// Normalize plaintext endpoint schemes for tonic.
 ///
-/// TLS is intentionally rejected until the remote backend enables and tests tonic's
+/// TLS is intentionally rejected until the sidecar enables and tests tonic's
 /// TLS transport feature instead of advertising an unusable `grpcs://` URL.
 pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
@@ -103,7 +103,7 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
         }
         Ok(format!("http://{rest}"))
     } else if trimmed.starts_with("grpcs://") || trimmed.starts_with("https://") {
-        Err("TLS endpoints are not supported by the SGLang remote backend".to_string())
+        Err("TLS endpoints are not supported by the SGLang sidecar".to_string())
     } else if let Some(rest) = trimmed.strip_prefix("http://") {
         if rest.is_empty() {
             return Err("SGLang gRPC endpoint host must not be empty".to_string());
@@ -126,7 +126,7 @@ mod tests {
     #[test]
     fn parses_sglang_managed_executable_args() {
         let args = Args::try_parse_from([
-            "dynamo-sglang-remote",
+            "dynamo-sglang-sidecar",
             "--sglang-endpoint",
             "http://127.0.0.1:30001",
         ])

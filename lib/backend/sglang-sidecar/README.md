@@ -1,6 +1,6 @@
-# SGLang remote backend
+# SGLang sidecar
 
-`dynamo-sglang-remote` connects Dynamo's unified worker lifecycle to an
+`dynamo-sglang-sidecar` connects Dynamo's unified worker lifecycle to an
 out-of-process SGLang engine through SGLang's native gRPC service. It is a
 standalone Rust executable, not a Python extension or importable sidecar
 module.
@@ -8,8 +8,8 @@ module.
 Build and run it directly from the Dynamo workspace:
 
 ```bash
-cargo build --release -p dynamo-sglang-remote
-./target/release/dynamo-sglang-remote \
+cargo build --release -p dynamo-sglang-sidecar
+./target/release/dynamo-sglang-sidecar \
     --sglang-endpoint http://127.0.0.1:30001
 ```
 
@@ -25,13 +25,13 @@ listener is ready:
 python3 -m sglang.launch_server \
     <args> \
     --grpc-port 30001 \
-    --sidecar-executable dynamo-sglang-remote
+    --sidecar-executable dynamo-sglang-sidecar
 ```
 
 The corresponding SGLang implementation should:
 
 1. Resolve the executable without invoking a shell.
-2. Spawn `dynamo-sglang-remote --sglang-endpoint <loopback-url>` only after
+2. Spawn `dynamo-sglang-sidecar --sglang-endpoint <loopback-url>` only after
    native gRPC is listening. Preserve the parent environment so Dynamo's
    namespace, discovery, and observability settings reach the worker.
 3. Keep the executable as the directly supervised child. A spawn wrapper may

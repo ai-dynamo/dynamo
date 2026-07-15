@@ -5,10 +5,10 @@ use std::process::Command;
 
 #[test]
 fn executable_exposes_sglang_managed_contract() {
-    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-remote"))
+    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-sglang-sidecar"))
         .arg("--help")
         .output()
-        .expect("run dynamo-sglang-remote --help");
+        .expect("run dynamo-sglang-sidecar --help");
 
     assert!(
         output.status.success(),
