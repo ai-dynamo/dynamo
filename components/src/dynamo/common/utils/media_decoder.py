@@ -50,4 +50,4 @@ def enable_frontend_video_decoding(media_decoder: Any) -> None:
         )
         return
 
-    enable_video({"num_frames": _video_num_frames()})
+    enable_video({"max_frames": _video_num_frames()})

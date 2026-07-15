@@ -121,7 +121,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             ["red", "static", "still"], frontend_decoding=True
                         ),
                         extra_script_args=["--frontend-decoding"],
-                        marks=[pytest.mark.post_merge],
                     ),
                 ],
             ),

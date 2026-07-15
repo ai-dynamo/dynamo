@@ -21,7 +21,7 @@ def test_enable_frontend_video_decoding_uses_backend_default(monkeypatch):
     enable_frontend_video_decoding(decoder)
 
     decoder.enable_video.assert_called_once_with(
-        {"num_frames": DEFAULT_FRONTEND_VIDEO_NUM_FRAMES}
+        {"max_frames": DEFAULT_FRONTEND_VIDEO_NUM_FRAMES}
     )
 
 
@@ -31,7 +31,7 @@ def test_enable_frontend_video_decoding_uses_configured_frame_count(monkeypatch)
 
     enable_frontend_video_decoding(decoder)
 
-    decoder.enable_video.assert_called_once_with({"num_frames": 8})
+    decoder.enable_video.assert_called_once_with({"max_frames": 8})
 
 
 @pytest.mark.parametrize("value", ["invalid", "0", "-1"])
@@ -44,7 +44,7 @@ def test_enable_frontend_video_decoding_rejects_invalid_frame_count(
     enable_frontend_video_decoding(decoder)
 
     decoder.enable_video.assert_called_once_with(
-        {"num_frames": DEFAULT_FRONTEND_VIDEO_NUM_FRAMES}
+        {"max_frames": DEFAULT_FRONTEND_VIDEO_NUM_FRAMES}
     )
     assert DYN_MM_VIDEO_NUM_FRAMES in caplog.text
 

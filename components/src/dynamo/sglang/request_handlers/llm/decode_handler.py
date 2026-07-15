@@ -8,7 +8,9 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import numpy as np
 import sglang as sgl
+import torch
 from PIL.Image import Image as PILImage
+from sglang.srt.utils.video_decoder import VideoDecoderWrapper
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
@@ -43,59 +45,42 @@ _SAMPLING_OPTION_FIELDS = (
 )
 
 
-_FRONTEND_DECODED_VIDEO_TYPE: Any = None
+class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
+    def __new__(
+        cls, video_frames: Any, video_metadata: Dict[str, Any]
+    ) -> "FrontendDecodedVideo":
+        video = np.ascontiguousarray(video_frames).view(cls)
+        duration = float(video_metadata.get("duration") or 0)
+        source_fps = float(video_metadata.get("fps") or 0)
+        video._avg_fps = len(video_frames) / duration if duration > 0 else source_fps
+        if video._avg_fps <= 0:
+            raise ValueError("Frontend-decoded video metadata must contain a valid fps")
+        return video
+
+    def __init__(self, video_frames: Any, video_metadata: Dict[str, Any]):
+        pass
+
+    def __array_finalize__(self, source: Any) -> None:
+        if source is not None:
+            self._avg_fps = getattr(source, "_avg_fps", 0.0)
+
+    @property
+    def avg_fps(self) -> float:
+        return self._avg_fps
+
+    def get_frames_as_tensor(self, indices: list[int]):
+        return torch.from_numpy(np.asarray(self)[indices])
+
+    def get_frames_at(self, indices: list[int]):
+        return np.asarray(self)[indices]
+
+    def close(self) -> None:
+        pass
 
 
-def _as_sglang_video(frames: Any, metadata: Dict[str, Any]) -> Any:
+def _as_sglang_video(frames: Any, metadata: Dict[str, Any]) -> FrontendDecodedVideo:
     """Expose transferred frames through SGLang's predecoded video contract."""
-    global _FRONTEND_DECODED_VIDEO_TYPE
-
-    if _FRONTEND_DECODED_VIDEO_TYPE is None:
-        # Keep module import compatible with SGLang releases that predate
-        # VideoDecoderWrapper; only frontend video decoding requires it.
-        from sglang.srt.utils.video_decoder import VideoDecoderWrapper
-
-        class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
-            def __new__(
-                cls, video_frames: Any, video_metadata: Dict[str, Any]
-            ) -> "FrontendDecodedVideo":
-                video = np.ascontiguousarray(video_frames).view(cls)
-                duration = float(video_metadata.get("duration") or 0)
-                source_fps = float(video_metadata.get("fps") or 0)
-                video._avg_fps = (
-                    len(video_frames) / duration if duration > 0 else source_fps
-                )
-                if video._avg_fps <= 0:
-                    raise ValueError(
-                        "Frontend-decoded video metadata must contain a valid fps"
-                    )
-                return video
-
-            def __init__(self, video_frames: Any, video_metadata: Dict[str, Any]):
-                pass
-
-            def __array_finalize__(self, source: Any) -> None:
-                if source is not None:
-                    self._avg_fps = getattr(source, "_avg_fps", 0.0)
-
-            @property
-            def avg_fps(self) -> float:
-                return self._avg_fps
-
-            def get_frames_as_tensor(self, indices: list[int]):
-                import torch
-
-                return torch.from_numpy(np.asarray(self)[indices])
-
-            def get_frames_at(self, indices: list[int]):
-                return np.asarray(self)[indices]
-
-            def close(self) -> None:
-                pass
-
-        _FRONTEND_DECODED_VIDEO_TYPE = FrontendDecodedVideo
-
-    return _FRONTEND_DECODED_VIDEO_TYPE(frames, metadata)
+    return FrontendDecodedVideo(frames, metadata)
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:

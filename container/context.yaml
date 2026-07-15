@@ -80,7 +80,7 @@ vllm:
   vllm_omni_ref: "v0.24.0"
   nixl_ref: v1.1.0
   max_jobs: "10"
-  enable_media_ffmpeg: "false"
+  enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   enable_modelexpress: "true"

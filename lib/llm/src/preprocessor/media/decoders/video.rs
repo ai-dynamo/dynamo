@@ -514,6 +514,22 @@ mod tests {
     }
 
     #[test]
+    fn test_decode_video_max_frames_clamps_to_short_video() {
+        let (encoded_data, width, height, total_frames) = load_test_video("240p_10.mp4");
+        let decoder = VideoDecoder {
+            max_frames: Some(32),
+            ..Default::default()
+        };
+
+        let decoded = decoder.decode(encoded_data).unwrap();
+
+        assert_eq!(decoded.tensor_info.shape[0], total_frames as usize);
+        assert_eq!(decoded.tensor_info.shape[1], height as usize);
+        assert_eq!(decoded.tensor_info.shape[2], width as usize);
+        assert_eq!(decoded.tensor_info.shape[3], 3);
+    }
+
+    #[test]
     fn test_decode_video_fps_sampling() {
         let (encoded_data, width, height, _total_frames) = load_test_video("240p_100.mp4");
 
