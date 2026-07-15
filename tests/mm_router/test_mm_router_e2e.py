@@ -291,7 +291,7 @@ def _send_request_get_overlap(
 # tipped over into an OOM-shaped worker exit during startup (OPS-7716). 32768
 # tokens (1024 blocks) is ~2x the worst-case single request (~520 blocks /
 # 16640 tokens per THREE_IMAGE_TOTAL_BLOCKS_RANGE), leaving ample reuse headroom.
-@pytest.mark.profiled_vram_gib(14.0)
+@pytest.mark.profiled_vram_gib(12.0)  # measured device peak ~11 GiB w/ token cap
 @pytest.mark.requested_trtllm_kv_tokens(32768)
 @pytest.mark.timeout(1800)
 def test_trtllm_mm_overlap_all(start_trtllm_mm_services, predownload_models):
