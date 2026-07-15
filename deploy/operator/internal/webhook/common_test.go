@@ -65,11 +65,28 @@ func TestLeaseAwareDefaulterWithoutChecker(t *testing.T) {
 }
 
 func TestWithGate(t *testing.T) {
-	webhook := WithGate(&admission.Webhook{}, features.Gates{Grove: true})
+	webhook := WithGate(&admission.Webhook{Handler: admission.HandlerFunc(func(context.Context, admission.Request) admission.Response {
+		return admission.Allowed("handled")
+	})}, features.Gates{Grove: true})
 	ctx := webhook.WithContextFunc(context.Background(), &http.Request{})
 	if !features.MustGateFrom(ctx).Enabled(features.Grove) {
 		t.Fatal("Grove gate missing from webhook context")
 	}
+	if response := webhook.Handler.Handle(ctx, admission.Request{}); !response.Allowed {
+		t.Fatal("handler rejected request with gate context")
+	}
+}
+
+func TestWithGateRequiresGateContext(t *testing.T) {
+	webhook := WithGate(&admission.Webhook{Handler: admission.HandlerFunc(func(context.Context, admission.Request) admission.Response {
+		return admission.Allowed("handled")
+	})}, features.Defaults())
+	defer func() {
+		if recover() == nil {
+			t.Fatal("handler did not panic without gate context")
+		}
+	}()
+	webhook.Handler.Handle(context.Background(), admission.Request{})
 }
 
 func TestCanModifyDGDReplicas(t *testing.T) {
