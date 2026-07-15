@@ -799,7 +799,7 @@ async def test_prefill_unload_treats_missing_request_adapter_as_idempotent(monke
     assert result["status"] == "success"
     unregister.assert_awaited_once()
     assert "adapterA" not in engine.loaded_loras
-    engine.engine_client.remove_lora.assert_not_awaited()
+    engine.engine_client.remove_lora.assert_awaited_once_with(123)
 
 
 # --------------------------------------------------------------------------- #
