@@ -258,7 +258,7 @@ class OmniHandler(BaseOmniHandler):
                         lora_path=lora_path,
                     )
                 )
-                if not add_ok:
+                if add_ok is False:
                     yield {
                         "status": "error",
                         "message": (
