@@ -497,22 +497,16 @@ impl OfflineReplayRouter {
         let (priority_jump, strict_priority) = request.router_priorities();
         let (overlaps, token_seq) = match replay_hashes {
             Some(replay_hashes) => {
+                let token_seq = self.config.compute_seq_hashes_for_tracking(
+                    &request.tokens,
+                    self.block_size,
+                    None,
+                    BlockHashOptions::default(),
+                    Some(&replay_hashes.local_block_hashes),
+                );
                 let overlaps = self
                     .indexer
                     .find_matches_for_hashes(replay_hashes.local_block_hashes);
-                let token_seq = if !self.config.router_track_active_blocks {
-                    None
-                } else if self.config.router_assume_kv_reuse {
-                    Some(replay_hashes.sequence_hashes)
-                } else {
-                    self.config.compute_seq_hashes_for_tracking(
-                        &request.tokens,
-                        self.block_size,
-                        None,
-                        BlockHashOptions::default(),
-                        None,
-                    )
-                };
                 (overlaps, token_seq)
             }
             None => {
@@ -710,9 +704,9 @@ mod tests {
     use dynamo_kv_router::PrefillTokenDeltas;
     use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel, RouterQueuePolicy};
     use dynamo_kv_router::protocols::{
-        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
-        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        WorkerId, WorkerWithDpRank,
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+        WorkerWithDpRank,
     };
     use rustc_hash::FxHashMap;
     use uuid::Uuid;
@@ -854,24 +848,23 @@ mod tests {
         };
         let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
         let first = request_with_priorities(1, 7, 10 * 64, 0, 0);
+        let first_hashes = ReplayRequestHashes::from_tokens(&first.tokens, router.block_size);
 
-        router.on_request_arrival(&first, None, 0.0).unwrap();
+        router
+            .on_request_arrival(&first, Some(first_hashes), 0.0)
+            .unwrap();
         assert_eq!(
             router.debug_snapshot(0.0).active_blocks_by_worker,
             vec![(0, 9)]
         );
 
         let second = request_with_priorities(2, 8, 10 * 64, 0, 0);
-        let second_sequence = router
-            .config
-            .compute_seq_hashes_for_tracking(
-                &second.tokens,
-                router.block_size,
-                None,
-                BlockHashOptions::default(),
-                None,
-            )
+        let second_hashes = ReplayRequestHashes::from_tokens(&second.tokens, router.block_size);
+        let second_pending = router
+            .build_pending_request(&second, Some(second_hashes), None)
             .unwrap();
+        let second_sequence = second_pending.token_seq.unwrap();
+        assert_eq!(second_sequence.len(), 3);
         let (potential_blocks, _, _) = router.slots.potential_blocks_and_tokens::<false>(
             Some(&second_sequence),
             &PrefillTokenDeltas::none(),

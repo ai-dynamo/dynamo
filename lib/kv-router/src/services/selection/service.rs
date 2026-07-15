@@ -64,6 +64,10 @@ impl SelectionServiceBuilder {
     }
 
     pub async fn build(self) -> anyhow::Result<SelectionService> {
+        self.kv_router_config
+            .validate_config()
+            .map_err(|error| anyhow::anyhow!("invalid KV router configuration: {error}"))?;
+
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         let replica_runtime = setup_replica_sync(
@@ -399,6 +403,21 @@ mod tests {
         })
         .await
         .expect("replica port was not released")
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_zero_active_sequence_stride() {
+        let mut config = test_config();
+        config.router_active_sequence_stride = 0;
+
+        let error = SelectionServiceBuilder::new(config)
+            .build()
+            .await
+            .err()
+            .expect("zero active-sequence stride must fail during service construction");
+        let message = error.to_string();
+        assert!(message.contains("invalid KV router configuration"));
+        assert!(message.contains("router_active_sequence_stride"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
