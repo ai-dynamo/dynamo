@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: tml-inkling-sglang-agg
+  labels:
+    app.kubernetes.io/name: tml-inkling-sglang-agg
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: sglang
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        imagePullSecrets:
+          - name: nvcr-imagepullsecret
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              # Edit this if your cluster provides a shared RWX model PVC
+              claimName: model-cache
+        mainContainer:
+          image: nvcr.io/nvstaging/nim/sglang-inkling:4cec9ef9d-custom-numba-dynamo-v1.3.0-dev.1-cuda13-inkling-frontend2
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+              readOnly: true
+          args:
+            - -m
+            - dynamo.frontend
+            - --model-path
+            - /model-cache/thinkingmachines/Inkling-NVFP4
+            - --model-name
+            - inkling-model
+            - --dyn-chat-processor
+            - sglang
+            - --reasoning-parser
+            - inkling
+            - --tool-call-parser
+            - inkling
+            - --trust-remote-code
+    decode:
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "8"
+        requests:
+          cpu: "64"
+          memory: "512Gi"
+          custom:
+            ephemeral-storage: "200Gi"
+      extraPodSpec:
+        hostIPC: true
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: nvidia.com/gpu.product
+                      operator: In
+                      values:
+                        - NVIDIA-B200
+        imagePullSecrets:
+          - name: nvcr-imagepullsecret
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              # Edit this if your cluster provides a shared RWX model PVC
+              claimName: model-cache
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 512Gi
+          - name: tmp
+            emptyDir:
+              sizeLimit: 200Gi
+          - name: flashinfer-cache
+            emptyDir:
+              sizeLimit: 32Gi
+        mainContainer:
+          image: nvcr.io/nvstaging/nim/sglang-inkling:4cec9ef9d-custom-numba-dynamo-v1.3.0-dev.1-cuda13-inkling-frontend2
+          workingDir: /workspace/examples/backends/sglang
+          env:
+            - name: SGLANG_ENABLE_UNIFIED_RADIX_TREE
+              value: "1"
+            - name: HF_HOME
+              value: /tmp/hf-cache
+            - name: FLASHINFER_DISABLE_VERSION_CHECK
+              value: "1"
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+            - name: tmp
+              mountPath: /tmp
+            - name: flashinfer-cache
+              mountPath: /root/.cache/flashinfer
+          command:
+            - python3
+            - -m
+            - dynamo.sglang
+          args:
+            - --model-path
+            - /model-cache/thinkingmachines/Inkling-NVFP4
+            - --served-model-name
+            - inkling-model
+            - --tensor-parallel-size
+            - "8"
+            - --quantization
+            - modelopt_fp4
+            - --attention-backend
+            - fa4
+            - --fp4-gemm-backend
+            - flashinfer_trtllm
+            - --moe-runner-backend
+            - flashinfer_trtllm_routed
+            - --enable-torch-symm-mem
+            - --mamba-radix-cache-strategy
+            - extra_buffer
+            - --mem-fraction-static
+            - "0.85"
+            - --swa-full-tokens-ratio
+            - "0.1"
+            - --mamba-full-memory-ratio
+            - "0.1"
+            - --enable-multimodal
+            - --reasoning-parser
+            - inkling
+            - --tool-call-parser
+            - inkling
