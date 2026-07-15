@@ -2644,10 +2644,6 @@ func generateAdapterName(dgdName, componentName string) string {
 	return fmt.Sprintf("%s-%s", dgdName, strings.ToLower(componentName))
 }
 
-func (r *DynamoGraphDeploymentReconciler) istioState() (enabled, available bool) {
-	return r.Config.ServiceMesh.IsEnabled(), r.RuntimeConfig.Enabled(features.Istio)
-}
-
 // hasEPPService checks if the DGD has an EPP service defined
 // reconcileEPPResources reconciles all EPP-related resources (ConfigMaps, Services, InferencePools)
 func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
@@ -2702,12 +2698,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// Only attempt DestinationRule reconciliation when the Istio CRDs are
 	// present on the cluster; otherwise the API call would fail on every
 	// reconcile for Istio-less clusters.
-	// When disabled, still best-effort clean up previously owned
-	// DestinationRules if the API exists.
-	// Configuration is the desired state; the gate records startup API availability.
-	// Keep them distinct so a transient discovery miss cannot turn enablement into cleanup.
-	meshEnabled, istioAvailable := r.istioState()
-	if !meshEnabled && !istioAvailable {
+	// When disabled, still best-effort clean up previously owned DestinationRules if the API exists.
+	meshEnabled := r.RuntimeConfig.Enabled(features.Istio)
+	istioAvailable := meshEnabled
+	if !meshEnabled {
 		istioAvailable = features.DetectIstioDestinationRuleAvailability(ctx, r.RestConfig)
 	}
 	if istioAvailable {

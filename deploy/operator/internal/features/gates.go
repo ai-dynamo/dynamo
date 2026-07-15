@@ -90,7 +90,7 @@ const (
 	// Default: false
 	DRA Name = "dra"
 
-	// Istio records resolved Istio DestinationRule API availability.
+	// Istio enables Istio DestinationRule reconciliation.
 	//
 	// Owner: @atchernych
 	// Experimental since: N/A
@@ -195,7 +195,7 @@ func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorC
 		"DRA is explicitly enabled in config but the resource.k8s.io/v1 API was not detected in the cluster (requires Kubernetes 1.34+)"); err != nil {
 		return Gates{}, err
 	}
-	if ptr.Deref(config.ServiceMesh.Enabled, true) {
+	if config.ServiceMesh.IsEnabled() {
 		if gates.Istio, err = resolve(config.ServiceMesh.Enabled, DetectIstioDestinationRuleAvailability(ctx, mgr.GetConfig()),
 			"service mesh is explicitly enabled in config but the networking.istio.io DestinationRule API was not detected in the cluster"); err != nil {
 			return Gates{}, err
