@@ -59,6 +59,7 @@ def _make_engine(generate_async) -> TrtllmLLMEngine:
     engine._logits_processor_spec = None
     engine._default_sampling_params = SimpleNamespace()
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
+    engine._disagg_machine_id = 0
     engine.max_seq_len = 1024
     engine._active_requests = {}
     engine._additional_metrics = None
@@ -166,3 +167,43 @@ async def test_visible_stop_tokens_use_dynamo_stopping():
     assert captured["sampling_params"] is sampling_params
     assert sampling_params.ignore_eos is True
     assert set(sampling_params.stop_token_ids) == {100, 300}
+
+
+async def test_prefill_skips_generation_stop_conditions():
+    captured: dict = {}
+
+    def fake_generate_async(**kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    sampling_params = SimpleNamespace(
+        max_tokens=None,
+        ignore_eos=False,
+        min_tokens=None,
+        stop_token_ids=[300],
+    )
+    engine = _make_engine(fake_generate_async)
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    engine._override_sampling_params = lambda _default, _request: sampling_params
+
+    await _drain(
+        engine,
+        _FakeContext(),
+        {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {
+                "max_tokens": 10,
+                "min_tokens": 8,
+                "ignore_eos": True,
+                "stop_token_ids_hidden": [100],
+                "stop_token_ids_visible": [200],
+            },
+        },
+    )
+
+    assert captured["sampling_params"] is sampling_params
+    assert sampling_params.max_tokens == 1
+    assert sampling_params.min_tokens is None
+    assert sampling_params.ignore_eos is False
+    assert sampling_params.stop_token_ids == [300]
+    assert captured["streaming"] is False

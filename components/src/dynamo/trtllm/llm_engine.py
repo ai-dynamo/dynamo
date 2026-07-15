@@ -856,7 +856,8 @@ class TrtllmLLMEngine(LLMEngine):
             elif self.max_seq_len is not None:
                 sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
 
-        apply_stop_conditions_to_sampling_params(sampling_params, stop_conditions)
+        if is_generation_stage(_TRTLLM_TO_COMMON_DISAGG[self.disaggregation_mode]):
+            apply_stop_conditions_to_sampling_params(sampling_params, stop_conditions)
 
         # In conversation-affinity mode let the engine's ConversationAwareADPRouter pick the
         # attention-DP rank from the conversation id; do NOT force a rank (an explicit rank is

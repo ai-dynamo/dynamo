@@ -35,6 +35,8 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.engine import is_generation_stage
+from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -1064,9 +1066,10 @@ class HandlerBase(BaseGenerativeHandler):
                 dynamic_default = max(1, self.max_seq_len - input_length)
                 sampling_params.max_tokens = dynamic_default
 
-        apply_stop_conditions_to_sampling_params(
-            sampling_params, request["stop_conditions"]
-        )
+        if is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name]):
+            apply_stop_conditions_to_sampling_params(
+                sampling_params, request["stop_conditions"]
+            )
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
