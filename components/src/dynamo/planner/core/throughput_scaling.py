@@ -181,19 +181,14 @@ class ThroughputScalingMixin:
             self._diag_throughput_reason = "model_not_ready"
             return None
         ttft_ms = capacity.ttft_ms or 0.0
-        sla_floor = 1
         if not capacity.eligible or ttft_ms > self._config.ttft_ms:
             logger.warning(
                 f"Prefill TTFT SLA not met: {ttft_ms:.1f}ms > {self._config.ttft_ms:.1f}ms"
             )
-            # Latency-driven floor
-            sla_floor = math.ceil(ttft_ms / self._config.ttft_ms)
 
         self._diag_engine_rps_prefill = engine_rps
 
-        result = max(
-            math.ceil(demand_rps / engine_rps), sla_floor, self._config.min_endpoint
-        )
+        result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
         logger.info(
             f"Prefill: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
             f"est_ttft={ttft_ms:.1f}ms, isl_raw={isl:.1f}, "

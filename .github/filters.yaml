@@ -194,6 +194,7 @@ sglang:
   - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
+  - 'components/src/dynamo/sglang_sidecar/**'
   - 'container/templates/sglang_*'
   - 'container/deps/sglang/**'
   - '!**/*.md'

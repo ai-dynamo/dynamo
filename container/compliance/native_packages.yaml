@@ -156,3 +156,14 @@ packages:
       - trtllm-runtime
       - trtllm-runtime-efa
       - dynamo-planner
+
+  # dash — POSIX shell copied from planner_builder to provide /bin/sh in the
+  # distroless planner (its base ships no shell). The distroless-python planner
+  # no longer scans dpkg, so the shipped binary is attributed here. BSD-3-Clause
+  # is the license of the redistributed binary (Debian copyright Files: *).
+  - name: dash
+    version: 0.5.12-12
+    license: BSD-3-Clause
+    source: http://gondor.apana.org.au/~herbert/dash/
+    images:
+      - dynamo-planner

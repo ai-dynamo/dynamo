@@ -46,6 +46,10 @@ def run_select_service(args: List[str]) -> None:
     """Run the Dynamo selection service with the given arguments."""
     ...
 
+def run_sglang_sidecar(args: List[str]) -> None:
+    """Run the SGLang gRPC sidecar with the given arguments."""
+    ...
+
 # Any Python object that can be serialized to JSON (dict, list, str, int, etc.)
 JsonLike = Any
 
@@ -246,6 +250,41 @@ class PyAsyncRequestStream:
     def __aiter__(self) -> "PyAsyncRequestStream": ...
     async def __anext__(self) -> JsonLike: ...
 
+class TransportType:
+    """
+    A read-only view of an instance's transport, wrapping the runtime
+    ``TransportType``. ``kind`` is the transport variant ("tcp" / "nats_tcp")
+    and ``address`` is its (transport-specific) address. The address format is
+    not a stable parse target.
+    """
+
+    @property
+    def kind(self) -> str: ...
+    @property
+    def address(self) -> str: ...
+
+class Instance:
+    """
+    A read-only view of a single registered instance of an endpoint, wrapping a
+    snapshot of the runtime ``Instance``. ``str(instance)`` yields
+    ``"namespace/component/endpoint/instance_id"``.
+    """
+
+    @property
+    def instance_id(self) -> int: ...
+    @property
+    def namespace(self) -> str: ...
+    @property
+    def component(self) -> str: ...
+    @property
+    def endpoint(self) -> str: ...
+    @property
+    def transport(self) -> TransportType: ...
+    @property
+    def device_type(self) -> Optional[str]:
+        """Device type, e.g. "cpu" or "cuda", or None if unspecified."""
+        ...
+
 class Client:
     """
     A client capable of calling served instances of an endpoint
@@ -259,6 +298,20 @@ class Client:
 
         Returns:
             A list of currently available instance IDs
+        """
+        ...
+
+    def instances(self) -> List[Instance]:
+        """
+        Get a snapshot of the current instances with full transport details.
+
+        Like ``instance_ids()``, the result is a snapshot of the watched
+        instance set; pair with ``wait_for_instances()`` to block until
+        instances exist.
+
+        Returns:
+            A list of ``Instance`` for the currently available instances,
+            across all transports (TCP, NATS, ...).
         """
         ...
 
@@ -658,12 +711,34 @@ class MultimodalEmbeddingCachePublisher:
         """
         ...
 
+class SelectionCacheConfig:
+    """
+    Bounds for the in-flight selection cache. Each field defaults to the
+    service default when omitted.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_secs: Optional[float] = None,
+        max_entries: Optional[int] = None,
+        max_bytes: Optional[int] = None,
+    ) -> None: ...
+
 class SelectionService:
     """
     In-process handle to a runtime-free Dynamo selection core.
     """
 
-    def __init__(self, *, indexer_threads: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        indexer_threads: int = 4,
+        indexer_peers: Optional[list[str]] = None,
+        replica_sync_port: Optional[int] = None,
+        replica_sync_peers: Optional[list[str]] = None,
+        selection_cache: Optional[SelectionCacheConfig] = None,
+    ) -> None:
         """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
         ...
 
@@ -708,7 +783,14 @@ class SelectionService:
         ...
 
     async def create_reservation(self, request: JsonLike) -> JsonLike:
-        """Book a request's load against a chosen worker."""
+        """Book a request's load against a worker, keyed by ``selection_id``.
+
+        Without a ``worker_id``, replays the matching ``select``'s cached
+        selection (same model/routing-group), booked under ``selection_id``;
+        other request fields are ignored. With a ``worker_id`` and the prompt,
+        books explicitly under ``selection_id`` on that worker and discards any
+        cached selection for the id. ``selection_id`` is required.
+        """
         ...
 
     async def prefill_complete(self, selection_id: str) -> None:
