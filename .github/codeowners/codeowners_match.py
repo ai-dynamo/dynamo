@@ -259,6 +259,38 @@ def load_tree(repo: Path) -> list[str]:
     return [p for p in out.splitlines() if p.strip()]
 
 
+def changed_paths(repo: Path, base: str) -> list[str]:
+    """Paths this branch adds/changes vs ``base`` (``git diff base...HEAD``).
+
+    ``--diff-filter=ACMR`` keeps Added/Copied/Modified/Renamed and drops
+    Deletions -- a removed file is not a coverage concern. Three-dot
+    ``base...HEAD`` diffs against the merge-base, so a long-running branch is
+    judged only on the surface it actually touched, not on unrelated paths
+    that landed on ``base`` after it forked. This is the diff-aware input to
+    the ``--strict`` gate; it reads the tree, like ``load_tree``, and lives
+    only in the coverage tool, never in emission.
+    """
+    try:
+        out = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "diff",
+                "--name-only",
+                "--diff-filter=ACMR",
+                f"{base}...HEAD",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError as err:
+        raise SystemExit(
+            f"git diff failed in {repo!r} (not a checkout, or base {base!r} unavailable): {err}"
+        ) from err
+    return [p for p in out.splitlines() if p.strip()]
+
+
 # ----------------------------------------------------------------------
 # Resolution pipeline
 # ----------------------------------------------------------------------

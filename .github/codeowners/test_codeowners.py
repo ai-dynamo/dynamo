@@ -16,6 +16,7 @@ If either drifts, the tests catch it before the generated CODEOWNERS goes wrong.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -24,11 +25,17 @@ import pytest
 # Allow `import codeowners_match` when pytest runs from the repo root.
 sys.path.insert(0, str(Path(__file__).parent))
 
+from build_codeowners import (  # noqa: E402
+    CoverageGate,
+    is_policy_change,
+    split_coverage,
+)
 from codeowners_match import (  # noqa: E402
     Area,
     ResolvedModel,
     SharedSpec,
     anchor,
+    changed_paths,
     compute_resolution,
     match,
     minimal_cover,
@@ -646,6 +653,222 @@ class TestEmissionIsTreeIndependent:
 
         rules = parse_codeowners(self._render(spec))
         assert resolve_owners(rules, "nested/Dockerfile") == ["@docs"]
+
+
+# ------------------------------------------------------------------
+# split_coverage() -- diff-aware strict gate partitioning
+# ------------------------------------------------------------------
+
+
+class TestSplitCoverage:
+    def test_full_tree_mode_blocks_every_unowned(self) -> None:
+        # Default (changed is None): whole-tree strict blocks on ANY unowned
+        # path -- the scheduled/maintenance 100%-coverage assertion.
+        gate = split_coverage(["a/x", "b/y"], None)
+        assert isinstance(gate, CoverageGate)
+        assert gate.blocking == ["a/x", "b/y"]
+        assert gate.warnings == []
+
+    def test_diff_aware_ignores_inherited_base_gap(self) -> None:
+        # A catch-all-only path the PR did NOT touch only warns; it never
+        # fails the gate. This is the base-churn race being closed.
+        gate = split_coverage(["base_only/x"], changed=["owned/new.py"])
+        assert gate.blocking == []
+        assert gate.warnings == ["base_only/x"]
+
+    def test_diff_aware_blocks_pr_introduced_gap(self) -> None:
+        # A catch-all-only path the PR introduced/touched still blocks: the
+        # PR's own surface must be 100% owned.
+        gate = split_coverage(["newdir/z"], changed=["newdir/z"])
+        assert gate.blocking == ["newdir/z"]
+        assert gate.warnings == []
+
+    def test_diff_aware_mixed_surface(self) -> None:
+        gate = split_coverage(
+            ["base_only/x", "newdir/z"], changed=["newdir/z", "owned/ok.py"]
+        )
+        assert gate.blocking == ["newdir/z"]
+        assert gate.warnings == ["base_only/x"]
+
+
+# ------------------------------------------------------------------
+# is_policy_change() -- policy edits force full-tree strict
+# ------------------------------------------------------------------
+
+
+class TestIsPolicyChange:
+    _AREAS = ".github/codeowners/areas.yaml"
+
+    def test_areas_file_is_policy(self) -> None:
+        assert is_policy_change([self._AREAS], self._AREAS, ".") is True
+
+    def test_script_in_policy_dir_is_policy(self) -> None:
+        assert (
+            is_policy_change(
+                [".github/codeowners/emit_codeowners.py"], self._AREAS, "."
+            )
+            is True
+        )
+
+    def test_codeowners_output_is_policy(self) -> None:
+        assert is_policy_change(["CODEOWNERS"], self._AREAS, ".") is True
+
+    def test_unrelated_change_is_not_policy(self) -> None:
+        assert (
+            is_policy_change(["src/foo.py", "owned/b.txt"], self._AREAS, ".") is False
+        )
+
+
+# ------------------------------------------------------------------
+# changed_paths() + end-to-end diff-aware --strict demo
+# ------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL)
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+
+
+def _head(repo: Path) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+
+def _run_build(repo: Path, areas: Path, *extra: str):
+    script = Path(__file__).parent / "build_codeowners.py"
+    return subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--areas",
+            str(areas),
+            "--repo",
+            str(repo),
+            "--strict",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+class TestChangedPaths:
+    def test_acmr_includes_add_modify_excludes_delete(self, tmp_path) -> None:
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        (repo / "keep.txt").write_text("1")
+        (repo / "gone.txt").write_text("1")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        base = _head(repo)
+        (repo / "keep.txt").write_text("2")  # modified
+        (repo / "added.txt").write_text("1")  # added
+        (repo / "gone.txt").unlink()  # deleted -> filtered out
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "change")
+
+        got = changed_paths(repo, base)
+        assert "added.txt" in got
+        assert "keep.txt" in got
+        assert "gone.txt" not in got  # deletions are not a coverage concern
+
+
+class TestDiffAwareStrictGateE2E:
+    """Concrete proof the relocated base-churn race is closed.
+
+    (a) a base-inherited unowned path does NOT fail diff-aware strict,
+    (b) a PR-introduced unowned path DOES fail it,
+    (c) default full-tree strict still fails on any unowned path.
+    """
+
+    def _areas(self, tmp_path: Path) -> Path:
+        areas = tmp_path / "areas.yaml"
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
+            '    path_globs: ["owned/"]\n'
+        )
+        return areas
+
+    def _repo_with_base(self, tmp_path: Path) -> tuple[Path, str]:
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        (repo / "owned").mkdir()
+        (repo / "owned" / "a.txt").write_text("x")
+        (repo / "base_unowned").mkdir()
+        (repo / "base_unowned" / "x.txt").write_text("x")  # inherited, unowned
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        return repo, _head(repo)
+
+    def test_base_gap_ignored_but_full_tree_fails(self, tmp_path) -> None:
+        areas = self._areas(tmp_path)
+        repo, base = self._repo_with_base(tmp_path)
+        # PR adds an OWNED path only; it never touches base_unowned/.
+        (repo / "owned" / "b.txt").write_text("y")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "pr adds owned only")
+        # (a) diff-aware strict PASSES despite the inherited base gap.
+        assert _run_build(repo, areas, "--changed-only", "--base", base).returncode == 0
+        # (c) full-tree strict still FAILS on that same inherited gap.
+        assert _run_build(repo, areas).returncode == 1
+
+    def test_pr_introduced_gap_fails(self, tmp_path) -> None:
+        areas = self._areas(tmp_path)
+        repo, base = self._repo_with_base(tmp_path)
+        # PR adds an UNOWNED path -- its own surface is not 100% owned.
+        (repo / "newdir").mkdir()
+        (repo / "newdir" / "z.txt").write_text("z")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "pr adds unowned")
+        # (b) diff-aware strict FAILS on the PR's own unowned path.
+        result = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert result.returncode == 1
+        assert "newdir/z.txt" in result.stdout
+
+
+class TestPolicyChangeFallback:
+    """A PR that edits ownership policy is judged whole-tree: a policy edit can
+    orphan paths the PR never touches, so diff-aware must not let it pass."""
+
+    def test_policy_edit_orphaning_untouched_path_blocks(self, tmp_path) -> None:
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        # areas.yaml lives INSIDE the repo (as in CI) so editing it shows in
+        # the diff and marks the PR a policy change.
+        areas = repo / ".github" / "codeowners" / "areas.yaml"
+        areas.parent.mkdir(parents=True)
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
+            '    path_globs: ["owned/"]\n'
+        )
+        (repo / "owned").mkdir()
+        (repo / "owned" / "a.txt").write_text("x")
+        (repo / "owned" / "b.txt").write_text("x")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        base = _head(repo)
+        # Narrow the policy so owned/b.txt is orphaned, WITHOUT touching it.
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
+            '    path_globs: ["owned/a.txt"]\n'
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "narrow policy, orphan b.txt")
+        # Plain diff-aware would miss owned/b.txt (not in the file diff); the
+        # policy-change fallback forces full-tree strict, so it BLOCKS.
+        result = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert result.returncode == 1
+        assert "owned/b.txt" in result.stdout
 
 
 # ------------------------------------------------------------------

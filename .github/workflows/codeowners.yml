@@ -42,11 +42,30 @@ jobs:
             --override-ini="addopts=" \
             --override-ini="filterwarnings="
 
-      # Coverage gate: fail if any tracked file falls through to the catch-all.
-      # New directories must be covered by an explicit path glob. This is the
-      # only step that reads git ls-files; the drift check below is a pure
-      # function of areas.yaml, so it never fires on unrelated tree churn.
-      - name: Validate 100% coverage (strict)
+      # Coverage gate on PRs: DIFF-AWARE. checkout builds the base+PR merge
+      # tree, so git ls-files sees paths that only ever landed on the base
+      # branch. --changed-only gates just the paths THIS PR adds/renames/
+      # modifies vs base.sha; unowned paths inherited unchanged from the base
+      # are a non-fatal warning. That stops unrelated base churn from red-Xing
+      # long-running PRs while still requiring the PR's own surface to be 100%
+      # owned. A PR that edits ownership policy (areas/scripts/CODEOWNERS) is
+      # judged full-tree, since a policy edit can orphan any path. base.sha is
+      # fetched by fetch-depth: 0 above.
+      - name: Validate coverage (diff-aware, PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          python .github/codeowners/build_codeowners.py \
+            --areas .github/codeowners/areas.yaml \
+            --repo . \
+            --strict \
+            --changed-only \
+            --base ${{ github.event.pull_request.base.sha }}
+
+      # Coverage gate off PRs (push to main / manual): whole-tree 100%. This is
+      # the maintenance assertion that every tracked file has a real owner, and
+      # the only step that reads git ls-files without a diff filter.
+      - name: Validate 100% coverage (strict, full tree)
+        if: github.event_name != 'pull_request'
         run: |
           python .github/codeowners/build_codeowners.py \
             --areas .github/codeowners/areas.yaml \
