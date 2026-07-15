@@ -131,13 +131,15 @@ def warn_conditional_disagg_prefill_busy_threshold_resolution(
         return
     if busy_threshold is not None:
         logging.getLogger(__name__).info(
-            "conditional_disagg load gate using "
+            "conditional_disagg prefill-load condition using "
             "--router-conditional-disagg-prefill-busy-threshold=%s",
             busy_threshold,
         )
     elif queue_threshold is not None:
         logging.getLogger(__name__).info(
-            "conditional_disagg load gate inheriting --router-queue-threshold=%s",
+            "conditional_disagg prefill-load condition using "
+            "--router-queue-threshold=%s because "
+            "--router-conditional-disagg-prefill-busy-threshold is unset",
             queue_threshold,
         )
     else:
@@ -145,7 +147,8 @@ def warn_conditional_disagg_prefill_busy_threshold_resolution(
             f"--router-conditional-disagg-policy={policy!r} consumes the "
             "prefill-worker busy signal, but neither "
             "--router-conditional-disagg-prefill-busy-threshold nor "
-            "--router-queue-threshold is set; the load gate will be a no-op.",
+            "--router-queue-threshold is set; the prefill-load condition "
+            "will be disabled.",
             stacklevel=3,
         )
 
@@ -502,8 +505,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD",
             default=2048,
             help=(
-                "KV Router: Effective-ISL token cutoff for the 'isl_bounding' "
-                "conditional-disagg policy."
+                "KV Router: For 'isl_bounding' and the ISL arm of "
+                "'isl_or_load', require effective ISL to be below this many tokens."
             ),
             arg_type=int,
             dest="conditional_disagg_eff_isl_threshold",
@@ -514,8 +517,9 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
             default=0.7,
             help=(
-                "KV Router: Effective-ISL/prompt-token ratio cutoff for the "
-                "'isl_bounding' conditional-disagg policy."
+                "KV Router: For 'isl_bounding' and the ISL arm of "
+                "'isl_or_load', require effective ISL / raw ISL to be below "
+                "this value. Must be in [0.0, 1.0]."
             ),
             arg_type=float,
             dest="conditional_disagg_eff_isl_ratio_threshold",
@@ -540,10 +544,10 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
             default=None,
             help=(
-                "KV Router: Decode-side circuit breaker for conditional disagg. "
-                "Denies bypass when active_decode_blocks(W) exceeds "
-                "threshold * total_kv_blocks(W) for the chosen decode worker. "
-                "If unset, the decode gate is disabled."
+                "KV Router: Decode-busy guard for conditional disagg. "
+                "When set, conditional-disagg bypass is disabled if the selected "
+                "decode worker's projected decode load exceeds "
+                "threshold * total_kv_blocks(W). If unset, the guard is disabled."
             ),
             arg_type=float,
             dest="conditional_disagg_decode_busy_threshold",

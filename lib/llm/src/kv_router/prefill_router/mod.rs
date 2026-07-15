@@ -141,9 +141,9 @@ pub struct PrefillRouter {
     session_affinity_ttl: Option<std::time::Duration>,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
-    /// `router_queue_threshold`. `None` means the prefill-load gate is a no-op.
+    /// `router_queue_threshold`. `None` means the prefill-load condition is disabled.
     conditional_disagg_prefill_busy_threshold: Option<f64>,
-    /// Dedicated decode-side circuit-breaker threshold. `None` means disabled.
+    /// Dedicated decode-busy guard threshold. `None` means disabled.
     conditional_disagg_decode_busy_threshold: Option<f64>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     /// Model name (used for logging / lifecycle messages).

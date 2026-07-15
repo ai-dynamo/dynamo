@@ -700,13 +700,13 @@ pub struct KvRouterConfig {
     pub conditional_disagg_eff_isl_ratio_threshold: f64,
 
     /// `PrefillLoadPolicy` busy-line fraction for the chosen prefill worker.
-    /// When unset, the load gate falls back to `router_queue_threshold`.
+    /// When unset, the prefill-load condition falls back to `router_queue_threshold`.
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub conditional_disagg_prefill_busy_threshold: Option<f64>,
 
-    /// Decode-side circuit-breaker busy-line fraction for the chosen decode
-    /// worker. When unset, the decode gate is disabled.
+    /// Decode-busy guard fraction for the chosen decode worker. When unset,
+    /// the guard is disabled.
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub conditional_disagg_decode_busy_threshold: Option<f64>,
@@ -871,19 +871,19 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
             (Some(threshold), _) => {
                 tracing::info!(
                     busy_threshold = threshold,
-                    "conditional_disagg load gate using --router-conditional-disagg-prefill-busy-threshold"
+                    "conditional_disagg prefill-load condition using --router-conditional-disagg-prefill-busy-threshold"
                 );
             }
             (None, Some(threshold)) => {
                 tracing::info!(
                     inherited_threshold = threshold,
-                    "conditional_disagg load gate inheriting --router-queue-threshold"
+                    "conditional_disagg prefill-load condition using --router-queue-threshold because --router-conditional-disagg-prefill-busy-threshold is unset"
                 );
             }
             (None, None) => {
                 tracing::warn!(
                     policy = ?config.conditional_disagg_policy,
-                    "conditional_disagg load gate is a no-op: neither prefill-busy threshold nor queue threshold is set"
+                    "conditional_disagg prefill-load condition disabled: set --router-conditional-disagg-prefill-busy-threshold or --router-queue-threshold, or use policy=isl_bounding"
                 );
             }
         }
@@ -893,7 +893,7 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
     {
         tracing::info!(
             decode_busy_threshold = threshold,
-            "conditional_disagg decode circuit breaker enabled"
+            "conditional_disagg decode-busy guard enabled: bypass is disabled when the selected decode worker's projected decode load exceeds this fraction of KV capacity"
         );
     }
     if let Err(error) = config.loaded_policy_config() {

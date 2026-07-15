@@ -160,7 +160,7 @@ impl PrefillRouter {
             tracing::debug!(
                 request_id,
                 prefill_chosen_worker_busy = ?busy,
-                "Conditional disagg load gate peeked best prefill worker"
+                "Conditional disagg prefill-load condition inspected selected prefill worker"
             );
             input = input.with_prefill_chosen_worker_busy(busy);
         }

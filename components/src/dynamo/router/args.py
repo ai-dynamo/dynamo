@@ -12,7 +12,6 @@ from dynamo.common.configuration.groups.aic_perf_args import (
     AicPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
-    CONDITIONAL_DISAGG_POLICY_CHOICES,
     KvRouterArgGroup,
     KvRouterConfigBase,
 )
@@ -67,27 +66,6 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
                     "--router-prefill-load-model=aic requires "
                     "--router-track-prefill-tokens"
                 )
-        if self.conditional_disagg_policy not in CONDITIONAL_DISAGG_POLICY_CHOICES:
-            raise ValueError(
-                "--router-conditional-disagg-policy must be one of "
-                + ", ".join(
-                    f"'{choice}'" for choice in CONDITIONAL_DISAGG_POLICY_CHOICES
-                )
-            )
-        if self.conditional_disagg_eff_isl_threshold < 0:
-            raise ValueError(
-                "--router-conditional-disagg-eff-isl-threshold must be >= 0"
-            )
-        if not 0.0 <= self.conditional_disagg_eff_isl_ratio_threshold <= 1.0:
-            raise ValueError(
-                "--router-conditional-disagg-eff-isl-ratio-threshold must be in [0.0, 1.0]"
-            )
-        if self.conditional_disagg_enabled:
-            raise ValueError(
-                "--router-conditional-disagg is only supported by dynamo.frontend "
-                "disaggregated serving; standalone dynamo.router constructs KvRouter "
-                "directly and cannot perform conditional prefill bypass"
-            )
 
 
 class DynamoRouterArgGroup(ArgGroup):

@@ -449,9 +449,9 @@ impl<
         Some((tokens as f64) > threshold * (max_batched as f64))
     }
 
-    /// Per-worker decode-busy check used by the conditional-disagg decode
-    /// circuit breaker. Returns `None` when the worker config or total KV
-    /// capacity is unavailable.
+    /// Per-worker decode-busy check used by the conditional-disagg decode-busy
+    /// guard. Returns `None` when the worker config or total KV capacity is
+    /// unavailable.
     pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
         let configs = self.workers_with_configs.borrow();
         let config = configs.get(&worker.worker_id)?;
