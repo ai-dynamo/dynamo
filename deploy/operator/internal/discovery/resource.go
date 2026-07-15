@@ -108,13 +108,18 @@ func GetK8sDiscoveryRoleBinding(dgdName, namespace string) *rbacv1.RoleBinding {
 	}
 }
 
+// getK8sDiscoveryLabelValue returns the app.kubernetes.io/name value shared by
+// the discovery ServiceAccount, Role, and RoleBinding. It is derived from the
+// SA name (not each resource's own name) so all three carry the same "app"
+// identifier, and is capped to Kubernetes' 63-char label-value limit via
+// deterministic SHA-256 suffix truncation when necessary.
 func getK8sDiscoveryLabelValue(serviceAccountName string) string {
 	if len(serviceAccountName) <= maxLabelValueLen {
 		return serviceAccountName
 	}
 
 	sum := sha256.Sum256([]byte(serviceAccountName))
-	hash := hex.EncodeToString(sum[:])[:hashLen]
+	hash := hex.EncodeToString(sum[:hashLen/2])
 	keep := maxLabelValueLen - len(hash) - 1
 	if keep <= 0 {
 		return hash

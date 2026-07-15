@@ -15,6 +15,7 @@ func TestGetK8sDiscoveryLabelValue(t *testing.T) {
 
 	tests := map[string]struct {
 		input        string
+		want         string
 		wantSame     bool
 		wantMaxLen   int
 		wantHashPart bool
@@ -30,7 +31,10 @@ func TestGetK8sDiscoveryLabelValue(t *testing.T) {
 			wantMaxLen: maxLabelValueLen,
 		},
 		"over limit truncated with hash": {
+			// sha256(64 * 'b') starts with a0fab137; expected value is
+			// 54 'b' chars + '-' + first 8 hex chars of that digest.
 			input:        strings.Repeat("b", maxLabelValueLen+1),
+			want:         strings.Repeat("b", maxLabelValueLen-hashLen-1) + "-a0fab137",
 			wantSame:     false,
 			wantMaxLen:   maxLabelValueLen,
 			wantHashPart: true,
@@ -43,6 +47,9 @@ func TestGetK8sDiscoveryLabelValue(t *testing.T) {
 
 			got := getK8sDiscoveryLabelValue(tc.input)
 
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("getK8sDiscoveryLabelValue(%q) = %q, want %q", tc.input, got, tc.want)
+			}
 			if tc.wantSame && got != tc.input {
 				t.Fatalf("getK8sDiscoveryLabelValue(%q) = %q, want unchanged", tc.input, got)
 			}
@@ -54,6 +61,9 @@ func TestGetK8sDiscoveryLabelValue(t *testing.T) {
 			}
 			if tc.wantHashPart && !strings.Contains(got, "-") {
 				t.Fatalf("getK8sDiscoveryLabelValue(%q) = %q, want hash separator", tc.input, got)
+			}
+			if again := getK8sDiscoveryLabelValue(tc.input); again != got {
+				t.Fatalf("getK8sDiscoveryLabelValue(%q) not deterministic: first=%q second=%q", tc.input, got, again)
 			}
 		})
 	}
