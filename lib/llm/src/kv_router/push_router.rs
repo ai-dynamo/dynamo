@@ -33,7 +33,7 @@ mod cancellation;
 mod request_guard;
 mod selection;
 
-use cancellation::{cancel_on_stop, cancelled_error};
+use cancellation::cancel_on_stop;
 use request_guard::RequestGuard;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
@@ -147,8 +147,8 @@ impl KvPushRouter {
             .map(|context| context.session_id.clone());
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
-        let mut selection_future = Box::pin(async {
-            self.select_worker(
+        let selection_future = self
+            .select_worker(
                 &context_id,
                 request,
                 routing_parts,
@@ -160,23 +160,9 @@ impl KvPushRouter {
                     session_id,
                 },
             )
-            .instrument(tracing::info_span!("kv_router.select_worker"))
-            .await
-        });
-        let selection_result = tokio::select! {
-            biased;
+            .instrument(tracing::info_span!("kv_router.select_worker"));
 
-            _ = request_context.stopped() => None,
-            result = &mut selection_future => Some(result),
-        };
-        drop(selection_future);
-
-        match selection_result {
-            Some(result) => result,
-            // Dropping selection_future drops its AdmissionLease. The scheduler actor owns
-            // rollback if selection reached queueing or booking; otherwise there is no state.
-            None => Err(cancelled_error(&context_id)),
-        }
+        cancel_on_stop(request_context.as_ref(), &context_id, selection_future).await?
     }
 
     async fn select_with_affinity(
@@ -1055,7 +1041,7 @@ mod tests {
         drop(initializer.commit(original_target).unwrap());
 
         let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
-        let cancellation = cancelled_error("cancelled-after-selection-request");
+        let cancellation = cancellation::cancelled_error("cancelled-after-selection-request");
         invalidate_on_non_cancellation(&mut operation, &cancellation);
         assert!(operation.is_some());
         drop(operation);
