@@ -8,13 +8,12 @@ import sys
 from dynamo._core import backend as _backend
 from dynamo.runtime.logging import configure_dynamo_logging
 
-configure_dynamo_logging(service_name="dynamo.sglang.sidecar")
-
 _run_sglang_remote = _backend._run_sglang_remote
 
 
 def main(argv: list[str] | None = None) -> None:
     """Run the remote backend against SGLang's injected gRPC endpoint."""
+    configure_dynamo_logging(service_name="dynamo.sglang.sidecar")
     _run_sglang_remote(sys.argv[1:] if argv is None else argv)
 
 
