@@ -2157,7 +2157,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	}
 
 	// GMS weight servers load weights fresh from disk and are not CRIU targets.
-	checkpointEnabled := p.runtimeConfig.Enabled(features.Checkpoint)
+	checkpointEnabled := p.runtimeConfig.Gate.Enabled(features.Checkpoint)
 	shouldUseAdmissionRestore := checkpointEnabled &&
 		p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
@@ -2330,10 +2330,10 @@ func topologyDomainsContain(domains []v1beta1.TopologyDomain, want v1beta1.Topol
 }
 
 func resolveGroveSchedulerQueue(ctx context.Context, annotations map[string]string, runtimeConfig *controller_common.RuntimeConfig) (string, error) {
-	if runtimeConfig.Enabled(features.Grove) && runtimeConfig.Enabled(features.KaiScheduler) && runtimeConfig.Enabled(features.VolcanoScheduler) {
+	if runtimeConfig.Gate.Enabled(features.Grove) && runtimeConfig.Gate.Enabled(features.KaiScheduler) && runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return "", fmt.Errorf("kai-scheduler and volcano scheduler integrations cannot both be enabled for Grove")
 	}
-	if !runtimeConfig.Enabled(features.Grove) || !runtimeConfig.Enabled(features.KaiScheduler) {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.KaiScheduler) {
 		return "", nil
 	}
 

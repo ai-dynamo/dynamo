@@ -670,7 +670,7 @@ func registerControllers(
 		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
 
-	if runtimeConfig.Enabled(features.Grove) {
+	if runtimeConfig.Gate.Enabled(features.Grove) {
 		if err = controller.NewFailoverCascadeReconciler(
 			mgr.GetClient(),
 			mgr.GetEventRecorderFor("gms-failover-cascade"),

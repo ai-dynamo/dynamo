@@ -86,9 +86,10 @@ func checkpointTestConfig() *configv1alpha1.OperatorConfiguration {
 
 func makeCheckpointReconciler(s *runtime.Scheme, objs ...client.Object) *CheckpointReconciler {
 	return &CheckpointReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(&nvidiacomv1alpha1.DynamoCheckpoint{}).Build(),
-		Config:   checkpointTestConfig(),
-		Recorder: record.NewFakeRecorder(10),
+		Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).WithStatusSubresource(&nvidiacomv1alpha1.DynamoCheckpoint{}).Build(),
+		Config:        checkpointTestConfig(),
+		RuntimeConfig: &commonController.RuntimeConfig{},
+		Recorder:      record.NewFakeRecorder(10),
 	}
 }
 

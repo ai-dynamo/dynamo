@@ -23,15 +23,7 @@ import "github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 // This is separate from the static OperatorConfiguration loaded from config files.
 type RuntimeConfig struct {
 	// Gate contains the resolved operator features.
-	Gate features.Gate
+	Gate features.Gates
 	// ExcludedNamespaces for cluster-wide mode namespace filtering
 	ExcludedNamespaces ExcludedNamespacesInterface
-}
-
-// Enabled reports whether a resolved operator feature is enabled.
-func (r *RuntimeConfig) Enabled(name features.Name) bool {
-	if r == nil || r.Gate == nil {
-		return features.Defaults().Enabled(name)
-	}
-	return r.Gate.Enabled(name)
 }

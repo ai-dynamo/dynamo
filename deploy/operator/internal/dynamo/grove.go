@@ -503,7 +503,7 @@ func injectKaiSchedulerIfEnabled(
 	validatedQueueName string,
 ) {
 	// Only proceed if grove is enabled, kai-scheduler is enabled, and no manual schedulerName is set
-	if !runtimeConfig.Enabled(features.Grove) || !runtimeConfig.Enabled(features.KaiScheduler) {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.KaiScheduler) {
 		return
 	}
 
@@ -530,7 +530,7 @@ func injectVolcanoSchedulerIfEnabled(
 	clique *grovev1alpha1.PodCliqueTemplateSpec,
 	runtimeConfig *controller_common.RuntimeConfig,
 ) {
-	if !runtimeConfig.Enabled(features.Grove) || !runtimeConfig.Enabled(features.VolcanoScheduler) {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return
 	}
 
@@ -549,7 +549,7 @@ func injectVolcanoQueueAnnotation(
 	annotations map[string]string,
 	runtimeConfig *controller_common.RuntimeConfig,
 ) {
-	if !runtimeConfig.Enabled(features.Grove) || !runtimeConfig.Enabled(features.VolcanoScheduler) {
+	if !runtimeConfig.Gate.Enabled(features.Grove) || !runtimeConfig.Gate.Enabled(features.VolcanoScheduler) {
 		return
 	}
 

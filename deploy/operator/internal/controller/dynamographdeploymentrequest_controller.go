@@ -406,10 +406,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) GetRecorder() record.EventRecor
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryEnabled() bool {
-	if r == nil {
-		return features.Defaults().Enabled(features.GPUDiscovery)
-	}
-	return r.RuntimeConfig.Enabled(features.GPUDiscovery)
+	return r.RuntimeConfig.Gate.Enabled(features.GPUDiscovery)
 }
 
 func (r *DynamoGraphDeploymentRequestReconciler) gpuDiscoveryReader() (client.Reader, bool) {

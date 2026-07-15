@@ -189,7 +189,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 
 	// Create the appropriate workload resource based on deployment type
 	var componentReconcileResult ComponentReconcileResult
-	if r.RuntimeConfig.Enabled(features.LWS) && dynamoComponentDeployment.IsMultinode() {
+	if r.RuntimeConfig.Gate.Enabled(features.LWS) && dynamoComponentDeployment.IsMultinode() {
 		componentReconcileResult, err = r.reconcileLeaderWorkerSetResources(ctx, dynamoComponentDeployment)
 	} else {
 		componentReconcileResult, err = r.reconcileDeploymentResources(ctx, dynamoComponentDeployment)
@@ -974,8 +974,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	// Resolve checkpoint for this component
 	var checkpointInfo *checkpoint.CheckpointInfo
-	if checkpointConfig := dynamo.GetCheckpoint(component); r.RuntimeConfig.Enabled(features.Checkpoint) && checkpointConfig != nil {
-		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dcd.Namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig), r.RuntimeConfig)
+	if checkpointConfig := dynamo.GetCheckpoint(component); r.RuntimeConfig.Gate.Enabled(features.Checkpoint) && checkpointConfig != nil {
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dcd.Namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig), r.RuntimeConfig.Gate)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
@@ -1005,7 +1005,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
-	if r.RuntimeConfig.Enabled(features.Checkpoint) {
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
 		if checkpointInfo == nil ||
 			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint) {
 			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
@@ -1174,7 +1174,7 @@ func (r *DynamoComponentDeploymentReconciler) hasExistingLegacyWorkerSelector(
 		return false, fmt.Errorf("failed to get deployment %s/%s: %w", dcd.Namespace, dcd.Name, err)
 	}
 
-	if r.RuntimeConfig != nil && r.RuntimeConfig.Enabled(features.LWS) {
+	if r.RuntimeConfig.Gate.Enabled(features.LWS) {
 		// Check the adopted "-0" LWS to keep alpha-era worker labels stable.
 		lwsName := leaderWorkerSetName(dcd)
 		leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
@@ -1229,7 +1229,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
 
-	if r.RuntimeConfig.Enabled(features.LWS) {
+	if r.RuntimeConfig.Gate.Enabled(features.LWS) {
 		m.Owns(&leaderworkersetv1.LeaderWorkerSet{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the LeaderWorkerSet
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },

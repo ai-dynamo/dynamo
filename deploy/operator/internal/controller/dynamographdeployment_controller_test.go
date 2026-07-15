@@ -823,8 +823,9 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotReuseExistingC
 			WithScheme(testScheme).
 			WithObjects(existing).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		Recorder:      record.NewFakeRecorder(10),
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1125,6 +1126,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRAppliesDGDDefaults(t 
 				Backend: configv1alpha1.DiscoveryBackendKubernetes,
 			},
 		},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
@@ -1246,8 +1248,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoUsesTargetConta
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
-		Config: &configv1alpha1.OperatorConfiguration{},
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1298,8 +1301,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsAutoPreservesPodTem
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(testScheme).Build(),
-		Config: &configv1alpha1.OperatorConfiguration{},
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1358,7 +1362,8 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpointsSyncsExistingAutoLi
 	ctx := context.Background()
 	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Config: &configv1alpha1.OperatorConfiguration{},
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1506,8 +1511,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
 	ref := friendlyCheckpointName
@@ -1597,8 +1603,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
 	ref := friendlyCheckpointName
@@ -1758,8 +1765,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_rejectsServiceGMSW
 			WithObjects(referenced).
 			WithStatusSubresource(referenced).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
 	ref := friendlyCheckpointName
@@ -1843,7 +1851,8 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointS
 				},
 			},
 		},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
 	ref := friendlyCheckpointName
@@ -1928,8 +1937,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 			WithObjects(existing).
 			WithStatusSubresource(existing).
 			Build(),
-		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		Recorder:      record.NewFakeRecorder(10),
+		RuntimeConfig: &controller_common.RuntimeConfig{},
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{

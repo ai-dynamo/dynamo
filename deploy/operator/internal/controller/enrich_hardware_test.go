@@ -80,9 +80,9 @@ func dcgmPod(name, ip string) *corev1.Pod {
 	}
 }
 
-func TestGPUDiscoveryEnabledDefaults(t *testing.T) {
-	assert.True(t, (*DynamoGraphDeploymentRequestReconciler)(nil).gpuDiscoveryEnabled())
-	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{}).gpuDiscoveryEnabled())
+func TestGPUDiscoveryEnabled(t *testing.T) {
+	assert.Panics(t, func() { (*DynamoGraphDeploymentRequestReconciler)(nil).gpuDiscoveryEnabled() })
+	assert.Panics(t, func() { (&DynamoGraphDeploymentRequestReconciler{}).gpuDiscoveryEnabled() })
 	assert.True(t, (&DynamoGraphDeploymentRequestReconciler{
 		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Defaults()},
 	}).gpuDiscoveryEnabled())
