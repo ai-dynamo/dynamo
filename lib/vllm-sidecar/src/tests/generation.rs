@@ -33,6 +33,31 @@ async fn generate_streams_tokens_then_stop_terminal() {
 }
 
 #[tokio::test]
+async fn generate_preserves_selected_token_logprobs() {
+    let handle = spawn_fake_engine(FakeConfig {
+        tokens: 2,
+        ..FakeConfig::default()
+    });
+    let engine = engine_for(&handle, DisaggregationMode::Aggregated);
+    engine.start(0).await.unwrap();
+    let mut input = request(Some(2));
+    input.output_options.logprobs = Some(1);
+
+    let chunks = collect_ok(
+        engine
+            .generate(input, gen_ctx(fresh_ctx()))
+            .await
+            .expect("stream"),
+    )
+    .await;
+    assert_eq!(chunks[0].token_ids, vec![1000]);
+    assert_eq!(chunks[0].log_probs, Some(vec![-0.25]));
+    assert_eq!(chunks[1].token_ids, vec![1001]);
+    assert_eq!(chunks[1].log_probs, Some(vec![-1.25]));
+    engine.cleanup().await.unwrap();
+}
+
+#[tokio::test]
 async fn generate_observes_midstream_cancellation() {
     let handle = spawn_fake_engine(FakeConfig {
         tokens: 50,
@@ -145,6 +170,6 @@ fn request_rejects_unsupported_sampling_and_output_options() {
     assert!(build_generate_request(&input, "req-guided", false).is_err());
 
     let mut input = request(Some(8));
-    input.output_options.logprobs = Some(1);
+    input.output_options.prompt_logprobs = Some(1);
     assert!(build_generate_request(&input, "req-logprobs", false).is_err());
 }

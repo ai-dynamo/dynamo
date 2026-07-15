@@ -12,6 +12,7 @@ use crate::proto as pb;
 
 #[derive(Clone)]
 pub(crate) struct BootstrapIdentity {
+    instance_id: String,
     model_id: String,
     served_model_name: String,
     reasoning_parser: String,
@@ -21,6 +22,7 @@ pub(crate) struct BootstrapIdentity {
 impl BootstrapIdentity {
     pub(crate) fn from_discovery(discovery: &Discovery) -> Self {
         Self {
+            instance_id: discovery.server.instance_id.clone(),
             model_id: discovery.model.model_id.clone(),
             served_model_name: discovery.model.served_model_name.clone(),
             reasoning_parser: discovery.model.reasoning_parser.clone(),
@@ -30,7 +32,8 @@ impl BootstrapIdentity {
 
     pub(crate) fn validate(&self, discovery: &Discovery) -> Result<(), DynamoError> {
         let live = Self::from_discovery(discovery);
-        if self.model_id != live.model_id
+        if self.instance_id != live.instance_id
+            || self.model_id != live.model_id
             || self.served_model_name != live.served_model_name
             || self.reasoning_parser != live.reasoning_parser
             || self.tool_call_parser != live.tool_call_parser
@@ -55,7 +58,8 @@ pub(crate) fn bootstrap_discover(
     rt.block_on(async {
         tokio::time::timeout(transport.deadline, async {
             let deadline = Instant::now() + transport.deadline;
-            let mut client = client::connect(endpoint, transport).await?;
+            let channel = client::connect(endpoint, transport).await?;
+            let mut client = pb::control_client::ControlClient::new(channel);
             client::discover(
                 &mut client,
                 deadline.saturating_duration_since(Instant::now()),
@@ -71,23 +75,12 @@ pub(crate) fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
-pub(crate) fn validate_discovery(discovery: &Discovery) -> Result<pb::EngineRole, DynamoError> {
-    if discovery.engine.engine_name != "vllm" {
-        return Err(client::invalid_arg(format!(
-            "vLLM gRPC endpoint reported unsupported engine `{}`",
-            discovery.engine.engine_name
-        )));
-    }
-    if discovery.engine.api_version != "vllm" {
+pub(crate) fn validate_discovery(discovery: &Discovery) -> Result<(), DynamoError> {
+    if discovery.server.api_version != "vllm" {
         return Err(client::invalid_arg(format!(
             "vLLM gRPC API version `{}` is not supported",
-            discovery.engine.api_version
+            discovery.server.api_version
         )));
-    }
-    let role = pb::EngineRole::try_from(discovery.engine.role)
-        .map_err(|_| client::invalid_arg("engine reported an unknown role"))?;
-    if role == pb::EngineRole::Unspecified {
-        return Err(client::invalid_arg("engine role must be specified"));
     }
     if discovery.model.model_id.trim().is_empty()
         || discovery.model.served_model_name.trim().is_empty()
@@ -101,39 +94,25 @@ pub(crate) fn validate_discovery(discovery: &Discovery) -> Result<pb::EngineRole
             "engine must support token-ID input for Dynamo routing",
         ));
     }
-    if discovery.model.supports_lora && discovery.model.max_loras == 0 {
+    if discovery.model.supports_lora && discovery.server.max_loras == 0 {
         return Err(client::invalid_arg(
             "LoRA-capable engine reported zero adapter capacity",
         ));
     }
-    Ok(role)
+    Ok(())
 }
 
-pub(crate) fn role_to_mode(role: pb::EngineRole) -> DisaggregationMode {
-    match role {
-        pb::EngineRole::Prefill => DisaggregationMode::Prefill,
-        pb::EngineRole::Decode => DisaggregationMode::Decode,
-        _ => DisaggregationMode::Aggregated,
-    }
-}
-
-pub(crate) fn health_request() -> pb::HealthRequest {
-    pb::HealthRequest {
-        include_inference_probe: false,
-        model: String::new(),
-    }
-}
-
-pub(crate) fn component_for_role(role: pb::EngineRole) -> &'static str {
-    match role {
-        pb::EngineRole::Prefill => "prefill",
+pub(crate) fn component_for_mode(mode: DisaggregationMode) -> &'static str {
+    match mode {
+        DisaggregationMode::Prefill => "prefill",
         _ => "backend",
     }
 }
 
 pub(crate) fn build_engine_config(discovery: &Discovery) -> EngineConfig {
     let model = &discovery.model;
-    let parallelism = discovery.engine.parallelism.clone().unwrap_or_default();
+    let server = &discovery.server;
+    let parallelism = server.parallelism.clone().unwrap_or_default();
     let served_model_name =
         (!model.served_model_name.is_empty()).then(|| model.served_model_name.clone());
 
@@ -142,18 +121,18 @@ pub(crate) fn build_engine_config(discovery: &Discovery) -> EngineConfig {
         served_model_name,
         runtime_data: Default::default(),
         llm: Some(LlmRegistration {
-            context_length: (model.max_context_length != 0).then_some(model.max_context_length),
-            kv_cache_block_size: (model.kv_block_size != 0).then_some(model.kv_block_size),
-            total_kv_blocks: (model.total_kv_blocks != 0).then_some(model.total_kv_blocks),
-            max_num_seqs: (model.max_running_requests != 0).then_some(model.max_running_requests),
-            max_num_batched_tokens: (model.max_batched_tokens != 0)
-                .then_some(model.max_batched_tokens),
+            context_length: (server.max_model_len != 0).then_some(server.max_model_len),
+            kv_cache_block_size: (server.kv_block_size != 0).then_some(server.kv_block_size),
+            total_kv_blocks: (server.total_kv_blocks != 0).then_some(server.total_kv_blocks),
+            max_num_seqs: (server.max_running_requests != 0).then_some(server.max_running_requests),
+            max_num_batched_tokens: (server.max_batched_tokens != 0)
+                .then_some(server.max_batched_tokens),
             data_parallel_size: (parallelism.data_parallel_size != 0)
                 .then_some(parallelism.data_parallel_size),
             data_parallel_start_rank: (parallelism.data_parallel_start_rank != 0)
                 .then_some(parallelism.data_parallel_start_rank),
             supports_lora: model.supports_lora,
-            max_loras: model.supports_lora.then_some(model.max_loras),
+            max_loras: model.supports_lora.then_some(server.max_loras),
             bootstrap_host: None,
             bootstrap_port: None,
         }),
@@ -182,10 +161,8 @@ mod tests {
 
     fn valid_discovery() -> Discovery {
         Discovery {
-            engine: pb::EngineInfo {
-                engine_name: "vllm".to_string(),
+            server: pb::ServerInfo {
                 api_version: "vllm".to_string(),
-                role: pb::EngineRole::Aggregated as i32,
                 ..Default::default()
             },
             model: pb::ModelInfo {
@@ -199,17 +176,10 @@ mod tests {
 
     #[test]
     fn discovery_validation_fails_closed() {
-        assert_eq!(
-            validate_discovery(&valid_discovery()).unwrap(),
-            pb::EngineRole::Aggregated
-        );
+        assert!(validate_discovery(&valid_discovery()).is_ok());
 
         let mut discovery = valid_discovery();
-        discovery.engine.role = pb::EngineRole::Unspecified as i32;
-        assert!(validate_discovery(&discovery).is_err());
-
-        let mut discovery = valid_discovery();
-        discovery.engine.api_version = "other".to_string();
+        discovery.server.api_version = "other".to_string();
         assert!(validate_discovery(&discovery).is_err());
 
         let mut discovery = valid_discovery();

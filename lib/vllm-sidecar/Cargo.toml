@@ -24,6 +24,7 @@ async-trait = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -37,6 +38,7 @@ prost = { version = "0.13.5" }
 # tonic-build maps the well-known types to ::prost_types by default.
 prost-types = { version = "0.13.5" }
 tonic = { version = "0.13.1" }
+tonic-health = { workspace = true }
 
 [build-dependencies]
 tonic-build = { version = "0.13.1" }

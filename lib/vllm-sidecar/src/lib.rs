@@ -5,9 +5,8 @@
 //!
 //! A [`VllmSidecarEngine`] implements [`dynamo_backend_common::LLMEngine`] by
 //! proxying inference to an out-of-process vLLM engine over the vLLM gRPC v1
-//! gRPC contract. The sidecar is **endpoint-only**: it is configured with just
-//! `--grpc-endpoint` and discovers model identity, disaggregation role,
-//! parallelism, KV block sizing, and context length from the engine itself.
+//! gRPC contract. It discovers engine/model capabilities while keeping the
+//! Dynamo disaggregation role as explicit deployment configuration.
 //!
 //! The crate never depends on `vllm` or any engine crate — only
 //! `dynamo-backend-common`, `tonic`/`prost`, `clap`, and tokio.

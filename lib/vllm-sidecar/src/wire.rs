@@ -9,7 +9,10 @@ use crate::client;
 use crate::proto as pb;
 
 pub(crate) enum GenerateEvent {
-    Token(Vec<u32>),
+    Token {
+        token_ids: Vec<u32>,
+        logprobs: Option<Vec<f64>>,
+    },
     Finished(pb::finish_info::FinishReason),
     PrefillReady(serde_json::Value),
 }
@@ -33,7 +36,22 @@ pub(crate) fn validate_generate_response(
             ));
         }
         if !is_prefill && !output.token_ids.is_empty() {
-            events.push(GenerateEvent::Token(output.token_ids));
+            if !output.logprobs.is_empty() && output.logprobs.len() != output.token_ids.len() {
+                return Err(client::protocol_error(
+                    "token_ids and selected-token logprobs are not positionally aligned",
+                ));
+            }
+            let logprobs = (!output.logprobs.is_empty()).then(|| {
+                output
+                    .logprobs
+                    .into_iter()
+                    .map(f64::from)
+                    .collect::<Vec<_>>()
+            });
+            events.push(GenerateEvent::Token {
+                token_ids: output.token_ids,
+                logprobs,
+            });
         }
         if let Some(finish) = output.finish_info {
             let reason =

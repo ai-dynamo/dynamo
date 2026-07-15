@@ -4,13 +4,12 @@
 //! `VllmSidecarEngine` — a [`LLMEngine`] that drives an out-of-process vLLM
 //! engine over vLLM's gRPC API.
 //!
-//! # Endpoint-only configuration
+//! # Minimal configuration
 //!
 //! The sidecar takes a single engine-specific input: the gRPC endpoint.
-//! Everything else — model identity, disaggregation role, parallelism, KV
-//! block sizing, and context length — is **discovered** from the engine over
-//! `GetEngineInfo` / `GetModelInfo`. There is no `--model` or
-//! `--disaggregation-mode`.
+//! Model identity, parallelism, KV block sizing, and context length are
+//! discovered through `GetServerInfo` / `GetModelInfo`. The Dynamo topology
+//! role is configured explicitly because it is not engine metadata.
 //!
 //! # Two-phase discovery
 //!
@@ -41,10 +40,10 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::{Args, TransportConfig, normalize_endpoint};
-use crate::client::{self, Client, Pool};
+use crate::client::{self, Health, Pool};
 use crate::discovery::{
-    BootstrapIdentity, bootstrap_discover, build_engine_config, component_for_role, health_request,
-    lora_from_proto, nonempty, role_to_mode, validate_discovery,
+    BootstrapIdentity, bootstrap_discover, build_engine_config, component_for_mode,
+    lora_from_proto, nonempty, validate_discovery,
 };
 use crate::proto as pb;
 use crate::request::{build_generate_request, finish_output};
@@ -134,22 +133,22 @@ impl VllmSidecarEngine {
         let transport = args.transport();
 
         let discovery = bootstrap_discover(&endpoint, &transport)?;
-        let role = validate_discovery(&discovery)?;
-        let disaggregation_mode = role_to_mode(role);
+        validate_discovery(&discovery)?;
+        let disaggregation_mode = args.disaggregation_mode;
 
         let served_model_name = (!discovery.model.served_model_name.is_empty())
             .then(|| discovery.model.served_model_name.clone());
 
         tracing::info!(
             %endpoint,
-            role = ?role,
+            role = ?disaggregation_mode,
             model = %discovery.model.model_id,
             "vllm sidecar bootstrapped engine discovery"
         );
 
         let config = WorkerConfig {
             namespace: args.namespace,
-            component: component_for_role(role).to_string(),
+            component: component_for_mode(disaggregation_mode).to_string(),
             endpoint: args.endpoint,
             endpoint_types: args.endpoint_types,
             custom_jinja_template: args.custom_jinja_template,
@@ -167,13 +166,12 @@ impl VllmSidecarEngine {
         Ok((engine, config))
     }
 
-    /// Poll `Health` until the engine reports `READY` or the deadline elapses.
+    /// Poll canonical gRPC health until the Generate service is serving.
     /// Transient RPC errors are treated as "not ready yet" and retried — the
     /// engine may still be loading the model when we reconnect.
-    async fn await_ready(&self, client: &mut Client, deadline: Instant) -> Result<(), DynamoError> {
-        let request = || pb::HealthRequest {
-            include_inference_probe: false,
-            model: String::new(),
+    async fn await_ready(&self, client: &mut Health, deadline: Instant) -> Result<(), DynamoError> {
+        let request = || tonic_health::pb::HealthCheckRequest {
+            service: "vllm.Generate".to_string(),
         };
 
         loop {
@@ -186,17 +184,18 @@ impl VllmSidecarEngine {
             }
             let outcome = tokio::time::timeout(
                 remaining.min(self.transport.connect_timeout),
-                client.health(request()),
+                client.check(request()),
             )
             .await;
             let retry_msg = match outcome {
                 Ok(Ok(resp)) => {
-                    let state = pb::HealthState::try_from(resp.into_inner().state)
-                        .unwrap_or(pb::HealthState::Unspecified);
+                    let state = tonic_health::pb::health_check_response::ServingStatus::try_from(
+                        resp.into_inner().status,
+                    )
+                    .unwrap_or(tonic_health::pb::health_check_response::ServingStatus::Unknown);
                     match state {
-                        pb::HealthState::Ready => return Ok(()),
-                        pb::HealthState::Draining => {
-                            return Err(client::engine_shutdown("engine is draining"));
+                        tonic_health::pb::health_check_response::ServingStatus::Serving => {
+                            return Ok(());
                         }
                         other => format!("engine not ready (state {other:?})"),
                     }
@@ -235,24 +234,16 @@ impl LLMEngine for VllmSidecarEngine {
         )
         .await
         .map_err(|_| client::engine_shutdown("connection pool startup timed out"))??;
+        let mut health = pool.health_client();
+        self.await_ready(&mut health, startup_deadline).await?;
         let mut control = pool.control_client();
-        self.await_ready(&mut control, startup_deadline).await?;
         let discovery = client::discover(
             &mut control,
             startup_deadline.saturating_duration_since(Instant::now()),
         )
         .await?;
 
-        // The role is the engine's authoritative `kv_role`; it must not have
-        // flipped between bootstrap and now (that would mean the worker
-        // registered under the wrong component).
-        let observed = role_to_mode(validate_discovery(&discovery)?);
-        if observed != self.disaggregation_mode {
-            return Err(client::invalid_arg(format!(
-                "engine role changed since bootstrap: registered as {:?} but engine now reports {:?}",
-                self.disaggregation_mode, observed
-            )));
-        }
+        validate_discovery(&discovery)?;
         if let Some(identity) = &self.bootstrap_identity {
             identity.validate(&discovery)?;
         }
@@ -374,10 +365,11 @@ impl LLMEngine for VllmSidecarEngine {
                                 let mut terminal = false;
                                 for event in response.events {
                                     match event {
-                                        GenerateEvent::Token(token_ids) => {
+                                        GenerateEvent::Token { token_ids, logprobs } => {
                                             generated += token_ids.len() as u32;
                                             yield Ok(LLMEngineOutput {
                                                 token_ids,
+                                                log_probs: logprobs,
                                                 ..Default::default()
                                             });
                                         }
@@ -428,8 +420,7 @@ impl LLMEngine for VllmSidecarEngine {
             return;
         };
         let req = pb::AbortRequest {
-            request_id: ctx.id().to_string(),
-            abort_all: false,
+            request_ids: vec![ctx.id().to_string()],
         };
         // Idempotent on the engine side (unknown id → ABORTED); failures here
         // are best-effort and swallowed.
@@ -534,7 +525,7 @@ impl LLMEngine for VllmSidecarEngine {
             return std::future::pending::<Result<(), DynamoError>>().await;
         };
 
-        let mut client = pool.control_client();
+        let mut client = pool.health_client();
         let mut interval = tokio::time::interval(self.transport.poll_interval);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -542,20 +533,19 @@ impl LLMEngine for VllmSidecarEngine {
             interval.tick().await;
             match tokio::time::timeout(
                 self.transport.connect_timeout,
-                client.health(health_request()),
+                client.check(tonic_health::pb::HealthCheckRequest {
+                    service: "vllm.Generate".to_string(),
+                }),
             )
             .await
             {
                 Ok(Ok(resp)) => {
-                    let state = pb::HealthState::try_from(resp.into_inner().state)
-                        .unwrap_or(pb::HealthState::Unspecified);
+                    let state = tonic_health::pb::health_check_response::ServingStatus::try_from(
+                        resp.into_inner().status,
+                    )
+                    .unwrap_or(tonic_health::pb::health_check_response::ServingStatus::Unknown);
                     match state {
-                        pb::HealthState::Ready => {}
-                        pb::HealthState::Draining => {
-                            return Err(client::engine_shutdown(
-                                "engine reported DRAINING after startup",
-                            ));
-                        }
+                        tonic_health::pb::health_check_response::ServingStatus::Serving => {}
                         other => {
                             return Err(client::engine_shutdown(format!(
                                 "engine health state {other:?} after startup"
@@ -616,7 +606,8 @@ impl LLMEngine for VllmSidecarEngine {
                 Some(KvEventSource::Zmq {
                     endpoint: format!("{proto}://{}:{}", e.host, e.port),
                     topic: s.topic,
-                    dp_rank: s.data_parallel_rank,
+                    dp_rank: s.data_parallel_rank.unwrap_or_default(),
+                    image_token_id: None,
                 })
             })
             .collect();

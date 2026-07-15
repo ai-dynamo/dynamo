@@ -2975,12 +2975,14 @@ dependencies = [
  "futures",
  "prost 0.13.5",
  "prost-types 0.13.5",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tonic-health",
  "tracing",
 ]
 

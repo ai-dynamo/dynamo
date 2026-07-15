@@ -208,6 +208,72 @@ fn build_request_forwards_hidden_stops_and_priority() {
 }
 
 #[test]
+fn build_request_preserves_prime_tito_sampling_logprobs_and_cache_salt() {
+    let mut request = request(Some(8));
+    request.extra_args = Some(serde_json::json!({
+        "vllm_tito": {
+            "sampling_params": {
+                "max_tokens": 17,
+                "min_tokens": 2,
+                "temperature": 0.7,
+                "top_p": 0.91,
+                "top_k": 23,
+                "min_p": 0.05,
+                "seed": 42,
+                "presence_penalty": 0.2,
+                "frequency_penalty": 0.3,
+                "repetition_penalty": 1.1,
+                "stop": ["done"],
+                "stop_token_ids": [99],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "skip_special_tokens": false,
+                "routed_experts_prompt_start": 11
+            },
+            "cache_salt": "rollout-7",
+            "priority": -7
+        }
+    }));
+
+    let wire = build_generate_request(&request, "req-tito", false).unwrap();
+    let sampling = wire.sampling.unwrap();
+    let decoding = wire.decoding.unwrap();
+    let stopping = wire.stopping.unwrap();
+    let response = wire.response.unwrap();
+    assert_eq!(wire.temperature, Some(0.7));
+    assert_eq!(sampling.top_k, 23);
+    assert_eq!(sampling.top_p, 0.91);
+    assert_eq!(sampling.min_p, 0.05);
+    assert_eq!(sampling.seed, Some(42));
+    assert_eq!(decoding.presence_penalty, 0.2);
+    assert_eq!(decoding.frequency_penalty, 0.3);
+    assert_eq!(decoding.repetition_penalty, 1.1);
+    assert_eq!(stopping.max_new_tokens, 17);
+    assert_eq!(stopping.min_new_tokens, 2);
+    assert_eq!(stopping.stop_strings, vec!["done"]);
+    assert_eq!(stopping.stop_token_ids, vec![99]);
+    assert!(stopping.ignore_eos);
+    assert!(response.output_logprobs);
+    assert!(response.output_candidates.is_some());
+    assert_eq!(wire.kv.unwrap().cache_salt, "dynamo-cache-salt:rollout-7");
+    assert_eq!(wire.priority, -7);
+}
+
+#[test]
+fn build_request_rejects_unsupported_tito_sampling_fields() {
+    let mut request = request(Some(8));
+    request.extra_args = Some(serde_json::json!({
+        "vllm_tito": {"sampling_params": {"beam_width": 4}}
+    }));
+    let error = build_generate_request(&request, "req-unsupported", false).unwrap_err();
+    assert_eq!(
+        error.error_type(),
+        ErrorType::Backend(BackendError::InvalidArgument)
+    );
+    assert!(error.message().contains("beam_width"));
+}
+
+#[test]
 fn prefill_clamps_min_and_max_tokens_to_one() {
     let mut request = request(Some(8));
     request.stop_conditions.min_tokens = Some(7);
@@ -216,22 +282,6 @@ fn prefill_clamps_min_and_max_tokens_to_one() {
     let stopping = wire.stopping.unwrap();
     assert_eq!(stopping.max_new_tokens, 1);
     assert_eq!(stopping.min_new_tokens, 1);
-}
-
-#[test]
-fn prefill_uses_prefill_rank_while_decode_uses_decode_rank() {
-    let mut request = request(Some(8));
-    request.routing = Some(RoutingHints {
-        dp_rank: Some(3),
-        prefill_dp_rank: Some(7),
-        ..Default::default()
-    });
-
-    let prefill = build_generate_request(&request, "req-prefill-rank", true).unwrap();
-    let decode = build_generate_request(&request, "req-decode-rank", false).unwrap();
-
-    assert_eq!(prefill.data_parallel_rank, Some(7));
-    assert_eq!(decode.data_parallel_rank, Some(3));
 }
 
 #[test]

@@ -33,6 +33,7 @@ use tonic::{Request, Response, Status};
 use crate::args::TransportConfig;
 use crate::engine::VllmSidecarEngine;
 use crate::proto as pb;
+use crate::proto::control_server::{Control, ControlServer};
 use crate::proto::generate_server::{Generate, GenerateServer};
 use crate::request::build_generate_request;
 use crate::wire::{json_to_prost_struct, prost_struct_to_json};
@@ -44,9 +45,16 @@ use crate::wire::{json_to_prost_struct, prost_struct_to_json};
 type RespStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
 /// How the fake engine should behave for a test.
+#[derive(Clone, Copy)]
+enum FakeRole {
+    Aggregated,
+    Prefill,
+    Decode,
+}
+
 #[derive(Clone)]
 struct FakeConfig {
-    role: pb::EngineRole,
+    role: FakeRole,
     /// Number of `Token` events the agg/decode path emits before `Finished`.
     tokens: u32,
     model_id: String,
@@ -62,7 +70,7 @@ struct FakeConfig {
 impl Default for FakeConfig {
     fn default() -> Self {
         Self {
-            role: pb::EngineRole::Aggregated,
+            role: FakeRole::Aggregated,
             tokens: 4,
             model_id: "fake-model".to_string(),
             served_model_name: "fake-served".to_string(),
@@ -76,15 +84,13 @@ impl Default for FakeConfig {
     }
 }
 
+#[derive(Clone)]
 struct FakeEngine {
     cfg: FakeConfig,
     /// Incremented once per `Abort` RPC — lets tests assert abort was sent.
     abort_count: Arc<AtomicUsize>,
     /// Captures the KV transfer parameters on the most recent request.
     last_kv_transfer_params: Arc<Mutex<Option<prost_types::Struct>>>,
-    /// Captures the `data_parallel_rank` of the most recent `Generate` request
-    /// so the KV-routing test can assert the router's forced rank is forwarded.
-    last_dp_rank: Arc<Mutex<Option<u32>>>,
     last_lora_name: Arc<Mutex<Option<String>>>,
     adapters: Arc<Mutex<BTreeMap<String, pb::LoraAdapter>>>,
 }
@@ -109,13 +115,12 @@ impl Generate for FakeEngine {
         let req = request.into_inner();
         *self.last_kv_transfer_params.lock().unwrap() =
             req.kv.as_ref().and_then(|kv| kv.kv_transfer_params.clone());
-        *self.last_dp_rank.lock().unwrap() = req.data_parallel_rank;
         *self.last_lora_name.lock().unwrap() = Some(req.lora_name.clone());
         let cfg = self.cfg.clone();
 
         let stream = async_stream::stream! {
             match cfg.role {
-                pb::EngineRole::Prefill => {
+                FakeRole::Prefill => {
                     let kv_transfer_params = json_to_prost_struct(&serde_json::json!({
                             "remote_engine_id": "engine-fake",
                             "remote_block_ids": [1, 2, 3],
@@ -150,6 +155,8 @@ impl Generate for FakeEngine {
                             prompt_info: None,
                             outputs: Some(pb::SequenceOutput {
                                 token_ids: vec![1000 + i],
+                                logprobs: vec![-0.25 - f64::from(i) as f32],
+                                ranks: vec![1],
                                 text: format!("t{i}"),
                                 num_tokens: 1,
                                 ..Default::default()
@@ -172,26 +179,32 @@ impl Generate for FakeEngine {
         };
         Ok(Response::new(Box::pin(stream)))
     }
+}
 
-    async fn get_engine_info(
+#[tonic::async_trait]
+impl Control for FakeEngine {
+    async fn get_server_info(
         &self,
-        _request: Request<pb::GetEngineInfoRequest>,
-    ) -> Result<Response<pb::EngineInfo>, Status> {
-        Ok(Response::new(pb::EngineInfo {
-            engine_name: "vllm".to_string(),
+        _request: Request<pb::GetServerInfoRequest>,
+    ) -> Result<Response<pb::ServerInfo>, Status> {
+        Ok(Response::new(pb::ServerInfo {
             engine_version: "0.0.0-fake".to_string(),
             api_version: "vllm".to_string(),
-            role: self.cfg.role as i32,
             instance_id: "fake-instance".to_string(),
-            supported_models: vec![self.cfg.model_id.clone()],
             parallelism: Some(pb::ParallelismInfo {
                 tensor_parallel_size: 1,
                 pipeline_parallel_size: 1,
                 data_parallel_size: 1,
                 data_parallel_rank: 0,
                 data_parallel_start_rank: 0,
+                decode_context_parallel_size: 1,
             }),
-            kv_connector: None,
+            max_model_len: 4096,
+            kv_block_size: 16,
+            total_kv_blocks: 1000,
+            max_running_requests: 256,
+            max_batched_tokens: 8192,
+            max_loras: self.cfg.max_loras,
         }))
     }
 
@@ -203,30 +216,13 @@ impl Generate for FakeEngine {
             model_id: self.cfg.model_id.clone(),
             served_model_name: self.cfg.served_model_name.clone(),
             served_model_aliases: Vec::new(),
-            max_context_length: 4096,
-            max_output_tokens: 2048,
-            kv_block_size: 16,
-            total_kv_blocks: 1000,
-            max_running_requests: 256,
-            max_batched_tokens: 8192,
             tokenizer_modes: Vec::new(),
             supports_text_input: true,
             supports_token_ids_input: true,
             supports_lora: self.cfg.supports_lora,
-            max_loras: self.cfg.max_loras,
             supports_multimodal: false,
             reasoning_parser: self.cfg.reasoning_parser.clone(),
             tool_call_parser: self.cfg.tool_call_parser.clone(),
-        }))
-    }
-
-    async fn health(
-        &self,
-        _request: Request<pb::HealthRequest>,
-    ) -> Result<Response<pb::HealthResponse>, Status> {
-        Ok(Response::new(pb::HealthResponse {
-            state: pb::HealthState::Ready as i32,
-            checks: Vec::new(),
         }))
     }
 
@@ -235,10 +231,7 @@ impl Generate for FakeEngine {
         _request: Request<pb::AbortRequest>,
     ) -> Result<Response<pb::AbortResponse>, Status> {
         self.abort_count.fetch_add(1, Ordering::SeqCst);
-        Ok(Response::new(pb::AbortResponse {
-            status: pb::AbortStatus::Aborted as i32,
-            message: String::new(),
-        }))
+        Ok(Response::new(pb::AbortResponse {}))
     }
 
     async fn drain(
@@ -247,16 +240,6 @@ impl Generate for FakeEngine {
     ) -> Result<Response<pb::DrainResponse>, Status> {
         Ok(Response::new(pb::DrainResponse {
             state: pb::DrainState::Complete as i32,
-            ..Default::default()
-        }))
-    }
-
-    async fn get_kv_connector_info(
-        &self,
-        _request: Request<pb::GetKvConnectorInfoRequest>,
-    ) -> Result<Response<pb::KvConnectorInfo>, Status> {
-        Ok(Response::new(pb::KvConnectorInfo {
-            schema_version: 1,
             ..Default::default()
         }))
     }
@@ -331,7 +314,6 @@ struct FakeHandle {
     endpoint: String,
     abort_count: Arc<AtomicUsize>,
     last_kv_transfer_params: Arc<Mutex<Option<prost_types::Struct>>>,
-    last_dp_rank: Arc<Mutex<Option<u32>>>,
     last_lora_name: Arc<Mutex<Option<String>>>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -355,7 +337,6 @@ impl Drop for FakeHandle {
 fn spawn_fake_engine(cfg: FakeConfig) -> FakeHandle {
     let abort_count = Arc::new(AtomicUsize::new(0));
     let last_kv_transfer_params = Arc::new(Mutex::new(None));
-    let last_dp_rank = Arc::new(Mutex::new(None));
     let last_lora_name = Arc::new(Mutex::new(None));
     let adapters = Arc::new(Mutex::new(BTreeMap::new()));
     let (tx, rx) = std::sync::mpsc::channel();
@@ -363,7 +344,6 @@ fn spawn_fake_engine(cfg: FakeConfig) -> FakeHandle {
 
     let svc_abort = abort_count.clone();
     let svc_kv = last_kv_transfer_params.clone();
-    let svc_dp = last_dp_rank.clone();
     let svc_lora_name = last_lora_name.clone();
     let svc_adapters = adapters.clone();
     std::thread::spawn(move || {
@@ -382,12 +362,20 @@ fn spawn_fake_engine(cfg: FakeConfig) -> FakeHandle {
                 cfg,
                 abort_count: svc_abort,
                 last_kv_transfer_params: svc_kv,
-                last_dp_rank: svc_dp,
                 last_lora_name: svc_lora_name,
                 adapters: svc_adapters,
             };
+            let (health_reporter, health_service) = tonic_health::server::health_reporter();
+            health_reporter
+                .set_serving::<GenerateServer<FakeEngine>>()
+                .await;
+            health_reporter
+                .set_serving::<ControlServer<FakeEngine>>()
+                .await;
             tonic::transport::Server::builder()
-                .add_service(GenerateServer::new(svc))
+                .add_service(health_service)
+                .add_service(GenerateServer::new(svc.clone()))
+                .add_service(ControlServer::new(svc))
                 .serve_with_incoming_shutdown(
                     tokio_stream::wrappers::TcpListenerStream::new(listener),
                     async move {
@@ -404,7 +392,6 @@ fn spawn_fake_engine(cfg: FakeConfig) -> FakeHandle {
         endpoint: format!("http://{addr}"),
         abort_count,
         last_kv_transfer_params,
-        last_dp_rank,
         last_lora_name,
         shutdown_tx: Some(shutdown_tx),
     }

@@ -27,14 +27,13 @@ fn from_args_discovers_aggregated_role() {
 
 #[test]
 fn from_args_discovers_prefill_role_and_component() {
-    let handle = spawn_fake_engine(FakeConfig {
-        role: pb::EngineRole::Prefill,
-        ..FakeConfig::default()
-    });
+    let handle = spawn_fake_engine(FakeConfig::default());
     let (_engine, config) = VllmSidecarEngine::from_args(Some(vec![
         "dynamo-vllm-sidecar".to_string(),
         "--grpc-endpoint".to_string(),
         handle.endpoint.clone(),
+        "--disaggregation-mode".to_string(),
+        "prefill".to_string(),
     ]))
     .expect("from_args");
 

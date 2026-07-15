@@ -20,15 +20,18 @@ use tonic::transport::{Channel, Endpoint};
 
 use crate::args::TransportConfig;
 use crate::proto as pb;
+use crate::proto::control_client::ControlClient;
 use crate::proto::generate_client::GenerateClient;
+use tonic_health::pb::health_client::HealthClient;
 
-/// Connected vLLM gRPC client over a tonic [`Channel`].
-pub type Client = GenerateClient<Channel>;
+pub type Generate = GenerateClient<Channel>;
+pub type Control = ControlClient<Channel>;
+pub type Health = HealthClient<Channel>;
 
 /// Engine discovery snapshot: identity / role / parallelism plus model caps.
 #[derive(Clone, Debug)]
 pub struct Discovery {
-    pub engine: pb::EngineInfo,
+    pub server: pb::ServerInfo,
     pub model: pb::ModelInfo,
 }
 
@@ -38,8 +41,8 @@ pub struct Discovery {
 /// Each attempt is bounded by [`TransportConfig::connect_timeout`]; failed
 /// attempts are retried every [`TransportConfig::poll_interval`] until
 /// [`TransportConfig::deadline`].
-pub async fn connect(uri: &str, cfg: &TransportConfig) -> Result<Client, DynamoError> {
-    connect_channel(uri, cfg).await.map(GenerateClient::new)
+pub async fn connect(uri: &str, cfg: &TransportConfig) -> Result<Channel, DynamoError> {
+    connect_channel(uri, cfg).await
 }
 
 async fn connect_channel(uri: &str, cfg: &TransportConfig) -> Result<Channel, DynamoError> {
@@ -131,30 +134,34 @@ impl Pool {
 
     /// Round-robin a client for a streaming `generate` call. The returned
     /// [`Client`] is a cheap clone sharing one of the pool's connections.
-    pub fn stream_client(&self) -> Client {
+    pub fn stream_client(&self) -> Generate {
         let i = self.next.fetch_add(1, Ordering::Relaxed) % self.channels.len();
         GenerateClient::new(self.channels[i].clone())
     }
 
     /// A stable client (the first connection) for low-frequency control RPCs.
-    pub fn control_client(&self) -> Client {
-        GenerateClient::new(self.channels[0].clone())
+    pub fn control_client(&self) -> Control {
+        ControlClient::new(self.channels[0].clone())
+    }
+
+    pub fn health_client(&self) -> Health {
+        HealthClient::new(self.channels[0].clone())
     }
 }
 
 /// Fetch engine + model metadata within one shared deadline.
 pub async fn discover(
-    client: &mut Client,
+    client: &mut Control,
     timeout: std::time::Duration,
 ) -> Result<Discovery, DynamoError> {
     let deadline = Instant::now() + timeout;
-    let engine = tokio::time::timeout(
+    let server = tokio::time::timeout(
         deadline.saturating_duration_since(Instant::now()),
-        client.get_engine_info(pb::GetEngineInfoRequest {}),
+        client.get_server_info(pb::GetServerInfoRequest {}),
     )
     .await
-    .map_err(|_| engine_shutdown("GetEngineInfo timed out"))?
-    .map_err(|s| status_to_dynamo("GetEngineInfo", s))?
+    .map_err(|_| engine_shutdown("GetServerInfo timed out"))?
+    .map_err(|s| status_to_dynamo("GetServerInfo", s))?
     .into_inner();
     let model = tokio::time::timeout(
         deadline.saturating_duration_since(Instant::now()),
@@ -164,7 +171,7 @@ pub async fn discover(
     .map_err(|_| engine_shutdown("GetModelInfo timed out"))?
     .map_err(|s| status_to_dynamo("GetModelInfo", s))?
     .into_inner();
-    Ok(Discovery { engine, model })
+    Ok(Discovery { server, model })
 }
 
 // ============================================================================

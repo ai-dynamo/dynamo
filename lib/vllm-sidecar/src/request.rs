@@ -9,22 +9,105 @@ use crate::client;
 use crate::proto as pb;
 use crate::wire::json_to_prost_struct;
 
+const CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
+
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TitoSampling {
+    max_tokens: Option<u32>,
+    min_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_k: Option<i32>,
+    top_p: Option<f32>,
+    min_p: Option<f32>,
+    seed: Option<i64>,
+    presence_penalty: Option<f32>,
+    frequency_penalty: Option<f32>,
+    repetition_penalty: Option<f32>,
+    stop: Option<Vec<String>>,
+    stop_token_ids: Option<Vec<u32>>,
+    ignore_eos: Option<bool>,
+    include_stop_str_in_output: Option<bool>,
+    logprobs: Option<u32>,
+    prompt_logprobs: Option<u32>,
+    skip_special_tokens: Option<bool>,
+    n: Option<u8>,
+    best_of: Option<u8>,
+    use_beam_search: Option<bool>,
+    length_penalty: Option<f32>,
+    // Prime's renderer adds this routing-only hint on subsequent turns. The
+    // native protocol does not yet carry expert traces, but dense models can
+    // safely accept the hint without changing generation semantics.
+    routed_experts_prompt_start: Option<u32>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct TitoEnvelope {
+    #[serde(default)]
+    sampling_params: TitoSampling,
+    cache_salt: Option<String>,
+    priority: Option<i32>,
+    kv_transfer_params: Option<serde_json::Value>,
+}
+
+fn tito_envelope(request: &PreprocessedRequest) -> Result<Option<TitoEnvelope>, DynamoError> {
+    let Some(value) = request
+        .extra_args
+        .as_ref()
+        .and_then(|value| value.get("vllm_tito"))
+    else {
+        return Ok(None);
+    };
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| client::invalid_arg(format!("invalid extra_args.vllm_tito: {error}")))
+}
+
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
     is_prefill: bool,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_generate_request(request)?;
+    let tito = tito_envelope(request)?;
+    let tito_sampling = tito.as_ref().map(|value| &value.sampling_params);
+    if let Some(options) = tito_sampling {
+        if options.prompt_logprobs.is_some() {
+            return Err(client::invalid_arg(
+                "TITO prompt_logprobs are not yet supported by the vLLM sidecar",
+            ));
+        }
+        if options.n.unwrap_or(1) != 1 || options.best_of.unwrap_or(1) != 1 {
+            return Err(client::invalid_arg("TITO n and best_of must both be 1"));
+        }
+        if options.use_beam_search.unwrap_or(false) {
+            return Err(client::invalid_arg("TITO beam search is not supported"));
+        }
+        if options
+            .length_penalty
+            .is_some_and(|value| (value - 1.0).abs() > f32::EPSILON)
+        {
+            return Err(client::invalid_arg(
+                "TITO non-default length_penalty is not supported",
+            ));
+        }
+        let _ = options.skip_special_tokens;
+        let _ = options.routed_experts_prompt_start;
+    }
     let sampling = &request.sampling_options;
     let max_tokens = if is_prefill {
         Some(1)
     } else {
-        request.stop_conditions.max_tokens
+        tito_sampling
+            .and_then(|value| value.max_tokens)
+            .or(request.stop_conditions.max_tokens)
     };
     let min_tokens = if is_prefill {
         Some(1)
     } else {
-        request.stop_conditions.min_tokens
+        tito_sampling
+            .and_then(|value| value.min_tokens)
+            .or(request.stop_conditions.min_tokens)
     };
 
     let mut stop_token_ids = Vec::new();
@@ -37,8 +120,11 @@ pub(crate) fn build_generate_request(
     {
         stop_token_ids.extend(ids.iter().copied());
     }
+    if let Some(ids) = tito_sampling.and_then(|value| value.stop_token_ids.as_ref()) {
+        stop_token_ids = ids.clone();
+    }
 
-    let kv_transfer_params = request
+    let framework_kv_transfer_params = request
         .prefill_result
         .as_ref()
         .map(|result| {
@@ -47,17 +133,26 @@ pub(crate) fn build_generate_request(
             })
         })
         .transpose()?;
-    let data_parallel_rank = request.routing.as_ref().and_then(|routing| {
-        if is_prefill {
-            routing.prefill_dp_rank.or(routing.dp_rank)
-        } else {
-            routing.dp_rank
-        }
-    });
+    let caller_kv_transfer_params = tito
+        .as_ref()
+        .and_then(|value| value.kv_transfer_params.as_ref())
+        .map(|value| {
+            json_to_prost_struct(value).ok_or_else(|| {
+                client::invalid_arg("extra_args.vllm_tito.kv_transfer_params must be an object")
+            })
+        })
+        .transpose()?;
+    if framework_kv_transfer_params.is_some() && caller_kv_transfer_params.is_some() {
+        return Err(client::invalid_arg(
+            "kv_transfer_params cannot be supplied by both TITO and the prefill handoff",
+        ));
+    }
+    let kv_transfer_params = framework_kv_transfer_params.or(caller_kv_transfer_params);
     let priority = request
         .routing
         .as_ref()
         .and_then(|routing| routing.priority);
+    let priority = tito.as_ref().and_then(|value| value.priority).or(priority);
     let lora_name = request
         .routing
         .as_ref()
@@ -70,22 +165,45 @@ pub(crate) fn build_generate_request(
         prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
             ids: request.token_ids.clone(),
         })),
-        temperature: sampling.temperature,
+        temperature: tito_sampling
+            .and_then(|value| value.temperature)
+            .or(sampling.temperature),
         sampling: Some(pb::RandomSampling {
-            num_sequences: u32::from(sampling.n.unwrap_or(1)),
-            top_k: sampling
-                .top_k
+            num_sequences: u32::from(
+                tito_sampling
+                    .and_then(|value| value.n)
+                    .or(sampling.n)
+                    .unwrap_or(1),
+            ),
+            top_k: tito_sampling
+                .and_then(|value| value.top_k)
+                .or(sampling.top_k)
                 .filter(|value| *value > 0)
                 .and_then(|value| u32::try_from(value).ok())
                 .unwrap_or(0),
-            top_p: sampling.top_p.unwrap_or(0.0),
-            min_p: sampling.min_p.unwrap_or(0.0),
-            seed: sampling.seed,
+            top_p: tito_sampling
+                .and_then(|value| value.top_p)
+                .or(sampling.top_p)
+                .unwrap_or(0.0),
+            min_p: tito_sampling
+                .and_then(|value| value.min_p)
+                .or(sampling.min_p)
+                .unwrap_or(0.0),
+            seed: tito_sampling.and_then(|value| value.seed).or(sampling.seed),
         }),
         decoding: Some(pb::DecodingParameters {
-            presence_penalty: sampling.presence_penalty.unwrap_or(0.0),
-            frequency_penalty: sampling.frequency_penalty.unwrap_or(0.0),
-            repetition_penalty: sampling.repetition_penalty.unwrap_or(0.0),
+            presence_penalty: tito_sampling
+                .and_then(|value| value.presence_penalty)
+                .or(sampling.presence_penalty)
+                .unwrap_or(0.0),
+            frequency_penalty: tito_sampling
+                .and_then(|value| value.frequency_penalty)
+                .or(sampling.frequency_penalty)
+                .unwrap_or(0.0),
+            repetition_penalty: tito_sampling
+                .and_then(|value| value.repetition_penalty)
+                .or(sampling.repetition_penalty)
+                .unwrap_or(0.0),
             logit_bias: Default::default(),
             allowed_token_ids: Vec::new(),
             structured_output: None,
@@ -94,9 +212,18 @@ pub(crate) fn build_generate_request(
             max_new_tokens: max_tokens.unwrap_or(0),
             min_new_tokens: min_tokens.unwrap_or(0),
             stop_token_ids,
-            stop_strings: request.stop_conditions.stop.clone().unwrap_or_default(),
-            include_stop_strings: sampling.include_stop_str_in_output.unwrap_or(false),
-            ignore_eos: request.stop_conditions.ignore_eos.unwrap_or(false),
+            stop_strings: tito_sampling
+                .and_then(|value| value.stop.clone())
+                .or_else(|| request.stop_conditions.stop.clone())
+                .unwrap_or_default(),
+            include_stop_strings: tito_sampling
+                .and_then(|value| value.include_stop_str_in_output)
+                .or(sampling.include_stop_str_in_output)
+                .unwrap_or(false),
+            ignore_eos: tito_sampling
+                .and_then(|value| value.ignore_eos)
+                .or(request.stop_conditions.ignore_eos)
+                .unwrap_or(false),
         }),
         response: Some(pb::ResponseOptions {
             prompt_token_ids: false,
@@ -104,19 +231,37 @@ pub(crate) fn build_generate_request(
             prompt_candidates: None,
             output_text: Some(false),
             output_token_ids: true,
-            output_logprobs: false,
-            output_candidates: None,
+            output_logprobs: tito_sampling
+                .and_then(|value| value.logprobs)
+                .or(request.output_options.logprobs)
+                .is_some(),
+            output_candidates: tito_sampling
+                .and_then(|value| value.logprobs)
+                .or(request.output_options.logprobs)
+                .map(|top_n| pb::CandidateTokens {
+                    select: Some(pb::candidate_tokens::Select::TopN(top_n)),
+                }),
         }),
         kv: Some(pb::KvCacheParameters {
             bypass_prefix_cache: false,
-            cache_salt: String::new(),
+            cache_salt: tito
+                .as_ref()
+                .and_then(|value| value.cache_salt.as_ref())
+                .or_else(|| {
+                    request
+                        .routing
+                        .as_ref()
+                        .and_then(|routing| routing.cache_namespace.as_ref())
+                })
+                .map(|value| format!("{CACHE_SALT_PREFIX}{value}"))
+                .unwrap_or_default(),
             kv_transfer_params,
+            ec_transfer_params: None,
         }),
         truncate_prompt_tokens: 0,
         priority: priority.unwrap_or(0),
         media: build_media(request)?,
         lora_name,
-        data_parallel_rank,
     })
 }
 
@@ -162,10 +307,9 @@ fn validate_generate_request(request: &PreprocessedRequest) -> Result<(), Dynamo
             "guided decoding is not supported by the vLLM sidecar",
         ));
     }
-    if request.output_options.logprobs.is_some() || request.output_options.prompt_logprobs.is_some()
-    {
+    if request.output_options.prompt_logprobs.is_some() {
         return Err(client::invalid_arg(
-            "logprobs are not supported by the vLLM sidecar",
+            "prompt_logprobs are not supported by the vLLM sidecar",
         ));
     }
     if request.output_options.skip_special_tokens == Some(false) {

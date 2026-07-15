@@ -8,8 +8,8 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `--experimental_allow_proto3_optional` lets older protoc (the container's
-    // apt protoc 3.12) compile the proto3 `optional` fields in vllm_grpc.proto
-    // (e.g. `data_parallel_rank`). The flag was added in protoc 3.12 for exactly
+    // apt protoc 3.12) compile the proto3 `optional` fields in vllm_grpc.proto.
+    // The flag was added in protoc 3.12 for exactly
     // this and is a no-op on 3.15+ where proto3 optional is stable.
     tonic_build::configure()
         .protoc_arg("--experimental_allow_proto3_optional")

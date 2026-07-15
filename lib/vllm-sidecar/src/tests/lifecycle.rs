@@ -66,21 +66,6 @@ async fn watch_reports_engine_shutdown_when_health_endpoint_disappears() {
 }
 
 #[tokio::test]
-async fn start_rejects_role_mismatch() {
-    let handle = spawn_fake_engine(FakeConfig {
-        role: pb::EngineRole::Prefill,
-        ..FakeConfig::default()
-    });
-    let engine = engine_for(&handle, DisaggregationMode::Aggregated);
-
-    let error = engine.start(0).await.expect_err("role mismatch must fail");
-    assert_eq!(
-        error.error_type(),
-        ErrorType::Backend(BackendError::InvalidArgument)
-    );
-}
-
-#[tokio::test]
 async fn generate_before_start_errors() {
     let handle = spawn_fake_engine(FakeConfig::default());
     let engine = engine_for(&handle, DisaggregationMode::Aggregated);
@@ -208,7 +193,7 @@ async fn drain_reports_completion() {
 #[tokio::test]
 async fn decode_disables_the_generation_canary() {
     let handle = spawn_fake_engine(FakeConfig {
-        role: pb::EngineRole::Decode,
+        role: FakeRole::Decode,
         ..FakeConfig::default()
     });
     let engine = engine_for(&handle, DisaggregationMode::Decode);

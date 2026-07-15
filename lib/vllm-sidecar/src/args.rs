@@ -3,16 +3,14 @@
 
 //! Command-line arguments for the vLLM sidecar.
 //!
-//! The sidecar is **endpoint-only**: the single engine-specific flag is
-//! `--grpc-endpoint`. Model identity, disaggregation role, parallelism,
-//! KV block sizing, and context length are all *discovered* from the engine
-//! over the vLLM gRPC API — there is deliberately no `--model` or
-//! `--disaggregation-mode`.
+//! The engine and model metadata are discovered from vLLM. Deployment topology
+//! remains a Dynamo concern, so `--disaggregation-mode` is explicit.
 //!
 //! The remaining flags mirror the Dynamo runtime knobs from
 //! [`dynamo_backend_common::CommonArgs`] (same names + env vars) **except**
-//! `--component` and `--disaggregation-mode`, which the engine reports.
+//! `--component`, which is derived from the selected disaggregation mode.
 
+use dynamo_backend_common::DisaggregationMode;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -21,15 +19,25 @@ use std::time::Duration;
 #[command(
     name = "dynamo-vllm-sidecar",
     about = "Dynamo vLLM sidecar — drives an out-of-process vLLM engine over vLLM gRPC. \
-             Configure with only --grpc-endpoint; everything else is discovered."
+             Model metadata is discovered; topology is configured explicitly."
 )]
 pub struct Args {
     /// `host:port` (or full URL) of the vLLM gRPC server.
     ///
     /// A bare `host:port` is normalised to `http://host:port`. This is the
-    /// only engine-specific configuration the sidecar takes.
+    /// engine endpoint used by the sidecar.
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
     pub grpc_endpoint: String,
+
+    /// Dynamo topology role. vLLM deliberately does not expose deployment
+    /// topology in its native protocol, so the sidecar owns this routing
+    /// configuration explicitly.
+    #[arg(
+        long,
+        env = "DYN_DISAGGREGATION_MODE",
+        default_value_t = DisaggregationMode::Aggregated
+    )]
+    pub disaggregation_mode: DisaggregationMode,
 
     /// Number of independent gRPC connections to open to the engine.
     ///
