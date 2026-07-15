@@ -46,7 +46,7 @@
 //! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
 //! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
 //! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
-//! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
+//! - ✅ `dynamo_frontend_active_requests` - Current active requests gauge
 //! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
 //! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
 //! - ✅ `dynamo_messaging_client_connection_duration_ms` - Connection time in milliseconds
