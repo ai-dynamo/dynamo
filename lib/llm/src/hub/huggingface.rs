@@ -22,7 +22,7 @@ const LORA_DOWNLOAD_TIMEOUT_SECS: &str = "LORA_DOWNLOAD_TIMEOUT_SECS";
 const DEFAULT_LORA_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
 
 /// A Hugging Face model repository and the revision requested by an `hf://` URI.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HfRepoSpec {
     repo_id: String,
     revision: String,
@@ -220,6 +220,54 @@ async fn with_hf_timeout<T>(
         .with_context(|| context)
 }
 
+struct CancelHfRuntimeOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl CancelHfRuntimeOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelHfRuntimeOnDrop {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.0.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
+/// Run hf-hub operations on a dedicated runtime so timing out its parent
+/// future also tears down any chunk tasks that hf-hub spawned internally.
+async fn run_in_isolated_hf_runtime<T, F, Fut>(operation: F) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = anyhow::Result<T>> + 'static,
+{
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let mut cancel_on_drop = CancelHfRuntimeOnDrop(Some(cancel_tx));
+    let download = tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("building isolated Hugging Face download runtime")?;
+        let result = runtime.block_on(async move {
+            tokio::select! {
+                biased;
+                _ = cancel_rx => anyhow::bail!("Hugging Face download cancelled"),
+                result = operation() => result,
+            }
+        });
+        // Async chunk tasks are cancelled as the runtime shuts down. Do not
+        // wait indefinitely for unrelated blocking-pool work such as DNS.
+        runtime.shutdown_timeout(Duration::ZERO);
+        result
+    });
+    let result = download.await;
+    cancel_on_drop.disarm();
+    result.context("joining isolated Hugging Face download runtime")?
+}
+
 /// Download one immutable repository snapshot into hf-hub's native cache layout.
 ///
 /// The requested branch/tag is resolved once via `info()`. Every sibling is then
@@ -237,6 +285,12 @@ pub(crate) async fn download_hf_snapshot(
         );
     }
 
+    let cache = cache.clone();
+    let spec = spec.clone();
+    run_in_isolated_hf_runtime(move || download_hf_snapshot_inner(cache, spec)).await
+}
+
+async fn download_hf_snapshot_inner(cache: Cache, spec: HfRepoSpec) -> anyhow::Result<PathBuf> {
     let api = build_hf_api(cache.clone())?;
     let download_timeout = hf_download_timeout();
     let requested_repo = spec.repo();
@@ -266,6 +320,10 @@ pub(crate) async fn download_hf_snapshot(
             "downloading {} from Hugging Face repository {}@{}",
             sibling.rfilename, spec.repo_id, info.sha
         );
+        // `hf-hub` spawns one task per chunk and detaches those tasks when
+        // this parent future is dropped. The dedicated runtime surrounding
+        // this function is destroyed before the timeout error is returned,
+        // which aborts every chunk task before callers can observe failure.
         with_hf_timeout(
             download_timeout,
             pinned_api.get(&sibling.rfilename),
@@ -434,5 +492,56 @@ mod tests {
                 .to_string()
                 .contains("testing Hugging Face timeout timed out after 0 seconds")
         );
+    }
+
+    #[tokio::test]
+    async fn isolated_hf_runtime_aborts_spawned_tasks_before_returning() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("background-task-finished");
+        let background_marker = marker.clone();
+
+        let error = run_in_isolated_hf_runtime(move || async move {
+            with_hf_timeout(
+                Duration::from_millis(10),
+                async move {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        std::fs::write(background_marker, b"finished").unwrap();
+                    });
+                    std::future::pending::<Result<(), ApiError>>().await
+                },
+                "testing isolated Hugging Face timeout".to_string(),
+            )
+            .await
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("timed out after 0 seconds"));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!marker.exists(), "background task survived timeout");
+    }
+
+    #[tokio::test]
+    async fn cancelling_hf_runtime_cancels_its_spawned_tasks() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("cancelled-task-finished");
+        let background_marker = marker.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let download = tokio::spawn(run_in_isolated_hf_runtime(move || async move {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                std::fs::write(background_marker, b"finished").unwrap();
+            });
+            started_tx.send(()).unwrap();
+            std::future::pending::<anyhow::Result<()>>().await
+        }));
+
+        started_rx.await.unwrap();
+        download.abort();
+        assert!(download.await.unwrap_err().is_cancelled());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!marker.exists(), "background task survived cancellation");
     }
 }
