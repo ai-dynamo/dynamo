@@ -19,7 +19,7 @@ python -m dynamo.frontend --router-mode kv &
 # decode worker (GPU 0), no LMCache. --disaggregation-mode decode is required
 # under --router-mode kv (matches disagg_router.sh); NixlConnector pairs w/ prefill.
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disaggregation-mode decode --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disaggregation-mode decode --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # wait for decode worker to initialize
 sleep 20
