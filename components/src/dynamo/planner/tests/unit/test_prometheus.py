@@ -736,40 +736,43 @@ class TestPowerAwareDcgmQueries:
             # exporter pod itself (DCGM exporter runs in its own ns), so
             # using it would silently match nothing once attribution works.
             assert 'exported_namespace="kube-namespace"' in query_str
-            # exported_pod (not bare `pod`) is the workload pod label.
-            # The numeric-index segment is optional so both Grove/LWS names
-            # (<dgd>-<idx>-<component>-<hash>) and standard Deployment names
-            # (<dgd>-<component>-<rs-hash>-<pod-hash>) are matched.  The
-            # hyphen in "my-dgd" is re.escape'd to `\-`, then the backslash
-            # is doubled by _quote_label_value for the PromQL string literal.
-            assert r'exported_pod=~"^my\\-dgd-(?:[0-9]+-)?.*"' in query_str
-            # The old narrower regex must not appear.
-            assert "(prefill|decode|agg|frontend)" not in query_str
+            # DGD identity is matched via the operator-stamped pod label,
+            # not a pod-name regex.
+            assert (
+                'kubernetes_label_nvidia_com_dynamo_graph_deployment_name="my-dgd"'
+                in query_str
+            )
 
-    def test_get_total_dgd_power_escapes_dgd_name_in_regex(self):
-        """dgd_name is a regex embedded in a PromQL quoted string, so it needs
-        two escaping layers: re.escape() for the regex, then the PromQL
-        string-literal escaping (_quote_label_value).
+    def test_get_total_dgd_power_label_is_exact_not_regex(self):
+        """dgd_name is an exact label value, not a regex — dots are literal.
 
-        A dot in the name must be treated literally (a bare `.` would match any
-        character and could pull in another DGD's pods); a plain name must not
-        be over-escaped.
+        A name like "my.dgd" must match only pods whose label value is
+        exactly "my.dgd"; it must not be treated as a PromQL regex where
+        "." matches any character.  Verifies the switch from exported_pod=~
+        to kubernetes_label_...="<exact>".
         """
         client = self._client()
 
-        # Name with a regex-significant dot.
+        # Name with a dot: must appear as a plain string, no backslash escaping.
         with patch.object(client.prom, "custom_query") as mock_query:
             mock_query.return_value = []
             client.get_total_dgd_power(k8s_namespace="ns", dgd_name="my.dgd")
             query_str = mock_query.call_args[0][0]
-            assert r'exported_pod=~"^my\\.dgd-(?:[0-9]+-)?.*"' in query_str
+            assert (
+                'kubernetes_label_nvidia_com_dynamo_graph_deployment_name="my.dgd"'
+                in query_str
+            )
+            assert "exported_pod" not in query_str
 
-        # Plain alphanumeric name: escaping must be a no-op (no stray backslashes).
+        # Plain alphanumeric name: no stray backslashes or regex syntax.
         with patch.object(client.prom, "custom_query") as mock_query:
             mock_query.return_value = []
             client.get_total_dgd_power(k8s_namespace="ns", dgd_name="qwen3quickstart")
             query_str = mock_query.call_args[0][0]
-            assert 'exported_pod=~"^qwen3quickstart-(?:[0-9]+-)?.*"' in query_str
+            assert (
+                'kubernetes_label_nvidia_com_dynamo_graph_deployment_name="qwen3quickstart"'
+                in query_str
+            )
 
     def test_get_total_dgd_power_returns_none_on_empty(self):
         client = self._client()
@@ -789,51 +792,23 @@ class TestPowerAwareDcgmQueries:
             )
             assert result is None
 
-    def test_get_total_dgd_power_uses_exported_pod_not_bare_pod(self):
-        """Regression guard for the original DCGM attribution bug.
+    def test_get_total_dgd_power_uses_dgd_label_not_pod_name(self):
+        """DGD identity must be matched via the operator pod label, not pod name.
 
-        Bare ``pod`` labels the DCGM exporter pod itself; only ``exported_pod``
-        is rewritten to the workload pod by the DCGM exporter.  Mixing them
-        up is a silent failure mode (no exception, just zero results).
+        The label ``kubernetes_label_nvidia_com_dynamo_graph_deployment_name``
+        is stamped by the operator on every workload pod and is immune to
+        Grove/LWS vs Deployment pod-name shape differences.  Neither
+        ``exported_pod`` (name-regex) nor bare ``pod`` must appear.
         """
-        client = self._client()
-        with patch.object(client.prom, "custom_query") as mock_query:
-            mock_query.return_value = []
-            client.get_total_dgd_power(k8s_namespace="ns", dgd_name="dgd")
-            # The query string must use exported_pod, not the bare pod label.
-            query_str = mock_query.call_args[0][0]
-            assert "exported_pod=~" in query_str
-            # No bare `pod=~` pattern should leak in.
-            assert "{pod=~" not in query_str
-            assert ",pod=~" not in query_str
-
-    def test_get_total_dgd_power_covers_both_pod_naming_shapes(self):
-        """The selector regex matches both Grove/LWS and standard Deployment pods.
-
-        Grove/LWS:  <dgd>-<replica-index>-<component>-<hash>
-        Standard:   <dgd>-<component>-<rs-hash>-<pod-hash>
-
-        The numeric-index segment is optional (``(?:[0-9]+-)?``) so both shapes
-        are included.  The test verifies the regex as a Python re pattern because
-        PromQL regex semantics are the same for this subset.
-        """
-        import re as _re
-
         client = self._client()
         with patch.object(client.prom, "custom_query") as mock_query:
             mock_query.return_value = []
             client.get_total_dgd_power(k8s_namespace="ns", dgd_name="my-dgd")
             query_str = mock_query.call_args[0][0]
-            assert r'exported_pod=~"^my\\-dgd-(?:[0-9]+-)?.*"' in query_str
-
-        # Validate the regex itself against both naming shapes.
-        selector = _re.compile(r"^my\-dgd-(?:[0-9]+-)?.*")
-        assert selector.match(
-            "my-dgd-0-vllmworker-86nvj"
-        ), "Grove/LWS indexed name must match"
-        assert selector.match(
-            "my-dgd-vllmdecodeworker-865f84c49-6q7s5"
-        ), "Standard Deployment name must match"
-        assert not selector.match(
-            "other-dgd-0-vllmworker-abc"
-        ), "Different DGD must not match"
+            assert (
+                'kubernetes_label_nvidia_com_dynamo_graph_deployment_name="my-dgd"'
+                in query_str
+            )
+            assert "exported_pod" not in query_str
+            assert "{pod=" not in query_str
+            assert ",pod=" not in query_str
