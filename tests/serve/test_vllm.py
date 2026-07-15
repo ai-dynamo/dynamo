@@ -163,7 +163,7 @@ vllm_configs = {
     # Speculative decoding: Llama-3.1-8B main model with an EAGLE3 draft model
     # (see launch/agg_spec_decoding.sh). The base model is gated on HF, so this
     # needs HF_TOKEN set and only runs where the token + VRAM are available.
-    # Temporarily pre_merge to validate the fix in PR CI; flip to nightly once green.
+    # Nightly-only: the 8B base plus EAGLE3 draft model is intentionally outside pre-merge CI.
     "aggregated_spec_decoding": VLLMConfig(
         name="aggregated_spec_decoding",
         directory=vllm_dir,
