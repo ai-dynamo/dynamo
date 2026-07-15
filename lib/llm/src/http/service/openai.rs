@@ -3792,6 +3792,28 @@ mod tests {
     }
 
     #[test]
+    fn test_x_session_id_populates_agent_context_and_affinity() {
+        let literal = "conversation-17:request-42";
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", literal.parse().unwrap());
+        let source = context_from_headers(
+            (),
+            "request-1".to_string(),
+            &headers,
+            &HeaderName::from_static("x-session-id"),
+        )
+        .unwrap();
+        let agent = source
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context attached");
+        let affinity = source
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+        assert_eq!(agent.session_id, literal);
+        assert_eq!(affinity.as_str(), literal);
+    }
+
+    #[test]
     fn test_context_metadata_uses_configured_session_affinity_header() {
         let mut headers = HeaderMap::new();
         headers.insert("x-customer-session", "session-456".parse().unwrap());
