@@ -69,69 +69,11 @@ PolicyClassQueue("agents")
 
 ## Policy-class admission lifecycle
 
-`SchedulerQueueActor` owns admission state, physical queue accounting, worker booking, and lifecycle delivery. The request path owns only the progress updater and one `AdmissionLease` after selection.
-
-```mermaid
-sequenceDiagram
-    participant C as Lifecycle owner
-    participant H as LocalScheduler / SchedulerQueue
-    participant A as SchedulerQueueActor
-    participant G as Admission strategy
-    participant Q as PolicyQueue
-    participant S as Worker slots
-    participant R as RequestGuard
-
-    C->>H: schedule(TrackedWithAdmission)
-    H->>A: EnqueueLeased(request, lease)
-    A->>G: admit(request facts + live progress)
-    alt Bypass
-        A->>A: Continue without strategy lifecycle
-    else Ready(Any or Exact)
-        A->>Q: Enter the physical ready class/lane if capacity blocks
-    else Defer
-        A->>Q: Retain as strategy-deferred
-        G-->>A: MakeReady(id, placement)
-        A->>Q: Reclassify/migrate into the physical ready class/lane
-    end
-    Note over H,A: The remaining flow applies only to Ready/Defer, while Bypass disarms the lease
-    par Lease handoff after ownership
-        A->>A: Arm lease only after generation-scoped ownership exists
-        A-->>H: Return armed lease acknowledgement
-    and Selection when ready
-        Note over A,S: Immediate, or after deferred/blocked work becomes ready
-        A->>S: Select worker and book request state
-        A-->>H: SchedulingResponse(progress)
-    end
-    H->>H: Attach the armed lease
-    H-->>C: Selected worker + lifecycle capabilities
-    C->>R: Move progress and lease before next fallible await
-    R->>R: Backend dispatch succeeds
-    R->>R: AdmissionLease::mark_dispatched fallback
-    R->>H: LocalScheduler::mark_dispatched
-    H->>A: Bounded Dispatched command
-    A->>G: AdmissionEvent::Dispatched
-    loop Response items
-        R->>R: Publish monotonic context progress
-    end
-    alt Successful terminal item
-        R->>R: Mark Completed before yielding
-        R-->>C: Yield Stop / EoS / Length
-    else Natural EOF
-        R->>R: Mark Completed
-    else Cancellation or error
-        R->>R: Mark Aborted
-    end
-    Note over C,R: Drop after the terminal yield and normal resume converge on the same Completed lease drop
-    R->>A: Lease drop via SegQueue + coalesced bounded wake
-    A->>S: Release worker booking
-    A->>G: Completed or Aborted
-```
-
-- `EnqueueLeased` arms the lease only after actor ownership exists. Its lifecycle generation prevents stale cleanup from touching a reused request ID.
-- Lease drops use the lock-free `SegQueue` and coalesced bounded actor wakeups. Cleanup drains to quiescence so no wake is lost; do not replace it with an unbounded channel or task-per-drop cleanup. Any bounded/interleaved drain must preserve wake correctness and be benchmarked.
-- Strategy ownership and physical queue class are separate. Exact placement may migrate queue storage/accounting while callbacks remain with the strategy that admitted the request.
-- Queue limits gate new arrivals; they are not strict occupancy invariants after reclassification or worker-count changes. Strict migration limits require a rejected-`MakeReady` contract.
-- Dispatch remains a two-step protocol: `AdmissionLease::mark_dispatched()` records the cancellation fallback before `LocalScheduler::mark_dispatched(request_id)` sends the live actor event. If that send is canceled, terminal cleanup emits `Dispatched` before the terminal event.
+- **Admit:** A `TrackedWithAdmission` request and its lease enter `SchedulerQueueActor`, which is the sole owner of admission state, queue accounting, and worker booking. The strategy returns `Bypass`, `Ready`, or `Defer`; bypass disarms the lease and continues through ordinary tracked scheduling.
+- **Queue and select:** Ready work is selected immediately or parked until capacity is available. Deferred work stays parked until `MakeReady`. Exact placement may move the request into another physical queue class or worker lane without changing which strategy owns its lifecycle. Queue limits gate new arrivals, not later reclassification.
+- **Hand off:** Once the actor owns the request generation, it arms the lease. Selection returns the worker, a monotonic progress updater, and that lease. The LLM router moves both lifecycle capabilities into `RequestGuard` before its next fallible await.
+- **Dispatch and stream:** After the backend accepts the request, `RequestGuard` records the lease's dispatch fallback before sending the bounded live `Dispatched` command. Stream items update logical context. `Stop`, `EoS`, and `Length` commit completion before they are yielded; natural EOF also completes, while cancellation and errors abort.
+- **Clean up:** Finishing or dropping `RequestGuard` drops the lease into the lock-free cleanup queue. A coalesced bounded wake tells the actor to release the worker booking and emit any missing `Dispatched` event followed by `Completed` or `Aborted`. Cleanup drains to quiescence so no wake is lost; do not replace it with an unbounded channel or task-per-drop cleanup.
 
 ## Guardrails
 
