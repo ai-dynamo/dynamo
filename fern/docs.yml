@@ -17,6 +17,7 @@
 
 instances:
   - url: ai-dynamo.docs.buildwithfern.com/dynamo
+    multi-source: true
 
 title: NVIDIA Dynamo Documentation
 
@@ -266,7 +267,6 @@ metadata:
 experimental:
   mdx-components:
     - ./components
-  basepath-aware: true
 
 colors:
   accentPrimary:
