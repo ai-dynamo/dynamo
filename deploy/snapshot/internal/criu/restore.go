@@ -74,17 +74,23 @@ func ExecuteRestore(
 	log.V(1).Info("Executing go-criu Restore call")
 	if err := c.Restore(criuOpts, notify); err != nil {
 		log.Error(err, "go-criu Restore returned error")
-		logging.LogRestoreErrors(checkpointPath, settings.WorkDir, log)
+		summary := logging.LogRestoreErrors(checkpointPath, settings.WorkDir, log)
+		if summary != "" {
+			return 0, fmt.Errorf("CRIU restore failed: %w\nrestore.log: %s", err, summary)
+		}
 		return 0, fmt.Errorf("CRIU restore failed: %w", err)
 	}
 
 	return notify.restoredPID, nil
 }
 
-// BuildRestoreOpts assembles CriuOpts for a CRIU restore from the checkpoint manifest.
+// BuildRestoreOpts assembles CriuOpts for a CRIU restore into rootPath.
 // ImagesDirFd and WorkDirFd are left unset — ExecuteRestore opens them at restore time.
-func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroupRoot string, log logr.Logger) (*criurpc.CriuOpts, error) {
-	extMounts, err := buildRestoreExtMounts(m)
+func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, rootPath string, cgroupRoot string, log logr.Logger) (*criurpc.CriuOpts, error) {
+	if !filepath.IsAbs(rootPath) {
+		return nil, fmt.Errorf("CRIU restore root must be absolute: %q", rootPath)
+	}
+	extMounts, err := buildRestoreExtMounts(m, rootPath)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +99,7 @@ func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroup
 	settings := m.CRIUDump.CRIU
 	criuOpts := &criurpc.CriuOpts{
 		LogFile: proto.String(RestoreLogFilename),
-		Root:    proto.String("/"),
+		Root:    proto.String(rootPath),
 		ExtMnt:  extMounts,
 	}
 	if err := applyCommonSettings(criuOpts, &settings); err != nil {
@@ -120,15 +126,18 @@ func BuildRestoreOpts(m *types.CheckpointManifest, checkpointPath string, cgroup
 	return criuOpts, nil
 }
 
-func buildRestoreExtMounts(m *types.CheckpointManifest) ([]*criurpc.ExtMountMap, error) {
+func buildRestoreExtMounts(m *types.CheckpointManifest, rootPath string) ([]*criurpc.ExtMountMap, error) {
 	if len(m.CRIUDump.ExtMnt) == 0 {
 		return nil, fmt.Errorf("checkpoint manifest is missing criuDump.extMnt")
 	}
 
-	restoreMap := map[string]string{"/": "."}
+	restoreMap := map[string]string{"/": rootPath}
 	for _, val := range m.CRIUDump.ExtMnt {
 		if val == "" || val == "/" {
 			continue
+		}
+		if !filepath.IsAbs(val) {
+			return nil, fmt.Errorf("external mount source must be absolute: %q", val)
 		}
 		restoreMap[val] = val
 	}
