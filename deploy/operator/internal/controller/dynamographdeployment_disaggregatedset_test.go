@@ -518,7 +518,7 @@ func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
 	current.Object["spec"] = map[string]any{"roles": []any{}}
 	desired := current.DeepCopy()
 	desired.SetLabels(map[string]string{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name})
-	desired.SetAnnotations(nil)
+	desired.SetAnnotations(map[string]string{"example.com/desired": "annotation"})
 	desired.SetOwnerReferences([]metav1.OwnerReference{*dgdControllerOwnerReference(dgd)})
 	desired.Object["spec"] = map[string]any{"roles": []any{map[string]any{"name": "prefill"}, map[string]any{"name": "decode"}}}
 	reconciler := &DynamoGraphDeploymentReconciler{
@@ -529,8 +529,14 @@ func TestSyncDisaggregatedSetPreservesUnmanagedMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, modified)
 	require.Equal(t, "label", synced.GetLabels()["example.com/keep"])
+	require.Equal(t, dgd.Name, synced.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName])
 	require.Equal(t, "annotation", synced.GetAnnotations()["example.com/keep"])
+	require.Equal(t, "annotation", synced.GetAnnotations()["example.com/desired"])
 	require.Len(t, synced.GetOwnerReferences(), 2)
+	persisted := newDisaggregatedSetObject()
+	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(current), persisted))
+	require.Equal(t, dgd.Name, persisted.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName])
+	require.Equal(t, "annotation", persisted.GetAnnotations()["example.com/desired"])
 }
 
 func TestMapDisaggregatedSetChildLWSToDGD(t *testing.T) {

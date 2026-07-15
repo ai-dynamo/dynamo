@@ -600,14 +600,18 @@ func (r *DynamoGraphDeploymentReconciler) syncDisaggregatedSet(ctx context.Conte
 		return false, nil, fmt.Errorf("refusing to update DisaggregatedSet %s/%s because it is not controlled by DynamoGraphDeployment %s/%s", desired.GetNamespace(), desired.GetName(), dgd.Namespace, dgd.Name)
 	}
 	original := current.DeepCopy()
-	if current.GetLabels() == nil {
-		current.SetLabels(map[string]string{})
+	labels := current.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
 	}
-	maps.Copy(current.GetLabels(), desired.GetLabels())
-	if current.GetAnnotations() == nil && len(desired.GetAnnotations()) > 0 {
-		current.SetAnnotations(map[string]string{})
+	maps.Copy(labels, desired.GetLabels())
+	current.SetLabels(labels)
+	annotations := current.GetAnnotations()
+	if annotations == nil && len(desired.GetAnnotations()) > 0 {
+		annotations = map[string]string{}
 	}
-	maps.Copy(current.GetAnnotations(), desired.GetAnnotations())
+	maps.Copy(annotations, desired.GetAnnotations())
+	current.SetAnnotations(annotations)
 	setDGDControllerOwnerReference(dgd, current)
 	current.Object["spec"] = desired.Object["spec"]
 	if equality.Semantic.DeepEqual(original.Object["spec"], current.Object["spec"]) &&
