@@ -54,6 +54,83 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
     assert dgd_config["kind"] == "DynamoGraphDeployment"
 
 
+def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
+    """AIC tuning args must not remove Dynamo's vLLM disaggregation contract."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=["--tensor-parallel-size", "2"],
+        decode_cli_args=["--tensor-parallel-size", "4"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill = next(
+        service
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode = next(
+        service
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+    prefill_args = prefill["extraPodSpec"]["mainContainer"]["args"]
+    decode_args = decode["extraPodSpec"]["mainContainer"]["args"]
+
+    assert prefill_args[prefill_args.index("--tensor-parallel-size") + 1] == "2"
+    assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
+    assert (
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1]
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+    )
+    assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "4"
+    assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+    assert "--kv-transfer-config" not in decode_args
+
+
+def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
+    """An explicit connector remains authoritative while worker roles are canonical."""
+    custom_kv_config = (
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both",'
+        '"kv_buffer_device":"cpu"}'
+    )
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=[
+            "--disaggregation-mode=decode",
+            "--kv-transfer-config",
+            custom_kv_config,
+        ],
+        decode_cli_args=["--disaggregation-mode", "prefill"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+
+    assert prefill_args.count("--disaggregation-mode") == 1
+    assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
+    assert (
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1]
+        == custom_kv_config
+    )
+    assert decode_args.count("--disaggregation-mode") == 1
+    assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+
+
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     """DP-only workers keep per-node GPU shaping without multinode inflation."""
     modifier = CONFIG_MODIFIERS["sglang"]
