@@ -19,7 +19,7 @@ from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
-from dynamo.common.rl import RLAdminValidationError, env_bool, require_lora_load_request
+from dynamo.common.rl import RLAdminValidationError, require_lora_load_request
 from dynamo.common.utils.output_modalities import (
     RequestType,
     get_output_modalities,
@@ -31,12 +31,10 @@ from dynamo.llm import (
     ModelRuntimeConfig,
     ModelType,
     WorkerType,
-    lora_name_to_id,
     register_model,
-    unregister_model,
 )
 from dynamo.llm.exceptions import EngineShutdown
-from dynamo.vllm.handlers import LoRAInfo, get_lora_manager
+from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.output_formatter import OutputFormatter
@@ -118,6 +116,12 @@ class OmniHandler(BaseOmniHandler):
 
         Accepts multiple request shapes used by compatibility aliases and
         engine-update forwarding layers.
+
+        Note:
+            This is intentionally broader than the base helper
+            ``require_lora_unload_request`` (which expects canonical
+            ``lora_name``). Omni accepts common alias keys here to remain
+            compatible with multiple forwarding layers.
         """
         if not isinstance(request, dict):
             return None
@@ -209,337 +213,64 @@ class OmniHandler(BaseOmniHandler):
             get_lora_manager() is not None
         )
 
-    async def load_lora(self, request=None):
-        try:
-            lora_name, lora_uri = require_lora_load_request(request)
-        except RLAdminValidationError as e:
-            yield {"status": "error", "message": str(e)}
-            return
-        if lora_name in (self.config.served_model_name, self.config.model):
-            yield self._lora_error_payload(
+    def _parse_lora_load_request(self, request: Any) -> tuple[str, str]:
+        return require_lora_load_request(request)
+
+    def _parse_lora_unload_request(self, request: Any) -> str:
+        # Keep broad key compatibility via _extract_lora_name_from_request,
+        # but preserve the shared validation contract by raising
+        # RLAdminValidationError when no valid LoRA name is provided.
+        lora_name = self._extract_lora_name_from_request(request)
+        if not lora_name:
+            raise RLAdminValidationError("'lora_name' is required in request")
+        return lora_name
+
+    async def _resolve_lora_source_path(self, lora_uri: str) -> tuple[bool, str]:
+        if lora_uri.startswith("file://"):
+            lora_path = self._local_path_from_uri(lora_uri)
+            if not os.path.exists(lora_path):
+                return False, f"Local LoRA path does not exist: {lora_path}"
+            return True, lora_path
+        return await super()._resolve_lora_source_path(lora_uri)
+
+    async def _register_lora_discovery(self, lora_name: str, lora_id: int) -> None:
+        if self.generate_endpoint is None:
+            logger.debug(
+                "Cannot publish LoRA '%s': generate_endpoint=%s",
                 lora_name,
-                (
-                    "LoRA name must not match base model names "
-                    f"('{self.config.served_model_name}' or '{self.config.model}')."
-                ),
+                self.generate_endpoint,
             )
             return
 
-        lock = self._get_lora_lock(lora_name)
-        async with lock:
-            old_info = self.loaded_loras.get(lora_name)
-            hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
-            is_hot_swap = old_info is not None and hot_swap_enabled
+        runtime_config = ModelRuntimeConfig()
+        model_type = get_output_modalities(
+            self.config.output_modalities,
+            self.config.model,
+        )
+        if model_type is None:
+            model_type = ModelType.Images
 
-            if old_info is not None and not hot_swap_enabled:
-                yield {
-                    "status": "success",
-                    "message": f"LoRA adapter '{lora_name}' already loaded",
-                    "lora_name": lora_name,
-                    "lora_id": old_info.id,
-                    "hot_swap": False,
-                }
-                return
+        await register_model(
+            model_input=ModelInput.Text,
+            model_type=model_type,
+            endpoint=self.generate_endpoint,
+            model_path=self.config.model,
+            kv_cache_block_size=self.config.engine_args.block_size,
+            runtime_config=runtime_config,
+            user_data={"lora_adapter": True, "lora_id": lora_id},
+            lora_name=lora_name,
+            base_model_path=self.config.model,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
 
-            try:
-                if lora_uri.startswith("file://"):
-                    lora_path = self._local_path_from_uri(lora_uri)
-                    if not os.path.exists(lora_path):
-                        yield self._lora_error_payload(
-                            lora_name,
-                            f"Local LoRA path does not exist: {lora_path}",
-                        )
-                        return
-                else:
-                    lora_manager = get_lora_manager()
-                    if lora_manager is None:
-                        yield self._lora_error_payload(
-                            lora_name,
-                            "LoRAManager not initialized. Set DYN_LORA_ENABLED=true for URI-based LoRA loading.",
-                        )
-                        return
-                    download_result = await lora_manager.download_lora(lora_uri)
-                    if download_result.get("status") != "success":
-                        yield self._lora_error_payload(
-                            lora_name,
-                            f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
-                        )
-                        return
-                    lora_path = download_result["local_path"]
-
-                lora_id = lora_name_to_id(lora_name)
-
-                if is_hot_swap and old_info is not None:
-                    try:
-                        removed_old = await self.engine_client.remove_lora(old_info.id)
-                        if removed_old is False:
-                            raise RuntimeError(
-                                "Engine rejected existing LoRA removal before hot-swap"
-                            )
-                    except Exception as remove_err:
-                        logger.exception(
-                            "Failed to remove existing LoRA '%s' before hot-swap",
-                            lora_name,
-                        )
-                        yield self._lora_error_payload(
-                            lora_name,
-                            (
-                                f"Failed to remove existing LoRA '{lora_name}' "
-                                f"before hot-swap: {remove_err!s}"
-                            ),
-                        )
-                        return
-
-                add_ok = await self.engine_client.add_lora(
-                    LoRARequest(
-                        lora_name=lora_name,
-                        lora_int_id=lora_id,
-                        lora_path=lora_path,
-                    )
-                )
-                if add_ok is False:
-                    if is_hot_swap and old_info is not None:
-                        try:
-                            await self.engine_client.add_lora(
-                                LoRARequest(
-                                    lora_name=lora_name,
-                                    lora_int_id=old_info.id,
-                                    lora_path=old_info.path,
-                                )
-                            )
-                        except Exception:
-                            self.loaded_loras.pop(lora_name, None)
-                            logger.exception(
-                                "Failed to rollback old LoRA '%s' after hot-swap add rejection",
-                                lora_name,
-                            )
-                    yield self._lora_error_payload(
-                        lora_name,
-                        (
-                            "Engine rejected LoRA adapter. "
-                            "Adapter may be incompatible with this base model."
-                        ),
-                    )
-                    return
-                self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
-                action = "hot-swapped" if is_hot_swap else "loaded"
-                logger.info(
-                    "LoRA '%s' %s and available for use",
-                    lora_name,
-                    action,
-                )
-
-                if is_hot_swap:
-                    try:
-                        await self.engine_client.reset_prefix_cache()
-                    except Exception as cache_reset_err:
-                        rolled_back = "tracking only"
-                        if old_info is not None:
-                            try:
-                                removed_new = await self.engine_client.remove_lora(
-                                    lora_id
-                                )
-                                if removed_new is False:
-                                    raise RuntimeError(
-                                        "Engine rejected new LoRA removal during hot-swap rollback"
-                                    )
-                                await self.engine_client.add_lora(
-                                    LoRARequest(
-                                        lora_name=lora_name,
-                                        lora_int_id=old_info.id,
-                                        lora_path=old_info.path,
-                                    )
-                                )
-                                self.loaded_loras[lora_name] = old_info
-                                rolled_back = "engine+tracking"
-                            except Exception as rollback_error:
-                                self.loaded_loras.pop(lora_name, None)
-                                logger.exception(
-                                    "LoRA '%s' hot-swap engine rollback failed: %s",
-                                    lora_name,
-                                    rollback_error,
-                                )
-                        else:
-                            self.loaded_loras.pop(lora_name, None)
-
-                        logger.error(
-                            "LoRA '%s' hot-swap rolled back (%s): prefix cache reset failed: %s",
-                            lora_name,
-                            rolled_back,
-                            cache_reset_err,
-                        )
-                        yield self._lora_error_payload(
-                            lora_name,
-                            (
-                                f"LoRA '{lora_name}' hot-swap aborted; prefix "
-                                f"cache reset failed: {cache_reset_err!s}"
-                            ),
-                            lora_id=lora_id,
-                        )
-                        return
-
-                if not is_hot_swap and self.generate_endpoint is not None:
-                    try:
-                        runtime_config = ModelRuntimeConfig()
-                        model_type = get_output_modalities(
-                            self.config.output_modalities,
-                            self.config.model,
-                        )
-                        if model_type is None:
-                            model_type = ModelType.Images
-
-                        await register_model(
-                            model_input=ModelInput.Text,
-                            model_type=model_type,
-                            endpoint=self.generate_endpoint,
-                            model_path=self.config.model,
-                            kv_cache_block_size=self.config.engine_args.block_size,
-                            runtime_config=runtime_config,
-                            user_data={"lora_adapter": True, "lora_id": lora_id},
-                            lora_name=lora_name,
-                            base_model_path=self.config.model,
-                            worker_type=WorkerType.Aggregated,
-                            needs=[],
-                        )
-                        logger.info(
-                            "Registered LoRA '%s' on endpoint %s",
-                            lora_name,
-                            self.generate_endpoint,
-                        )
-                    except Exception as reg_err:
-                        logger.exception(
-                            "Failed to register LoRA '%s' in discovery; rolling back",
-                            lora_name,
-                        )
-                        try:
-                            await self.engine_client.remove_lora(lora_id)
-                            self.loaded_loras.pop(lora_name, None)
-                        except Exception:
-                            logger.exception(
-                                "Failed to rollback LoRA '%s' after discovery registration failure",
-                                lora_name,
-                            )
-                        yield self._lora_error_payload(
-                            lora_name,
-                            f"Failed to register LoRA '{lora_name}' in discovery registry: {reg_err!s}",
-                        )
-                        return
-
-                yield {
-                    "status": "success",
-                    "message": (
-                        f"LoRA adapter '{lora_name}' " f"{action} successfully"
-                    ),
-                    "lora_name": lora_name,
-                    "lora_id": lora_id,
-                    "hot_swap": is_hot_swap,
-                }
-            except Exception as e:
-                logger.exception("Failed to load LoRA adapter: %s", e)
-                yield {"status": "error", "message": str(e)}
-            finally:
-                self._lora_state.cleanup_lock_if_not_loaded(lora_name, lock)
+    async def load_lora(self, request=None):
+        async for response in super().load_lora(request):
+            yield response
 
     async def unload_lora(self, request=None):
-        lora_name = self._extract_lora_name_from_request(request)
-        if not lora_name:
-            yield {"status": "error", "message": "'lora_name' is required in request"}
-            return
-
-        lock = self._get_lora_lock(lora_name)
-        async with lock:
-            try:
-                lora = self.loaded_loras.get(lora_name)
-                if lora is None:
-                    yield {
-                        "status": "error",
-                        "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
-                    }
-                    return
-
-                lora_id = lora.id
-                lora_path = lora.path
-
-                # Remove from engine first, before unregistering from discovery.
-                # This way, if engine removal fails, the adapter remains discoverable for retry.
-                try:
-                    await self.engine_client.remove_lora(lora_id)
-                except Exception as remove_err:
-                    logger.exception(
-                        "Failed to remove LoRA '%s' from engine",
-                        lora_name,
-                    )
-                    yield {
-                        "status": "error",
-                        "message": f"Failed to unload LoRA '{lora_name}' from engine: {remove_err!s}",
-                        "lora_name": lora_name,
-                    }
-                    return
-
-                # Remove from tracking after successful engine removal
-                self.loaded_loras.pop(lora_name, None)
-
-                # Now unregister from discovery after engine removal succeeds
-                if self.generate_endpoint is not None:
-                    try:
-                        await unregister_model(
-                            endpoint=self.generate_endpoint,
-                            lora_name=lora_name,
-                        )
-                    except Exception as unreg_err:
-                        logger.exception(
-                            "Failed to unregister LoRA '%s' from discovery",
-                            lora_name,
-                        )
-
-                        # Rollback: re-add to engine to maintain consistency
-                        try:
-                            logger.debug(
-                                "Rolling back: re-adding LoRA '%s' to engine",
-                                lora_name,
-                            )
-                            await self.engine_client.add_lora(
-                                LoRARequest(
-                                    lora_name=lora_name,
-                                    lora_int_id=lora_id,
-                                    lora_path=lora_path,
-                                )
-                            )
-                            # Re-add to tracking
-                            self.loaded_loras[lora_name] = LoRAInfo(
-                                id=lora_id, path=lora_path
-                            )
-                            logger.debug(
-                                "Successfully rolled back LoRA '%s'",
-                                lora_name,
-                            )
-                        except Exception as rollback_error:
-                            logger.exception(
-                                "Failed to rollback LoRA '%s': %s",
-                                lora_name,
-                                rollback_error,
-                            )
-
-                        yield {
-                            "status": "error",
-                            "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {unreg_err!s}",
-                            "lora_name": lora_name,
-                        }
-                        return
-
-                logger.info("LoRA '%s' unloaded", lora_name)
-
-                yield {
-                    "status": "success",
-                    "message": f"LoRA adapter '{lora_name}' unloaded successfully",
-                    "lora_name": lora_name,
-                    "lora_id": lora_id,
-                }
-            except Exception as e:
-                logger.exception("Failed to unload LoRA adapter: %s", e)
-                yield {"status": "error", "message": str(e)}
-            finally:
-                self._lora_state.cleanup_lock_if_not_loaded(lora_name, lock)
+        async for response in super().unload_lora(request):
+            yield response
 
     async def list_loras(self, request=None):
         async for response in super().list_loras(request):

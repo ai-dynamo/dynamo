@@ -11,11 +11,11 @@ import os
 import struct
 import tempfile
 import time
-from types import SimpleNamespace
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import (
     Any,
     AsyncIterator,
@@ -2008,6 +2008,100 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
         return self._lora_state.get_lock(lora_name)
 
+    def _parse_lora_load_request(self, request: Any) -> tuple[str, str]:
+        """Parse and validate a LoRA load request payload."""
+        return require_lora_load_request(request)
+
+    def _parse_lora_unload_request(self, request: Any) -> str:
+        """Parse and validate a LoRA unload request payload."""
+        return require_lora_unload_request(request)
+
+    async def _resolve_lora_source_path(self, lora_uri: str) -> tuple[bool, str]:
+        """Resolve a LoRA URI into a local filesystem path.
+
+        Returns:
+            (ok, value): on success, (True, local_path); on failure,
+            (False, error_message).
+        """
+        lora_manager = get_lora_manager()
+        if lora_manager is None:
+            return (
+                False,
+                "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
+            )
+
+        download_result = await lora_manager.download_lora(lora_uri)
+        if download_result["status"] != "success":
+            return (
+                False,
+                f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+            )
+
+        return True, download_result["local_path"]
+
+    async def _register_lora_discovery(self, lora_name: str, lora_id: int) -> None:
+        """Publish a loaded LoRA adapter to discovery.
+
+        Default implementation mirrors the legacy BaseWorkerHandler behavior.
+        """
+        if self.generate_endpoint is None:
+            logger.debug(
+                f"Cannot publish LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}, config={self.config}"
+            )
+            return
+
+        logger.debug(
+            f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
+        )
+
+        runtime_config = ModelRuntimeConfig()
+        runtime_config.context_length = self.model_max_len
+        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
+        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
+
+        if self.config.disaggregation_mode == DisaggregationMode.PREFILL:
+            lora_model_type = ModelType.Prefill
+            lora_worker_type = WorkerType.Prefill
+            lora_needs_set: list[WorkerType] = [WorkerType.Decode]
+        elif self.config.disaggregation_mode == DisaggregationMode.DECODE:
+            lora_model_type = ModelType.Chat | ModelType.Completions
+            lora_worker_type = WorkerType.Decode
+            lora_needs_set = [WorkerType.Prefill]
+        else:  # AGGREGATED
+            lora_model_type = ModelType.Chat | ModelType.Completions
+            lora_worker_type = WorkerType.Aggregated
+            lora_needs_set = []
+        if self.config.route_to_encoder:
+            lora_needs_set.append(WorkerType.Encode)
+        lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
+
+        await register_model(
+            model_input=ModelInput.Tokens,
+            model_type=lora_model_type,
+            endpoint=self.generate_endpoint,
+            model_path=self.config.model,
+            kv_cache_block_size=self.config.engine_args.block_size,
+            runtime_config=runtime_config,
+            user_data={"lora_adapter": True, "lora_id": lora_id},
+            lora_name=lora_name,
+            base_model_path=self.config.model,
+            worker_type=lora_worker_type,
+            needs=lora_needs,
+            max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
+        )
+
+    async def _unregister_lora_discovery(self, lora_name: str) -> None:
+        """Remove a loaded LoRA adapter from discovery."""
+        if self.generate_endpoint is None:
+            logger.debug(
+                f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
+            )
+            return
+        await unregister_model(
+            endpoint=self.generate_endpoint,
+            lora_name=lora_name,
+        )
+
     async def load_lora(self, request=None):
         """
         Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
@@ -2027,7 +2121,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         try:
             try:
-                lora_name, lora_uri = require_lora_load_request(request)
+                lora_name, lora_uri = self._parse_lora_load_request(request)
             except RLAdminValidationError as e:
                 yield {"status": "error", "message": str(e)}
                 return
@@ -2035,15 +2129,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # Debug: Log the incoming request
             logger.debug(f"load_lora request keys: {list(request.keys())}")
             logger.debug(f"load_lora request: {request}")
-
-            # Use LoRAManager to download from URI
-            lora_manager = get_lora_manager()
-            if lora_manager is None:
-                yield {
-                    "status": "error",
-                    "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true to enable URI-based LoRA loading.",
-                }
-                return
 
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
@@ -2070,16 +2155,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     logger.info(
                         f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
                     )
-                    download_result = await lora_manager.download_lora(lora_uri)
-
-                    if download_result["status"] != "success":
+                    path_ok, lora_path_or_error = await self._resolve_lora_source_path(
+                        lora_uri
+                    )
+                    if not path_ok:
                         yield {
                             "status": "error",
-                            "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                            "message": lora_path_or_error,
                         }
                         return
 
-                    lora_path = download_result["local_path"]
+                    lora_path = lora_path_or_error
                     logger.debug(f"LoRA downloaded to: {lora_path}")
 
                     # Generate deterministic ID from lora_name before using it
@@ -2190,87 +2276,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             }
                             return
 
-                    # Publish LoRA as a ModelDeploymentCard with format:
-                    # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
-                    # This allows the frontend to discover it and route correctly to the worker instance
-                    if not is_hot_swap and self.generate_endpoint is not None:
-                        logger.debug(
-                            f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
-                        )
+                    if not is_hot_swap:
                         try:
-                            logger.debug(
-                                f"Publishing LoRA '{lora_name}' ModelDeploymentCard"
-                            )
-
-                            # Mark this as a LoRA in user_data
-                            user_data = {
-                                "lora_adapter": True,
-                                "lora_id": lora_id,
-                            }
-
-                            runtime_config = ModelRuntimeConfig()
-                            runtime_config.context_length = self.model_max_len
-                            runtime_config.tool_call_parser = (
-                                self.config.dyn_tool_call_parser
-                            )
-                            runtime_config.reasoning_parser = (
-                                self.config.dyn_reasoning_parser
-                            )
-
-                            # Match the base-model registration topology (see
-                            # worker_factory.py _create_decode_worker /
-                            # _create_prefill_worker) so the router activates for the
-                            # LoRA model name the same way it does for the base model.
-                            # A prefill worker carries its role via worker_type=Prefill;
-                            # we register the legacy ModelType.Prefill marker bit (not a
-                            # surface) so an old frontend still detects it during the
-                            # cross-version rollout. Decode and aggregated workers expose the
-                            # LoRA on the same chat/completions surface.
-                            # --route-to-encoder adds Encode to the AND-set of peers.
-                            if (
-                                self.config.disaggregation_mode
-                                == DisaggregationMode.PREFILL
-                            ):
-                                lora_model_type = ModelType.Prefill
-                                lora_worker_type = WorkerType.Prefill
-                                lora_needs_set: list[WorkerType] = [WorkerType.Decode]
-                            elif (
-                                self.config.disaggregation_mode
-                                == DisaggregationMode.DECODE
-                            ):
-                                lora_model_type = ModelType.Chat | ModelType.Completions
-                                lora_worker_type = WorkerType.Decode
-                                lora_needs_set = [WorkerType.Prefill]
-                            else:  # AGGREGATED
-                                lora_model_type = ModelType.Chat | ModelType.Completions
-                                lora_worker_type = WorkerType.Aggregated
-                                lora_needs_set = []
-                            if self.config.route_to_encoder:
-                                lora_needs_set.append(WorkerType.Encode)
-                            lora_needs: list[list[WorkerType]] = (
-                                [lora_needs_set] if lora_needs_set else []
-                            )
-
-                            # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                            await register_model(
-                                model_input=ModelInput.Tokens,
-                                model_type=lora_model_type,
-                                endpoint=self.generate_endpoint,
-                                model_path=self.config.model,
-                                kv_cache_block_size=self.config.engine_args.block_size,
-                                runtime_config=runtime_config,
-                                user_data=user_data,
-                                lora_name=lora_name,
-                                base_model_path=self.config.model,
-                                worker_type=lora_worker_type,
-                                needs=lora_needs,
-                                # Publish the worker's per-worker LoRA slot budget so the frontend
-                                # allocator sizes placement against real capacity instead of the
-                                # hard-coded default.
-                                max_gpu_lora_count=getattr(
-                                    self.config.engine_args, "max_loras", None
-                                ),
-                            )
+                            await self._register_lora_discovery(lora_name, lora_id)
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
                             )
@@ -2301,10 +2309,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 "lora_name": lora_name,
                             }
                             return
-                    elif not is_hot_swap:
-                        logger.debug(
-                            f"Cannot publish LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}, config={self.config}"
-                        )
 
                     yield {
                         "status": "success",
@@ -2334,7 +2338,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         try:
             try:
-                lora_name = require_lora_unload_request(request)
+                lora_name = self._parse_lora_unload_request(request)
             except RLAdminValidationError as e:
                 yield {"status": "error", "message": str(e)}
                 return
@@ -2367,10 +2371,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
                         try:
-                            await unregister_model(
-                                endpoint=self.generate_endpoint,
-                                lora_name=lora_name,
-                            )
+                            await self._unregister_lora_discovery(lora_name)
                             logger.info(
                                 f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
                             )
