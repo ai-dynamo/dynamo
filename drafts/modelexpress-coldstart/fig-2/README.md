@@ -6,10 +6,11 @@ loop figure.
 | File | Description |
 |---|---|
 | `gen_fig_2_rl_loop.py` | Generator: 2x2 clockwise RL loop (Rollout → Reward → Trainer → Weight refit) with ModelExpress as the single green accent. Display/hero title treatment. |
-| `build.sh` | One-shot rebuild. Renders `images/fig-2-rl-loop.png`. |
+| `build.sh` | One-shot rebuild. Renders `images/fig-2-rl-loop.{png,svg}`. |
 | `design_tokens.yaml` | Canonical Dynamo Dark tokens (copied, not forked). |
 | `plotly_dynamo.py` | Canonical Plotly template helper (copied, not forked). |
 | `images/fig-2-rl-loop.png` | Rendered figure (1600×900, scale=2). |
+| `images/fig-2-rl-loop.svg` | Vector render (for Fern / Confluence embedding). |
 
 ## Reproduce
 

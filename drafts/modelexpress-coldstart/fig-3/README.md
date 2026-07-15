@@ -38,10 +38,14 @@ Dynamo Dark remake of the ModelExpress (MX) cold-start reference diagram.
   `layer="below"`) express the plane split structurally instead of via tinted
   backgrounds.
 - **Green** (`#76b900`) is the single selective accent — reserved for the
-  ModelExpress software components (MX Server + MX Clients), the subject.
-- **cpu_blue** marks the control-plane Metadata Store; **fluorite** carries the
-  data-plane weight-transfer flows. (Emerald was avoided next to NV green per
-  DESIGN.md; the three roles are three distinct hues.)
+  data-plane weight-transfer flows (GPUDirect RDMA + ModelStreamer + GDS), the
+  fast path ModelExpress accelerates. This matches fig-1, where green is the
+  peer-to-peer data-plane flow.
+- The ModelExpress software components (MX Server + MX Clients) take a neutral,
+  elevated structural surface (`#3a3a3a` card fill, muted-grey border) — never a
+  green fill — so green stays the one thing that reads as the accelerated flow.
+- **cpu_blue** marks the control-plane Metadata Store; thin grey lines carry the
+  recessive control wiring.
 - All connectors are orthogonal (right angles only); every coordinate is computed
   from named constants; the three data paths land on the New engine's bottom edge
   with arrowheads on exact edges.

@@ -8,19 +8,21 @@ start of a DeepSeek-V4-Pro / vLLM deployment into its eight phases, anchored by
 a large "420s" KPI. ModelExpress delivers weights peer-to-peer (Model load via
 MX P2P is only 11 s / 2.6 %, the single green accent), so the cost shifts almost
 entirely to the cold JIT-cache warmup cluster (profiling + DeepGEMM compile +
-CUDA graph capture = 350 s / 83 %, rendered in the coral cost family).
+CUDA graph capture = 350 s / 83 %, rendered in the gold warmup family so it
+reads the same as the warmup phase in fig-4).
 
 Restyle of the reference light-theme breakdown bar into Dynamo Dark:
     - pure-black ground, token palette only, border-radius 0
     - display / hero title treatment (Helvetica Neue Light, title case)
-    - single green accent on the ModelExpress weight-load phase; the warmup
-      cluster carries the coral "cost" role; setup phases recede to grey
+    - single green accent on the ModelExpress weight-load phase (the hero
+      data-plane weight load); the JIT-cache warmup cluster carries the gold
+      "warmup" role, matching fig-4; setup phases recede to grey
     - real seconds x-axis so the minute ticks align exactly to the bar
 
 Data (durations in seconds) is the source of truth; percentages are derived.
 
 Usage:
-    python3 gen_fig_6_coldstart_anatomy.py   # -> images/fig-6-coldstart-anatomy.png
+    python3 gen_fig_6_coldstart_anatomy.py   # -> images/fig-6-coldstart-anatomy.{png,svg}
 """
 
 from __future__ import annotations
@@ -41,8 +43,10 @@ TOTAL_SEC = 420  # observed total, start -> Application startup complete (7m)
 
 # Semantic roles decide color:
 #   grey  -> process / infra setup (recedes)
-#   green -> the ModelExpress win (single accent)
-#   coral -> the cold-JIT-cache warmup cost cluster (peak = brightest coral)
+#   green -> the ModelExpress win (single accent, hero data-plane weight load)
+#   gold  -> the cold-JIT-cache warmup cluster (peak = brightest gold), matching
+#            fig-4's warmup phase; coral stays reserved for a baseline/slow path,
+#            which this single optimized run does not contain
 # Phases in time order. `place`: "in" = label inside the bar; "above" = leader
 # line + marker + duration above the bar (used for the narrow phases).
 SEGMENTS = [
@@ -118,11 +122,11 @@ def main() -> None:
     font_mono = tokens["typography"]["font_family_mono"]
 
     green = colors["accent"]["dynamo_green"]  # ModelExpress win (accent)
-    coral = colors["accent"]["coral"]  # peak warmup phase
-    coral_muted = colors["chart_fills"][7]  # #702828 -- flanking warmup
+    warmup = colors["accent"]["fluorite"]  # peak warmup phase (gold, matches fig-4)
+    warmup_muted = colors["chart_fills"][2]  # #9a7800 -- flanking warmup (muted gold)
     grey = colors["text"]["medium"]  # #8c8c8c -- setup (neutral)
     subtle = colors["border"]["subtle"]  # #3a3a3a -- separators / ticks
-    black = colors["background"]["primary"]  # #000000 -- hairline gaps
+    black = colors["background"]["primary"]  # #000000 -- hairline gaps + in-bar text
     text_primary = colors["text"]["primary"]
     text_secondary = colors["text"]["secondary"]
     text_muted = colors["text"]["muted"]
@@ -130,8 +134,8 @@ def main() -> None:
     role_color = {
         "setup": grey,
         "win": green,
-        "cost": coral_muted,
-        "peak": coral,
+        "cost": warmup_muted,
+        "peak": warmup,
     }
 
     def pct(dur: int) -> float:
@@ -206,8 +210,10 @@ def main() -> None:
                 layer="above",
             )
         )
-        # in-bar label for the wide phases
+        # in-bar label for the wide phases. The wide phases are the gold warmup
+        # cluster, so the label sits black-on-gold (AA on both gold shades).
         if s["place"] == "in":
+            in_label_color = black if s["role"] in ("cost", "peak") else text_primary
             annotations.append(
                 dict(
                     xref="x",
@@ -219,7 +225,7 @@ def main() -> None:
                     text=f"{s['inbar']} · {s['dur']}s",
                     showarrow=False,
                     font=dict(
-                        family=font_mono, size=15, color=text_primary, weight=500
+                        family=font_mono, size=15, color=in_label_color, weight=500
                     ),
                 )
             )
@@ -431,9 +437,9 @@ def main() -> None:
             font=dict(family=HERO_FONT, size=40, color=text_primary, weight=300),
             subtitle=dict(
                 text=(
-                    "DeepSeek-V4-Pro · vLLM 0.23.0 · TP8 + EP on one 8-GPU "
-                    "node · load_format=modelexpress — weights arrive P2P, "
-                    "JIT caches start cold."
+                    "DeepSeek-V4-Pro · vLLM 0.23.0 · TP8 + EP + fp8 KV cache "
+                    "on one 8-GPU node · load_format=modelexpress — weights "
+                    "arrive peer-to-peer, but every JIT kernel cache starts empty."
                 ),
                 font=dict(family=HERO_FONT, size=19, color=text_muted, weight=300),
             ),
@@ -452,10 +458,14 @@ def main() -> None:
         showlegend=False,
     )
 
-    out = Path(__file__).parent / "images" / "fig-6-coldstart-anatomy.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_image(str(out), scale=2)
-    print(f"Wrote {out}")
+    out_dir = Path(__file__).parent / "images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    png = out_dir / "fig-6-coldstart-anatomy.png"
+    svg = out_dir / "fig-6-coldstart-anatomy.svg"
+    fig.write_image(str(png), scale=2)
+    fig.write_image(str(svg))
+    print(f"Wrote {png}")
+    print(f"Wrote {svg}")
 
 
 if __name__ == "__main__":

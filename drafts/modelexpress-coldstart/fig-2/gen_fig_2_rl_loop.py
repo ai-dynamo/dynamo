@@ -24,7 +24,7 @@ Title uses the Dynamo Dark display/hero treatment (Helvetica Neue Light,
 title case). Renders deterministically; no external data.
 
 Usage:
-    python3 gen_fig_2_rl_loop.py        # -> images/fig-2-rl-loop.png
+    python3 gen_fig_2_rl_loop.py        # -> images/fig-2-rl-loop.{png,svg}
 """
 
 from __future__ import annotations
@@ -210,10 +210,14 @@ def main() -> None:
         annotations=annotations,
     )
 
-    out = Path(__file__).parent / "images" / "fig-2-rl-loop.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_image(str(out), scale=2)
-    print(f"Wrote {out}")
+    out_dir = Path(__file__).parent / "images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    png = out_dir / "fig-2-rl-loop.png"
+    svg = out_dir / "fig-2-rl-loop.svg"
+    fig.write_image(str(png), scale=2)
+    fig.write_image(str(svg))
+    print(f"Wrote {png}")
+    print(f"Wrote {svg}")
 
 
 if __name__ == "__main__":

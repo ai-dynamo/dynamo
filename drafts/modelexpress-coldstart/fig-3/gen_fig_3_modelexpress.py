@@ -20,9 +20,13 @@ Dynamo Dark rethink:
     black, so the plane separation reads structurally instead of via tinted
     backgrounds.
   - Green (#76b900) is the single selective accent, reserved for the
-    ModelExpress software components (MX Server + MX Clients) — the subject.
-  - Emerald marks the metadata database; fluorite carries the data-plane
-    weight-transfer flows; thin grey lines carry recessive control wiring.
+    data-plane weight-transfer flows (GPUDirect RDMA + ModelStreamer + GDS) —
+    the fast path ModelExpress accelerates, matching fig-1's data-plane green.
+  - The ModelExpress software components (MX Server + MX Clients) take a
+    neutral, elevated structural surface (never green fills), so green stays
+    the one thing that reads as the accelerated flow.
+  - cpu_blue marks the control-plane metadata store; thin grey lines carry the
+    recessive control wiring.
   - All connectors are orthogonal (right angles only); every coordinate is
     computed from named constants; the three data paths converge on the New
     engine's bottom edge with arrowheads on exact edges.
@@ -147,18 +151,17 @@ def main() -> None:
     template = build_template(tokens)
     colors = tokens["colors"]
 
-    green = colors["accent"]["dynamo_green"]  # ModelExpress components
-    green_fill = colors["fills"]["green"]
+    green = colors["accent"]["dynamo_green"]  # data-plane weight-transfer flows
     cpu_blue = colors["accent"]["cpu_blue"]  # control-plane metadata store
     blue_fill = colors["fills"]["blue"]
-    fluorite = colors["accent"]["fluorite"]  # data-plane weight flows
     subtle = colors["border"]["subtle"]  # hairline borders
     surface = colors["background"]["surface"]  # plane band fill
     surface_alt = colors["background"]["surface_alt"]  # component card fill
+    elevated = colors["background"]["elevated"]  # MX component cards (neutral)
     text_primary = colors["text"]["primary"]
     text_secondary = colors["text"]["secondary"]
     text_medium = colors["text"]["medium"]
-    text_muted = colors["text"]["muted"]
+    text_muted = colors["text"]["muted"]  # neutral border for MX component cards
 
     fig = go.Figure()
     shapes: list[dict] = []
@@ -226,7 +229,7 @@ def main() -> None:
     SRC_CLIENT = (9.0, MX_Y0, 25.0, MX_Y1)
     NEW_CLIENT = (75.0, MX_Y0, 91.0, MX_Y1)
     for x0, y0, x1, y1 in (SRC_CLIENT, NEW_CLIENT):
-        _box(shapes, x0, y0, x1, y1, border=green, fill=green_fill, width=1.5)
+        _box(shapes, x0, y0, x1, y1, border=text_muted, fill=elevated, width=1.5)
         _label(
             annotations,
             (x0 + x1) / 2,
@@ -239,7 +242,7 @@ def main() -> None:
 
     # MX Server (center).
     SRV = (42.0, MX_Y0, 58.0, MX_Y1)
-    _box(shapes, *SRV, border=green, fill=green_fill, width=1.5)
+    _box(shapes, *SRV, border=text_muted, fill=elevated, width=1.5)
     _label(
         annotations,
         (SRV[0] + SRV[2]) / 2,
@@ -324,7 +327,7 @@ def main() -> None:
             (TIP_RDMA, y_rdma),
             (TIP_RDMA, NEW_BOTTOM),
         ],
-        color=fluorite,
+        color=green,
     )
 
     # ModelStreamer: Object storage → New engine.
@@ -334,11 +337,11 @@ def main() -> None:
         fig,
         annotations,
         [(obj_cx, OBJ[3]), (obj_cx, y_ms), (TIP_MS, y_ms), (TIP_MS, NEW_BOTTOM)],
-        color=fluorite,
+        color=green,
     )
 
     # GPUDirect Storage (GDS): File storage → New engine (straight vertical).
-    _flow(fig, annotations, [(TIP_GDS, FILE[3]), (TIP_GDS, NEW_BOTTOM)], color=fluorite)
+    _flow(fig, annotations, [(TIP_GDS, FILE[3]), (TIP_GDS, NEW_BOTTOM)], color=green)
 
     # Flow labels (bound to the fluorite flow color).
     _label(
@@ -346,7 +349,7 @@ def main() -> None:
         (src_out_x + TIP_RDMA) / 2,
         y_rdma + 2.6,
         "<b>GPUDirect RDMA</b>",
-        color=fluorite,
+        color=green,
         size=13,
         weight=700,
     )
@@ -355,7 +358,7 @@ def main() -> None:
         (obj_cx + TIP_MS) / 2,
         y_ms + 2.6,
         "<b>ModelStreamer</b>",
-        color=fluorite,
+        color=green,
         size=13,
         weight=700,
     )
@@ -364,7 +367,7 @@ def main() -> None:
         TIP_GDS - 2.0,
         41.0,
         "<b>GPUDirect Storage<br>(GDS)</b>",
-        color=fluorite,
+        color=green,
         size=13,
         weight=700,
         anchor="right",
@@ -376,7 +379,7 @@ def main() -> None:
         (NEW[0] + NEW[2]) / 2,
         NEW[3] + 2.4,
         "<b>COLD START</b>",
-        color=fluorite,
+        color=text_secondary,
         size=12,
         weight=700,
     )

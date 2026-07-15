@@ -12,6 +12,7 @@ server entirely).
 |---|---|---|
 | `gen_fig_1_coldstart_sequence.py` | Sequence diagram: source registers → target discovers → RDMA weight transfer, GPU to GPU | Display (Helvetica Neue Light) |
 | `images/fig-1-modelexpress-coldstart.png` | Rendered PNG (1600 px wide hero, `scale=2`) | — |
+| `images/fig-1-modelexpress-coldstart.svg` | Vector render (for Fern / Confluence embedding) | — |
 
 ## Single Takeaway
 
