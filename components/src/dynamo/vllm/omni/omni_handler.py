@@ -193,7 +193,9 @@ class OmniHandler(BaseOmniHandler):
         )
 
     def _lora_enabled(self) -> bool:
-        return bool(getattr(self.config.engine_args, "enable_lora", False))
+        return bool(getattr(self.config.engine_args, "enable_lora", False)) and (
+            get_lora_manager() is not None
+        )
 
     async def load_lora(self, request=None):
         try:
