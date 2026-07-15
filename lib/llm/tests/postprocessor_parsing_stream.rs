@@ -691,15 +691,19 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_to
     assert_eq!(content, "This is plain content");
 }
 
-/// DYN-3525 non-streaming parity: a `stream=false` request is served by folding
-/// the SAME reasoning-parsed, `<think>`-stripped delta stream that streaming
-/// clients receive (the engine always runs internally in streaming mode; only
-/// the HTTP layer folds). This test drives `postprocessor_parsing_stream` — where
-/// the `force_nonempty_content` strip lives — and then aggregates through the
-/// production `NvCreateChatCompletionResponse::from_annotated_stream` entrypoint
-/// used by the non-streaming handler. It asserts the aggregated message has
-/// non-empty, `<think>`-stripped `content` and empty `reasoning_content`, i.e.
-/// the guarantee clients that require non-empty content depend on.
+/// Non-streaming parity for the Nemotron `force_nonempty_content` flag.
+///
+/// A `stream=false` request is not a separate code path: the engine always runs
+/// internally in streaming mode, and the HTTP layer folds the resulting deltas
+/// into a single response. The leading-`<think>` strip that
+/// `postprocessor_parsing_stream` applies must therefore survive that fold.
+///
+/// This test exercises the full non-streaming path: `postprocessor_parsing_stream`
+/// (where the `force_nonempty_content` strip lives), then
+/// `NvCreateChatCompletionResponse::from_annotated_stream` (the entrypoint the
+/// non-streaming handler uses). It asserts the aggregated message has non-empty,
+/// `<think>`-stripped `content` and empty `reasoning_content` — the guarantee
+/// clients that require non-empty content depend on.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_strips_start_token() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
@@ -746,10 +750,10 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_stri
     );
 }
 
-/// DYN-3525 non-streaming parity, EOF-flush case: when the stream ends after only
-/// a partial `<think>` prefix, those bytes are valid content that the strip flushes
-/// on the terminal chunk. Confirm the non-streaming fold preserves that flushed
-/// content rather than dropping it.
+/// Non-streaming parity, EOF-flush case: when the stream ends after only a
+/// partial `<think>` prefix, those bytes are valid content that the strip
+/// flushes on the terminal chunk. This confirms the non-streaming fold keeps
+/// that flushed content instead of dropping it.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flushes_partial_prefix()
 {
