@@ -687,7 +687,7 @@ models:
     }
 
     #[test]
-    fn accepts_session_aware_admission() {
+    fn accepts_typed_session_aware_admission() {
         let config = RouterPolicyConfig::from_yaml(
             r#"
 default_policy_family: standard
@@ -703,6 +703,8 @@ policy_classes:
     queue_policy: wspt
     queue_admission:
       type: session_aware
+      pause_threshold: 0.7
+      scheduler_interval_seconds: 3.0
     quantum: 1
 "#,
         )
@@ -710,10 +712,18 @@ policy_classes:
 
         let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
         let agents = profile.class(profile.resolve_class_index(Some("agents"), 0));
-        assert!(matches!(
-            agents.queue_admission,
-            Some(QueueAdmissionConfig::SessionAware {})
-        ));
+        let Some(QueueAdmissionConfig::SessionAware {
+            pause_threshold,
+            pause_target,
+            scheduler_interval_seconds,
+            ..
+        }) = &agents.queue_admission
+        else {
+            panic!("expected session-aware admission");
+        };
+        assert_eq!(*pause_threshold, Some(0.7));
+        assert_eq!(*pause_target, None);
+        assert_eq!(*scheduler_interval_seconds, Some(3.0));
     }
 
     #[test]
@@ -753,8 +763,8 @@ policy_classes:
         for (admission, expected) in [
             ("type: misspelled", "unknown variant"),
             (
-                "type: session_aware\n      pause_threshold: 0.7",
-                "unknown field `pause_threshold`",
+                "type: session_aware\n      buffer_per_program: 100",
+                "unknown field `buffer_per_program`",
             ),
         ] {
             let yaml = format!(

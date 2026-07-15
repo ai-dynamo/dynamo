@@ -4,7 +4,6 @@
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_yaml::{Mapping, Value};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -38,12 +37,6 @@ impl Default for ThunderAgentConfig {
 }
 
 impl ThunderAgentConfig {
-    pub fn from_options(options: &Mapping) -> Result<Self, ConfigError> {
-        let config: Self = serde_yaml::from_value(Value::Mapping(options.clone()))?;
-        config.validate()?;
-        Ok(config)
-    }
-
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_fraction(self.pause_threshold, "pause_threshold must be in [0, 1]")?;
         validate_fraction(self.pause_target, "pause_target must be in [0, 1]")?;
@@ -86,19 +79,6 @@ fn validate_positive_duration(value: f64, message: &'static str) -> Result<(), C
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn options_use_defaults_and_reject_unknown_fields() {
-        let options =
-            serde_yaml::from_str::<Mapping>("pause_threshold: 0.7\npause_target: 0.6").unwrap();
-        let config = ThunderAgentConfig::from_options(&options).unwrap();
-        assert_eq!(config.pause_threshold, 0.7);
-        assert_eq!(config.pause_target, 0.6);
-        assert_eq!(config.session_retention_seconds, 1_800.0);
-
-        let unknown = serde_yaml::from_str::<Mapping>("unknown: 1").unwrap();
-        assert!(ThunderAgentConfig::from_options(&unknown).is_err());
-    }
 
     #[test]
     fn rejects_inconsistent_or_zero_control_values() {

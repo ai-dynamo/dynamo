@@ -288,7 +288,18 @@ pub trait PolicyClassAdmissionStrategy: Send {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum QueueAdmissionConfig {
-    SessionAware {},
+    SessionAware {
+        #[serde(default)]
+        pause_threshold: Option<f64>,
+        #[serde(default)]
+        pause_target: Option<f64>,
+        #[serde(default)]
+        resume_timeout_seconds: Option<f64>,
+        #[serde(default)]
+        session_retention_seconds: Option<f64>,
+        #[serde(default)]
+        scheduler_interval_seconds: Option<f64>,
+    },
 }
 
 #[cfg(test)]

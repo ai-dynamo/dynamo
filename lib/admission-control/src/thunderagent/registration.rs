@@ -5,19 +5,16 @@ use std::collections::HashMap;
 
 use dynamo_kv_router::RouterQueuePolicy;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId};
-use dynamo_kv_router::scheduling::{PolicyClassAdmissionStrategies, PolicyProfile};
+use dynamo_kv_router::scheduling::{
+    PolicyClassAdmissionStrategies, PolicyProfile, QueueAdmissionConfig,
+};
 use thiserror::Error;
 use tokio::sync::watch;
 
-use super::{ConfigError, STRATEGY_NAME, ThunderAgent, ThunderAgentConfig, WatchWorkerCapacity};
+use super::{ConfigError, ThunderAgent, ThunderAgentConfig, WatchWorkerCapacity};
 
 #[derive(Debug, Error)]
 pub enum RegistrationError {
-    #[error("unsupported queue admission strategy {strategy:?} for policy class {policy_class:?}")]
-    UnsupportedStrategy {
-        strategy: String,
-        policy_class: String,
-    },
     #[error("ThunderAgent queue admission requires FCFS for policy class {0:?}")]
     ThunderAgentRequiresFcfs(String),
     #[error(
@@ -46,12 +43,13 @@ where
         if strategies.contains_key(&class.name) {
             continue;
         }
-        if admission.strategy != STRATEGY_NAME {
-            return Err(RegistrationError::UnsupportedStrategy {
-                strategy: admission.strategy.clone(),
-                policy_class: class.name.clone(),
-            });
-        }
+        let QueueAdmissionConfig::SessionAware {
+            pause_threshold,
+            pause_target,
+            resume_timeout_seconds,
+            session_retention_seconds,
+            scheduler_interval_seconds,
+        } = admission;
         if class.queue_policy != RouterQueuePolicy::Fcfs {
             return Err(RegistrationError::ThunderAgentRequiresFcfs(
                 class.name.clone(),
@@ -63,7 +61,22 @@ where
                 second: class.name.clone(),
             });
         }
-        let config = ThunderAgentConfig::from_options(&admission.options)?;
+        let mut config = ThunderAgentConfig::default();
+        if let Some(value) = *pause_threshold {
+            config.pause_threshold = value;
+        }
+        if let Some(value) = *pause_target {
+            config.pause_target = value;
+        }
+        if let Some(value) = *resume_timeout_seconds {
+            config.resume_timeout_seconds = value;
+        }
+        if let Some(value) = *session_retention_seconds {
+            config.session_retention_seconds = value;
+        }
+        if let Some(value) = *scheduler_interval_seconds {
+            config.scheduler_interval_seconds = value;
+        }
         let capacity = WatchWorkerCapacity::new(workers.clone(), block_size);
         strategies.insert(
             class.name.clone(),
@@ -111,8 +124,8 @@ mod tests {
         }
     }
 
-    fn profile(strategy: &str) -> PolicyProfile {
-        RouterPolicyConfig::from_yaml(&format!(
+    fn profile() -> PolicyProfile {
+        RouterPolicyConfig::from_yaml(
             r#"
 default_policy_family: standard
 uncached_isl_buckets:
@@ -123,10 +136,11 @@ policy_classes:
     policy_family: standard
     cache_bucket: all
     queue_admission:
-      type: {strategy}
+      type: session_aware
+      scheduler_interval_seconds: 3.0
     quantum: 1
-"#
-        ))
+"#,
+        )
         .unwrap()
         .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
     }
@@ -138,25 +152,12 @@ policy_classes:
     #[test]
     fn builds_configured_thunderagent() {
         let mut strategies = PolicyClassAdmissionStrategies::new();
-        register_builtin_strategies(&profile(STRATEGY_NAME), workers(), 16, &mut strategies)
-            .unwrap();
+        register_builtin_strategies(&profile(), workers(), 16, &mut strategies).unwrap();
 
         assert_eq!(
             strategies["agents"].reconcile_interval(),
-            Some(Duration::from_secs(5))
+            Some(Duration::from_secs(3))
         );
-    }
-
-    #[test]
-    fn rejects_unknown_strategy() {
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        let error = register_builtin_strategies(&profile("custom"), workers(), 16, &mut strategies)
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            RegistrationError::UnsupportedStrategy { .. }
-        ));
     }
 
     #[test]
@@ -164,7 +165,7 @@ policy_classes:
         let mut strategies = PolicyClassAdmissionStrategies::new();
         strategies.insert("agents".to_owned(), Box::new(CustomStrategy));
 
-        register_builtin_strategies(&profile("custom"), workers(), 16, &mut strategies).unwrap();
+        register_builtin_strategies(&profile(), workers(), 16, &mut strategies).unwrap();
 
         assert_eq!(strategies["agents"].reconcile_interval(), None);
     }
