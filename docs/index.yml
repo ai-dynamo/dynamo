@@ -691,6 +691,12 @@ navigation:
         path: proposals/TEMPLATE.mdx
         slug: template
       - section: Draft
+        # skip-slug keeps DEP URLs stable across lifecycle transitions:
+        # /proposals/0001-dep-process rather than /proposals/draft/…, so a
+        # DEP that moves Draft → Accepted keeps the same public URL and any
+        # prior links (Slack, Linear, GitHub) don't 404. Applies to every
+        # status section below.
+        skip-slug: true
         contents:
           - page: "DEP-0000: Example Proposal"
             path: proposals/0000-example-dep.mdx
