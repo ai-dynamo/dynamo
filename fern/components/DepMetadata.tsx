@@ -30,6 +30,13 @@ interface DepMetadataProps {
   /** Lifecycle status: Draft | Proposed | Under Review | Accepted | Replaced | Deferred | Rejected. */
   status: string;
   category?: string;
+  /**
+   * Owning SIG (Special Interest Group). Mirrors the Kubernetes KEP
+   * `owning-sig` metadata. Per DEP-0001, a SIG owns a DEP, not a code repo.
+   */
+  owningSig?: string;
+  /** Other SIGs involved or impacted. Mirrors Kubernetes KEP `participating-sigs`. */
+  participatingSigs?: string;
   authors?: string;
   sponsor?: string;
   requiredReviewers?: string;
@@ -89,6 +96,8 @@ export function DepMetadata({
   title,
   status,
   category,
+  owningSig,
+  participatingSigs,
   authors,
   sponsor,
   requiredReviewers,
@@ -109,6 +118,8 @@ export function DepMetadata({
     if (value && value.trim()) fields.push({ label, value });
   };
   push("Category", category);
+  push("Owning SIG", owningSig);
+  push("Participating SIGs", participatingSigs);
   push("Authors", authors);
   push("Sponsor", sponsor);
   push("Required Reviewers", requiredReviewers);
