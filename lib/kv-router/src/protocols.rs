@@ -186,7 +186,8 @@ pub trait WorkerConfigLike {
         false
     }
 
-    /// Advertised peer-control endpoint used as a router_hint source, if available.
+    /// Advertised peer-control endpoint used when this worker is selected as a router_hint source.
+    /// Backends that advertise router-hint support are responsible for publishing a usable endpoint.
     fn router_hint_source_control_endpoint(&self) -> Option<&str> {
         None
     }

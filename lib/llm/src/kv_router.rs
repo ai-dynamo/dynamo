@@ -471,15 +471,23 @@ where
                 return None;
             }
 
-            let (source, block_hashes) = candidates.best_source(|worker| {
-                worker != target
-                    && configs
-                        .get(&worker.worker_id)
-                        .is_some_and(|config| config.supports_router_hints())
-            })?;
-            let source_control_endpoint = configs
-                .get(&source.worker_id)?
-                .router_hint_source_control_endpoint()?
+            let prefix_blocks_to_beat =
+                usize::try_from(target_cached_prefix_blocks).unwrap_or(usize::MAX);
+            let (source, block_hashes) =
+                candidates.best_source(prefix_blocks_to_beat, |worker| {
+                    worker != target
+                        && configs
+                            .get(&worker.worker_id)
+                            .is_some_and(|config| config.supports_router_hints())
+                })?;
+            let source_config = configs.get(&source.worker_id)?;
+            let source_control_endpoint = source_config
+                .router_hint_source_control_endpoint()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "router_hint-capable source worker {source:?} must advertise a control endpoint"
+                    )
+                })
                 .to_string();
             (block_hashes, source_control_endpoint)
         };
