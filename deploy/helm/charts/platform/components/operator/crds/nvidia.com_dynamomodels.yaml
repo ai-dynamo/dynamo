@@ -169,12 +169,14 @@ spec:
                       podName:
                         description: PodName is the name of the pod serving this endpoint
                         type: string
+                      loraFallbackCovered:
+                        description: LoRAFallbackCovered indicates a legacy prefill endpoint covered by a capable peer during a rolling upgrade. It does not make the endpoint ready to serve the adapter.
+                        type: boolean
                       ready:
                         description: |-
-                          Ready indicates whether the endpoint is ready to serve traffic
-                          For LoRA models: true if the lifecycle request succeeded, or during a rolling
-                          upgrade if a Kubernetes-ready legacy prefill is covered by another capable prefill
-                          For base models: always false (no probing performed)
+                          Ready indicates whether this endpoint is ready to serve traffic.
+                          For LoRA models: true only if this endpoint's lifecycle request succeeded.
+                          For base models: always false (no probing performed).
                         type: boolean
                     required:
                       - address
@@ -183,6 +185,9 @@ spec:
                   type: array
                 readyEndpoints:
                   description: ReadyEndpoints is the count of endpoints that are ready
+                  type: integer
+                loraFallbackCoveredEndpoints:
+                  description: LoRAFallbackCoveredEndpoints is the count of legacy prefill endpoints covered by a capable peer during a rolling upgrade.
                   type: integer
                 totalEndpoints:
                   description: TotalEndpoints is the total count of endpoints

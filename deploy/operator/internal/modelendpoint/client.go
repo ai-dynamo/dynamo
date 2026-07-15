@@ -154,10 +154,10 @@ func (c *Client) LoadLoRA(
 			// A legacy prefill can be non-serving only when another capable
 			// vLLM prefill in the same runtime topology published the adapter card.
 			_, covered := capableVLLMPrefillGroups[candidate.LoRAFallbackGroup]
-			endpoint.Ready = candidate.LoRAFallbackGroup != "" && covered && candidate.KubernetesReady
+			endpoint.LoRAFallbackCovered = candidate.LoRAFallbackGroup != "" && covered && candidate.KubernetesReady
 		}
 
-		if endpoint.Ready {
+		if endpoint.Ready || endpoint.LoRAFallbackCovered {
 			readyCount++
 		} else {
 			failureCount++

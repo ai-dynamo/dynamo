@@ -294,10 +294,11 @@ func TestLoadLoRAAllowsLegacyFallbackAlongsideCapableVLLMPrefill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a capable prefill card should permit the legacy rolling fallback: %v", err)
 	}
-	for _, endpoint := range endpoints {
-		if !endpoint.Ready {
-			t.Fatalf("expected all endpoints ready during mixed-version rollout: %#v", endpoints)
-		}
+	if !endpoints[0].Ready || !endpoints[1].Ready {
+		t.Fatalf("expected the direct-serving endpoints to be ready: %#v", endpoints)
+	}
+	if endpoints[2].Ready || !endpoints[2].LoRAFallbackCovered {
+		t.Fatalf("expected legacy prefill to remain not ready but be fallback-covered: %#v", endpoints)
 	}
 }
 

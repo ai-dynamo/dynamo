@@ -226,9 +226,9 @@ class VllmLLMEngine(LLMEngine):
         # publishes against it.
         self._endpoint: Optional[Endpoint] = None
         self.loaded_loras: dict[str, LoRAInfo] = {}
-        # Adapters explicitly added through the lifecycle control path. Prefill
-        # registration is metadata-only, so only these adapters can be safely
-        # removed through ``engine_client.remove_lora`` during unload.
+        # Adapters known to have been handed to vLLM. Prefill registration is
+        # metadata-only, but vLLM activates a prefill adapter lazily when an
+        # inference request supplies its LoRARequest.
         self._engine_loaded_loras: set[str] = set()
         # Adapters whose discovery ModelDeploymentCard is currently published.
         # Tracked separately from `loaded_loras` because the engine load and the
@@ -507,6 +507,7 @@ class VllmLLMEngine(LLMEngine):
         # model resolves to None. With LoRA enabled, an unknown adapter name
         # raises rather than silently falling back to the base model.
         lora_request = self._resolve_lora_request(request.get("model"))
+        self._track_lora_request_activation(lora_request)
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         gen = self.engine_client.generate(
@@ -798,6 +799,18 @@ class VllmLLMEngine(LLMEngine):
         if self._lora_enabled():
             raise ValueError(f"unknown model or LoRA adapter: '{model_name}'")
         return None
+
+    def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
+        """Record adapters handed to vLLM for request-time lazy activation.
+
+        Prefill lifecycle registration deliberately does not call ``add_lora``.
+        vLLM can nevertheless load the adapter when this request reaches its
+        scheduler, so unload must attempt a matching removal. A request that
+        fails before vLLM activates the adapter is harmless: unload treats a
+        not-loaded response as idempotent.
+        """
+        if lora_request is not None:
+            self._engine_loaded_loras.add(lora_request.lora_name)
 
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Return the stripe lock that serializes load/unload for ``lora_name``.
@@ -1218,28 +1231,28 @@ class VllmLLMEngine(LLMEngine):
                         lora_name,
                     )
 
-                # Prefill lifecycle registration is metadata-only. Only
-                # remove adapters this process explicitly preloaded; asking
-                # vLLM to remove a metadata-only adapter fails and leaves the
-                # discovery and local lifecycle state out of sync.
+                # Prefill lifecycle registration is metadata-only, but vLLM
+                # may have activated the adapter lazily for an inference
+                # request. Remove only adapters known to have reached vLLM.
                 if lora_name in self._engine_loaded_loras:
                     try:
                         await self.engine_client.remove_lora(lora_id)
                     except Exception as e:
-                        # The discovery card is already gone but the engine still
-                        # holds the adapter (loaded-but-unpublished). Leave it in
-                        # loaded_loras so a retried unload skips the unregister
-                        # and retries only the engine removal.
-                        logger.exception(
-                            "Failed to remove LoRA %s from engine: %s",
-                            lora_name,
-                            e,
-                        )
-                        return {
-                            "status": "error",
-                            "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
-                            "lora_name": lora_name,
-                        }
+                        if not self._is_lora_not_loaded_error(e):
+                            # The discovery card is already gone but the engine still
+                            # holds the adapter (loaded-but-unpublished). Leave it in
+                            # loaded_loras so a retried unload skips the unregister
+                            # and retries only the engine removal.
+                            logger.exception(
+                                "Failed to remove LoRA %s from engine: %s",
+                                lora_name,
+                                e,
+                            )
+                            return {
+                                "status": "error",
+                                "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
+                                "lora_name": lora_name,
+                            }
                     self._engine_loaded_loras.discard(lora_name)
 
                 del self.loaded_loras[lora_name]
@@ -1258,6 +1271,12 @@ class VllmLLMEngine(LLMEngine):
         except Exception as e:
             logger.exception("Failed to unload LoRA adapter: %s", e)
             return {"status": "error", "message": str(e)}
+
+    @staticmethod
+    def _is_lora_not_loaded_error(error: Exception) -> bool:
+        """Return whether vLLM reports an idempotent remove of a missing LoRA."""
+        message = str(error).lower()
+        return "not loaded" in message or "not found" in message
 
     async def list_loras(self, body: dict) -> dict:
         """List all loaded LoRA adapters as a lora_name -> lora_id mapping."""

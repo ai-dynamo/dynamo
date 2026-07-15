@@ -998,9 +998,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.model_config = model_config
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
-        # Only adapters explicitly activated by lifecycle management belong in
-        # this set. Prefill registration is metadata-only and must not later
-        # call vLLM's remove_lora for an adapter it never added.
+        # Adapters known to have been handed to vLLM. Prefill registration is
+        # metadata-only, but vLLM activates a prefill adapter lazily when an
+        # inference request supplies its LoRARequest.
         self._engine_loaded_loras: set[str] = set()
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
@@ -1909,6 +1909,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
         return None
 
+    def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
+        """Record adapters handed to vLLM for request-time lazy activation."""
+        if lora_request is not None:
+            self._engine_loaded_loras.add(lora_request.lora_name)
+
+    @staticmethod
+    def _is_lora_not_loaded_error(error: Exception) -> bool:
+        """Return whether vLLM reports an idempotent remove of a missing LoRA."""
+        message = str(error).lower()
+        return "not loaded" in message or "not found" in message
+
     def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
         """Get/create the per-LoRA lock without eagerly allocating a new lock each call."""
         with self._lora_load_locks_guard:
@@ -2336,12 +2347,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
                         )
 
-                    # Prefill lifecycle registration is metadata-only. Remove
-                    # only adapters explicitly activated by the lifecycle
-                    # path; vLLM rejects removal of adapters that were never
-                    # added and would otherwise strand local tracking.
+                    # Prefill lifecycle registration is metadata-only, but
+                    # vLLM may have activated the adapter lazily for an
+                    # inference request. Remove only adapters known to have
+                    # reached vLLM.
                     if lora_name in self._engine_loaded_loras:
-                        await self.engine_client.remove_lora(lora_id)
+                        try:
+                            await self.engine_client.remove_lora(lora_id)
+                        except Exception as e:
+                            if not self._is_lora_not_loaded_error(e):
+                                raise
                         self._engine_loaded_loras.discard(lora_name)
                     del self.loaded_loras[lora_name]
 
@@ -2679,6 +2694,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 request_id,
                 lora_request,
             )
+            self._track_lora_request_activation(lora_request)
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -3407,6 +3423,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
+                self._track_lora_request_activation(lora_request)
                 gen = self.engine_client.generate(
                     prompt,
                     sampling_params,

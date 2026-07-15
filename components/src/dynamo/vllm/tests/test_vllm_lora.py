@@ -165,6 +165,15 @@ def test_resolve_lora_request_for_loaded_adapter():
     assert lora_request.lora_path == "/path/a"
 
 
+def test_request_time_activation_is_tracked_for_unload():
+    engine = _make_lora_engine()
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=7, path="/path/a")}
+
+    engine._track_lora_request_activation(engine._resolve_lora_request("adapterA"))
+
+    assert engine._engine_loaded_loras == {"adapterA"}
+
+
 def test_resolve_lora_request_for_base_is_none(monkeypatch):
     monkeypatch.setattr(llm_engine_mod, "get_lora_manager", lambda: MagicMock())
     engine = _make_lora_engine()
@@ -242,6 +251,7 @@ async def test_generate_passes_resolved_lora_request(monkeypatch):
     ]
     assert captured["kwargs"]["lora_request"] is not None
     assert captured["kwargs"]["lora_request"].lora_name == "adapterA"
+    assert "adapterA" in engine._engine_loaded_loras
 
     # Base-model request -> None.
     _ = [
@@ -758,6 +768,37 @@ async def test_prefill_unload_skips_engine_removal_for_metadata_only_adapter(
     assert result["status"] == "success"
     unregister.assert_awaited_once()
     engine.engine_client.add_lora.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefill_unload_removes_request_activated_adapter(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._track_lora_request_activation(engine._resolve_lora_request("adapterA"))
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "success"
+    unregister.assert_awaited_once()
+    engine.engine_client.remove_lora.assert_awaited_once_with(123)
+
+
+@pytest.mark.asyncio
+async def test_prefill_unload_treats_missing_request_adapter_as_idempotent(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
+    engine.engine_client.remove_lora.side_effect = RuntimeError("adapter not found")
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "success"
+    unregister.assert_awaited_once()
+    assert "adapterA" not in engine.loaded_loras
     engine.engine_client.remove_lora.assert_not_awaited()
 
 
