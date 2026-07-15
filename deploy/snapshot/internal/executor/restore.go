@@ -5,14 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-logr/logr"
+	"golang.org/x/sys/unix"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/criu"
@@ -62,20 +65,45 @@ func Restore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Logger, r
 	}
 	hostInspectDuration := time.Since(hostInspectStart)
 
+	image, err := snapshotruntime.OpenValidatedRootfs(snap.CheckpointPath, req.CheckpointID)
+	if err != nil {
+		return 0, fmt.Errorf("validate rootfs artifact: %w", err)
+	}
+	defer image.Close()
+	rootfsMount, err := snapshotruntime.PrepareDetachedRootfsMount(image)
+	if err != nil {
+		return 0, fmt.Errorf("prepare rootfs mount: %w", err)
+	}
+	defer rootfsMount.Close()
+	workspace, err := openRootfsBackingWorkspace(snap.PlaceholderPID)
+	if err != nil {
+		return 0, err
+	}
+	defer workspace.Close()
+	checkpoint, err := openCheckpointDirectory(snap.CheckpointPath)
+	if err != nil {
+		return 0, err
+	}
+	defer checkpoint.Close()
+
 	// Phase 2: Execute — nsrestore handles rootfs, CRIU restore, and CUDA restore inside namespace
-	result, err := execNSRestore(ctx, log, req, snap)
+	result, err := execNSRestore(
+		ctx,
+		log,
+		req,
+		snap,
+		rootfsMount,
+		workspace,
+		checkpoint,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("nsrestore failed: %w", err)
 	}
-	restoreDuration := hostInspectDuration + result.NSRestoreSetupDuration + result.CRIURestoreDuration + result.CUDADuration
 	log.Info("Restore timing summary",
 		"restore", map[string]any{
-			"duration": restoreDuration.String(),
+			"duration": time.Since(restoreStart).String(),
 			"phases": map[string]string{
-				"host_inspect_duration":    hostInspectDuration.String(),
-				"nsrestore_setup_duration": result.NSRestoreSetupDuration.String(),
-				"criu_restore_duration":    result.CRIURestoreDuration.String(),
-				"cuda_duration":            result.CUDADuration.String(),
+				"host_inspect_duration": hostInspectDuration.String(),
 			},
 		},
 	)
@@ -192,22 +220,24 @@ func inspectRestore(ctx context.Context, rt snapshotruntime.Runtime, log logr.Lo
 
 // execNSRestore launches the nsrestore binary inside the placeholder container's
 // namespaces via nsenter and parses the restored PID from stdout JSON.
-func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, snap *types.RestoreContainerSnapshot) (*RestoreInNamespaceResult, error) {
-	checkpointPath := req.ContainerCheckpointLocation
-	if checkpointPath != "" && !filepath.IsAbs(checkpointPath) {
-		return nil, fmt.Errorf("container checkpoint location must be absolute: %q", checkpointPath)
+func execNSRestore(
+	ctx context.Context,
+	log logr.Logger,
+	req RestoreRequest,
+	snap *types.RestoreContainerSnapshot,
+	rootfsMount, workspace, checkpoint *os.File,
+) (*RestoreInNamespaceResult, error) {
+	if rootfsMount == nil || workspace == nil || checkpoint == nil {
+		return nil, fmt.Errorf("rootfs mount, backing workspace, and checkpoint are required")
 	}
-	if checkpointPath == "" {
-		checkpointPath = snap.CheckpointPath
-	}
-	args := []string{
-		"-t", strconv.Itoa(snap.PlaceholderPID),
-		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
-		// from the host-visible hierarchy so --cgroup-root remap works.
-		"-m", "-u", "-i", "-n", "-p",
+	checkpointPath := "/proc/self/fd/5"
+	args := append(
+		nsenterTargetArgs(snap.PlaceholderPID),
 		"--", req.NSRestorePath,
 		"--checkpoint-path", checkpointPath,
-	}
+		"--rootfs-mount-fd", "3",
+		"--rootfs-workspace-fd", "4",
+	)
 	if snap.CUDADeviceMap != "" {
 		args = append(args, "--cuda-device-map", snap.CUDADeviceMap)
 	}
@@ -219,16 +249,22 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)
+	cmd.ExtraFiles = []*os.File{rootfsMount, workspace, checkpoint}
 	// Inherit the agent environment so nsrestore uses the same logger settings.
 	cmd.Env = os.Environ()
 	log.V(1).Info("Executing nsenter + nsrestore", "cmd", cmd.String())
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("nsrestore failed: %w\nstdout: %s", err, stdout.String())
+		return nil, fmt.Errorf(
+			"nsrestore failed: %w\nstdout: %s\nstderr tail: %s",
+			err,
+			stdout.String(),
+			stderrTail(stderr.Bytes()),
+		)
 	}
 
 	var result RestoreInNamespaceResult
@@ -240,4 +276,58 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 
 	return &result, nil
+}
+
+func nsenterTargetArgs(targetPID int) []string {
+	return []string{
+		"-t", strconv.Itoa(targetPID),
+		// Intentionally exclude cgroup namespace (-C): CRIU must manage cgroups
+		// from the host-visible hierarchy so --cgroup-root remap works.
+		"-m", "-u", "-i", "-n", "-p",
+	}
+}
+
+// Kubernetes Event messages are limited to 1 KiB. Leave room for the
+// surrounding restore error while preserving the final nsrestore log lines.
+const nsRestoreStderrTailLimit = 768
+
+func stderrTail(stderr []byte) []byte {
+	if len(stderr) <= nsRestoreStderrTailLimit {
+		return stderr
+	}
+	tail := stderr[len(stderr)-nsRestoreStderrTailLimit:]
+	for len(tail) > 0 && !utf8.RuneStart(tail[0]) {
+		tail = tail[1:]
+	}
+	return tail
+}
+
+func openRootfsBackingWorkspace(placeholderPID int) (*os.File, error) {
+	path := filepath.Join(
+		snapshotruntime.HostProcPath,
+		strconv.Itoa(placeholderPID),
+		"root",
+		strings.TrimPrefix(snapshotruntime.RootfsBackingWorkspaceMountPath, "/"),
+	)
+	fd, err := unix.Open(
+		path,
+		unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open rootfs backing workspace: %w", err)
+	}
+	return os.NewFile(uintptr(fd), "rootfs-backing-workspace"), nil
+}
+
+func openCheckpointDirectory(path string) (*os.File, error) {
+	fd, err := unix.Open(
+		path,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+		0,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("open checkpoint directory: %w", err)
+	}
+	return os.NewFile(uintptr(fd), "checkpoint-directory"), nil
 }

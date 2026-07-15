@@ -170,14 +170,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iptables \
     procps \
     uuid-runtime \
-    tar \
+    squashfs-tools \
     ca-certificates \
     util-linux \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
+RUN mkdir -p /legal/squashfs-tools \
+    && cp /usr/share/doc/squashfs-tools/copyright /legal/squashfs-tools/copyright
+
 # Copy CRIU from builder
 COPY --from=criu-builder /criu-install/usr/local /usr/local
-COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
 # Copy CUDA checkpoint binaries
@@ -191,7 +194,7 @@ COPY --from=builder /snapshot-agent /usr/local/bin/snapshot-agent
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 
 # Create directories
-RUN mkdir -p /checkpoints /var/run/snapshot
+RUN mkdir -p /checkpoints /host/dev /var/run/snapshot
 
 USER root
 
@@ -231,7 +234,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iptables \
     procps \
     uuid-runtime \
-    tar \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -250,5 +252,6 @@ RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-help
 COPY --from=builder /nsrestore /usr/local/bin/nsrestore
 RUN chmod +x /usr/local/bin/nsrestore
 
-# Create directories
-RUN mkdir -p /checkpoints /var/run/criu /var/criu-work
+# The backing path is a pod-managed emptyDir in restore pods.
+RUN mkdir -p /checkpoints /var/run/criu /var/criu-work \
+    /.dynamo-snapshot-backing

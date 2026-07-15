@@ -1,7 +1,9 @@
 package types
 
 import (
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 
 	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 )
 
@@ -18,6 +21,7 @@ const manifestFilename = "manifest.yaml"
 type CheckpointManifest struct {
 	CheckpointID string    `yaml:"checkpointId"`
 	CreatedAt    time.Time `yaml:"createdAt"`
+	RootFSSHA256 string    `yaml:"rootfsSha256"`
 
 	CRIUDump CRIUDumpManifest  `yaml:"criuDump"`
 	K8s      SourcePodManifest `yaml:"k8s"`
@@ -149,6 +153,9 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 	if strings.TrimSpace(data.CheckpointID) == "" {
 		return fmt.Errorf("checkpoint manifest is missing checkpointId")
 	}
+	if err := validateRootFSSHA256(data.RootFSSHA256); err != nil {
+		return err
+	}
 
 	content, err := yaml.Marshal(data)
 	if err != nil {
@@ -167,7 +174,13 @@ func WriteManifest(checkpointDir string, data *CheckpointManifest) error {
 func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 	manifestPath := filepath.Join(checkpointDir, manifestFilename)
 
-	content, err := os.ReadFile(manifestPath)
+	fd, err := unix.Open(manifestPath, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), manifestFilename)
+	defer file.Close()
+	content, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint manifest: %w", err)
 	}
@@ -179,6 +192,19 @@ func ReadManifest(checkpointDir string) (*CheckpointManifest, error) {
 	if strings.TrimSpace(data.CheckpointID) == "" {
 		return nil, fmt.Errorf("checkpoint manifest is missing checkpointId")
 	}
+	if err := validateRootFSSHA256(data.RootFSSHA256); err != nil {
+		return nil, err
+	}
 
 	return &data, nil
+}
+
+func validateRootFSSHA256(digest string) error {
+	if len(digest) != 64 {
+		return fmt.Errorf("checkpoint manifest has invalid rootfsSha256")
+	}
+	if _, err := hex.DecodeString(digest); err != nil {
+		return fmt.Errorf("checkpoint manifest has invalid rootfsSha256: %w", err)
+	}
+	return nil
 }

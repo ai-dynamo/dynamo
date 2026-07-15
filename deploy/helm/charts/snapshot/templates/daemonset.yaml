@@ -149,6 +149,9 @@ spec:
             # Mount host cgroup for CRIU (write access needed for cgroup freezer)
             - name: host-cgroup
               mountPath: /sys/fs/cgroup
+            # The agent allocates loop numbers through the only host device it receives.
+            - name: host-loop-control
+              mountPath: /host/dev/loop-control
             # Kubelet PodResources API socket (for GPU UUID discovery)
             - name: kubelet-pod-resources
               mountPath: /var/lib/kubelet/pod-resources
@@ -214,6 +217,11 @@ spec:
           hostPath:
             path: /sys/fs/cgroup
             type: Directory
+        # Individual loop block nodes are created in the agent's ephemeral root.
+        - name: host-loop-control
+          hostPath:
+            path: /dev/loop-control
+            type: CharDevice
         # Kubelet PodResources API socket directory
         - name: kubelet-pod-resources
           hostPath:

@@ -197,6 +197,10 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	// status write did not. The artifact dir exists only after the executor's atomic rename,
 	// so its presence means a completed dump.
 	if artifactPresent(loc.HostPath) {
+		if err := snapshotruntime.ValidateCheckpointArtifact(loc.HostPath, id); err != nil {
+			return w.setSnapshotContentFailed(ctx, content, "InvalidCheckpointArtifact",
+				fmt.Errorf("validate existing checkpoint artifact: %w", err))
+		}
 		return w.setSnapshotContentSucceeded(ctx, content)
 	}
 
@@ -417,8 +421,8 @@ func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *
 
 // executorCheckpoint is the production checkpointFn. The reconciler has already resolved the
 // container ID and host PID. It runs executor.Checkpoint to the destination, verifies the
-// artifact directory, and writes the snapshot-complete sentinel. On dump or verification
-// failure it SIGKILLs the CUDA-locked process before returning the error.
+// artifact directory, and writes the snapshot-complete sentinel. On dump or directory
+// verification or sentinel failure it SIGKILLs the CUDA-locked process before returning the error.
 func (w *NodeController) executorCheckpoint(ctx context.Context, params CheckpointParams) error {
 	log := logr.FromContextOrDiscard(ctx)
 
@@ -447,7 +451,6 @@ func (w *NodeController) executorCheckpoint(ctx context.Context, params Checkpoi
 		}
 		return fmt.Errorf("verify checkpoint path %s: not a directory", params.HostPath)
 	}
-
 	if err := snapshotruntime.WriteControlSentinel(params.ContainerPID, snapshotprotocol.SnapshotCompleteFile); err != nil {
 		w.killCheckpointProcess(log, params.ContainerPID, "checkpoint sentinel failed")
 		return fmt.Errorf("write snapshot-complete sentinel: %w", err)
