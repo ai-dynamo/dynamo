@@ -173,6 +173,12 @@ overrides:
     license: LicenseRef-NVIDIA-Proprietary
     source: "Internal NVIDIA tool — distributed via NGC under the NVIDIA Software License Agreement"
 
+  # --- Third-party Python packages with malformed license metadata ---
+  - ecosystem: python
+    name: helion
+    license: BSD-3-Clause
+    source: "Wheel bundles a BSD-3-Clause LICENSE; upstream: https://github.com/pytorch/helion/blob/main/LICENSE"
+
   # --- Intel oneAPI Python wheels ---
   # oneccl / oneccl-devel wheel METADATA sets License: "Intel Simplified Software
   # License" and Classifier: "License :: Other/Proprietary License" — neither
