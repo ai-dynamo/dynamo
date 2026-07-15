@@ -487,6 +487,8 @@ navigation:
             contents:
               - page: LWS
                 path: kubernetes/lws.md
+              - page: MatrixHub
+                path: integrations/matrixhub-integration.md
 
       # ==================== Design Docs ====================
       - section: Design Docs
