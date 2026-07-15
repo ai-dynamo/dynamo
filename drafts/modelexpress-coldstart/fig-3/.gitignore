@@ -1,0 +1,4 @@
+# Build scaffolding — never commit the venv or bytecode caches.
+.venv/
+__pycache__/
+*.pyc
