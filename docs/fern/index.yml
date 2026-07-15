@@ -811,6 +811,8 @@ navigation:
                     path: kubernetes/topology-aware-kv-transfer.md
                   - page: LWS
                     path: kubernetes/lws.md
+                  - page: MatrixHub
+                    path: kubernetes/matrixhub.md
       - section: Contributing
         icon: code-pull-request
         contents:
