@@ -2,10 +2,68 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Frontend Guide
-subtitle: Configures the KServe gRPC frontend, including supported endpoints, gRPC tuning, and registering OpenAI or tensor-based backends.
+subtitle: Configure the HTTP and KServe gRPC frontends, including experimental Python routes, gRPC tuning, and backend registration.
 ---
 
-This guide covers the KServe gRPC frontend configuration and integration for the Dynamo Frontend.
+This guide covers HTTP and KServe gRPC frontend configuration and integration.
+
+## Custom Python HTTP Routes
+
+> [!WARNING]
+> Custom Python routes are experimental. Route modules are trusted, in-process code with the same privileges as the frontend. Review a module before loading it.
+
+Use `--custom-routes` to add application-specific HTTP endpoints alongside Dynamo's built-in Rust endpoints. Pass either an existing `.py` file or an importable dotted module. Repeat the option to load multiple modules; Dynamo imports and registers them in command-line order.
+
+```bash
+python -m dynamo.frontend \
+  --custom-routes /opt/dynamo/routes/tenants.py \
+  --custom-routes my_service.health_routes
+```
+
+Alternatively, set a whitespace-separated module list:
+
+```bash
+export DYN_CUSTOM_ROUTES="/opt/dynamo/routes/tenants.py my_service.health_routes"
+python -m dynamo.frontend
+```
+
+Each module must define `register_routes(router, runtime)`. The hook can be synchronous or asynchronous and must return `None`. Handlers must be asynchronous and return an explicit `Response`:
+
+```python
+from dynamo.frontend.routes import Request, Response, Router
+from dynamo.runtime import DistributedRuntime
+
+
+async def register_routes(
+    router: Router, runtime: DistributedRuntime
+) -> None:
+    client = await runtime.endpoint("namespace.component.endpoint").client()
+
+    @router.post("/custom/{tenant}")
+    async def custom(request: Request) -> Response:
+        stream = await client.generate(
+            request.json(),
+            annotated=False,
+            context=request.context,
+        )
+        chunks = [chunk async for chunk in stream]
+        return Response.json(
+            {"tenant": request.path_params["tenant"], "chunks": chunks}
+        )
+```
+
+`Router` provides `route(path, methods=[...])` and `get`, `post`, `put`, `patch`, `delete`, `head`, and `options` decorators. Paths can contain named single-segment parameters such as `{tenant}`. `Request` provides the method, path, path parameters, raw `query_string`, parsed multi-value `query_params`, case-insensitive multi-value headers, buffered body, `json()`, and a Dynamo `Context`. Pass that context to downstream Dynamo calls to propagate request identity, tracing, metadata, and client-disconnect cancellation.
+
+Use `Response(body, status=200, headers=None)`, `Response.json(...)`, or `Response.text(...)` to create a buffered response. Raising `dynamo.llm.HttpError` returns its status and message. Other handler exceptions are logged by the frontend and returned as a sanitized HTTP 500 response.
+
+Registration fails startup if a module cannot be imported, a hook fails, a route is malformed or duplicated, or a route could match a built-in endpoint. Different methods can share one custom path. Custom methods and paths appear in `/openapi.json`, but this version does not accept plugin-provided OpenAPI schemas.
+
+> [!NOTE]
+> Python runs only after a custom route matches. Built-in routes retain their Rust request path. An executing Python handler holds the GIL whenever it runs Python code, so offload blocking or CPU-intensive work instead of running it on the event loop.
+
+The request body limit is shared with the built-in HTTP API: 45 MiB by default, configurable with `DYN_HTTP_BODY_LIMIT_MB`. Custom routes work with frontend TLS. They are not available with interactive mode or the KServe gRPC frontend.
+
+This initial API does not provide sandboxing, hot reload, streaming responses, WebSockets, catch-all paths, ASGI or FastAPI integration, plugin middleware, or built-in route replacement.
 
 ## KServe gRPC Frontend
 

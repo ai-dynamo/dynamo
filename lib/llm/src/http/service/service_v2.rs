@@ -17,6 +17,7 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+use super::custom::CustomHttpRoute;
 use super::metrics;
 use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
 use crate::discovery::ModelManager;
@@ -589,6 +590,10 @@ pub struct HttpServiceConfig {
     /// Distributed runtime used by the RL worker discovery API.
     #[builder(default = "None")]
     runtime: Option<Arc<DistributedRuntime>>,
+
+    /// Trusted, in-process extension routes mounted on the inference HTTP router.
+    #[builder(default)]
+    custom_routes: Vec<CustomHttpRoute>,
 }
 
 fn default_rl_port() -> u16 {
@@ -1046,6 +1051,11 @@ impl HttpServiceConfigBuilder {
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
+            inference_router = inference_router.merge(route);
+            all_docs.extend(route_docs);
+        }
+        if !config.custom_routes.is_empty() {
+            let (route_docs, route) = super::custom::router(&config.custom_routes, &all_docs)?;
             inference_router = inference_router.merge(route);
             all_docs.extend(route_docs);
         }

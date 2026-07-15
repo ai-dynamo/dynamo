@@ -15,6 +15,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    Union,
 )
 
 # Import from specialized modules
@@ -1379,6 +1380,66 @@ class HttpService:
         """
         ...
 
+class _CustomHttpRequest:
+    @property
+    def method(self) -> str: ...
+    @property
+    def path(self) -> str: ...
+    @property
+    def path_params(self) -> Dict[str, str]: ...
+    @property
+    def query_string(self) -> str: ...
+    @property
+    def query_params(self) -> Dict[str, List[str]]: ...
+    @property
+    def headers(self) -> Dict[str, List[str]]: ...
+    @property
+    def body(self) -> bytes: ...
+    @property
+    def context(self) -> Context: ...
+    def json(self) -> Any: ...
+
+class _CustomHttpResponse:
+    def __init__(
+        self,
+        body: Union[str, bytes],
+        status: int = 200,
+        headers: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
+    ) -> None: ...
+    @staticmethod
+    def json(
+        value: Any,
+        status: int = 200,
+        headers: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
+    ) -> "_CustomHttpResponse": ...
+    @staticmethod
+    def text(
+        value: str,
+        status: int = 200,
+        headers: Optional[Dict[str, Union[str, Sequence[str]]]] = None,
+    ) -> "_CustomHttpResponse": ...
+    @property
+    def status(self) -> int: ...
+    @property
+    def headers(self) -> Dict[str, List[str]]: ...
+    @property
+    def body(self) -> bytes: ...
+
+class _CustomHttpRoute:
+    def __init__(
+        self,
+        source: str,
+        method: str,
+        path: str,
+        callback: Callable[[_CustomHttpRequest], Awaitable[_CustomHttpResponse]],
+    ) -> None: ...
+    @property
+    def method(self) -> str: ...
+    @property
+    def path(self) -> str: ...
+    @property
+    def source(self) -> str: ...
+
 class PythonAsyncEngine:
     """
     Bridge a Python async generator onto Dynamo's AsyncEngine interface.
@@ -2375,7 +2436,12 @@ async def make_engine(distributed_runtime: DistributedRuntime, args: EntrypointA
     """Make an engine matching the args"""
     ...
 
-async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
+async def run_input(
+    runtime: DistributedRuntime,
+    input: str,
+    engine_config: EngineConfig,
+    custom_routes: Optional[Sequence[_CustomHttpRoute]] = None,
+) -> None:
     """Start an engine, connect it to an input, and run until stopped."""
     ...
 

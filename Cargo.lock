@@ -2625,6 +2625,7 @@ dependencies = [
  "tokio-util",
  "tonic 0.13.1",
  "tonic-build 0.13.1",
+ "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-subscriber",

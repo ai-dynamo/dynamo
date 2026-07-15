@@ -57,6 +57,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     kv_cache_block_size: Optional[int]
     http_host: str
     http_port: int
+    custom_routes: list[str]
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
 
@@ -97,6 +98,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
+            )
+        if self.custom_routes and (self.interactive or self.kserve_grpc_server):
+            raise ValueError(
+                "--custom-routes requires the HTTP frontend; it cannot be used "
+                "with --interactive or --kserve-grpc-server"
             )
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
@@ -221,6 +227,17 @@ class FrontendArgGroup(ArgGroup):
             default=8000,
             help="HTTP port for the engine (u16).",
             arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--custom-routes",
+            env_var="DYN_CUSTOM_ROUTES",
+            default=[],
+            help=(
+                "Trusted Python route module. Repeat for multiple modules; each value is "
+                "an existing .py path or importable dotted module."
+            ),
+            action="append",
         )
         add_negatable_bool_argument(
             g,

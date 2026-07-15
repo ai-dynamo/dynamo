@@ -73,6 +73,7 @@ impl From<RouterMode> for RsRouterMode {
 
 mod backend;
 mod context;
+mod custom_routes;
 mod engine;
 pub mod errors;
 mod http;
@@ -231,6 +232,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
+    m.add_class::<custom_routes::PyCustomHttpRequest>()?;
+    m.add_class::<custom_routes::PyCustomHttpResponse>()?;
+    m.add_class::<custom_routes::PyCustomHttpRoute>()?;
     m.add_class::<context::Context>()?;
     m.add_class::<context::ContextMetadata>()?;
     m.add_class::<context::SpanProxy>()?;

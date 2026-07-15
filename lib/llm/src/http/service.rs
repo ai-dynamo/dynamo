@@ -23,6 +23,7 @@ pub mod metadata;
 mod openai;
 
 pub mod busy_threshold;
+pub mod custom;
 pub mod disconnect;
 pub mod error;
 pub mod generate;
@@ -54,5 +55,13 @@ impl RouteDoc {
             method,
             path: path.into(),
         }
+    }
+
+    pub fn method(&self) -> &axum::http::Method {
+        &self.method
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }

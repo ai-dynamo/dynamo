@@ -98,6 +98,21 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
+    run_input_with_http_routes(drt, in_opt, engine_config, Vec::new()).await
+}
+
+/// Run an engine input with optional frontend HTTP extension routes.
+///
+/// Keeping this separate preserves the source-compatible Rust `run_input` API.
+pub async fn run_input_with_http_routes(
+    drt: dynamo_runtime::DistributedRuntime,
+    in_opt: Input,
+    engine_config: super::EngineConfig,
+    custom_routes: Vec<crate::http::service::custom::CustomHttpRoute>,
+) -> anyhow::Result<()> {
+    if !custom_routes.is_empty() && in_opt != Input::Http {
+        anyhow::bail!("custom routes require the HTTP frontend input");
+    }
     if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
         tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
     }
@@ -112,7 +127,7 @@ pub async fn run_input(
 
     match in_opt {
         Input::Http => {
-            http::run(drt, engine_config).await?;
+            http::run_with_custom_routes(drt, engine_config, custom_routes).await?;
         }
         Input::Grpc => {
             grpc::run(drt, engine_config).await?;

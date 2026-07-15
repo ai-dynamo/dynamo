@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::http::service::custom::CustomHttpRoute;
 use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher},
     endpoint_type::EndpointType,
@@ -24,6 +25,15 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
+) -> anyhow::Result<()> {
+    run_with_custom_routes(distributed_runtime, engine_config, Vec::new()).await
+}
+
+/// Build and run an HTTP service with trusted in-process extension routes.
+pub async fn run_with_custom_routes(
+    distributed_runtime: DistributedRuntime,
+    engine_config: EngineConfig,
+    custom_routes: Vec<CustomHttpRoute>,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
@@ -69,6 +79,7 @@ pub async fn run(
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
     http_service_builder =
         http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
+    http_service_builder = http_service_builder.custom_routes(custom_routes);
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {

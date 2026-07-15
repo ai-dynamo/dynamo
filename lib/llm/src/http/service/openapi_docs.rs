@@ -35,7 +35,7 @@
 
 use axum::Router;
 use utoipa::OpenApi;
-use utoipa::openapi::{PathItem, Paths, RefOr};
+use utoipa::openapi::{Paths, RefOr};
 
 use crate::http::service::RouteDoc;
 
@@ -94,23 +94,33 @@ pub fn generate_openapi_spec(route_docs: &[RouteDoc]) -> utoipa::openapi::OpenAp
         // Add operation based on method
         let operation = create_operation_for_route(method, path);
 
-        // Create PathItem with the operation
+        // Merge the operation into the path item so one path can advertise
+        // multiple methods (custom routes commonly do this).
         use utoipa::openapi::HttpMethod;
-        let path_item = match method.to_uppercase().as_str() {
-            "GET" => PathItem::new(HttpMethod::Get, operation),
-            "POST" => PathItem::new(HttpMethod::Post, operation),
-            "PUT" => PathItem::new(HttpMethod::Put, operation),
-            "DELETE" => PathItem::new(HttpMethod::Delete, operation),
-            "PATCH" => PathItem::new(HttpMethod::Patch, operation),
-            "HEAD" => PathItem::new(HttpMethod::Head, operation),
-            "OPTIONS" => PathItem::new(HttpMethod::Options, operation),
+        let method = match method.to_uppercase().as_str() {
+            "GET" => HttpMethod::Get,
+            "POST" => HttpMethod::Post,
+            "PUT" => HttpMethod::Put,
+            "DELETE" => HttpMethod::Delete,
+            "PATCH" => HttpMethod::Patch,
+            "HEAD" => HttpMethod::Head,
+            "OPTIONS" => HttpMethod::Options,
             _ => {
                 tracing::warn!("Unknown HTTP method: {}", method);
                 continue;
             }
         };
-
-        paths.paths.insert(path.to_string(), path_item);
+        let path_item = paths.paths.entry(path.to_string()).or_default();
+        match method {
+            HttpMethod::Get => path_item.get = Some(operation),
+            HttpMethod::Post => path_item.post = Some(operation),
+            HttpMethod::Put => path_item.put = Some(operation),
+            HttpMethod::Delete => path_item.delete = Some(operation),
+            HttpMethod::Patch => path_item.patch = Some(operation),
+            HttpMethod::Head => path_item.head = Some(operation),
+            HttpMethod::Options => path_item.options = Some(operation),
+            HttpMethod::Trace => path_item.trace = Some(operation),
+        }
     }
 
     openapi.paths = paths;
@@ -404,9 +414,15 @@ mod tests {
         let routes = vec![
             RouteDoc::new(axum::http::Method::POST, "/v1/chat/completions"),
             RouteDoc::new(axum::http::Method::GET, "/v1/models"),
+            RouteDoc::new(axum::http::Method::GET, "/custom/{tenant}"),
+            RouteDoc::new(axum::http::Method::POST, "/custom/{tenant}"),
         ];
 
         let spec = generate_openapi_spec(&routes);
+
+        let custom = spec.paths.paths.get("/custom/{tenant}").unwrap();
+        assert!(custom.get.is_some());
+        assert!(custom.post.is_some());
 
         // Verify basic structure
         assert!(!spec.info.title.is_empty());

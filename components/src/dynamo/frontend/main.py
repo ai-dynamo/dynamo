@@ -42,6 +42,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .frontend_args import FrontendArgGroup, FrontendConfig
+from .routes import load_custom_routes
 
 if TYPE_CHECKING:
     from .vllm_processor import EngineFactory
@@ -206,6 +207,7 @@ async def async_main():
         config.request_plane,
         event_plane=config.event_plane,
     )
+    custom_routes = await load_custom_routes(config.custom_routes, runtime)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -302,7 +304,7 @@ async def async_main():
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
-            await run_input(runtime, "http", engine)
+            await run_input(runtime, "http", engine, custom_routes)
     except asyncio.exceptions.CancelledError:
         pass
 

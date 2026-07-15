@@ -925,19 +925,26 @@ async fn select_engine(
 }
 
 #[pyfunction]
-#[pyo3(signature = (distributed_runtime, input, engine_config))]
+#[pyo3(signature = (distributed_runtime, input, engine_config, custom_routes=None))]
 pub fn run_input<'p>(
     py: Python<'p>,
     distributed_runtime: super::DistributedRuntime,
     input: &str,
     engine_config: EngineConfig,
+    custom_routes: Option<Vec<Py<crate::custom_routes::PyCustomHttpRoute>>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
+    let custom_routes = custom_routes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|route| route.borrow(py).inner.clone())
+        .collect();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        dynamo_llm::entrypoint::input::run_input(
+        dynamo_llm::entrypoint::input::run_input_with_http_routes(
             distributed_runtime.inner.clone(),
             input_enum,
             engine_config.inner,
+            custom_routes,
         )
         .await
         .map_err(to_pyerr)?;
