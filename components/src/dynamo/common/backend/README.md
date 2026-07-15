@@ -535,6 +535,14 @@ Lifecycle and runtime:
 - **Sleep/wake (vLLM)** — `sleep` / `wake_up` controls via
   `VllmEnginePauseController` (discovery unregister before sleep,
   re-register after wake; `worker.rs` `engine_control_policy`)
+- **KV block clearing (vLLM)** — `POST /engine/control/clear_kv_blocks`
+  on the unified worker's system port,
+  with an empty JSON object (`{}`). The control resets both the prefix
+  cache and connector cache in aggregated, prefill, and decode modes. It
+  returns `{"status":"success","message":"KV cache cleared"}` on
+  success and HTTP 200 with `status:"error"` on semantic failure. The
+  control runs directly without pausing generation or draining requests;
+  if blocks are still in use, retry after the active requests finish.
 - **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
   with the legacy handler: `new_data_parallel_size` validation, a
   single-flight lock (concurrent scales rejected, not queued), and the
@@ -629,7 +637,6 @@ Request handling:
 |---------|-------------|
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
-| KV block clearing | Prefix cache reset endpoint |
 | `VllmEngineMonitor` | Background `EngineDeadError` detection task |
 | Instrumented scheduler + FPM relay | Per-forward-pass `ForwardPassMetrics` ZMQ telemetry |
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
@@ -684,10 +691,9 @@ For users picking what to land next on the unified path:
    (engine updates `/engine/update/load_lora|unload_lora|list_loras` + a
    `/v1/loras` compatibility alias; see [What works today](#what-works-today)).
    Remaining: SGLang and TRT-LLM, which advertise no LoRA updates yet.
-3. **Engine routes / lifecycle endpoints** — weight updates, KV block
-   clearing, prefix cache reset. (Profiling, sleep/wake, elastic-EP
-   scaling, and headless multi-node already landed.) Visible in operator
-   workflows.
+3. **Engine routes / lifecycle endpoints** — weight updates. (Profiling,
+   sleep/wake, KV block clearing, elastic-EP scaling, and headless
+   multi-node already landed.) Visible in operator workflows.
 4. **Snapshot / CRIU** — production checkpoint support.
 5. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.

@@ -143,7 +143,6 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
         ],
@@ -201,7 +200,10 @@ vllm_omni_configs = {
     # Known flake (post-merge): URL check fails after 600s with "StageDiffusionProc
     # died during handshake (exit code 143)" — the diffusion child process is
     # SIGTERM'd before the handshake completes. Bumping the timeout will not fix this;
-    # needs investigation of why StageDiffusionProc is dying.
+    # needs investigation of why StageDiffusionProc is dying. On XPU, this
+    # currently manifests as `RuntimeError: level_zero backend failed with error:
+    # 20 (UR_RESULT_ERROR_DEVICE_LOST)`, so skip the XPU variant until the
+    # backend path is stabilized.
     "omni_t2v": VLLMOmniConfig(
         name="omni_t2v",
         directory=vllm_dir,
@@ -213,7 +215,6 @@ vllm_omni_configs = {
         ],
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.xpu_1,
             pytest.mark.post_merge,
             pytest.mark.timeout(1200),
             pytest.mark.profiled_vram_gib(16.8),  # actual profiled peak with kv-bytes

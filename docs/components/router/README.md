@@ -22,7 +22,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8000
 | `--router-kv-overlap-score-credit` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Consume worker KV events, or explicitly disable them to use approximate routing |
-| `--router-queue-threshold` | `16.0` | Backpressure queue threshold; priority hints only reorder requests while this queue is non-empty |
+| `--router-queue-threshold` | disabled | Backpressure queue threshold; setting a numeric value enables queueing, where priority hints reorder waiting requests |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
 

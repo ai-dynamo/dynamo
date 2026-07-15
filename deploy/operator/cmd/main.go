@@ -277,6 +277,7 @@ func main() {
 	}
 
 	restrictedNamespace := operatorCfg.Namespace.Restricted
+	isClusterWide := restrictedNamespace == ""
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
@@ -290,12 +291,10 @@ func main() {
 
 		banner := strings.Repeat("=", 80)
 		setupLog.Error(nil, banner)
-		setupLog.Error(nil, "DEPRECATION WARNING: Namespace-restricted mode is deprecated "+
-			"and will be removed in a future release.")
+		setupLog.Error(nil, "DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production.")
 		setupLog.Error(nil, "The operator is running in namespace-restricted mode",
 			"namespace", restrictedNamespace)
-		setupLog.Error(nil, "Please migrate to cluster-wide mode "+
-			"by removing the namespaceRestriction configuration.")
+		setupLog.Error(nil, "Use cluster-wide mode for production deployments.")
 		setupLog.Error(nil, banner)
 	} else {
 		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
@@ -655,22 +654,25 @@ func main() {
 		os.Exit(1)
 	}
 
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS
-	// secrets before this point. Auto mode can therefore patch admission and
-	// conversion CAs immediately; manual mode waits for externally provided
-	// ca.crt and only patches conversion, leaving admission CA management
-	// out-of-band.
+	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
+	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
+	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
 		os.Exit(1)
 	}
 	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if err := caInjector.InjectAll(mainCtx); err != nil {
+		if isClusterWide {
+			err = caInjector.InjectAll(mainCtx)
+		} else {
+			err = caInjector.InjectAdmission(mainCtx)
+		}
+		if err != nil {
 			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
 			os.Exit(1)
 		}
-	} else {
+	} else if isClusterWide {
 		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
 		// blocks startup instead of running with unauthenticated conversion.
 		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
@@ -875,24 +877,26 @@ func registerWebhookHandlers(
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
-		Complete(); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
-	}
+	if isClusterWide {
+		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
+			Complete(); err != nil {
+			return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
+		}
 
-	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeployment{}).
-		Complete(); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
-	}
+		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeployment{}).
+			Complete(); err != nil {
+			return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
+		}
 
-	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoComponentDeployment{}).
-		Complete(); err != nil {
-		return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
-	}
+		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoComponentDeployment{}).
+			Complete(); err != nil {
+			return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
+		}
 
-	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
-		Complete(); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeploymentScalingAdapter conversion webhook: %w", err)
+		if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
+			Complete(); err != nil {
+			return fmt.Errorf("unable to register DynamoGraphDeploymentScalingAdapter conversion webhook: %w", err)
+		}
 	}
 
 	setupLog.Info("Registering defaulting webhooks")

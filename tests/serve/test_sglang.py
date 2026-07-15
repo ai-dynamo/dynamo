@@ -167,6 +167,33 @@ sglang_configs = {
             completion_payload_default(),
         ],
     ),
+    "disaggregated_router": SGLangConfig(
+        # Disaggregated serving + KV-aware routing (2 prefill + 2 decode);
+        # frontend --router-mode kv drives the internal prefill router.
+        name="disaggregated_router",
+        directory=sglang_dir,
+        script_name="disagg_router.sh",
+        marks=[
+            pytest.mark.router,
+            pytest.mark.gpu_4,
+            pytest.mark.timeout(470),  # parity with sglang disaggregated configs
+            pytest.mark.nightly,  # heavy e2e launch scenario; runs on nightly multi-gpu lane
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+            # Disagg workers expose fewer sglang:* metrics; check the
+            # prefill worker's endpoint (mirrors disaggregated_same_gpu).
+            metric_payload_default(
+                min_num_requests=6,
+                backend="sglang_disagg",
+                port=DefaultPort.SYSTEM1.value,
+            ),
+        ],
+    ),
     "disaggregated_same_gpu": SGLangConfig(
         # Uses disagg_same_gpu.sh for single-GPU disaggregated testing
         # Validates metrics from both prefill (DefaultPort.SYSTEM1) and decode
@@ -783,6 +810,39 @@ sglang_configs = {
             ),
         ],
     ),
+    "diffusion_llada": SGLangConfig(
+        # LLaDA2.0 diffusion LM: text via iterative refinement (not autoregressive),
+        # served over /v1/chat/completions, so it uses a chat payload.
+        name="diffusion_llada",
+        directory=sglang_dir,
+        script_name="diffusion_llada.sh",
+        # diffusion_llada.sh forwards "$@"; 0.4 OOMs the sglang scheduler, 0.7 boots.
+        script_args=["--mem-fraction-static", "0.7"],
+        marks=[
+            # Text diffusion LM (not image/video), so component marker is core.
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.h100,
+            pytest.mark.profiled_vram_gib(56.0),
+            # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
+            pytest.mark.timeout(600),
+            pytest.mark.nightly,
+        ],
+        model="inclusionAI/LLaDA2.0-mini-preview",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # Non-deterministic diffusion output: accept any non-empty response.
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=[],
+                # Small: diffusion decode cost scales with tokens.
+                max_tokens=32,
+                temperature=0.0,
+            ),
+        ],
+    ),
     "anthropic_messages": SGLangConfig(
         name="anthropic_messages",
         directory=sglang_dir,
@@ -814,9 +874,9 @@ def sglang_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.sglang
-# Use 2 system ports because some `sglang_configs` validate metrics on multiple ports.
-# This test iterates over all configs via `sglang_config_test`.
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+# Allocate 4 system ports: disaggregated_router runs 4 workers each needing a
+# unique DYN_SYSTEM_PORT; other configs use <=2 (extra ports are harmless).
+@pytest.mark.parametrize("num_system_ports", [4], indirect=True)
 def test_sglang_deployment(
     sglang_config_test,
     request,

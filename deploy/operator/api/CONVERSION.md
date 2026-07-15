@@ -168,6 +168,9 @@ Allowed local helpers:
   stored objects that predate structural preservation. Never re-emit them.
 - Keep legacy keys named `legacyAnn*` and isolate their decoding in legacy
   helpers.
+- Keep the legacy implementation and its focused fixtures in dedicated
+  `dynamographdeploymentrequest_legacy_read*` files so the eventual removal is
+  isolated from structural conversion.
 - Decode legacy data into the same typed `restored` model used by structural
   conversion. Structural payloads take precedence when both formats exist.
 - Legacy data is an old-value cache only and must not override fields

@@ -49,18 +49,19 @@ pub(super) struct RequestState {
     expected_output_tokens: Option<u32>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct PromptMembershipStore {
-    pub parent: Option<SequenceHash>,
-    pub hashes: Vec<SequenceHash>,
+    pub path: Vec<SequenceHash>,
+    pub new_suffix_start: usize,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) struct PromptMembershipRemove {
-    pub hashes: Vec<SequenceHash>,
+    pub path: Vec<SequenceHash>,
+    pub remove_from: usize,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct PromptMembershipDelta {
     pub stores: Vec<PromptMembershipStore>,
     pub removes: Vec<PromptMembershipRemove>,
@@ -72,22 +73,32 @@ impl PromptMembershipDelta {
         self.removes.extend(other.removes);
     }
 
-    fn push_store(&mut self, parent: Option<SequenceHash>, hashes: Vec<SequenceHash>) {
-        if hashes.is_empty() {
-            return;
-        }
-        self.stores.push(PromptMembershipStore { parent, hashes });
+    fn push_store(&mut self, path: Vec<SequenceHash>, new_suffix_start: usize) {
+        assert!(
+            new_suffix_start < path.len(),
+            "prompt store suffix must start inside a non-empty path"
+        );
+        self.stores.push(PromptMembershipStore {
+            path,
+            new_suffix_start,
+        });
     }
 
-    fn push_remove(&mut self, hashes: Vec<SequenceHash>) {
-        if hashes.is_empty() {
-            return;
+    fn push_remove(&mut self, released: Option<super::block_tracker::ReleasedPromptPath>) {
+        if let Some(released) = released {
+            assert!(
+                released.remove_from < released.path.len(),
+                "prompt removal must remove a non-empty suffix"
+            );
+            self.removes.push(PromptMembershipRemove {
+                path: released.path,
+                remove_from: released.remove_from,
+            });
         }
-        self.removes.push(PromptMembershipRemove { hashes });
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct SequenceMutationOutcome {
     pub membership_delta: PromptMembershipDelta,
     pub expired_request_ids: HashSet<RequestId>,
@@ -176,17 +187,15 @@ impl ActiveSequences {
         let (blocks, first_new_prompt_idx) = self.blocks.acquire_prompt(&prompt_hashes);
 
         if let Some(first_new_prompt_idx) = first_new_prompt_idx {
+            #[cfg(any(test, debug_assertions))]
             debug_assert!(
                 prompt_hashes[first_new_prompt_idx..]
                     .iter()
                     .all(|hash| self.blocks.contains_block(hash))
             );
-            let parent = first_new_prompt_idx
-                .checked_sub(1)
-                .map(|idx| prompt_hashes[idx]);
             outcome
                 .membership_delta
-                .push_store(parent, prompt_hashes[first_new_prompt_idx..].to_vec());
+                .push_store(prompt_hashes, first_new_prompt_idx);
         }
 
         let prefill = if track_prefill_tokens {
@@ -391,8 +400,8 @@ mod tests {
             first.membership_delta,
             PromptMembershipDelta {
                 stores: vec![PromptMembershipStore {
-                    parent: None,
-                    hashes: vec![1, 2],
+                    path: vec![1, 2],
+                    new_suffix_start: 0,
                 }],
                 removes: Vec::new(),
             }
@@ -411,8 +420,8 @@ mod tests {
             second.membership_delta,
             PromptMembershipDelta {
                 stores: vec![PromptMembershipStore {
-                    parent: Some(2),
-                    hashes: vec![3],
+                    path: vec![1, 2, 3],
+                    new_suffix_start: 2,
                 }],
                 removes: Vec::new(),
             }
@@ -427,7 +436,8 @@ mod tests {
         assert_eq!(
             second_free.removes,
             vec![PromptMembershipRemove {
-                hashes: vec![1, 2, 3],
+                path: vec![1, 2, 3],
+                remove_from: 0,
             }]
         );
     }
@@ -448,8 +458,8 @@ mod tests {
         assert_eq!(
             outcome.membership_delta.stores,
             vec![PromptMembershipStore {
-                parent: None,
-                hashes: vec![1, 2, 3],
+                path: vec![1, 2, 3],
+                new_suffix_start: 0,
             }]
         );
         assert_eq!(
@@ -476,7 +486,8 @@ mod tests {
         assert_eq!(
             free_delta.removes,
             vec![PromptMembershipRemove {
-                hashes: vec![1, 2, 3],
+                path: vec![1, 2, 3],
+                remove_from: 0,
             }]
         );
     }
