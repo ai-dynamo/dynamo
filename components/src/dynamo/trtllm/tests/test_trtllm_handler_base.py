@@ -1290,3 +1290,59 @@ class TestConversationAffinity:
             async for _ in handler.generate_locally(request, self._make_context()):
                 pass
         handler.engine.llm.generate_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_override_suppresses_dp_rank_and_forwards_conversation_params(
+        self, monkeypatch
+    ):
+        """DYN_ENGINE_CONV_AFFINITY override=True + engine detection disabled →
+        dp_rank suppressed, conversation_params forwarded."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        # Engine detection returns False (no engine-side affinity config).
+        handler = self._make_handler(conversation_affinity=False)
+        # Simulate DYN_ENGINE_CONV_AFFINITY=true wired through RequestHandlerConfig.
+        handler._engine_conversation_affinity_override = True
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-99:agent-0"},
+            },
+        )
+        # Override must suppress the router rank just like auto-detection does.
+        assert kwargs["scheduling_params"] is None
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-99:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_override_raises_when_conversation_params_api_missing(
+        self, monkeypatch
+    ):
+        """DYN_ENGINE_CONV_AFFINITY=true on a build without ConversationParams →
+        RuntimeError on first request (guard in _generate_locally_impl)."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        handler._engine_conversation_affinity_override = True
+        handler.engine.llm.generate_async = MagicMock()
+
+        with pytest.raises(RuntimeError, match="DYN_ENGINE_CONV_AFFINITY"):
+            async for _ in handler.generate_locally(
+                {
+                    "token_ids": [1, 2, 3],
+                    "stop_conditions": {"max_tokens": 10},
+                    "sampling_options": {"temperature": 0.7},
+                },
+                self._make_context(),
+            ):
+                pass
+        handler.engine.llm.generate_async.assert_not_called()
