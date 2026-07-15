@@ -533,7 +533,20 @@
       badge.type = "button";
       badge.setAttribute("aria-expanded", "false");
       badge.innerHTML = "\uD83D\uDCAC " + g.comments.length;
-      marks[marks.length - 1].insertAdjacentElement("afterend", badge);
+      /* Anchor the badge as a sibling of any enclosing <a> when the last mark
+       * lives inside a hyperlink (e.g. a quote that overlaps `[@grahamking]
+       * (...)`). Nesting a <button> inside <a> is invalid HTML and, because
+       * clicks bubble, tapping the badge would open the link instead of
+       * toggling this card. The wrapping itself is unchanged — per-text-node
+       * marks still land inside the <a>, so the highlight and href survive. */
+      var badgeAnchor = marks[marks.length - 1];
+      var badgeBlock = blockAncestor(badgeAnchor, root);
+      var probe = badgeAnchor.parentNode;
+      while (probe && probe !== badgeBlock && probe !== root) {
+        if ((probe.nodeName || "").toUpperCase() === "A") { badgeAnchor = probe; break; }
+        probe = probe.parentNode;
+      }
+      badgeAnchor.insertAdjacentElement("afterend", badge);
 
       var card = document.createElement("div");
       card.className = "dep-pr-card dep-pr-ui";
