@@ -103,8 +103,7 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
         image="example/vllm:test",
         prefill_cli_args=[
             "--disaggregation-mode=decode",
-            "--kv-transfer-config",
-            custom_kv_config,
+            f"--kv-transfer-config '{custom_kv_config}'",
         ],
         decode_cli_args=["--disaggregation-mode", "prefill"],
     )
@@ -123,6 +122,7 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
 
     assert prefill_args.count("--disaggregation-mode") == 1
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
+    assert prefill_args.count("--kv-transfer-config") == 1
     assert (
         prefill_args[prefill_args.index("--kv-transfer-config") + 1] == custom_kv_config
     )
