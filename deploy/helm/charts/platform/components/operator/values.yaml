@@ -17,8 +17,9 @@
 # Declare variables to be passed into your templates.
 
 # Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container.
-# This must be false for namespace-restricted installations, which use the CRDs
-# managed by the cluster-wide operator.
+# When false, the chart installs no CRDs; apply them separately before starting a cluster-wide
+# operator. Namespace-restricted installations must set this to false and use the CRDs managed by
+# the cluster-wide operator.
 upgradeCRD: true
 
 featureGates:

@@ -396,14 +396,20 @@ runs:
       run: |
         echo "::group::Wait for Dynamo operator CRDs inside vCluster"
         # The crd-apply init container installs CRDs asynchronously after Helm returns.
-        # Wait for the resource to exist before checking its Established condition.
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          wait --for=create \
-          crd/dynamographdeployments.nvidia.com \
-          --timeout=1800s
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+        # Poll for the resource because a condition wait fails if it does not exist yet.
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+        CRD=dynamographdeployments.nvidia.com
+        end=$((SECONDS + 1800))
+        until kubectl --kubeconfig="${VKUBECONFIG}" get "crd/${CRD}" >/dev/null 2>&1; do
+          if [ $SECONDS -ge $end ]; then
+            echo "::error::CRD ${CRD} was not created after 1800s"
+            exit 1
+          fi
+          sleep 5
+        done
+        kubectl --kubeconfig="${VKUBECONFIG}" \
           wait --for=condition=established \
-          crd/dynamographdeployments.nvidia.com \
+          "crd/${CRD}" \
           --timeout=120s
         echo "::endgroup::"
 

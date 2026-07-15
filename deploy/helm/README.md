@@ -30,5 +30,6 @@ in the operator image.
 - **Initial installation and upgrades**: The operator Deployment's `crd-apply` init container applies
   CRDs from the operator image using server-side apply before the manager starts.
 - **External management**: Set `dynamo-operator.upgradeCRD=false` when another process manages CRDs.
-  Namespace-restricted operators require this setting and use the CRDs managed by the cluster-wide
-  operator.
+  With this setting, the chart installs no CRDs. Apply them separately before starting a cluster-wide
+  operator. Namespace-restricted operators require this setting and use the CRDs managed by the
+  cluster-wide operator.
