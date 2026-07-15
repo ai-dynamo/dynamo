@@ -149,7 +149,10 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
 # build (which COPYs /epp from this image) can consume it in its licenses
 # stage. EPP itself is not customer-facing — the SBOM lives here purely as
 # a build artifact for frontend's compliance pipeline. cyclonedx-gomod is
-# pinned to keep the SBOM tool itself reproducible.
+# pinned to keep the SBOM tool itself reproducible. app mode is build-constraint
+# aware, so we pin CGO_ENABLED/GOOS/GOARCH to match the go build above and
+# produce a deterministic amd64-basis SBOM; EPP's Go module set doesn't vary by
+# GOARCH (linux only), so this one export is authoritative for all frontend arches.
 #
 # cyclonedx-gomod app runs `git describe` to determine the module's version.
 # The COPY of the build context doesn't bring .git/ (BuildKit excludes it),
@@ -164,7 +167,7 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=shared \
     git -c user.email=ci@example -c user.name=ci commit -q --allow-empty -m "sbom build" && \
     git tag "v0.0.0-${BUILD_REF:-dev}" && \
     GOBIN=/usr/local/bin go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0 && \
-    cyclonedx-gomod app -licenses -json \
+    CGO_ENABLED=1 GOOS=linux GOARCH=amd64 cyclonedx-gomod app -licenses -json \
         -main ./cmd/epp \
         -output /sbom-go.cdx.json \
         .

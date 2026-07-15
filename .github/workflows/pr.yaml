@@ -827,7 +827,13 @@ jobs:
   frontend-compliance-audit:
     name: frontend # grouped in the UI with other frontend jobs
     needs: [changed-files, frontend-build]
-    if: needs.changed-files.outputs.frontend == 'true'
+    # Mirror frontend-build's trigger so every rebuilt frontend image gets an
+    # audit report, including operator/snapshot/deploy-driven rebuilds.
+    if: |
+      needs.changed-files.outputs.frontend == 'true' ||
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true' ||
+      needs.changed-files.outputs.deploy == 'true'
     uses: ./.github/workflows/shared-compliance-audit.yml
     with:
       framework: dynamo

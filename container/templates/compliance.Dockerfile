@@ -80,7 +80,8 @@ COPY --from=wheel_builder /opt/dynamo/rust-licenses /tmp/rust-licenses
 # (see deploy/inference-gateway/epp/Dockerfile sbom-export stage). This avoids
 # re-pulling the pushed EPP image — whose runtime layer could be served from a
 # stale cache and miss these files after the BuildKit builder is refreshed. The
-# SBOM is architecture-independent JSON, exported once on amd64.
+# SBOM is exported once on amd64; EPP's Go module set doesn't vary by GOARCH
+# (linux only), so the amd64 export is authoritative for all frontend arches.
 COPY .epp-sbom/sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
 # Real Go module LICENSE files so the go generator inlines upstream license text
 # instead of canonical SPDX fallback.
