@@ -253,7 +253,7 @@ impl LLMEngine for VllmSidecarEngine {
             .set(pool)
             .map_err(|_| client::engine_shutdown("vllm sidecar already started"))?;
 
-        let config = build_engine_config(&discovery);
+        let config = build_engine_config(&discovery, self.disaggregation_mode);
         let served_model_name = config
             .served_model_name
             .clone()

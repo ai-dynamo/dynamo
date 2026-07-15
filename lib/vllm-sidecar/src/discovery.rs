@@ -10,6 +10,8 @@ use crate::args::TransportConfig;
 use crate::client::{self, Discovery};
 use crate::proto as pb;
 
+const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
+
 #[derive(Clone)]
 pub(crate) struct BootstrapIdentity {
     instance_id: String,
@@ -109,7 +111,7 @@ pub(crate) fn component_for_mode(mode: DisaggregationMode) -> &'static str {
     }
 }
 
-pub(crate) fn build_engine_config(discovery: &Discovery) -> EngineConfig {
+pub(crate) fn build_engine_config(discovery: &Discovery, mode: DisaggregationMode) -> EngineConfig {
     let model = &discovery.model;
     let server = &discovery.server;
     let parallelism = server.parallelism.clone().unwrap_or_default();
@@ -119,7 +121,16 @@ pub(crate) fn build_engine_config(discovery: &Discovery) -> EngineConfig {
     EngineConfig {
         model: model.model_id.clone(),
         served_model_name,
-        runtime_data: Default::default(),
+        runtime_data: if mode.is_prefill() {
+            Default::default()
+        } else {
+            [(
+                VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+                serde_json::Value::Bool(true),
+            )]
+            .into_iter()
+            .collect()
+        },
         llm: Some(LlmRegistration {
             context_length: (server.max_model_len != 0).then_some(server.max_model_len),
             kv_cache_block_size: (server.kv_block_size != 0).then_some(server.kv_block_size),

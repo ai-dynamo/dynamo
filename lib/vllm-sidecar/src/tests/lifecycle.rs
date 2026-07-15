@@ -28,8 +28,33 @@ async fn start_advertises_discovered_metadata() {
     assert_eq!(llm.max_num_seqs, Some(256));
     assert_eq!(llm.max_num_batched_tokens, Some(8192));
     assert!(llm.bootstrap_host.is_none());
+    assert_eq!(
+        cfg.runtime_data.get("vllm_inference_v1_generate"),
+        Some(&serde_json::Value::Bool(true))
+    );
 
     engine.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn generate_capability_is_role_aware() {
+    for (mode, expected) in [
+        (DisaggregationMode::Aggregated, true),
+        (DisaggregationMode::Decode, true),
+        (DisaggregationMode::Prefill, false),
+    ] {
+        let handle = spawn_fake_engine(FakeConfig::default());
+        let engine = engine_for(&handle, mode);
+        let cfg = engine.start(0).await.expect("start");
+        assert_eq!(
+            cfg.runtime_data
+                .get("vllm_inference_v1_generate")
+                .and_then(serde_json::Value::as_bool),
+            expected.then_some(true),
+            "unexpected Generate capability for {mode:?}"
+        );
+        engine.cleanup().await.unwrap();
+    }
 }
 
 #[tokio::test]

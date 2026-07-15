@@ -594,6 +594,8 @@ fn build_engine_config(
             data_parallel_start_rank,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
             bootstrap_port: mode.is_prefill().then_some(bootstrap_port).flatten(),
+            supports_lora: false,
+            max_loras: None,
         }),
     })
 }
