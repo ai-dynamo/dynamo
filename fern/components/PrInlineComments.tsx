@@ -32,7 +32,13 @@ interface PrInlineCommentsProps {
   owner?: string;
   /** Repository name (default "dynamo"). */
   repo?: string;
-  /** Only show inline comments on this file path (default the example DEP). */
+  /**
+   * Only show inline review comments whose GitHub `path` matches this value.
+   * Default is empty (no filter): the runtime shows every inline review
+   * comment on the PR. Set this on multi-file PRs so a DEP page only mirrors
+   * comments on its own markdown file. Must be the repo-relative path GitHub
+   * uses (e.g. `docs/proposals/0000-example-dep.mdx`).
+   */
   path?: string;
   /** If true, comment cards are expanded on first render. Default collapsed. */
   autoOpen?: boolean;
@@ -43,7 +49,7 @@ export function PrInlineComments({
   issue,
   owner = "ai-dynamo",
   repo = "dynamo",
-  path = "docs/proposals/0000-example-dep.mdx",
+  path = "",
   autoOpen = false,
 }: PrInlineCommentsProps) {
   return (

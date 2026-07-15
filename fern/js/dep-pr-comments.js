@@ -581,11 +581,18 @@
         mount.setAttribute(DONE_ATTR, "1");
       } finally {
         running = false;
+        // Any scan() calls that arrived while we were fetching early-returned
+        // on the single-flight lock. If SPA nav swapped the mount mid-fetch,
+        // the new mount is undone and would only render on the next
+        // incidental DOM mutation; sweep it now (idempotent under
+        // scanScheduled, so this cannot double-fire with pending observers).
+        scheduleScan();
       }
     }).catch(function () {
       // fetchAll uses allSettled and never rejects; this only guards an
       // unexpected render error so the single-flight lock is always released.
       running = false;
+      scheduleScan();
     });
   }
 

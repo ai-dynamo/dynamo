@@ -198,8 +198,10 @@ List frequently used acronyms and abbreviations that are uncommon or unlikely to
       - "Design discussion": the tracking-issue thread (durable debate).
     Set pr={<your PR>} once the draft PR exists, and issue={<your issue>} once
     the tracking issue exists (omit issue to show the "open a tracking issue"
-    empty state). Every card deep-links to GitHub to reply; the page never
-    posts. See fern/components/PrInlineComments.tsx and
+    empty state). If your PR touches multiple files, also set
+    path="docs/proposals/NNNN-your-feature.mdx" so the inline review here only
+    mirrors comments on this page. Every card deep-links to GitHub to reply;
+    the page never posts. See fern/components/PrInlineComments.tsx and
     fern/js/dep-pr-comments.js. */}
 
 <PrInlineComments pr={12345} issue={67890} />
