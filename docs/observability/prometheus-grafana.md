@@ -100,8 +100,6 @@ Sections:
 
 Metric panels read the `dynamo_frontend_*`, `dynamo_component_*`, and `dynamo_router_*` metric surfaces, filtered by the `${model}` template variable.
 
-The Kubernetes version is provisioned from [deploy/observability/grafana-dynamo-dashboard-configmap.yaml](../../deploy/observability/grafana-dynamo-dashboard-configmap.yaml).
-
 ### Troubleshooting
 
 1. Verify services are running using `docker compose ps`

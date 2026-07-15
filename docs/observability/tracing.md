@@ -12,7 +12,7 @@ Dynamo supports OpenTelemetry-based distributed tracing for visualizing request 
 
 **Note:** When OTLP export is enabled, Dynamo exports both **traces and logs**. Traces are sent to Tempo and logs are sent to Loki (via the OpenTelemetry Collector). To send logs to a separate endpoint, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`; otherwise it defaults to the traces endpoint. See [Logging](logging.md#otlp-log-export) for details.
 
-This guide covers single GPU demo setup using Docker Compose. For Kubernetes deployments, see [Kubernetes Deployment](#kubernetes-deployment).
+This guide covers single GPU demo setup using Docker Compose.
 
 **Note:** This section has overlap with [Logging of OpenTelemetry Tracing](logging.md) since OpenTelemetry has aspects of both logging and tracing. The tracing approach documented here is for persistent trace visualization and analysis. For short debugging sessions examining trace context directly in logs, see the [Logging](logging.md) guide.
 
@@ -92,27 +92,4 @@ Below is an example of what a trace looks like in Grafana Tempo:
 ### 5. Stop Services
 
 When done, stop the observability stack. See [Observability Getting Started](README.md#getting-started-quickly) for Docker Compose commands.
-
----
-
-## Kubernetes Deployment
-
-For Kubernetes deployments, ensure you have a Tempo instance deployed and accessible (e.g., `http://tempo.observability.svc.cluster.local:4317`).
-
-### Modify DynamoGraphDeployment for Tracing
-
-Tracing-enabled variants of the example deployments are provided:
-
-- **Aggregated:** `examples/backends/vllm/deploy/agg_tracing.yaml`
-- **Disaggregated:** `examples/backends/vllm/deploy/disagg_tracing.yaml`
-
-These add the tracing environment variables (see [Environment Variables](../reference/observability/environment-variables.mdx#opentelemetry-traces-and-logs)) to the base `agg.yaml` / `disagg.yaml` deployments. To override the Tempo endpoint, edit `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in the YAML.
-
-Apply a tracing-enabled deployment:
-
-```bash
-kubectl apply -f examples/backends/vllm/deploy/disagg_tracing.yaml
-```
-
-Traces will now be exported to Tempo and can be viewed in Grafana.
 

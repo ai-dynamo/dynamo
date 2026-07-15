@@ -219,7 +219,6 @@ In addition to the HTTP endpoints described above, Dynamo includes a **canary he
 The canary health check system:
 - **Monitors endpoint health** by sending periodic test requests to worker endpoints
 - **Only activates during idle periods** - if there's ongoing traffic, health checks are skipped to avoid overhead
-- **Automatically enabled in Kubernetes** deployments via the operator
 - **Disabled by default** in local/development environments
 
 ### How It Works
@@ -230,25 +229,6 @@ The canary health check system:
 4. **Timeout Handling**: If a health check doesn't respond within the timeout (default: 3 seconds), the endpoint is marked as unhealthy
 
 ### Configuration
-
-#### In Kubernetes (Enabled by Default)
-
-Health checks are automatically enabled by the Dynamo operator. No additional configuration is required.
-
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-deployment
-spec:
-  services:
-    VllmWorker:
-      componentType: worker
-      replicas: 2
-      # Health checks automatically enabled by operator
-```
-
-#### In Local/Development Environments (Disabled by Default)
 
 To enable health checks locally:
 
@@ -299,7 +279,7 @@ ERROR Health check request failed for generate: connection refused
 
 ### When to Use Canary Health Checks
 
-**Enable in production (Kubernetes):**
+**Enable in production:**
 - ✅ Detect unhealthy workers before they affect user traffic
 - ✅ Enable faster failure detection and recovery
 - ✅ Monitor worker availability continuously

@@ -30,14 +30,14 @@ tabs:
   cli-guide:
     display-name: CLI Guide
     icon: rectangle-terminal
-    skip-slug: true
+    slug: cli
   use-cases:
     display-name: Features
-    icon: star
+    icon: puzzle-piece
     skip-slug: true
   well-lit-paths:
     display-name: Walkthroughs
-    icon: road
+    icon: compass
     skip-slug: true
   recipes:
     display-name: Recipes
@@ -192,7 +192,7 @@ navigation:
         icon: rocket
         contents:
           - page: Introduction
-            path: getting-started/cli-introduction.md
+            path: cli/introduction.md
           - page: Quickstart
             path: getting-started/quickstart.mdx
 
@@ -202,14 +202,14 @@ navigation:
           - page: Install Dynamo
             path: getting-started/local-installation.md
           - page: Building from Source
-            path: getting-started/building-from-source.md
+            path: cli/building-from-source.md
           - page: Minikube Setup
             path: kubernetes/deployment/minikube.md
           - section: Observability Setup
             collapsed: true
             contents:
               - page: Overview
-                path: observability/README.md
+                path: cli/observability.md
               - page: Prometheus + Grafana
                 path: observability/prometheus-grafana.md
 
@@ -217,7 +217,7 @@ navigation:
         icon: microchip
         contents:
           - page: Overview
-            path: getting-started/cli-model-deployment.md
+            path: cli/overview.md
           - section: Backends
             collapsed: true
             contents:
@@ -233,7 +233,7 @@ navigation:
               - page: LMCache Integration
                 path: integrations/lmcache-integration.md
               - page: Hicache Integration
-                path: backends/sglang/sglang-hicache.md
+                path: cli/sglang-hicache.md
               - page: FlexKV Integration
                 path: integrations/flexkv-integration.md
               - page: Custom KV Events
