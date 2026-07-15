@@ -956,6 +956,99 @@ class TestBenchmarkConfig:
             "prefix_max_batch_size_samples": 3,
         }
 
+    def test_benchmark_points_file_is_embedded_in_benchmark_config(
+        self, mock_vllm_cli, tmp_path
+    ):
+        points_path = tmp_path / "points.json"
+        points = {
+            "schema_version": 1,
+            "prefill": [
+                {
+                    "total_prefill_tokens": 8,
+                    "total_kv_read_tokens": 0,
+                    "batch_size": 1,
+                }
+            ],
+            "decode": [{"total_kv_read_tokens": 32, "batch_size": 2}],
+        }
+        points_path.write_text(json.dumps(points))
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "agg",
+            "--benchmark-points-file",
+            str(points_path),
+        )
+
+        config = parse_args()
+
+        bench = config._benchmark_additional_config
+        assert bench["points"] == points
+        assert len(bench["points_digest"]) == 64
+        assert bench["points_source_path"] == str(points_path.resolve())
+        assert "benchmark_points_file" not in bench
+
+    def test_benchmark_points_file_requires_mode(self, mock_vllm_cli, tmp_path):
+        points_path = tmp_path / "points.json"
+        points_path.write_text("{}")
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-points-file",
+            str(points_path),
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="--benchmark-points-file requires --benchmark-mode",
+        ):
+            parse_args()
+
+    @pytest.mark.parametrize(
+        "sampling_flag",
+        [
+            "--prefill-max-new-token-samples",
+            "--prefill-max-kv-read-token-samples",
+            "--decode-max-kv-read-token-samples",
+            "--decode-max-batch-size-samples",
+            "--prefix-max-batch-size-samples",
+            "--benchmark-prefill-granularity",
+        ],
+    )
+    def test_benchmark_points_file_rejects_sampling_controls(
+        self, mock_vllm_cli, tmp_path, sampling_flag
+    ):
+        points_path = tmp_path / "points.json"
+        points_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "prefill": [
+                        {
+                            "total_prefill_tokens": 8,
+                            "total_kv_read_tokens": 0,
+                            "batch_size": 1,
+                        }
+                    ],
+                    "decode": [],
+                }
+            )
+        )
+        mock_vllm_cli(
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--benchmark-mode",
+            "prefill",
+            "--benchmark-points-file",
+            str(points_path),
+            sampling_flag,
+            "2",
+        )
+
+        with pytest.raises(ValueError, match="cannot be combined"):
+            parse_args()
+
     def test_benchmark_sampling_controls_reach_scheduler_config(self, mock_vllm_cli):
         mock_vllm_cli(
             "--model",

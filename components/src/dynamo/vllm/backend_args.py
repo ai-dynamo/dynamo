@@ -9,6 +9,7 @@ import argparse
 import logging
 import os
 import warnings
+from pathlib import Path
 from typing import Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -19,6 +20,11 @@ from dynamo.common.configuration.groups.frontend_decoding_args import (
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
+from .benchmark_points import (
+    ExplicitBenchmarkPoints,
+    benchmark_points_digest,
+    load_benchmark_points_file,
+)
 from .constants import DisaggregationMode, EmbeddingTransferMode
 
 logger = logging.getLogger(__name__)
@@ -244,6 +250,19 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--benchmark-points-file",
+            env_var="DYN_BENCHMARK_POINTS_FILE",
+            default=None,
+            help=(
+                "JSON file containing explicit pure prefill/decode benchmark points "
+                "applied uniformly to every data-parallel rank. The file completely "
+                "replaces generated grid sampling for the phases selected by "
+                "--benchmark-mode. It is read and normalized once before vLLM "
+                "workers start, then the same contents are forwarded to every rank."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--prefill-max-new-token-samples",
             env_var="DYN_PREFILL_MAX_NEW_TOKEN_SAMPLES",
             default=64,
@@ -449,6 +468,7 @@ class DynamoVllmConfig(ConfigBase):
 
     # Benchmark / self-profiling
     benchmark_mode: Optional[str] = None
+    benchmark_points_file: Optional[str] = None
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
@@ -467,6 +487,9 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_prefill_batch_granularity: Optional[int] = None
     benchmark_decode_length_granularity: Optional[int] = None
     benchmark_decode_batch_granularity: Optional[int] = None
+    _benchmark_points: Optional[ExplicitBenchmarkPoints] = None
+    _benchmark_points_digest: Optional[str] = None
+    _benchmark_points_source_path: Optional[str] = None
 
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
@@ -476,8 +499,70 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
         self._validate_custom_encoder()
+        self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
+
+    def _load_explicit_benchmark_points(self) -> None:
+        self._benchmark_points = None
+        self._benchmark_points_digest = None
+        self._benchmark_points_source_path = None
+        if self.benchmark_points_file is None:
+            return
+        if self.benchmark_mode is None:
+            raise ValueError("--benchmark-points-file requires --benchmark-mode")
+
+        conflicting_options = []
+        sampling_options = (
+            ("prefill_max_new_token_samples", 64),
+            ("prefill_max_kv_read_token_samples", 16),
+            ("decode_max_kv_read_token_samples", 128),
+            ("decode_max_batch_size_samples", 128),
+            ("prefix_max_batch_size_samples", 3),
+        )
+        for name, default in sampling_options:
+            if (
+                getattr(self, f"{name}_explicit", False)
+                or getattr(self, name) != default
+            ):
+                conflicting_options.append(f"--{name.replace('_', '-')}")
+
+        legacy_options = (
+            "benchmark_prefill_granularity",
+            "benchmark_prefill_kv_read_granularity",
+            "benchmark_prefill_batch_granularity",
+            "benchmark_decode_length_granularity",
+            "benchmark_decode_batch_granularity",
+        )
+        for name in legacy_options:
+            if getattr(self, name) is not None:
+                conflicting_options.append(f"--{name.replace('_', '-')}")
+
+        if conflicting_options:
+            raise ValueError(
+                "--benchmark-points-file cannot be combined with grid sampling "
+                "option(s): " + ", ".join(conflicting_options)
+            )
+
+        effective_output_path = os.environ.get(
+            "DYN_FPM_BENCHMARK_OUTPUT_PATH",
+            self.benchmark_output_path,
+        )
+        points_path = Path(self.benchmark_points_file).resolve()
+        output_path = Path(effective_output_path).resolve()
+        output_tmp_path = Path(f"{effective_output_path}.tmp").resolve()
+        if points_path in {output_path, output_tmp_path}:
+            raise ValueError(
+                "--benchmark-points-file must differ from both "
+                "--benchmark-output-path and its .tmp sidecar"
+            )
+
+        self._benchmark_points = load_benchmark_points_file(
+            self.benchmark_points_file,
+            self.benchmark_mode,
+        )
+        self._benchmark_points_digest = benchmark_points_digest(self._benchmark_points)
+        self._benchmark_points_source_path = str(points_path)
 
     def _resolve_legacy_benchmark_sampling(self) -> None:
         if self.benchmark_mode is None:

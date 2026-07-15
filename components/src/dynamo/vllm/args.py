@@ -359,7 +359,7 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
-        dynamo_config._benchmark_additional_config = {  # type: ignore[attr-defined]
+        benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
@@ -380,6 +380,19 @@ def update_engine_config_with_dynamo(
                 dynamo_config.prefix_max_batch_size_samples
             ),
         }
+        explicit_points = getattr(dynamo_config, "_benchmark_points", None)
+        if explicit_points is not None:
+            benchmark_config["points"] = explicit_points
+            benchmark_config["points_digest"] = getattr(
+                dynamo_config, "_benchmark_points_digest", None
+            )
+            benchmark_config["points_source_path"] = getattr(
+                dynamo_config, "_benchmark_points_source_path", None
+            )
+        # main.py injects this after resolving its worker-specific output path.
+        # Do not put it directly in EngineArgs until unified_main also gates
+        # registration on benchmark completion and exposes the result endpoint.
+        dynamo_config._benchmark_additional_config = benchmark_config  # type: ignore[attr-defined]
         logger.info(
             "Benchmark mode=%s configured (output=%s)",
             dynamo_config.benchmark_mode,

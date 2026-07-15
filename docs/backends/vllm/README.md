@@ -150,6 +150,7 @@ reaches feature and operational parity with the Python vLLM backend.
 ## Next Steps
 
 - **[Reference Guide](vllm-reference-guide.md)**: Configuration, arguments, and operational details
+- **[Self-Benchmarking](vllm-self-benchmark.md)**: Generated sweeps and explicit prefill/decode point manifests
 - **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
 - **[KV Cache Offloading](vllm-kv-offloading.md)**: KVBM, LMCache, and FlexKV integrations
 - **[Observability](vllm-observability.md)**: Metrics and monitoring
