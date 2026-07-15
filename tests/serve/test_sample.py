@@ -32,7 +32,12 @@ sample_configs = {
         script_args=["--model-name", "Qwen/Qwen3-0.6B"],
         marks=[
             pytest.mark.gpu_0,
-            pytest.mark.timeout(300),
+            # CPU-mode vLLM startup for this deployment runs ~237s; a 300s
+            # cap left only ~20% headroom and flaked ~40% of post-merge runs
+            # on vllm-runtime-efa / CPU Test (the pod was killed mid-startup
+            # under runner contention). Match the 600s EngineConfig
+            # health-wait ceiling. See OPS-7728.
+            pytest.mark.timeout(600),
             pytest.mark.pre_merge,
             pytest.mark.unified,
             pytest.mark.vllm,
