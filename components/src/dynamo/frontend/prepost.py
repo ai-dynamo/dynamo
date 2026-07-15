@@ -136,8 +136,23 @@ def _prepare_request(
         )
         else None
     )
-    chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
-    chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    # The Rust bindings serialize this field as `chat_template_args` (serde
+    # `alias = "chat_template_kwargs"` applies on deserialize only), so a request
+    # arriving as a raw dict carries the client's kwargs there rather than under
+    # the vLLM-native `chat_template_kwargs`. Fall back to it so per-request
+    # template control is not silently dropped, mirroring sglang_prepost.py.
+    raw_template_args = (
+        request.get("chat_template_args") if isinstance(request, dict) else None
+    )
+    chat_template_kwargs = dict(
+        request_for_sampling.chat_template_kwargs or raw_template_args or {}
+    )
+    # A top-level reasoning_effort wins; otherwise keep a nested one and fall back
+    # to None so the key is always present for templates that consult it.
+    if request_for_sampling.reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    else:
+        chat_template_kwargs.setdefault("reasoning_effort", None)
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
@@ -154,14 +169,17 @@ def _prepare_request(
     chat_params = ChatParams(
         chat_template=request_for_sampling.chat_template,
         chat_template_content_format="auto",
-        chat_template_kwargs=dict(
-            add_generation_prompt=request_for_sampling.add_generation_prompt,
-            continue_final_message=request_for_sampling.continue_final_message,
-            tools=tool_dicts,
-            documents=request_for_sampling.documents,
-            tokenize=tokenize_in_template,
+        # Renderer-managed keys are authoritative and applied last so a client
+        # that nests one of them in chat_template_kwargs can't trigger a
+        # duplicate-keyword TypeError.
+        chat_template_kwargs={
             **chat_template_kwargs,
-        ),
+            "add_generation_prompt": request_for_sampling.add_generation_prompt,
+            "continue_final_message": request_for_sampling.continue_final_message,
+            "tools": tool_dicts,
+            "documents": request_for_sampling.documents,
+            "tokenize": tokenize_in_template,
+        },
     )
 
     return (

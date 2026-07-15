@@ -155,6 +155,76 @@ class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool strip
         ), "No tools in request should produce None tools in template"
 
 
+class TestChatTemplateArgsPassthrough:  # regression for #11704 — client template kwargs must reach the template
+    """Per-request chat template kwargs must survive into the rendered template.
+
+    The Rust bindings serialize the request field as ``chat_template_args``
+    (serde ``alias = "chat_template_kwargs"`` only applies on deserialize), so a
+    request arriving as a raw dict carries the client's kwargs under
+    ``chat_template_args``. The vLLM processor previously read only
+    ``chat_template_kwargs`` and silently dropped it.
+    """
+
+    def test_chat_template_args_reaches_template(self, tokenizer):
+        """Kwargs keyed as chat_template_args (the pythonize'd key) reach the template."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": False},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("enable_thinking") is False
+        ), "chat_template_args must be forwarded to the chat template"
+
+    def test_chat_template_kwargs_native_key_still_works(self, tokenizer):
+        """The vLLM-native chat_template_kwargs key keeps working."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("enable_thinking") is False
+        ), "native chat_template_kwargs must be forwarded to the chat template"
+
+    def test_nested_reasoning_effort_is_not_clobbered(self, tokenizer):
+        """A reasoning_effort nested in template kwargs survives the top-level default."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"reasoning_effort": "high"},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("reasoning_effort") == "high"
+        ), "nested reasoning_effort must not be overwritten by an absent top-level field"
+
+    def test_reserved_render_key_in_template_args_does_not_crash(self, tokenizer):
+        """A renderer-reserved key nested in template kwargs must not raise TypeError."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"documents": [{"text": "doc"}]},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        # The renderer-managed value wins; the point is that merging does not raise.
+        assert "documents" in chat_params.chat_template_kwargs
+
+
 class TestMultimodalFeatureMetadata:
     def _feature(
         self, modality, mm_hash, offset, length, data=_DEFAULT_MM_DATA, is_embed=None
