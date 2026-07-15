@@ -147,11 +147,13 @@ impl NvCreateChatCompletionRequest {
             return Ok(());
         }
 
+        let is_adaptive = matches!(thinking_mode, Some(OpenAiThinkingMode::Adaptive));
         let args = self.chat_template_args.get_or_insert_with(HashMap::new);
         if let Some(mode) = thinking_mode {
             match mode {
                 OpenAiThinkingMode::Enabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(true));
+                    args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("enabled".to_string()),
@@ -160,11 +162,19 @@ impl NvCreateChatCompletionRequest {
                 OpenAiThinkingMode::Disabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(false));
                     args.insert(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(false),
+                    );
+                    args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("disabled".to_string()),
                     );
                 }
                 OpenAiThinkingMode::Adaptive => {
+                    // `adaptive` defers to the model: drop any stale toggle so the
+                    // param wins, leaving only the mode.
+                    args.remove("thinking");
+                    args.remove("enable_thinking");
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("adaptive".to_string()),
@@ -173,8 +183,11 @@ impl NvCreateChatCompletionRequest {
             }
         }
         if let Some(effort) = reasoning_effort {
-            args.entry("enable_thinking".to_string())
-                .or_insert_with(|| serde_json::Value::Bool(effort.as_str() != Some("none")));
+            // `adaptive` defers to the model, so a graded effort derives no toggle.
+            if !is_adaptive {
+                args.entry("enable_thinking".to_string())
+                    .or_insert_with(|| serde_json::Value::Bool(effort.as_str() != Some("none")));
+            }
             args.insert("reasoning_effort".to_string(), effort);
         }
 
@@ -1240,6 +1253,124 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
+    }
+
+    #[test]
+    fn test_thinking_param_disabled_sets_enable_thinking_false() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "disabled"}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("disabled thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
+        assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
+    }
+
+    #[test]
+    fn test_thinking_param_enabled_sets_enable_thinking_true() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled"}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("enabled thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
+        assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("thinking_mode"), Some(&json!("enabled")));
+    }
+
+    #[test]
+    fn test_adaptive_param_clears_stale_client_bool() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_args": {"enable_thinking": false},
+            "thinking": {"type": "adaptive"}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("adaptive thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert!(args.get("enable_thinking").is_none());
+        assert!(args.get("thinking").is_none());
+        assert_eq!(args.get("thinking_mode"), Some(&json!("adaptive")));
+    }
+
+    #[test]
+    fn test_adaptive_param_with_reasoning_effort() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high",
+            "thinking": {"type": "adaptive"}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("adaptive thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        // Adaptive wins over the effort grade: the mode is preserved and the raw
+        // effort is still forwarded for graders, but no on/off toggle is derived.
+        assert_eq!(args.get("thinking_mode"), Some(&json!("adaptive")));
+        assert!(args.get("enable_thinking").is_none());
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("high")));
+    }
+
+    #[test]
+    fn test_adaptive_param_with_reasoning_effort_none() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "none",
+            "thinking": {"type": "adaptive"}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("adaptive thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        // `none` must NOT override an adaptive param into a disable; adaptive
+        // leaves the on/off decision to the model.
+        assert_eq!(args.get("thinking_mode"), Some(&json!("adaptive")));
+        assert!(args.get("enable_thinking").is_none());
+        assert!(args.get("thinking").is_none());
         assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
     }
 

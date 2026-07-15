@@ -745,6 +745,52 @@ class TestChatTemplateKwargsForwarding:
         )
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
 
+    def _kwargs(self, request, tokenizer):
+        """Return the chat_template_kwargs dict built by _prepare_request."""
+        _, _, chat_template_kwargs, _, _ = _prepare_request(
+            request,
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        return chat_template_kwargs
+
+    def test_reasoning_effort_none_disables_enable_thinking(self, tokenizer):
+        """reasoning_effort='none' derives enable_thinking=False."""
+        kwargs = self._kwargs(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "reasoning_effort": "none",
+            },
+            tokenizer,
+        )
+        assert kwargs["enable_thinking"] is False
+
+    def test_client_enable_thinking_wins_over_reasoning_effort(self, tokenizer):
+        """An explicit chat_template_args enable_thinking is recovered from the
+        raw dict and wins over the reasoning_effort-derived default."""
+        kwargs = self._kwargs(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_args": {"enable_thinking": False},
+                "reasoning_effort": "high",
+            },
+            tokenizer,
+        )
+        assert kwargs["enable_thinking"] is False
+
+    def test_reasoning_effort_absent_omits_key(self, tokenizer):
+        """No reasoning_effort leaves the key out (no None injection, no crash)."""
+        kwargs = self._kwargs(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+            },
+            tokenizer,
+        )
+        assert "reasoning_effort" not in kwargs
+
 
 @pytest.mark.parametrize(
     ("runtime_config", "expected"),
