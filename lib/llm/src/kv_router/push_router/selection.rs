@@ -7,7 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::RoutingEligibility,
+    scheduling::{AdmissionLease, RequestProgressUpdater, RoutingEligibility},
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -28,6 +28,8 @@ pub(super) struct WorkerSelection {
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) scheduler_tracked: bool,
+    pub(super) request_progress: Option<RequestProgressUpdater>,
+    pub(super) admission_lease: Option<AdmissionLease>,
 }
 
 #[derive(Clone, Copy)]
@@ -75,7 +77,7 @@ impl KvPushRouter {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
         let outcome = self
             .chooser
-            .find_best_match_details_with_policy_class(
+            .find_best_match_details_with_admission(
                 Some(args.context_id),
                 args.routing_parts.token_ids,
                 args.routing_parts.block_mm_infos,
@@ -102,6 +104,8 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
+                request_progress,
+                admission_lease,
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
@@ -110,6 +114,8 @@ impl KvPushRouter {
                 cached_tokens,
                 routing_hashes,
                 scheduler_tracked: args.scheduler_tracked,
+                request_progress,
+                admission_lease,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
