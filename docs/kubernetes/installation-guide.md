@@ -197,10 +197,13 @@ To request the DS path on a `DynamoGraphDeployment`, add:
 ```yaml
 metadata:
   annotations:
+    nvidia.com/enable-grove: "false"
     nvidia.com/enable-disaggregatedset: "true"
 ```
 
-If Grove is also installed, add `nvidia.com/enable-grove: "false"` on the same DGD so the request uses the LWS/DS path instead of Grove.
+The operator routes workloads in this order: Grove, opt-in DS, then the standard DCD pathway. This is routing precedence, not mutual exclusion between Grove and DS. When Grove is available and enabled, selecting DS requires both annotations shown above. If Grove is unavailable, `nvidia.com/enable-grove: "false"` is not required.
+
+Installing the DS API does not automatically move existing DGDs to DS. The `nvidia.com/enable-disaggregatedset: "true"` annotation is always required.
 
 > [!NOTE]
 > The current non-DS LWS pathway requires both the LWS and Volcano APIs. The DS pathway detects `disaggregatedset.x-k8s.io/v1` separately because DS itself does not rely on Volcano.

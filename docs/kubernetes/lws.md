@@ -24,14 +24,20 @@ The installation guide includes the exact Helm commands for [LWS and Volcano](in
 
 ## Orchestrator Selection
 
-For multinode deployments, the Dynamo operator selects an orchestrator based on what is installed:
+For multinode deployments, the operator applies this routing precedence:
+
+1. Grove
+2. Opt-in DisaggregatedSet
+3. The standard DynamoComponentDeployment (DCD) pathway
+
+This is an ordered routing decision, not mutual exclusion between Grove and DS. Installing the DS API does not change the pathway of existing DGDs because DS requires an explicit opt-in annotation. When Grove is available and enabled, it remains the selected pathway even if the DGD requests DS.
 
 | Cluster state | Operator behavior |
 | --- | --- |
-| Grove and LWS installed | Uses Grove by default. |
-| Grove and LWS installed, DGD has `nvidia.com/enable-grove: "false"` | Uses LWS. |
-| Only LWS installed | Uses LWS. |
-| Neither Grove nor LWS installed | Rejects multinode deployments. |
+| Grove is available and `nvidia.com/enable-grove` is not `"false"` | Uses Grove. |
+| Grove is disabled or unavailable, and the DGD sets `nvidia.com/enable-disaggregatedset: "true"` | Uses DS when the DS API and requested role configuration are supported. |
+| Grove is disabled or unavailable, and DS is not requested or cannot be used | Uses the standard DCD pathway. Multinode components require LWS + Volcano. |
+| No selected pathway can support the multinode components | Rejects the deployment with `no multinode orchestrator available`. |
 
 To force the LWS path when Grove is also present:
 
@@ -48,13 +54,13 @@ spec:
 
 ## DisaggregatedSet Path
 
-Use the DisaggregatedSet path when you want one DS object to own multiple multinode worker roles. This is an opt-in path and does not replace Grove.
+Use the DisaggregatedSet path when you want one DS object to own multiple multinode worker roles. DS is an opt-in path below Grove in the routing precedence; it does not replace or disable Grove.
 
 To request the DS path:
 
 1. Install an LWS release that serves `disaggregatedset.x-k8s.io/v1`.
 2. Add `nvidia.com/enable-disaggregatedset: "true"` to the DGD.
-3. If Grove is installed in the cluster, also set `nvidia.com/enable-grove: "false"` so the request does not stay on the Grove path.
+3. If Grove is available and enabled, also set `nvidia.com/enable-grove: "false"` so routing can continue to the DS decision.
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -67,6 +73,8 @@ metadata:
 spec:
   # ...
 ```
+
+Using both annotations makes the DS selection explicit on clusters that run Grove. If Grove is unavailable, `nvidia.com/enable-grove: "false"` is not required.
 
 Dynamo falls back to the standard DCD pathway when the DS request cannot be honored. Multinode components then require the existing LWS + Volcano pathway; if that pathway is unavailable, reconciliation reports that no multinode orchestrator is available. Common fallback cases are:
 

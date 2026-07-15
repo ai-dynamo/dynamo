@@ -79,19 +79,15 @@ DisaggregatedSet (DS) is an opt-in multinode path for clusters that install the 
 
 ### Orchestrator Selection Algorithm
 
-Dynamo automatically selects the best available orchestrator for multinode deployments using the following logic:
+Dynamo uses an ordered routing decision for multinode deployments:
 
-#### When Both Grove and LWS are Available:
-- **Grove is selected by default** (recommended for advanced AI workloads)
-- **LWS is selected** if you explicitly set `nvidia.com/enable-grove: "false"` annotation on your DGD resource
+1. **Grove:** selected when Grove is available and `nvidia.com/enable-grove` is not `"false"`.
+2. **DisaggregatedSet:** considered only when Grove was not selected and the DGD sets `nvidia.com/enable-disaggregatedset: "true"`. The DS API and requested role configuration must also be supported.
+3. **Standard DCD pathway:** used when neither Grove nor DS is selected. Multinode components on this pathway require LWS + Volcano.
 
-#### When the DisaggregatedSet API is Available:
-- **DS is selected** only if you set `nvidia.com/enable-disaggregatedset: "true"`
-- **Grove still wins by default** when Grove is enabled, so also set `nvidia.com/enable-grove: "false"` if you want the DS path on clusters that have Grove
-- **The standard DCD pathway is used as the fallback** when the DS request cannot be honored; multinode components then still require the existing LWS + Volcano pathway
+Grove and DS are not mutually exclusive features. Grove has higher routing priority, while DS requires explicit opt-in. Installing the DS API alone does not move existing DGDs from Grove or DCD to DS.
 
-#### When Only One Orchestrator is Available:
-- The installed orchestrator (Grove or LWS) is automatically selected
+To select DS when Grove is available, set both `nvidia.com/enable-grove: "false"` and `nvidia.com/enable-disaggregatedset: "true"`. If Grove is unavailable, only the DS opt-in annotation is required.
 
 #### Scheduler Integration:
 - **With Grove**: Dynamo uses Grove for multinode orchestration when the Grove API is available, unless you set `nvidia.com/enable-grove: "false"` on the DGD resource. Scheduler integration is configured separately:
