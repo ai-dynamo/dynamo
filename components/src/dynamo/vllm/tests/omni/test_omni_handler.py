@@ -43,6 +43,7 @@ def _make_handler(stage_types=("diffusion",)):
     config.served_model_name = None
     config.output_modalities = ["text"]
     config.enable_lora = False  # Disable LoRA for tests unless explicitly set
+    config.engine_args = SimpleNamespace(enable_lora=False)
     handler.config = config
 
     defaults = []
@@ -144,7 +145,7 @@ class TestBuildEngineInputs:
         """Video request parses prompt, size, seconds, and sets fps."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
-            prompt="a drone", model="test", size="832x480", seconds=2
+            prompt="a drone", model="test-model", size="832x480", seconds=2
         )
         inputs = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
         assert inputs.request_type == RequestType.VIDEO_GENERATION
@@ -181,7 +182,7 @@ class TestI2VEngineInputs:
         """T2V has no multi_modal_data; I2V attaches image to prompt."""
         handler = _make_handler()
         req = NvCreateVideoRequest(
-            prompt="a drone", model="test", size="832x480", seconds=2
+            prompt="a drone", model="test-model", size="832x480", seconds=2
         )
 
         # T2V: no image
@@ -201,7 +202,7 @@ class TestI2VEngineInputs:
         handler = _make_handler()
         req = NvCreateVideoRequest(
             prompt="bear",
-            model="test",
+            model="test-model",
             size="832x480",
             nvext=VideoNvExt(
                 boundary_ratio=0.875, guidance_scale_2=1.0, num_inference_steps=40
@@ -312,6 +313,26 @@ class TestLoraRequestParsing:
         assert (
             handler._extract_lora_name_from_request({"model": "adapterA"}) == "adapterA"
         )
+
+
+class TestLoraEnablement:
+    def test_resolve_lora_request_unknown_adapter_raises_when_enabled(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+
+        with patch(
+            "dynamo.vllm.omni.omni_handler.get_lora_manager",
+            return_value=MagicMock(),
+        ):
+            with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+                handler._resolve_lora_request("ghost-adapter")
+
+    def test_resolve_lora_request_unknown_adapter_is_none_when_manager_missing(self):
+        handler = _make_handler()
+        handler.config.engine_args.enable_lora = True
+
+        with patch("dynamo.vllm.omni.omni_handler.get_lora_manager", return_value=None):
+            assert handler._resolve_lora_request("ghost-adapter") is None
 
 
 class TestBuildOriginalPrompt:

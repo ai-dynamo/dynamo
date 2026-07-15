@@ -11,7 +11,7 @@ import uvloop
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
-from dynamo.common.rl import env_bool, first_endpoint_response
+from dynamo.common.rl import first_endpoint_response
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.output_modalities import get_output_modalities
@@ -19,6 +19,7 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType, WorkerType, fetch_model, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.realtime_utils import init_omni_realtime
@@ -64,9 +65,8 @@ async def init_omni(
 
     shutdown_endpoints[:] = [generate_endpoint]
 
-    env_lora_enabled = env_bool("DYN_LORA_ENABLED")
     engine_lora_enabled = bool(getattr(config.engine_args, "enable_lora", False))
-    lora_enabled = env_lora_enabled or engine_lora_enabled
+    lora_enabled = engine_lora_enabled and (get_lora_manager() is not None)
     load_lora_endpoint = None
     unload_lora_endpoint = None
     list_loras_endpoint = None

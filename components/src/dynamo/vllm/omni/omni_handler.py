@@ -209,6 +209,8 @@ class OmniHandler(BaseOmniHandler):
         )
 
     def _lora_enabled(self) -> bool:
+        # Match non-Omni LoRA gating: engine must be started with LoRA support
+        # and the LoRA manager must be initialized.
         return bool(getattr(self.config.engine_args, "enable_lora", False)) and (
             get_lora_manager() is not None
         )

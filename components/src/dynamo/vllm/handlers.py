@@ -15,7 +15,6 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 from typing import (
     Any,
     AsyncIterator,
@@ -1073,9 +1072,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Default names used by base _resolve_lora_request(); specialized
         # handlers can override these fields after super().__init__.
         self._served_model_name = config.served_model_name or config.model
-        self.engine_args = getattr(config, "engine_args", None) or SimpleNamespace(
-            model=config.model
-        )
+        self.engine_args = config.engine_args
         self._lora_state = LoRAState()
         # Keep historical attribute names for compatibility with existing code.
         self.loaded_loras = self._lora_state.loaded_loras
@@ -2046,12 +2043,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         """
         if self.generate_endpoint is None:
             logger.debug(
-                f"Cannot publish LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}, config={self.config}"
+                "Cannot publish LoRA '%s': generate_endpoint=%s, config=%s",
+                lora_name,
+                self.generate_endpoint,
+                self.config,
             )
             return
 
         logger.debug(
-            f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
+            "Publishing LoRA '%s' ModelDeploymentCard to %s",
+            lora_name,
+            self.generate_endpoint,
         )
 
         runtime_config = ModelRuntimeConfig()
