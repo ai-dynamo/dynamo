@@ -660,6 +660,12 @@
    * the surface that supports line-level comments. Falls back to the
    * tracking issue when no PR is configured. Returns "" when neither
    * signal is available — the caller uses that to hide the button.
+   *
+   * NOTE: this is the always-safe, top-of-file fallback URL. A separate
+   * async path (`resolveLineAnchoredUrl`) upgrades it to a line-anchored
+   * `#diff-<hash>R<line>` fragment when we can identify the source line
+   * for the selection. On any failure the caller falls back to this URL,
+   * so the MVP never breaks.
    */
   function buildGitHubUrl(cfg) {
     if (!cfg || !cfg.owner || !cfg.repo) return "";
@@ -667,6 +673,188 @@
     if (cfg.pr) return base + "/pull/" + cfg.pr + "/files";
     if (cfg.issue) return base + "/issues/" + cfg.issue;
     return "";
+  }
+
+  /** GitHub's per-line diff-file fragment on the Files-changed view.
+   *
+   *   #diff-<sha256hex(path)><side><lineNumber>
+   *
+   * Verified empirically against the live PR #61 DOM (headless Chrome
+   * dump of /pull/61/files): the file container carries
+   * id="diff-<sha256hex(path)>" and each source line carries
+   * id="diff-<hash>R<lineNumber>" for the right (added) side and
+   * id="diff-<hash>L<lineNumber>" for the left (removed) side. For a
+   * DEP-adding PR every line is an addition, so `R` is the correct
+   * default. Returns "" on invalid inputs so the caller falls back to
+   * the top-of-file URL.
+   */
+  function buildLineAnchor(hash, line, side) {
+    if (!hash || typeof hash !== "string") return "";
+    var lineNum = parseInt(line, 10);
+    if (!lineNum || lineNum < 1) return "";
+    var s = side == null ? "R" : String(side);
+    if (s !== "R" && s !== "L") return "";
+    return "#diff-" + hash + s + lineNum;
+  }
+
+  /** SHA-256 of a UTF-8 string, returned as lower-case hex.
+   *
+   * Uses the Web Crypto API (`crypto.subtle.digest`), which is available
+   * in every modern browser served over HTTPS (Fern docs are always HTTPS)
+   * and in Node 18+ for unit tests. Returns `null` when the API is
+   * unavailable — the caller then falls back to the no-anchor URL.
+   */
+  function sha256Hex(text) {
+    if (
+      typeof crypto === "undefined" ||
+      !crypto ||
+      !crypto.subtle ||
+      typeof crypto.subtle.digest !== "function" ||
+      typeof TextEncoder === "undefined"
+    ) {
+      return Promise.resolve(null);
+    }
+    var bytes;
+    try {
+      bytes = new TextEncoder().encode(String(text == null ? "" : text));
+    } catch (e) {
+      return Promise.resolve(null);
+    }
+    return crypto.subtle.digest("SHA-256", bytes).then(function (buf) {
+      var arr = new Uint8Array(buf);
+      var hex = "";
+      for (var i = 0; i < arr.length; i++) {
+        var h = arr[i].toString(16);
+        if (h.length < 2) hex += "0";
+        hex += h;
+      }
+      return hex;
+    }).catch(function () { return null; });
+  }
+
+  /** Locate a selection in the raw DEP source markdown, so the caller can
+   *  build a line-anchored GitHub URL.
+   *
+   * Returns the 1-based line number of the FIRST source line whose
+   * markdown-stripped, whitespace-normalized text contains the (also
+   * normalized) start of the selection, or `null` if nothing matches.
+   *
+   * The selection is rendered prose — asterisks / links / code fences
+   * are gone. The source is raw markdown, so we strip the same syntactic
+   * markers `selectorFromComment` strips from `diff_hunk` lines
+   * (`stripMarkdown`) before comparing. Whitespace is normalized on both
+   * sides (`normWs`). We match on the first ~60 chars of the normalized
+   * selection because the reader often selects a full paragraph while
+   * the source line only carries the paragraph's first sentence — the
+   * URL should anchor at the paragraph's start.
+   */
+  function findSourceLine(sourceLines, quote) {
+    if (!sourceLines || !sourceLines.length) return null;
+    var nq = normWs(quote);
+    if (!nq) return null;
+    // First ~60 normalized chars — enough to disambiguate typical prose
+    // while tolerating soft-wrap and MDX-rendering differences.
+    var needle = nq.slice(0, Math.min(nq.length, 60));
+    if (!needle) return null;
+    for (var i = 0; i < sourceLines.length; i++) {
+      var nl = normWs(stripMarkdown(sourceLines[i]));
+      if (!nl) continue;
+      if (nl.indexOf(needle) !== -1) return i + 1;
+    }
+    return null;
+  }
+
+  /* Per-PR caches for the line-anchor path. Populated lazily on the first
+   * click that has a resolvable line, so a reader who never highlights any
+   * prose never pays the fetch cost. Both caches store the Promise so
+   * concurrent clicks coalesce onto one in-flight request. */
+  var prHeadCache = {};
+  var sourceLinesCache = {};
+
+  /** Resolve `{owner, repo, sha}` for the head of a pull request.
+   *
+   * The DEP page's mount div only tells us the SOURCE repo (e.g.
+   * ai-dynamo/enhancements) and the PR number. To fetch the raw source
+   * at the exact revision under review we need the head repo + head sha
+   * from the PR object itself. Unauthenticated call; 403 (rate limit)
+   * or network failure resolves to `null` and the caller falls back to
+   * the top-of-file URL. */
+  function fetchPrHead(cfg) {
+    if (!cfg || !cfg.owner || !cfg.repo || !cfg.pr) return Promise.resolve(null);
+    var key = cfg.owner + "/" + cfg.repo + "#" + cfg.pr;
+    if (prHeadCache[key]) return prHeadCache[key];
+    var url = "https://api.github.com/repos/" + cfg.owner + "/" + cfg.repo +
+      "/pulls/" + cfg.pr;
+    var p = fetch(url, { headers: { Accept: "application/vnd.github+json" } })
+      .then(function (r) {
+        if (!r.ok) throw new Error("PR API " + r.status);
+        return r.json();
+      })
+      .then(function (j) {
+        if (!j || !j.head || !j.head.sha) return null;
+        var headRepo = j.head.repo || {};
+        var headOwner = (headRepo.owner && headRepo.owner.login) || cfg.owner;
+        var headName = headRepo.name || cfg.repo;
+        return { owner: headOwner, repo: headName, sha: j.head.sha };
+      })
+      .catch(function () { return null; });
+    prHeadCache[key] = p;
+    return p;
+  }
+
+  /** Fetch the raw DEP source markdown for the mount's configured `path`
+   *  at the PR's head sha, and return it split into lines.
+   *
+   * Line splits preserve source line numbers 1:1 with the GitHub Files
+   * view (which counts every source line, blanks included). Failure
+   * modes (missing path, network, rate-limit, non-2xx) all resolve to
+   * `null` — the caller then falls back to the no-anchor URL. */
+  function fetchSourceLines(cfg) {
+    if (!cfg || !cfg.pr || !cfg.path) return Promise.resolve(null);
+    var key = cfg.owner + "/" + cfg.repo + "#" + cfg.pr + ":" + cfg.path;
+    if (sourceLinesCache[key]) return sourceLinesCache[key];
+    var p = fetchPrHead(cfg).then(function (head) {
+      if (!head) return null;
+      var raw = "https://raw.githubusercontent.com/" +
+        head.owner + "/" + head.repo + "/" + head.sha + "/" + cfg.path;
+      return fetch(raw)
+        .then(function (r) {
+          if (!r.ok) throw new Error("raw " + r.status);
+          return r.text();
+        })
+        .then(function (text) {
+          return String(text || "").split(/\r\n|\r|\n/);
+        })
+        .catch(function () { return null; });
+    }).catch(function () { return null; });
+    sourceLinesCache[key] = p;
+    return p;
+  }
+
+  /** Async URL builder that upgrades `buildGitHubUrl(cfg)` with a
+   *  line-level `#diff-<hash>R<line>` fragment when we can identify the
+   *  source line for the selection.
+   *
+   * Resolves to the fully-qualified line-anchored URL on success, or "" on
+   * any failure (missing path, fetch error, unmatched line, missing web
+   * crypto). The caller uses the empty return as a signal to fall back to
+   * the plain no-anchor URL. Never rejects — the clipboard copy path
+   * runs in parallel and must never be blocked by URL resolution. */
+  function resolveLineAnchoredUrl(cfg, selectionText) {
+    if (!cfg || !cfg.owner || !cfg.repo || !cfg.pr || !cfg.path) {
+      return Promise.resolve("");
+    }
+    return fetchSourceLines(cfg).then(function (lines) {
+      if (!lines) return "";
+      var line = findSourceLine(lines, selectionText);
+      if (!line) return "";
+      return sha256Hex(cfg.path).then(function (hash) {
+        var frag = buildLineAnchor(hash, line, "R");
+        if (!frag) return "";
+        return "https://github.com/" + cfg.owner + "/" + cfg.repo +
+          "/pull/" + cfg.pr + "/files" + frag;
+      });
+    }).catch(function () { return ""; });
   }
 
   /* Fetch the three read-only sources in parallel; one failing source (e.g. a
@@ -995,6 +1183,49 @@
     return false;
   }
 
+  /** Is the given DOM node in the DEP's non-body region? "Non-body" =
+   *  page title / subtitle / status banner (top-of-page callout) /
+   *  <DepMetadata> card — every DOM node that DOM-precedes the first
+   *  `<h2>` inside the prose root, plus anything nested inside the
+   *  `.dep-meta` metadata card even if that card ever moved.
+   *
+   * We use positive scoping (must be at-or-after the first <h2>)
+   * because Fern-rendered admonitions don't carry a stable, documented
+   * class hook — but ATX H2 IS stable (it's the first heading after
+   * the metadata / banner). This one predicate covers both the header
+   * and the banner without depending on Fern's callout class name.
+   *
+   * Selecting the H2 heading itself IS allowed — it's the boundary of
+   * the body, and readers do occasionally want to comment on a section
+   * title. */
+  function inHeaderRegion(node, root) {
+    var el = node && node.nodeType === 3 ? node.parentNode : node;
+    if (!el || !root) return true;
+    // Explicit metadata guard — belt-and-suspenders in case the .dep-meta
+    // card ever renders somewhere the positive-scope check wouldn't
+    // catch (e.g. after the first h2 during a hydration reorder).
+    var probe = el;
+    while (probe && probe !== root.parentNode) {
+      if (probe.classList && probe.classList.contains("dep-meta")) return true;
+      probe = probe.parentNode;
+    }
+    var firstH2 = root.querySelector("h2");
+    // No section heading yet -- either the page is still hydrating or
+    // it's a very short DEP with no body sections. Treat as header
+    // (no meaningful body prose to comment on).
+    if (!firstH2) return true;
+    // Selection lands on the h2 itself or inside it -- treat as body
+    // (the section starts here).
+    if (el === firstH2) return false;
+    var pos = firstH2.compareDocumentPosition(el);
+    // Node.DOCUMENT_POSITION_FOLLOWING === 4. Bit is set when `el`
+    // comes after `firstH2` in document order (which includes the
+    // "contained by firstH2" case, since a descendant follows in
+    // pre-order traversal). Everything else -- preceding, or the same
+    // node without the descendant relationship -- is header.
+    return !(pos & 4);
+  }
+
   function selectionInsideProse(sel) {
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
     var range = sel.getRangeAt(0);
@@ -1007,6 +1238,10 @@
     // Require the selection to be contained in the prose root; otherwise
     // it's in the sidebar / nav / footer, which is not commentable.
     if (!root.contains(range.commonAncestorContainer)) return null;
+    // Reject selections that live in the DEP header / metadata card /
+    // status banner. Positive-scoped: must be at-or-after the first
+    // <h2> in the prose root. See `inHeaderRegion` for the rationale.
+    if (inHeaderRegion(range.commonAncestorContainer, root)) return null;
     return range;
   }
 
@@ -1039,11 +1274,21 @@
     var cfg = stored && stored.cfg ? stored.cfg : null;
     hideQuoteBtn();
     if (!text || !cfg) return;
-    var url = buildGitHubUrl(cfg);
+    var fallbackUrl = buildGitHubUrl(cfg);
     var quote = buildBlockquote(text);
-    copyToClipboard(quote).then(function (copied) {
-      if (url) {
-        window.open(url, "_blank", "noopener,noreferrer");
+    // Kick off clipboard copy and URL resolution in parallel — the
+    // clipboard copy MUST always work regardless of whether we can
+    // resolve a line-anchored URL. `resolveLineAnchoredUrl` never
+    // rejects; it resolves to "" on any failure, and we then use the
+    // no-anchor `fallbackUrl` so the tab always opens somewhere useful.
+    var copyP = copyToClipboard(quote);
+    var urlP = resolveLineAnchoredUrl(cfg, text);
+    Promise.all([copyP, urlP]).then(function (results) {
+      var copied = results[0];
+      var lineUrl = results[1];
+      var target = lineUrl || fallbackUrl;
+      if (target) {
+        window.open(target, "_blank", "noopener,noreferrer");
       }
       showToast(
         copied

@@ -24,50 +24,83 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(join(HERE, "dep-pr-comments.js"), "utf8");
 
 /**
- * Extract a top-level `function <name>(...) { ... }` block from the runtime
- * source and eval it into an isolated scope, so tests can call it directly.
- * Matches functions that live at the IIFE indent level.
+ * Extract the raw source of a top-level `function <name>(...) { ... }` block
+ * from the runtime source. Matches functions declared at the IIFE indent
+ * level. Returns just the source string; caller decides how to eval it.
  */
-function extractFn(name) {
-  // Non-greedy body match up to the matching close-brace at column 0 of the
-  // indented IIFE. We locate the function declaration and count braces.
+function extractFnSource(name) {
   const marker = `function ${name}(`;
   const start = SRC.indexOf(marker);
   if (start === -1) throw new Error(`function ${name} not found in source`);
   let depth = 0;
   let inFn = false;
   let i = start;
-  let braceOpen = -1;
   while (i < SRC.length) {
     const ch = SRC[i];
     if (ch === "{") {
-      if (!inFn) {
-        inFn = true;
-        braceOpen = i;
-      }
+      if (!inFn) inFn = true;
       depth++;
     } else if (ch === "}") {
       depth--;
-      if (inFn && depth === 0) {
-        const body = SRC.slice(start, i + 1);
-        // eslint-disable-next-line no-new-func
-        return new Function(`${body}; return ${name};`)();
-      }
+      if (inFn && depth === 0) return SRC.slice(start, i + 1);
     }
     i++;
   }
   throw new Error(`unterminated function body for ${name}`);
 }
 
+/**
+ * Eval one runtime helper in isolation for unit-testing. Extracts the named
+ * function body from the source and returns it, so tests can call it
+ * directly without pulling in `window`/`document`.
+ */
+function extractFn(name) {
+  const body = extractFnSource(name);
+  // eslint-disable-next-line no-new-func
+  return new Function(`${body}; return ${name};`)();
+}
+
+/**
+ * Bundle-extract helpers: eval multiple named function declarations in one
+ * Function scope and return the last one. Use this when a helper depends on
+ * sibling helpers at module scope (e.g. findSourceLine reuses `normWs` +
+ * `stripMarkdown`) — reproducing those dependencies inside the isolated
+ * eval keeps the extracted helper self-contained.
+ */
+function extractBundle(names) {
+  const bodies = names.map(extractFnSource).join("\n");
+  const last = names[names.length - 1];
+  // eslint-disable-next-line no-new-func
+  return new Function(`${bodies}\nreturn ${last};`)();
+}
+
 const sanitizeHtml = extractFn("sanitizeHtml");
 const buildBlockquote = extractFn("buildBlockquote");
 const buildGitHubUrl = extractFn("buildGitHubUrl");
+const buildLineAnchor = extractFn("buildLineAnchor");
+const findSourceLine = extractBundle(["normWs", "stripMarkdown", "findSourceLine"]);
+const sha256Hex = extractFn("sha256Hex");
 
 let passes = 0;
 let fails = 0;
 function test(name, fn) {
   try {
     fn();
+    console.log(`  ok  ${name}`);
+    passes++;
+  } catch (err) {
+    console.log(`  FAIL ${name}`);
+    console.log(`       ${err.message}`);
+    fails++;
+  }
+}
+
+// Async twin: awaits the test body so a rejected Promise counts as a
+// failure (the sync `test()` would silently pass because the rejection
+// escapes the try/catch). Callers must `await testAsync(...)`.
+async function testAsync(name, fn) {
+  try {
+    await fn();
     console.log(`  ok  ${name}`);
     passes++;
   } catch (err) {
@@ -322,6 +355,165 @@ test("returns empty string when owner or repo is missing", () => {
   assert.equal(buildGitHubUrl({ repo: "dynamo", pr: 1 }), "");
   assert.equal(buildGitHubUrl({ owner: "ai-dynamo", pr: 1 }), "");
   assert.equal(buildGitHubUrl({}), "");
+});
+
+console.log("");
+console.log("buildLineAnchor — GitHub diff-file line fragment");
+
+// The DEP-adding PR file is `deps/0000-nova.md`. Its sha256 is used
+// as the per-file diff container id on GitHub's Files-changed view.
+// Verified empirically against the live PR #61 DOM.
+const NOVA_HASH =
+  "d7997b07b820f51651e7ee53b7f55c6f5319495344ff6c6f1cf9d75ad114744d";
+
+test("formats a right-side line anchor with default side", () => {
+  assert.equal(
+    buildLineAnchor(NOVA_HASH, 42),
+    `#diff-${NOVA_HASH}R42`
+  );
+});
+
+test("formats a right-side line anchor with explicit side='R'", () => {
+  assert.equal(
+    buildLineAnchor(NOVA_HASH, 1, "R"),
+    `#diff-${NOVA_HASH}R1`
+  );
+});
+
+test("formats a left-side line anchor when side='L'", () => {
+  // For a DEP-adding PR every line is an addition (R), but the helper
+  // has to be symmetrical for future use on non-add-only patches.
+  assert.equal(
+    buildLineAnchor(NOVA_HASH, 12, "L"),
+    `#diff-${NOVA_HASH}L12`
+  );
+});
+
+test("rejects empty hash", () => {
+  assert.equal(buildLineAnchor("", 5), "");
+  assert.equal(buildLineAnchor(null, 5), "");
+});
+
+test("rejects non-positive line numbers", () => {
+  assert.equal(buildLineAnchor(NOVA_HASH, 0), "");
+  assert.equal(buildLineAnchor(NOVA_HASH, -1), "");
+  assert.equal(buildLineAnchor(NOVA_HASH, null), "");
+});
+
+test("rejects unknown side markers", () => {
+  // Guard so a caller passing side="foo" doesn't produce a broken URL
+  // silently. Fall back to empty and let the outer caller use the
+  // no-anchor fallback URL.
+  assert.equal(buildLineAnchor(NOVA_HASH, 5, "X"), "");
+});
+
+console.log("");
+console.log("findSourceLine — locate a rendered selection in the DEP source");
+
+// Real Nova DEP source excerpt (verified by curl against the head ref of
+// ai-dynamo/enhancements#61). Bold-key metadata + a section body.
+const NOVA_SRC = [
+  "# Nova: Active Messaging as a Foundational Network Primitive",
+  "",
+  "**Status**: Draft",
+  "",
+  "**Authors**: [@ryanolson](https://github.com/ryanolson)",
+  "",
+  "**Category**: Architecture",
+  "",
+  "# Summary",
+  "",
+  "Nova provides a transport-agnostic active messaging layer that serves as the foundational network primitive for dynamo.",
+  "",
+];
+
+test("returns 1-based line number for an exact match", () => {
+  assert.equal(
+    findSourceLine(NOVA_SRC, "Category: Architecture"),
+    7
+  );
+});
+
+test("normalizes whitespace: extra spaces in the selection still match", () => {
+  // Reader selected a line whose whitespace got mangled by the DOM (e.g.
+  // rendered with two spaces where source had one). Normalization
+  // collapses runs of whitespace so the contains-match still hits.
+  assert.equal(
+    findSourceLine(NOVA_SRC, "  Nova provides  a  transport-agnostic  active"),
+    11
+  );
+});
+
+test("strips bold markdown so `**Status**: Draft` matches selection `Status: Draft`", () => {
+  // The selection is rendered prose (no asterisks); the source line has
+  // bold-key syntax. findSourceLine must strip the markdown before
+  // comparing, otherwise every metadata row would be un-anchorable.
+  assert.equal(findSourceLine(NOVA_SRC, "Status: Draft"), 3);
+});
+
+test("matches on the first ~60 chars of the selection so long quotes still resolve", () => {
+  // Selections often span more text than a single source line — e.g. a
+  // whole paragraph. Anchor on the START of the selection so the URL
+  // points at the paragraph's first line.
+  const longSelection =
+    "Nova provides a transport-agnostic active messaging layer that serves " +
+    "as the foundational network primitive for dynamo. Second sentence lives in the rendered DOM only.";
+  assert.equal(findSourceLine(NOVA_SRC, longSelection), 11);
+});
+
+test("returns null when the selection cannot be located in the source", () => {
+  assert.equal(
+    findSourceLine(NOVA_SRC, "This text does not appear anywhere in the source"),
+    null
+  );
+});
+
+test("returns null on empty / null / whitespace-only inputs", () => {
+  assert.equal(findSourceLine([], "hello"), null);
+  assert.equal(findSourceLine(null, "hello"), null);
+  assert.equal(findSourceLine(NOVA_SRC, ""), null);
+  assert.equal(findSourceLine(NOVA_SRC, "   \n  "), null);
+});
+
+test("skips blank source lines (does not return a line number for empty match)", () => {
+  const src = ["", "", "actual content", ""];
+  // The selection is a substring — should hit line 3 (1-based), not line
+  // 1 (which is empty).
+  assert.equal(findSourceLine(src, "actual"), 3);
+});
+
+console.log("");
+console.log("sha256Hex — hex-encoded SHA-256, used for the diff-file hash");
+
+await testAsync("computes the expected hash for the Nova DEP path", async () => {
+  // Verified against the live PR #61 DOM: the file container id is
+  // `diff-<sha256hex('deps/0000-nova.md')>`.
+  const hex = await sha256Hex("deps/0000-nova.md");
+  assert.equal(hex, NOVA_HASH);
+  assert.equal(hex.length, 64);
+});
+
+await testAsync("computes the empty-string SHA-256 vector", async () => {
+  // NIST test vector: sha256("") == e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  const hex = await sha256Hex("");
+  assert.equal(
+    hex,
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  );
+});
+
+await testAsync("returns null when crypto.subtle is unavailable", async () => {
+  // Simulate the "web crypto missing" edge case (older browser, HTTP
+  // context, insecure iframe). We can't unset globalThis.crypto without
+  // breaking other tests, so eval an isolated copy with no crypto in
+  // scope — mirrors what the runtime sees when it must fall back.
+  const src = extractFnSource("sha256Hex");
+  const noCrypto = new Function(
+    "crypto",
+    `${src}; return sha256Hex;`
+  )(undefined);
+  const result = await noCrypto("anything");
+  assert.equal(result, null);
 });
 
 console.log("");
