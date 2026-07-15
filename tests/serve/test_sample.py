@@ -36,7 +36,7 @@ sample_configs = {
             # cap left only ~20% headroom and flaked ~40% of post-merge runs
             # on vllm-runtime-efa / CPU Test (the pod was killed mid-startup
             # under runner contention). Match the 600s EngineConfig
-            # health-wait ceiling. See OPS-7728.
+            # health-wait ceiling.
             pytest.mark.timeout(600),
             pytest.mark.pre_merge,
             pytest.mark.unified,
