@@ -325,6 +325,14 @@ where
         self.update_queue_metrics();
     }
 
+    /// Select a worker from current scheduler state without queue admission or booking.
+    pub async fn select_without_admission(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        self.inner.select_without_admission(request).await
+    }
+
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
         self.inner.register_workers(worker_ids);
     }
@@ -351,6 +359,30 @@ where
 
     pub fn pending_isl_tokens(&self) -> usize {
         self.inner.pending_isl_tokens()
+    }
+
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: tokio::time::Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.inner
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
+    pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
+        self.inner.worker_is_decode_busy(worker, threshold)
+    }
+
+    pub fn projected_decode_load_exceeds(
+        &self,
+        worker: WorkerWithDpRank,
+        projected_blocks: usize,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.inner
+            .projected_decode_load_exceeds(worker, projected_blocks, threshold)
     }
 
     pub fn worker_type(&self) -> &'static str {

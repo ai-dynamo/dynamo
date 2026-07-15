@@ -237,6 +237,22 @@ impl KvPushRouter {
         }
     }
 
+    pub(crate) fn query_affinity_worker(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+    ) -> Result<Option<WorkerWithDpRank>, Error> {
+        let Some(affinity) = self.affinity.as_ref() else {
+            return Ok(None);
+        };
+        let Some(session_id) = affinity_id(request)? else {
+            return Ok(None);
+        };
+        let explicit = explicit_target(request, phase)?;
+        let target = affinity.query_target(&session_id, explicit)?;
+        Ok(target.and_then(affinity_worker))
+    }
+
     async fn track_selection(
         &self,
         request: &SingleIn<PreprocessedRequest>,

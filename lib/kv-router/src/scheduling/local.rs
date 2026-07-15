@@ -52,6 +52,58 @@ where
     Sel: WorkerSelector<C> + Send + Sync + 'static,
     RF: OverlapScoresRefresh + 'static,
 {
+    fn make_scheduling_request(
+        &self,
+        request: ScheduleRequest,
+        resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
+    ) -> (SchedulingRequest, Option<Vec<LocalBlockHash>>) {
+        let track_prefill_tokens = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.track_prefill_tokens_default);
+        let ScheduleRequest {
+            mode,
+            token_seq,
+            block_hashes,
+            isl_tokens,
+            lora_name,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            router_config_override,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            overlap,
+            shared_cache_hits,
+        } = request;
+        let request = SchedulingRequest {
+            mode,
+            token_seq,
+            isl_tokens,
+            lora_name,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            router_config_override,
+            track_prefill_tokens,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            overlap,
+            shared_cache_hits,
+            worker_loads: FxHashMap::default(),
+            resp_tx,
+        };
+
+        (request, block_hashes)
+    }
+
     fn worker_dp_ranges(workers: &HashMap<WorkerId, C>) -> Vec<WorkerDpRange> {
         workers
             .iter()
@@ -249,49 +301,7 @@ where
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
-        let track_prefill_tokens = request
-            .router_config_override
-            .as_ref()
-            .and_then(|cfg| cfg.track_prefill_tokens)
-            .unwrap_or(self.track_prefill_tokens_default);
-        let ScheduleRequest {
-            mode,
-            token_seq,
-            block_hashes,
-            isl_tokens,
-            lora_name,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            router_config_override,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            overlap,
-            shared_cache_hits,
-        } = request;
-        let request = SchedulingRequest {
-            mode,
-            token_seq,
-            isl_tokens,
-            lora_name,
-            expected_output_tokens,
-            pinned_worker,
-            allowed_worker_ids,
-            routing_constraints,
-            router_config_override,
-            track_prefill_tokens,
-            priority_jump,
-            strict_priority,
-            policy_class,
-            session_id,
-            overlap,
-            shared_cache_hits,
-            worker_loads: FxHashMap::default(),
-            resp_tx: Some(resp_tx),
-        };
+        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
 
         let mut lifecycle_lease = self
             .queue
@@ -312,6 +322,15 @@ where
             }
         }
         response
+    }
+
+    /// Select a worker from current scheduler state without queue admission or booking.
+    pub async fn select_without_admission(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let (request, _block_hashes) = self.make_scheduling_request(request, None);
+        self.queue.select_without_admission(request).await
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -507,6 +526,30 @@ where
 
     pub fn supports_overlap_refresh(&self) -> bool {
         self.queue.supports_overlap_refresh()
+    }
+
+    pub fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.queue
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
+    pub fn worker_is_decode_busy(&self, worker: WorkerWithDpRank, threshold: f64) -> Option<bool> {
+        self.queue.worker_is_decode_busy(worker, threshold)
+    }
+
+    pub fn projected_decode_load_exceeds(
+        &self,
+        worker: WorkerWithDpRank,
+        projected_blocks: usize,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.queue
+            .projected_decode_load_exceeds(worker, projected_blocks, threshold)
     }
 
     pub fn worker_type(&self) -> &'static str {

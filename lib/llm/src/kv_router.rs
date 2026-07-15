@@ -77,11 +77,18 @@ pub enum FindBestMatchOutcome {
         overlap_blocks: u32,
         effective_overlap_blocks: f64,
         cached_tokens: usize,
+        potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum FindBestMatchAdmission {
+    WithAdmission { track_lifecycle: bool },
+    WithoutAdmission,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -544,7 +551,51 @@ where
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
+            FindBestMatchAdmission::WithAdmission {
+                track_lifecycle: false,
+            },
+        )
+        .await
+        .map(|(outcome, _)| outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_details_without_admission(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_inner(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
             false,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            FindBestMatchAdmission::WithoutAdmission,
         )
         .await
         .map(|(outcome, _)| outcome)
@@ -569,7 +620,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        track_lifecycle: bool,
+        admission: FindBestMatchAdmission,
     ) -> anyhow::Result<(
         FindBestMatchOutcome,
         Option<(RequestProgressUpdater, RequestLifecycleLease)>,
@@ -579,7 +630,13 @@ where
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states && track_lifecycle {
+        let mode = if update_states
+            && matches!(
+                admission,
+                FindBestMatchAdmission::WithAdmission {
+                    track_lifecycle: true
+                }
+            ) {
             ScheduleMode::TrackedWithLifecycle {
                 request_id: context_id.expect("validated above").to_string(),
             }
@@ -668,29 +725,39 @@ where
             pinned_worker.as_ref(),
         );
 
-        let response = match self
-            .scheduler
-            .schedule_request(ScheduleRequest {
-                mode,
-                token_seq: maybe_seq_hashes,
-                block_hashes: block_hashes_for_refresh,
-                isl_tokens,
-                overlap,
-                router_config_override: router_config_override.cloned(),
-                lora_name,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                session_id,
-                expected_output_tokens,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-                shared_cache_hits,
-            })
-            .instrument(tracing::info_span!("kv_router.schedule"))
-            .await
-        {
+        let schedule_request = ScheduleRequest {
+            mode,
+            token_seq: maybe_seq_hashes,
+            block_hashes: block_hashes_for_refresh,
+            isl_tokens,
+            overlap,
+            router_config_override: router_config_override.cloned(),
+            lora_name,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            shared_cache_hits,
+        };
+        let response_result = match admission {
+            FindBestMatchAdmission::WithAdmission { .. } => {
+                self.scheduler
+                    .schedule_request(schedule_request)
+                    .instrument(tracing::info_span!("kv_router.schedule"))
+                    .await
+            }
+            FindBestMatchAdmission::WithoutAdmission => {
+                self.scheduler
+                    .select_without_admission(schedule_request)
+                    .instrument(tracing::info_span!("kv_router.select_without_admission"))
+                    .await
+            }
+        };
+        let response = match response_result {
             Ok(response) => response,
             Err(KvSchedulerError::QueueRejected(rejection)) => {
                 return Ok((FindBestMatchOutcome::QueueRejected { rejection }, None));
@@ -745,6 +812,7 @@ where
                 overlap_blocks: response.effective_overlap_blocks.round() as u32,
                 effective_overlap_blocks: response.effective_overlap_blocks,
                 cached_tokens: response.cached_tokens,
+                potential_decode_blocks: response.potential_decode_blocks as u64,
                 routing_hashes,
             },
             lifecycle,
@@ -870,6 +938,34 @@ where
     /// Sum of ISL tokens for requests currently parked in the scheduler queue.
     pub fn pending_isl_tokens(&self) -> usize {
         self.scheduler.pending_isl_tokens()
+    }
+
+    pub(crate) fn worker_is_prefill_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        decay_now: tokio::time::Instant,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.scheduler
+            .worker_is_prefill_busy(worker, decay_now, threshold)
+    }
+
+    pub(crate) fn worker_is_decode_busy(
+        &self,
+        worker: WorkerWithDpRank,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.scheduler.worker_is_decode_busy(worker, threshold)
+    }
+
+    pub(crate) fn projected_decode_load_exceeds(
+        &self,
+        worker: WorkerWithDpRank,
+        projected_blocks: usize,
+        threshold: f64,
+    ) -> Option<bool> {
+        self.scheduler
+            .projected_decode_load_exceeds(worker, projected_blocks, threshold)
     }
 
     fn prefill_load_hint_for(
