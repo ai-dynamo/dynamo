@@ -8476,6 +8476,13 @@ spec:
                     - Ready
                     - Failed
                   type: string
+                podSnapshotName:
+                  description: |-
+                    PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is
+                    the authoritative pointer to the snapshot (which is otherwise located by label, not by
+                    reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)
+                    from one that was created and later went missing (set, but no longer found).
+                  type: string
                 storageType:
                   description: |-
                     Deprecated: StorageType is ignored and no longer populated. It is retained

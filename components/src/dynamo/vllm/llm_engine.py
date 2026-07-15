@@ -69,10 +69,16 @@ from dynamo.vllm.cache_info import (
     get_configured_kv_event_block_size,
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
+from dynamo.vllm.kv_connector_protocols import (
+    disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
+)
 
 from .handlers import (
     VllmEnginePauseController,
     _apply_nvext_cache_salt,
+    _engine_generate_reasoning_kwargs,
+    _request_reasoning_metadata,
+    build_prompt_tokens_details,
     build_sampling_params,
     get_dp_range_for_worker,
 )
@@ -344,6 +350,7 @@ class VllmLLMEngine(LLMEngine):
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
+        disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
         self._vllm_config = vllm_config
         self._default_sampling_params = (
             vllm_config.model_config.get_diff_sampling_param()
@@ -436,6 +443,7 @@ class VllmLLMEngine(LLMEngine):
         # vLLM's KV transfer is internal to NixlConnector
         # (--kv-transfer-config). Dispatch only sets connector hints and
         # forwards the prefill→decode handoff payload.
+        prefill_prompt_tokens_details = None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
@@ -458,6 +466,7 @@ class VllmLLMEngine(LLMEngine):
             sampling_params.min_tokens = 1
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             prefill_result = require_prefill_result(request, self.disaggregation_mode)
+            prefill_prompt_tokens_details = prefill_result.get("prompt_tokens_details")
             # `disaggregated_params` may be present-but-None (prefill error path
             # / _build_disaggregated_params returning None), so use `or {}` — a
             # .get default only applies when the key is absent. A None value then
@@ -498,6 +507,7 @@ class VllmLLMEngine(LLMEngine):
         # model resolves to None. With LoRA enabled, an unknown adapter name
         # raises rather than silently falling back to the base model.
         lora_request = self._resolve_lora_request(request.get("model"))
+        reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
         gen = self.engine_client.generate(
             prompt,
@@ -505,6 +515,11 @@ class VllmLLMEngine(LLMEngine):
             request_id,
             data_parallel_rank=local_dp_rank,
             lora_request=lora_request,
+            **_engine_generate_reasoning_kwargs(
+                self.engine_client,
+                reasoning_ended,
+                reasoning_parser_kwargs,
+            ),
             **telemetry.engine_trace_kwargs(context),
         )
 
@@ -583,10 +598,16 @@ class VllmLLMEngine(LLMEngine):
                         len(res.prompt_token_ids) if res.prompt_token_ids else 0
                     )
                     completion_tokens = sum(total_output_tokens_by_index.values())
+                    prompt_tokens_details = prefill_prompt_tokens_details
+                    if prompt_tokens_details is None:
+                        prompt_tokens_details = build_prompt_tokens_details(
+                            getattr(res, "num_cached_tokens", None)
+                        )
                     out["completion_usage"] = {
                         "prompt_tokens": prompt_tokens,
                         "completion_tokens": completion_tokens,
                         "total_tokens": prompt_tokens + completion_tokens,
+                        "prompt_tokens_details": prompt_tokens_details,
                     }
                     # Stamp the connector's transfer handle on the
                     # prefill terminal so PrefillRouter can forward it.
@@ -696,7 +717,13 @@ class VllmLLMEngine(LLMEngine):
         )
 
     def supported_controls(self) -> set[str]:
-        controls = {"start_profile", "stop_profile", "sleep", "wake_up"}
+        controls = {
+            "start_profile",
+            "stop_profile",
+            "sleep",
+            "wake_up",
+            "clear_kv_blocks",
+        }
         if self.engine_client is not None and hasattr(
             self.engine_client, "scale_elastic_ep"
         ):
@@ -709,6 +736,7 @@ class VllmLLMEngine(LLMEngine):
             "stop_profile": self.stop_profile,
             "sleep": self.sleep,
             "wake_up": self.wake_up,
+            "clear_kv_blocks": self.clear_kv_blocks,
         }
         if self.engine_client is not None and hasattr(
             self.engine_client, "scale_elastic_ep"
@@ -1285,6 +1313,19 @@ class VllmLLMEngine(LLMEngine):
             return {"status": "ok", "message": "Profiling stopped"}
         except Exception as e:
             logger.error("Failed to stop profiling: %s", e)
+            return {"status": "error", "message": str(e)}
+
+    async def clear_kv_blocks(self, _body: dict) -> dict:
+        """Clear KV blocks; the control request body is intentionally ignored."""
+        if self.engine_client is None:
+            return {"status": "error", "message": "Engine is not running"}
+        try:
+            cleared = await self.engine_client.reset_prefix_cache(reset_connector=True)
+            if cleared is False:
+                return {"status": "error", "message": "KV cache reset failed"}
+            return {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            logger.error("Failed to clear KV cache: %s", e)
             return {"status": "error", "message": str(e)}
 
     async def scale_elastic_ep(self, body: dict) -> dict:

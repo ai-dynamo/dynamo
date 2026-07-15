@@ -94,6 +94,18 @@ enum PrefillOutcome {
     },
 }
 
+fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
+    let bootstrap_host = params.get("bootstrap_host")?.as_str()?.to_string();
+    let bootstrap_port = u16::try_from(params.get("bootstrap_port")?.as_u64()?).ok()?;
+    let bootstrap_room = params.get("bootstrap_room")?.as_u64()?;
+    Some(BootstrapInfo {
+        bootstrap_host,
+        bootstrap_port,
+        bootstrap_room,
+        handoff_id: Some(Uuid::new_v4()),
+    })
+}
+
 struct PreparedPrefill {
     worker_id: u64,
     bootstrap_info: Option<BootstrapInfo>,
@@ -313,10 +325,20 @@ impl
             } else {
                 drop(prefill_phase_barrier);
                 let completion = Self::consume_prefill_stream(prefill_stream, tracker).await?;
-                PrefillOutcome::Completed {
-                    result: completion.result,
-                    worker_id: prepared.worker_id,
-                    worker_link: completion.worker_link,
+
+                if let Some(bootstrap_info) =
+                    extract_bootstrap_info(&completion.result.disaggregated_params)
+                {
+                    PrefillOutcome::Bootstrap {
+                        bootstrap_info,
+                        worker_id: prepared.worker_id,
+                    }
+                } else {
+                    PrefillOutcome::Completed {
+                        result: completion.result,
+                        worker_id: prepared.worker_id,
+                        worker_link: completion.worker_link,
+                    }
                 }
             };
             Ok((outcome, topology_constraints))
@@ -769,5 +791,43 @@ mod tests {
             Ok(PrefillLifecycleState::Unavailable)
         );
         assert_eq!(PrefillLifecycleState::try_from(3), Err(3));
+    }
+
+    #[test]
+    fn extract_bootstrap_info_parses_valid_params() {
+        let params = serde_json::json!({
+            "bootstrap_host": "10.0.0.5",
+            "bootstrap_port": 12345,
+            "bootstrap_room": 987654321u64,
+            // extra fields (e.g. worker_id) must be ignored
+            "worker_id": {"prefill_worker_id": 7},
+        });
+        let info = extract_bootstrap_info(&params).expect("valid params should parse");
+        assert_eq!(info.bootstrap_host, "10.0.0.5");
+        assert_eq!(info.bootstrap_port, 12345);
+        assert_eq!(info.bootstrap_room, 987654321);
+    }
+
+    #[test]
+    fn extract_bootstrap_info_none_when_field_missing() {
+        // Missing bootstrap_room -> not the bootstrap path (falls through to Completed).
+        let missing_room = serde_json::json!({
+            "bootstrap_host": "10.0.0.5",
+            "bootstrap_port": 12345,
+        });
+        assert!(extract_bootstrap_info(&missing_room).is_none());
+        // An aggregated / vLLM completed prefill carries no bootstrap fields.
+        assert!(extract_bootstrap_info(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn extract_bootstrap_info_rejects_out_of_range_port() {
+        // bootstrap_port must fit in u16 -> reject rather than silently truncating.
+        let params = serde_json::json!({
+            "bootstrap_host": "h",
+            "bootstrap_port": 70000,
+            "bootstrap_room": 1,
+        });
+        assert!(extract_bootstrap_info(&params).is_none());
     }
 }

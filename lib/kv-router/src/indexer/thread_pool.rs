@@ -15,6 +15,11 @@ use dashmap::DashMap;
 use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
+#[cfg(feature = "bench")]
+use super::{
+    EventCompletionBuffer, EventCompletionWriter, ObservationError, ObservationSeal,
+    ObservedEnqueueReceipt, ThreadPoolObservationPlan, ThreadPoolObservationSnapshot,
+};
 use super::{
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
     WorkerLookupStats, WorkerTask, panic_payload_message,
@@ -22,6 +27,8 @@ use super::{
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
 use dynamo_tokens::SequenceHash;
+#[cfg(feature = "bench")]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 /// Generic wrapper that provides [`KvIndexerInterface`] for any [`SyncIndexer`] backend.
 ///
@@ -80,6 +87,54 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
     /// Synthetic event IDs for approximate store/remove events.
     synthetic_event_id: Arc<AtomicU64>,
+
+    #[cfg(feature = "bench")]
+    observation_active: AtomicBool,
+}
+
+#[cfg(feature = "bench")]
+struct ObservationLease<'a> {
+    active: &'a AtomicBool,
+}
+
+#[cfg(feature = "bench")]
+impl Drop for ObservationLease<'_> {
+    fn drop(&mut self) {
+        self.active.store(false, AtomicOrdering::Release);
+    }
+}
+
+#[cfg(feature = "bench")]
+pub struct ThreadPoolObservationSession<'a, T: SyncIndexer> {
+    indexer: &'a ThreadPoolIndexer<T>,
+    epoch: std::time::Instant,
+    seal_tasks: Vec<Option<WorkerTask>>,
+    seal_receivers: Vec<oneshot::Receiver<Option<ObservationSeal>>>,
+    harvest_tasks: Vec<Option<WorkerTask>>,
+    harvest_receivers: Vec<oneshot::Receiver<EventCompletionBuffer>>,
+    queue_depth_at_stop: Vec<usize>,
+    lease: ObservationLease<'a>,
+}
+
+#[cfg(feature = "bench")]
+pub struct ThreadPoolObservationDrain<'a, T: SyncIndexer> {
+    indexer: &'a ThreadPoolIndexer<T>,
+    seal_tasks: Vec<Option<WorkerTask>>,
+    seal_receivers: Vec<oneshot::Receiver<Option<ObservationSeal>>>,
+    harvest_tasks: Vec<Option<WorkerTask>>,
+    harvest_receivers: Vec<oneshot::Receiver<EventCompletionBuffer>>,
+    queue_depth_at_stop: Vec<usize>,
+    lease: ObservationLease<'a>,
+}
+
+#[cfg(feature = "bench")]
+pub struct ThreadPoolSealedObservation<'a, T: SyncIndexer> {
+    indexer: &'a ThreadPoolIndexer<T>,
+    seals: Vec<ObservationSeal>,
+    harvest_tasks: Vec<Option<WorkerTask>>,
+    harvest_receivers: Vec<oneshot::Receiver<EventCompletionBuffer>>,
+    queue_depth_at_stop: Vec<usize>,
+    lease: ObservationLease<'a>,
 }
 
 impl<T: SyncIndexer> ThreadPoolIndexer<T> {
@@ -142,14 +197,19 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 
     pub fn new_with_metrics_and_pruning(
-        backend: T,
+        mut backend: T,
         num_workers: usize,
         kv_block_size: u32,
         metrics: Option<Arc<KvIndexerMetrics>>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
         assert!(num_workers > 0, "Number of workers must be greater than 0");
+        assert!(
+            prune_config.is_none() || backend.supports_routing_decision_pruning(),
+            "backend does not support routing-decision pruning"
+        );
         super::warn_on_unit_block_size("thread_pool", kv_block_size);
+        backend.configure_metrics(metrics.as_deref());
 
         let backend = Arc::new(backend);
         let mut worker_event_senders = Vec::new();
@@ -217,6 +277,8 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             prune_manager,
             prune_pump_cancel,
             synthetic_event_id,
+            #[cfg(feature = "bench")]
+            observation_active: AtomicBool::new(false),
         }
     }
 
@@ -232,6 +294,128 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// itself.
     pub fn backend_arc(&self) -> Arc<T> {
         Arc::clone(&self.backend)
+    }
+
+    #[cfg(feature = "bench")]
+    pub async fn begin_observation(
+        &self,
+        plan: ThreadPoolObservationPlan,
+    ) -> Result<ThreadPoolObservationSession<'_, T>, ObservationError> {
+        if plan.expected_events_by_worker.is_empty() {
+            return Err(ObservationError::EmptyPlan);
+        }
+        if self
+            .observation_active
+            .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+            .is_err()
+        {
+            return Err(ObservationError::AlreadyActive);
+        }
+        let lease = ObservationLease {
+            active: &self.observation_active,
+        };
+
+        let mut seen = BTreeSet::new();
+        let mut expected_events_per_queue = vec![0usize; self.num_workers];
+        for &(worker_id, expected_events) in &plan.expected_events_by_worker {
+            if !seen.insert(worker_id) {
+                return Err(ObservationError::DuplicateWorker(worker_id));
+            }
+            let worker_idx = Self::get_or_assign_thread_idx(
+                &self.worker_assignments,
+                &self.worker_assignment_count,
+                worker_id,
+                self.num_workers,
+            );
+            expected_events_per_queue[worker_idx] = expected_events_per_queue[worker_idx]
+                .checked_add(expected_events)
+                .ok_or(ObservationError::CapacityOverflow(worker_idx))?;
+        }
+
+        let mut install_receivers = Vec::with_capacity(self.num_workers);
+        let mut seal_tasks = Vec::with_capacity(self.num_workers);
+        let mut seal_receivers = Vec::with_capacity(self.num_workers);
+        let mut harvest_tasks = Vec::with_capacity(self.num_workers);
+        let mut harvest_receivers = Vec::with_capacity(self.num_workers);
+
+        for (worker_idx, &capacity) in expected_events_per_queue.iter().enumerate() {
+            let (install_tx, install_rx) = oneshot::channel();
+            self.worker_event_channels[worker_idx]
+                .send(WorkerTask::InstallObservation {
+                    writer: EventCompletionWriter::new(plan.epoch, capacity),
+                    resp: install_tx,
+                })
+                .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
+            install_receivers.push(install_rx);
+
+            let (seal_tx, seal_rx) = oneshot::channel();
+            seal_tasks.push(Some(WorkerTask::SealObservation(seal_tx)));
+            seal_receivers.push(seal_rx);
+
+            let (harvest_tx, harvest_rx) = oneshot::channel();
+            harvest_tasks.push(Some(WorkerTask::HarvestObservation(harvest_tx)));
+            harvest_receivers.push(harvest_rx);
+        }
+
+        for (worker_idx, receiver) in install_receivers.into_iter().enumerate() {
+            let accepted = receiver
+                .await
+                .map_err(|_| ObservationError::InstallCanceled(worker_idx))?;
+            if !accepted {
+                return Err(ObservationError::InstallRejected(worker_idx));
+            }
+        }
+
+        Ok(ThreadPoolObservationSession {
+            indexer: self,
+            epoch: plan.epoch,
+            seal_tasks,
+            seal_receivers,
+            harvest_tasks,
+            harvest_receivers,
+            queue_depth_at_stop: vec![0; self.num_workers],
+            lease,
+        })
+    }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn enqueue_active_observation_owned(
+        &self,
+        event: RouterEvent,
+        correlation_id: u32,
+        epoch: std::time::Instant,
+    ) -> Result<ObservedEnqueueReceipt, ObservationError> {
+        if !self.observation_active.load(AtomicOrdering::Acquire) {
+            return Err(ObservationError::ProducerClosed);
+        }
+        let worker_id = event.worker_id;
+        let worker_idx = self
+            .worker_assignments
+            .get(&worker_id)
+            .map(|entry| *entry)
+            .ok_or(ObservationError::UnknownWorker(worker_id))?;
+
+        self.worker_event_channels[worker_idx]
+            .send(WorkerTask::ObservedEvent {
+                event,
+                correlation_id,
+            })
+            .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
+        let accepted_ns = epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.maybe_enqueue_cleanup(worker_idx);
+
+        Ok(ObservedEnqueueReceipt {
+            accepted_ns,
+            event_worker: worker_idx,
+        })
+    }
+
+    #[cfg(feature = "bench")]
+    fn capture_queue_depths(&self, depths: &mut [usize]) {
+        for (depth, channel) in depths.iter_mut().zip(&self.worker_event_channels) {
+            *depth = channel.len();
+        }
     }
 
     pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
@@ -556,6 +740,104 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     }
 }
 
+#[cfg(feature = "bench")]
+impl<'a, T: SyncIndexer> ThreadPoolObservationSession<'a, T> {
+    pub fn enqueue_observed_owned(
+        &mut self,
+        event: RouterEvent,
+        correlation_id: u32,
+    ) -> Result<ObservedEnqueueReceipt, ObservationError> {
+        self.indexer
+            .enqueue_active_observation_owned(event, correlation_id, self.epoch)
+    }
+
+    pub fn close_observed_producers(mut self) -> ThreadPoolObservationDrain<'a, T> {
+        self.indexer
+            .capture_queue_depths(&mut self.queue_depth_at_stop);
+
+        ThreadPoolObservationDrain {
+            indexer: self.indexer,
+            seal_tasks: self.seal_tasks,
+            seal_receivers: self.seal_receivers,
+            harvest_tasks: self.harvest_tasks,
+            harvest_receivers: self.harvest_receivers,
+            queue_depth_at_stop: self.queue_depth_at_stop,
+            lease: self.lease,
+        }
+    }
+}
+
+#[cfg(feature = "bench")]
+impl<'a, T: SyncIndexer> ThreadPoolObservationDrain<'a, T> {
+    pub async fn seal(mut self) -> Result<ThreadPoolSealedObservation<'a, T>, ObservationError> {
+        for worker_idx in 0..self.indexer.num_workers {
+            let Some(task) = self.seal_tasks[worker_idx].take() else {
+                return Err(ObservationError::SealTaskConsumed(worker_idx));
+            };
+            self.indexer.worker_event_channels[worker_idx]
+                .send(task)
+                .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
+        }
+
+        let mut seals = Vec::with_capacity(self.indexer.num_workers);
+        for (worker_idx, receiver) in self.seal_receivers.into_iter().enumerate() {
+            let seal = receiver
+                .await
+                .map_err(|_| ObservationError::SealCanceled(worker_idx))?
+                .ok_or(ObservationError::SealRejected(worker_idx))?;
+            seals.push(seal);
+        }
+
+        Ok(ThreadPoolSealedObservation {
+            indexer: self.indexer,
+            seals,
+            harvest_tasks: self.harvest_tasks,
+            harvest_receivers: self.harvest_receivers,
+            queue_depth_at_stop: self.queue_depth_at_stop,
+            lease: self.lease,
+        })
+    }
+}
+
+#[cfg(feature = "bench")]
+impl<T: SyncIndexer> ThreadPoolSealedObservation<'_, T> {
+    pub fn latest_seal_ns(&self) -> u64 {
+        self.seals
+            .iter()
+            .map(|seal| seal.sealed_ns)
+            .max()
+            .unwrap_or_default()
+    }
+
+    pub async fn harvest(mut self) -> Result<ThreadPoolObservationSnapshot, ObservationError> {
+        for worker_idx in 0..self.indexer.num_workers {
+            let Some(task) = self.harvest_tasks[worker_idx].take() else {
+                return Err(ObservationError::HarvestTaskConsumed(worker_idx));
+            };
+            self.indexer.worker_event_channels[worker_idx]
+                .send(task)
+                .map_err(|_| ObservationError::WorkerOffline(worker_idx))?;
+        }
+
+        let mut buffers = Vec::with_capacity(self.indexer.num_workers);
+        for (worker_idx, receiver) in self.harvest_receivers.into_iter().enumerate() {
+            buffers.push(
+                receiver
+                    .await
+                    .map_err(|_| ObservationError::HarvestCanceled(worker_idx))?,
+            );
+        }
+
+        let snapshot = ThreadPoolObservationSnapshot {
+            seals: self.seals,
+            buffers,
+            queue_depth_at_stop: self.queue_depth_at_stop,
+        };
+        drop(self.lease);
+        Ok(snapshot)
+    }
+}
+
 impl<T: SyncIndexer> Drop for ThreadPoolIndexer<T> {
     fn drop(&mut self) {
         if let Some(cancel) = &self.prune_pump_cancel {
@@ -696,6 +978,12 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        if !self.backend.supports_event_dump() {
+            return Err(KvRouterError::Unsupported(
+                "backend cannot reconstruct router events".to_string(),
+            ));
+        }
+
         // Send DumpEvents to every worker as a FIFO barrier: each worker must
         // finish processing all previously queued Events before it handles
         // DumpEvents, so by the time all workers respond we know the shared
@@ -855,5 +1143,41 @@ mod tests {
     #[tokio::test]
     async fn cold_rank_remove_reserves_sticky_queue() {
         assert_cold_remove_reserves_sticky_queue(ColdRemoval::DpRank).await;
+    }
+
+    #[cfg(feature = "bench")]
+    #[tokio::test]
+    async fn observed_events_use_fixed_worker_buffers_and_fifo_seals() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        let epoch = std::time::Instant::now();
+        let mut observation = indexer
+            .begin_observation(ThreadPoolObservationPlan {
+                epoch,
+                expected_events_by_worker: vec![(1, 1), (2, 1)],
+            })
+            .await
+            .unwrap();
+
+        let first = observation
+            .enqueue_observed_owned(make_store_event(1, &[11]), 10)
+            .unwrap();
+        let second = observation
+            .enqueue_observed_owned(make_store_event(2, &[22]), 20)
+            .unwrap();
+        assert_ne!(first.event_worker, second.event_worker);
+
+        let sealed = observation.close_observed_producers().seal().await.unwrap();
+        assert!(sealed.latest_seal_ns() >= first.accepted_ns);
+        let snapshot = sealed.harvest().await.unwrap();
+        assert_eq!(snapshot.buffers.len(), 2);
+        assert!(snapshot.buffers.iter().all(|buffer| !buffer.overflowed()));
+        let mut ids = snapshot
+            .buffers
+            .iter()
+            .flat_map(|buffer| buffer.records().iter())
+            .map(|record| record.correlation_id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, [10, 20]);
     }
 }

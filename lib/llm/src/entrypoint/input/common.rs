@@ -13,7 +13,9 @@ use crate::{
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
     kv_router::indexer::try_build_cache_indexer,
-    kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
+    kv_router::{
+        EncoderRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+    },
     lora::LoraFilteredRouter,
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -79,6 +81,7 @@ pub struct PreprocessedRouting {
     backend_engine:
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     prefill_router: Arc<PrefillRouter>,
+    encoder_router: Arc<EncoderRouter>,
 }
 
 pub struct PreparedEngine {
@@ -242,6 +245,7 @@ pub async fn build_preprocessed_routing(
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
@@ -296,6 +300,7 @@ pub async fn build_preprocessed_routing(
             session_affinity_ttl_secs,
         )
     });
+    let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
 
     let session_affinity_ttl = session_affinity_ttl_secs.map(Duration::from_secs);
     let decode_session_affinity = if router_mode.is_kv_routing() {
@@ -315,6 +320,7 @@ pub async fn build_preprocessed_routing(
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,
+        encoder_router,
     })
 }
 
@@ -492,15 +498,18 @@ impl PreprocessedRouting {
         let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
             .into_operator_for::<BackendOutput>();
         let prefill_op = self.prefill_router.into_operator();
+        let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
         let engine = frontend
             .link(preprocessor_op.forward_edge())?
             .link(migration.forward_edge())?
             .link(token_backend.forward_edge())?
+            .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
+            .link(encoder_op.backward_edge())?
             .link(token_backend.backward_edge())?
             .link(migration.backward_edge())?
             .link(preprocessor_op.backward_edge())?
@@ -527,13 +536,16 @@ impl PreprocessedRouting {
         let migration = Migration::from_mdc(card, migration_limit, migration_max_seq_len, metrics)
             .into_operator_for::<LLMEngineOutput>();
         let prefill_op = self.prefill_router.into_operator();
+        let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
         let engine = frontend
             .link(migration.forward_edge())?
+            .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
+            .link(encoder_op.backward_edge())?
             .link(migration.backward_edge())?
             .link(frontend)?;
 

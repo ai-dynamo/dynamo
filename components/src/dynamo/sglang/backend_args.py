@@ -8,7 +8,7 @@
 import argparse
 import logging
 import warnings
-from typing import Optional
+from typing import List, Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -193,6 +193,10 @@ class DynamoSGLangConfig(ConfigBase):
     frontend_decoding: bool = False
     enable_conditional_disagg: bool = False
     sglang_trace_level: int
+
+    # Extra served names beyond the primary, parsed from --served-model-name.
+    # None (not []) since ConfigBase copies class defaults by reference.
+    served_model_aliases: Optional[List[str]] = None
 
     def validate(self) -> None:
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):

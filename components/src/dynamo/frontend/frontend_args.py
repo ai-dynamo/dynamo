@@ -183,6 +183,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 queue_threshold=self.router_queue_threshold,
             )
         self.apply_admission_control()
+        self.validate_rejection_thresholds()
+        self.log_rejection_thresholds()
 
 
 @register_encoder(FrontendConfig)

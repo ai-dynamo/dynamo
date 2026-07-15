@@ -199,6 +199,13 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
+	// PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is
+	// the authoritative pointer to the snapshot (which is otherwise located by label, not by
+	// reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)
+	// from one that was created and later went missing (set, but no longer found).
+	// +optional
+	PodSnapshotName string `json:"podSnapshotName,omitempty"`
+
 	// CreatedAt is the timestamp when the checkpoint became ready
 	// +optional
 	CreatedAt *metav1.Time `json:"createdAt,omitempty"`

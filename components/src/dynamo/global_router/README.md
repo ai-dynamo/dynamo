@@ -20,9 +20,9 @@ Both modes support priority-based pool overrides from agent hints and optional p
 
 - **vLLM** - Uses synchronous prefill path (frontend waits for prefill to complete)
 - **Mocker** - Uses same synchronous path as vLLM
+- **SGLang** - Uses the bootstrap path (async KV transfer)
 
 **Not supported:**
-- **SGLang** - Bootstrap path (async KV transfer) not implemented
 - **TensorRT-LLM** - Bootstrap path not implemented
 
 ## Architecture

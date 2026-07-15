@@ -22,8 +22,8 @@ path for shared GPU clusters and multi-node serving.
 
 ## Prerequisites
 
-- Kubernetes cluster (v1.24+) with GPU nodes
-- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) (v1.24+)
+- Kubernetes cluster (v1.30+) with GPU nodes
+- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) (v1.30+)
 - [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
 - [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed on the cluster
 - HuggingFace token secret on cluster
@@ -78,7 +78,7 @@ Optionally, verify your cluster is ready:
 export NAMESPACE=dynamo-system
 helm install dynamo-platform \
   oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
-  --version "1.0.2" \
+  --version "1.2.1" \
   --namespace "$NAMESPACE" \
   --create-namespace
 ```

@@ -30,11 +30,13 @@ from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
+    clear_kv_blocks_payload,
     completion_payload_default,
     completion_payload_with_logprobs,
     elastic_ep_scale_payload,
     embedding_payload,
     embedding_payload_default,
+    guided_decoding_chat_payload_default,
     kv_events_metrics_payload,
     metric_payload_default,
     router_cached_tokens_chat_payload,
@@ -162,7 +164,7 @@ vllm_configs = {
         name="aggregated_unified",
         directory=vllm_dir,
         script_name="agg.sh",
-        script_args=["--unified"],
+        script_args=["--unified", "--enable-prefix-caching"],
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
@@ -176,6 +178,8 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            clear_kv_blocks_payload(),
+            guided_decoding_chat_payload_default(),
         ],
     ),
     "elastic_ep_unified": VLLMConfig(

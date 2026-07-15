@@ -13,8 +13,8 @@ from tests.router.common import (
     _test_router_decisions_disagg,
     _test_router_indexers_sync,
 )
-from tests.router.helper import generate_random_suffix, get_runtime
-from tests.utils.constants import DefaultPort
+from tests.router.helper import generate_random_suffix, managed_runtime
+from tests.utils.constants import DynamoPortRange
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
 
@@ -33,7 +33,7 @@ TEST_PROMPT = (
 
 
 def allocate_frontend_ports(request, count: int) -> list[int]:
-    ports = allocate_ports(count, DefaultPort.FRONTEND.value)
+    ports = allocate_ports(count, DynamoPortRange.FRONTEND.value)
     request.addfinalizer(lambda: deallocate_ports(ports))
     return ports
 
@@ -157,11 +157,6 @@ class ManagedEngineProcessMixin:
         time.sleep(self.cleanup_delay_seconds)
 
 
-def get_engine_endpoint(engine_workers, request_plane: str, component_name: str):
-    runtime = get_runtime(request_plane=request_plane)
-    return runtime.endpoint(f"{engine_workers.namespace}.{component_name}.generate")
-
-
 def _create_engine_process(
     *,
     engine_process_cls,
@@ -264,8 +259,13 @@ def run_router_decisions_test(
         default_process_kwargs=default_process_kwargs,
         engine_process_kwargs=engine_process_kwargs,
     )
-    with process as engine_workers:
-        endpoint = get_engine_endpoint(engine_workers, request_plane, component_name)
+    with (
+        process as engine_workers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
+        endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{component_name}.generate"
+        )
         scenario_kwargs = dict(test_kwargs or {})
         for argument, attribute in (
             ("standalone_indexer_url", "standalone_indexer_url"),
@@ -306,8 +306,13 @@ def run_cache_salt_isolation_test(
         default_process_kwargs={"num_workers": 2, "single_gpu": True},
         engine_process_kwargs=None,
     )
-    with process as engine_workers:
-        endpoint = get_engine_endpoint(engine_workers, request_plane, component_name)
+    with (
+        process as engine_workers,
+        managed_runtime(request_plane=request_plane) as runtime,
+    ):
+        endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{component_name}.generate"
+        )
         _test_router_cache_salt_isolation(
             engine_workers,
             endpoint,
