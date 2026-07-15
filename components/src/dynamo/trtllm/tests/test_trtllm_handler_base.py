@@ -1084,6 +1084,7 @@ class TestConversationAffinity:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
