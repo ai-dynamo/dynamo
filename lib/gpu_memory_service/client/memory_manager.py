@@ -737,6 +737,17 @@ class GMSClientMemoryManager:
         )
         return va
 
+    def scratch_summary(self) -> tuple[int, int]:
+        """Return (count, total_logical_bytes) of live scratch-aliased mappings.
+
+        The per-mapping "[GMS] Reserved ... scratch" line is logged at INFO on
+        this module's logger, which the vLLM worker subprocess suppresses.
+        Callers use this to emit a single visible summary confirming that KV was
+        scratch-aliased (VA-reserved, physically cheap) rather than fully backed.
+        """
+        total = sum(m.size for m in self._scratch_mappings.values())
+        return len(self._scratch_mappings), total
+
     def prepare_scratch_for_reallocation(self) -> None:
         """Move scratch bookkeeping into _mappings as preserved-VA records.
 

@@ -271,10 +271,24 @@ class GMSWorker(Worker):
         if is_scratch_kv_enabled():
             # Client-local scratch only — no GMS server session at init.
             # wake_up will connect RW and allocate fresh server backing.
-            get_or_create_scratch_manager(socket, device, tag="kv_cache")
+            scratch_mgr = get_or_create_scratch_manager(socket, device, tag="kv_cache")
             # The scratch pool is scoped to the KV tensors by
             # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
             self.model_runner.initialize_kv_cache(kv_cache_config)
+            # The per-mapping "[GMS] Reserved ... scratch" line is logged at INFO
+            # on the gpu_memory_service logger, which the vLLM worker subprocess
+            # suppresses, so scratch engagement is invisible in engine logs. Emit
+            # one visible summary (logger + print, matching the accounting message
+            # above) so operators and failover harnesses can confirm the KV was
+            # scratch-aliased rather than fully backed.
+            n_scratch, logical_bytes = scratch_mgr.scratch_summary()
+            msg = (
+                f"[GMS] Scratch-KV engaged: {n_scratch} aliased mappings, "
+                f"{logical_bytes / (1 << 30):.2f} GiB logical KV reserved "
+                f"on device {device}"
+            )
+            logger.info(msg)
+            print(msg, flush=True)
         elif self.vllm_config.model_config.enable_sleep_mode:
             get_or_create_gms_client_memory_manager(
                 socket,
