@@ -5,7 +5,7 @@ This crate contains built-in implementations of `PolicyClassAdmissionStrategy`. 
 ## Structure
 
 - `src/lib.rs` exposes strategy modules and preserves the crate's public convenience re-exports.
-- `src/thunderagent/` contains the complete ThunderAgent implementation and its local instructions.
+- `src/session_aware/` contains the complete Session-Aware Admission Control implementation and its local instructions.
 
 ## Boundaries
 

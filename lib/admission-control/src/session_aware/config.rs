@@ -8,15 +8,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("invalid ThunderAgent configuration: {0}")]
+    #[error("invalid session-aware admission-control configuration: {0}")]
     Invalid(&'static str),
-    #[error("failed to parse ThunderAgent configuration: {0}")]
+    #[error("failed to parse session-aware admission-control configuration: {0}")]
     Parse(#[from] serde_yaml::Error),
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ThunderAgentConfig {
+pub struct SessionAwareAdmissionControlConfig {
     pub pause_threshold: f64,
     pub pause_target: f64,
     pub resume_timeout_seconds: f64,
@@ -24,7 +24,7 @@ pub struct ThunderAgentConfig {
     pub scheduler_interval_seconds: f64,
 }
 
-impl Default for ThunderAgentConfig {
+impl Default for SessionAwareAdmissionControlConfig {
     fn default() -> Self {
         Self {
             pause_threshold: 0.95,
@@ -36,7 +36,7 @@ impl Default for ThunderAgentConfig {
     }
 }
 
-impl ThunderAgentConfig {
+impl SessionAwareAdmissionControlConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_fraction(self.pause_threshold, "pause_threshold must be in [0, 1]")?;
         validate_fraction(self.pause_target, "pause_target must be in [0, 1]")?;
@@ -83,28 +83,28 @@ mod tests {
     #[test]
     fn rejects_inconsistent_or_zero_control_values() {
         for config in [
-            ThunderAgentConfig {
+            SessionAwareAdmissionControlConfig {
                 pause_threshold: 0.7,
                 pause_target: 0.8,
                 ..Default::default()
             },
-            ThunderAgentConfig {
+            SessionAwareAdmissionControlConfig {
                 resume_timeout_seconds: 0.0,
                 ..Default::default()
             },
-            ThunderAgentConfig {
+            SessionAwareAdmissionControlConfig {
                 session_retention_seconds: 0.0,
                 ..Default::default()
             },
-            ThunderAgentConfig {
+            SessionAwareAdmissionControlConfig {
                 scheduler_interval_seconds: 0.0,
                 ..Default::default()
             },
-            ThunderAgentConfig {
+            SessionAwareAdmissionControlConfig {
                 scheduler_interval_seconds: 1e-20,
                 ..Default::default()
             },
-            ThunderAgentConfig {
+            SessionAwareAdmissionControlConfig {
                 resume_timeout_seconds: 1e-20,
                 ..Default::default()
             },

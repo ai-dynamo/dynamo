@@ -11,18 +11,21 @@ use dynamo_kv_router::scheduling::{
 use thiserror::Error;
 use tokio::sync::watch;
 
-use super::{ConfigError, ThunderAgent, ThunderAgentConfig, WatchWorkerCapacity};
+use super::{
+    ConfigError, SessionAwareAdmissionControl, SessionAwareAdmissionControlConfig,
+    WatchWorkerCapacity,
+};
 
 #[derive(Debug, Error)]
 pub enum RegistrationError {
-    #[error("ThunderAgent queue admission requires FCFS for policy class {0:?}")]
-    ThunderAgentRequiresFcfs(String),
+    #[error("session-aware admission control requires FCFS for policy class {0:?}")]
+    SessionAwareAdmissionControlRequiresFcfs(String),
     #[error(
-        "ThunderAgent queue admission may be configured for only one policy class (found {first:?} and {second:?})"
+        "session-aware admission control may be configured for only one policy class (found {first:?} and {second:?})"
     )]
-    MultipleThunderAgentClasses { first: String, second: String },
+    MultipleSessionAwareAdmissionControlClasses { first: String, second: String },
     #[error(transparent)]
-    ThunderAgentConfig(#[from] ConfigError),
+    SessionAwareAdmissionControlConfig(#[from] ConfigError),
 }
 
 /// Register configured built-in strategies without replacing caller-provided ones.
@@ -35,7 +38,7 @@ pub fn register_builtin_strategies<C>(
 where
     C: WorkerConfigLike + Send + Sync + 'static,
 {
-    let mut thunderagent_class = None;
+    let mut session_aware_class = None;
     for class in profile.classes() {
         let Some(admission) = &class.queue_admission else {
             continue;
@@ -51,17 +54,19 @@ where
             scheduler_interval_seconds,
         } = admission;
         if class.queue_policy != RouterQueuePolicy::Fcfs {
-            return Err(RegistrationError::ThunderAgentRequiresFcfs(
+            return Err(RegistrationError::SessionAwareAdmissionControlRequiresFcfs(
                 class.name.clone(),
             ));
         }
-        if let Some(first) = thunderagent_class.replace(class.name.clone()) {
-            return Err(RegistrationError::MultipleThunderAgentClasses {
-                first,
-                second: class.name.clone(),
-            });
+        if let Some(first) = session_aware_class.replace(class.name.clone()) {
+            return Err(
+                RegistrationError::MultipleSessionAwareAdmissionControlClasses {
+                    first,
+                    second: class.name.clone(),
+                },
+            );
         }
-        let mut config = ThunderAgentConfig::default();
+        let mut config = SessionAwareAdmissionControlConfig::default();
         if let Some(value) = *pause_threshold {
             config.pause_threshold = value;
         }
@@ -80,7 +85,7 @@ where
         let capacity = WatchWorkerCapacity::new(workers.clone(), block_size);
         strategies.insert(
             class.name.clone(),
-            Box::new(ThunderAgent::new(capacity, config)?),
+            Box::new(SessionAwareAdmissionControl::new(capacity, config)?),
         );
     }
     Ok(())
@@ -150,7 +155,7 @@ policy_classes:
     }
 
     #[test]
-    fn builds_configured_thunderagent() {
+    fn builds_configured_session_aware() {
         let mut strategies = PolicyClassAdmissionStrategies::new();
         register_builtin_strategies(&profile(), workers(), 16, &mut strategies).unwrap();
 

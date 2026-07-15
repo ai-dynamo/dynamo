@@ -13,7 +13,9 @@ use dynamo_kv_router::scheduling::{
 };
 use indexmap::{IndexMap, IndexSet};
 
-use super::{ConfigError, ThunderAgentConfig, WorkerCapacity, WorkerCapacityProvider};
+use super::{
+    ConfigError, SessionAwareAdmissionControlConfig, WorkerCapacity, WorkerCapacityProvider,
+};
 
 #[derive(Clone)]
 enum ProgramState {
@@ -121,17 +123,20 @@ struct SessionRequests {
     waiting: IndexSet<AdmissionId>,
 }
 
-pub struct ThunderAgent<P> {
+pub struct SessionAwareAdmissionControl<P> {
     capacity: P,
-    config: ThunderAgentConfig,
+    config: SessionAwareAdmissionControlConfig,
     programs: IndexMap<String, Program>,
     requests: HashMap<AdmissionId, RequestState>,
     sessions: HashMap<String, SessionRequests>,
     next_tick: Instant,
 }
 
-impl<P: WorkerCapacityProvider> ThunderAgent<P> {
-    pub fn new(capacity: P, config: ThunderAgentConfig) -> Result<Self, ConfigError> {
+impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
+    pub fn new(
+        capacity: P,
+        config: SessionAwareAdmissionControlConfig,
+    ) -> Result<Self, ConfigError> {
         config.validate()?;
         tracing::info!(
             pause_threshold = config.pause_threshold,
@@ -139,7 +144,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
             resume_timeout_seconds = config.resume_timeout_seconds,
             session_retention_seconds = config.session_retention_seconds,
             scheduler_interval_seconds = config.scheduler_interval_seconds,
-            "ThunderAgent admission strategy configured"
+            "Session-aware admission control configured"
         );
         let next_tick = Instant::now() + Duration::from_secs_f64(config.scheduler_interval_seconds);
         Ok(Self {
@@ -468,7 +473,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 expired_programs,
                 released_requests = actions.len(),
                 capacity_workers = capacities.len(),
-                "ThunderAgent admission state changed"
+                "Session-aware admission-control state changed"
             );
         }
         actions
@@ -712,7 +717,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
                 target_tokens = target,
                 paused_programs = paused,
                 marked_programs = marked,
-                "ThunderAgent worker pressure handled"
+                "Session-aware admission-control worker pressure handled"
             );
         }
         (paused_total, marked_total)
@@ -842,7 +847,7 @@ impl<P: WorkerCapacityProvider> ThunderAgent<P> {
     }
 }
 
-impl<P: WorkerCapacityProvider> PolicyClassAdmissionStrategy for ThunderAgent<P> {
+impl<P: WorkerCapacityProvider> PolicyClassAdmissionStrategy for SessionAwareAdmissionControl<P> {
     fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
         self.admit_request(request)
     }
@@ -980,7 +985,7 @@ mod tests {
     }
 
     fn reconcile_now<P: WorkerCapacityProvider>(
-        strategy: &mut ThunderAgent<P>,
+        strategy: &mut SessionAwareAdmissionControl<P>,
     ) -> Vec<AdmissionAction> {
         strategy.next_tick = Instant::now();
         strategy.on_event(AdmissionEvent::Reconcile)
@@ -989,7 +994,8 @@ mod tests {
     #[test]
     fn sessionless_requests_do_not_create_program_state() {
         let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
         assert_eq!(
             strategy.admit(request(1, None, 100)),
             AdmissionDecision::Bypass
@@ -999,9 +1005,11 @@ mod tests {
 
     #[test]
     fn new_session_uses_least_loaded_worker_and_sticks() {
-        let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000), (2, 1_000)]), Default::default())
-                .unwrap();
+        let mut strategy = SessionAwareAdmissionControl::new(
+            || capacities(&[(1, 1_000), (2, 1_000)]),
+            Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             strategy.admit(request(1, Some("a"), 100)),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
@@ -1024,9 +1032,11 @@ mod tests {
 
     #[test]
     fn placement_respects_request_worker_eligibility() {
-        let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000), (2, 1_000)]), Default::default())
-                .unwrap();
+        let mut strategy = SessionAwareAdmissionControl::new(
+            || capacities(&[(1, 1_000), (2, 1_000)]),
+            Default::default(),
+        )
+        .unwrap();
         assert_eq!(
             strategy.admit(filtered_request(1, Some("a"), 100, || vec![worker(2)])),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(2)))
@@ -1037,7 +1047,8 @@ mod tests {
     fn deferred_request_rechecks_live_worker_eligibility() {
         let allowed = Arc::new(AtomicBool::new(false));
         let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
         strategy
             .programs
             .insert("paused".to_owned(), suspended_program(0, Instant::now(), 0));
@@ -1072,7 +1083,7 @@ mod tests {
             let current = Arc::clone(&current);
             move || current.lock().unwrap().clone()
         };
-        let mut strategy = ThunderAgent::new(provider, Default::default()).unwrap();
+        let mut strategy = SessionAwareAdmissionControl::new(provider, Default::default()).unwrap();
         assert_eq!(
             strategy.admit(request(1, Some("a"), 100)),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
@@ -1096,9 +1107,11 @@ mod tests {
     #[test]
     fn sticky_session_waits_for_transiently_unavailable_worker() {
         let available = Arc::new(AtomicBool::new(true));
-        let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000), (2, 1_000)]), Default::default())
-                .unwrap();
+        let mut strategy = SessionAwareAdmissionControl::new(
+            || capacities(&[(1, 1_000), (2, 1_000)]),
+            Default::default(),
+        )
+        .unwrap();
         let snapshot = {
             let available = Arc::clone(&available);
             move || {
@@ -1161,7 +1174,7 @@ mod tests {
             let current = Arc::clone(&current);
             move || current.lock().unwrap().clone()
         };
-        let mut strategy = ThunderAgent::new(provider, Default::default()).unwrap();
+        let mut strategy = SessionAwareAdmissionControl::new(provider, Default::default()).unwrap();
         strategy.admit(request(1, Some("a"), 100));
         strategy.on_event(AdmissionEvent::Dispatched {
             id: AdmissionId::new(1),
@@ -1183,7 +1196,8 @@ mod tests {
     #[test]
     fn completion_commits_authoritative_context_tokens() {
         let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
         strategy.admit(request(1, Some("a"), 100));
         strategy.on_event(AdmissionEvent::Dispatched {
             id: AdmissionId::new(1),
@@ -1200,7 +1214,8 @@ mod tests {
     #[test]
     fn live_progress_updates_inflight_reasoning_context_tokens() {
         let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
         strategy.admit(request(1, Some("a"), 100));
         let (progress, updater) = RequestProgress::new(100);
         strategy.programs["a"].state = ProgramState::Running {
@@ -1227,11 +1242,12 @@ mod tests {
 
     #[test]
     fn retention_expiry_removes_only_quiescent_acting_programs() {
-        let config = ThunderAgentConfig {
+        let config = SessionAwareAdmissionControlConfig {
             session_retention_seconds: 900.0,
             ..Default::default()
         };
-        let mut strategy = ThunderAgent::new(Vec::<WorkerCapacity>::new, config).unwrap();
+        let mut strategy =
+            SessionAwareAdmissionControl::new(Vec::<WorkerCapacity>::new, config).unwrap();
         let now = Instant::now();
         let expired_at = now - Duration::from_secs(900);
 
@@ -1276,11 +1292,12 @@ mod tests {
 
     #[test]
     fn expired_session_returns_as_a_new_program() {
-        let config = ThunderAgentConfig {
+        let config = SessionAwareAdmissionControlConfig {
             session_retention_seconds: 900.0,
             ..Default::default()
         };
-        let mut strategy = ThunderAgent::new(|| capacities(&[(1, 1_000)]), config).unwrap();
+        let mut strategy =
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), config).unwrap();
         strategy.programs.insert(
             "expired".to_owned(),
             idle_program(
@@ -1307,12 +1324,12 @@ mod tests {
             let current = Arc::clone(&current);
             move || current.lock().unwrap().clone()
         };
-        let config = ThunderAgentConfig {
+        let config = SessionAwareAdmissionControlConfig {
             pause_threshold: 0.8,
             pause_target: 0.5,
             ..Default::default()
         };
-        let mut strategy = ThunderAgent::new(provider, config).unwrap();
+        let mut strategy = SessionAwareAdmissionControl::new(provider, config).unwrap();
 
         for (id, session, input, output) in [(1, "small", 80, 20), (2, "large", 150, 30)] {
             assert!(matches!(
@@ -1352,11 +1369,12 @@ mod tests {
 
     #[test]
     fn timeout_forces_deferred_request_without_capacity_metadata() {
-        let config = ThunderAgentConfig {
+        let config = SessionAwareAdmissionControlConfig {
             resume_timeout_seconds: 1.0,
             ..Default::default()
         };
-        let mut strategy = ThunderAgent::new(Vec::<WorkerCapacity>::new, config).unwrap();
+        let mut strategy =
+            SessionAwareAdmissionControl::new(Vec::<WorkerCapacity>::new, config).unwrap();
         strategy
             .programs
             .insert("paused".to_owned(), suspended_program(0, Instant::now(), 0));
@@ -1379,11 +1397,13 @@ mod tests {
 
     #[test]
     fn forced_resume_delegates_worker_selection() {
-        let config = ThunderAgentConfig {
+        let config = SessionAwareAdmissionControlConfig {
             resume_timeout_seconds: 1.0,
             ..Default::default()
         };
-        let mut strategy = ThunderAgent::new(|| capacities(&[(1, 100), (2, 100)]), config).unwrap();
+        let mut strategy =
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 100), (2, 100)]), config)
+                .unwrap();
         for (session_id, assigned_worker, footprint) in
             [("worker-1", worker(1), 300), ("worker-2", worker(2), 200)]
         {
@@ -1416,7 +1436,8 @@ mod tests {
     #[test]
     fn cancellation_before_dispatch_restores_prior_program_state() {
         let mut strategy =
-            ThunderAgent::new(Vec::<WorkerCapacity>::new, Default::default()).unwrap();
+            SessionAwareAdmissionControl::new(Vec::<WorkerCapacity>::new, Default::default())
+                .unwrap();
         strategy.programs.insert(
             "existing".to_owned(),
             idle_program(None, 200, Instant::now(), 3),
@@ -1437,7 +1458,8 @@ mod tests {
     #[test]
     fn cancellation_after_dispatch_restores_prior_program_state() {
         let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
         strategy.programs.insert(
             "existing".to_owned(),
             idle_program(Some(worker(1)), 200, Instant::now(), 3),
@@ -1460,7 +1482,8 @@ mod tests {
     #[test]
     fn concurrent_session_request_waits_without_mutating_program() {
         let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
         assert_eq!(
             strategy.admit(request(1, Some("same"), 100)),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
@@ -1499,7 +1522,8 @@ mod tests {
     #[test]
     fn cancelling_current_session_request_promotes_one_waiter() {
         let mut strategy =
-            ThunderAgent::new(|| capacities(&[(1, 1_000)]), Default::default()).unwrap();
+            SessionAwareAdmissionControl::new(|| capacities(&[(1, 1_000)]), Default::default())
+                .unwrap();
         assert!(matches!(
             strategy.admit(request(1, Some("same"), 100)),
             AdmissionDecision::Ready(_)

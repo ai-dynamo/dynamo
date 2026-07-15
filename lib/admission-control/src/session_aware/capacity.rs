@@ -82,7 +82,7 @@ where
             tracing::warn!(
                 worker_count = workers.len(),
                 missing_capacity_workers,
-                "ThunderAgent capacity gating excludes workers without usable KV capacity"
+                "Session-aware admission-control capacity gating excludes workers without usable KV capacity"
             );
             self.warned_missing_capacity = true;
         }

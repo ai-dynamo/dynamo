@@ -1,11 +1,11 @@
-# ThunderAgent admission strategy
+# Session-Aware Admission Control
 
-This module implements ThunderAgent as one `PolicyClassAdmissionStrategy`. It controls whether a session's next request may enter the normal ready queue and, when ready, whether it must return to a specific worker. It does not own the queue, select the final worker, or communicate with engines.
+This module implements Session-Aware Admission Control as one `PolicyClassAdmissionStrategy`. Its policy is inspired by ThunderAgent, adapted to Dynamo's native queue-admission lifecycle. It controls whether a session's next request may enter the normal ready queue and, when ready, whether it must return to a specific worker. It does not own the queue, select the final worker, or communicate with engines.
 
 ## Files
 
 - `capacity.rs` converts worker runtime configuration into per-worker/rank token capacity.
-- `config.rs` defines and validates ThunderAgent's tuning parameters.
+- `config.rs` defines and validates the session-aware admission-control tuning parameters.
 - `registration.rs` constructs the configured strategy for a policy class.
 - `strategy.rs` contains the session state machine, accounting, pause/resume policy, placement, and tests.
 
@@ -19,13 +19,13 @@ This module implements ThunderAgent as one `PolicyClassAdmissionStrategy`. It co
 | `session_retention_seconds` | `1800` | Retain quiescent placement and footprint state after the last successful turn. |
 | `scheduler_interval_seconds` | `5` | Minimum interval between reconciliation passes. |
 
-## Differences from upstream ThunderAgent
+## ThunderAgent inspiration and differences
 
-The comparison target is `ThunderAgent-org/ThunderAgent` at `7ddc861027`, primarily `scheduler/router.py` and `backend/state.py`. This implementation retains upstream's global new-program fairness gate, smallest-ACTING-first and deferred-REASONING pause, three resume-priority groups, largest-first packing, and starvation timeout; the intentional differences are:
+The comparison target is `ThunderAgent-org/ThunderAgent` at `7ddc861027`, primarily `scheduler/router.py` and `backend/state.py`. Session-Aware Admission Control retains upstream's global new-program fairness gate, smallest-ACTING-first and deferred-REASONING pause, three resume-priority groups, largest-first packing, and starvation timeout; the intentional differences are:
 
 | Change | Why |
 |---|---|
-| Require a stable `session_id`; bypass sessionless traffic instead of grouping it under a default program. | Identity is the working-set ownership key, and bypass keeps unrelated non-agent traffic out of ThunderAgent state. |
+| Require a stable `session_id`; bypass sessionless traffic instead of grouping it under a default program. | Identity is the working-set ownership key, and bypass keeps unrelated non-agent traffic out of session-aware admission-control state. |
 | Preserve the assigned worker across normal pressure suspension; upstream clears the backend and BFD may resume elsewhere. Structural worker removal and the starvation timeout remain escape paths. | In the matched replay this removed 219 migrations, improved turns by 12.4%, and raised physical cache reuse by 2.26 percentage points. |
 | Trigger pressure at 0.95, drain to 0.80, and also use 0.80 as the resume ceiling; upstream pauses only after projected overflow and resumes against remaining capacity. | The proactive high/low pair avoids engine-cache saturation, while earlier pausing and a separate resume ceiling both lost throughput or reuse. |
 | Account exact live logical context from `RequestProgress` against device plus native-offload capacity; omit upstream's character estimate, shared-token discount, per-program buffer, ACTING weight, and optional decay. | Exact Dynamo observations remove interacting heuristics; the buffer ablation did not help, and no retained decision required decay or polled residency. |
@@ -34,7 +34,7 @@ The comparison target is `ThunderAgent-org/ThunderAgent` at `7ddc861027`, primar
 
 ## State model
 
-ThunderAgent keys state by `session_id`. The ID must remain stable across a trajectory's turns; a fresh per-request ID creates unrelated programs and defeats continuation admission and affinity.
+Session-Aware Admission Control keys state by `session_id`. The ID must remain stable across a trajectory's turns; a fresh per-request ID creates unrelated programs and defeats continuation admission and affinity.
 
 Each retained program is in exactly one state:
 
@@ -70,7 +70,7 @@ Worker eligibility is live. A deferred request retains `WorkerEligibility` and t
 
 ## Logical capacity accounting
 
-Capacity is `total_kv_blocks * block_size + native_offloading_capacity_tokens` for each worker/rank. Workers with missing or zero device capacity are excluded from ThunderAgent capacity gating, with a one-time warning. If no worker reports usable metadata, capacity gating is disabled and requests continue through normal router selection.
+Capacity is `total_kv_blocks * block_size + native_offloading_capacity_tokens` for each worker/rank. Workers with missing or zero device capacity are excluded from session-aware admission-control capacity gating, with a one-time warning. If no worker reports usable metadata, capacity gating is disabled and requests continue through normal router selection.
 
 Only Running or IdleResident programs with an assigned worker contribute usage:
 
@@ -82,7 +82,7 @@ Running programs read their full logical context directly from the retained `Req
 
 This is a logical projection, not live engine or indexer residency.
 
-Completed sessions remain retained for `session_retention_seconds` (30 minutes by default). The clock resets after every successful turn. Once the retention lease expires, reconciliation removes an IdleResident or Suspended session only when it has no current or waiting request. This approximates useful cache residence without requiring clients to emit a terminal signal; a later turn is treated as a new ThunderAgent program and still goes through normal KV-aware worker selection.
+Completed sessions remain retained for `session_retention_seconds` (30 minutes by default). The clock resets after every successful turn. Once the retention lease expires, reconciliation removes an IdleResident or Suspended session only when it has no current or waiting request. This approximates useful cache residence without requiring clients to emit a terminal signal; a later turn is treated as a new session-aware program and still goes through normal KV-aware worker selection.
 
 ## Reconciliation algorithm
 
@@ -111,7 +111,7 @@ A current request suspended for `resume_timeout_seconds` bypasses the normal fit
 
 ### Pause
 
-When a worker exceeds `pause_threshold * capacity`, ThunderAgent suspends the smallest IdleResident sessions until usage reaches `pause_target * capacity`. Running sessions cannot be interrupted, so if those suspensions are insufficient they are marked and become Suspended only after their current request completes.
+When a worker exceeds `pause_threshold * capacity`, Session-Aware Admission Control suspends the smallest IdleResident sessions until usage reaches `pause_target * capacity`. Running sessions cannot be interrupted, so if those suspensions are insufficient they are marked and become Suspended only after their current request completes.
 
 ## Primitive mapping
 
@@ -127,7 +127,7 @@ When a worker exceeds `pause_threshold * capacity`, ThunderAgent suspends the sm
 
 ## Invariants
 
-- Sessionless requests allocate no ThunderAgent state.
+- Sessionless requests allocate no session-aware admission-control state.
 - At most one request per session mutates program state at a time.
 - Placement never widens the request's router-owned eligibility.
 - Temporary overload does not migrate a sticky session before the configured starvation timeout.
