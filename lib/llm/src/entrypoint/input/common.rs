@@ -191,6 +191,7 @@ fn preprocessed_backend_engine(
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
+    decode_affinity: Option<AffinityCoordinator>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
@@ -233,7 +234,9 @@ fn preprocessed_backend_engine(
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
             Arc::new(KvPushRouter::new_with_coordinator(
-                router, chooser, affinity,
+                router,
+                chooser,
+                decode_affinity,
             ))
         }
     };
@@ -311,6 +314,12 @@ pub async fn build_preprocessed_routing(
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
+    let session_affinity_ttl = session_affinity_ttl_secs.map(Duration::from_secs);
+    let decode_affinity = if router_mode.is_kv_routing() {
+        prefill_router.get_or_create_decode_session_affinity(session_affinity_ttl)?
+    } else {
+        None
+    };
 
     let backend_engine = preprocessed_backend_engine(
         router,
@@ -319,6 +328,7 @@ pub async fn build_preprocessed_routing(
         &model_manager,
         &endpoint_id,
         affinity,
+        decode_affinity,
     )?;
     Ok(PreprocessedRouting {
         backend_engine,
