@@ -132,6 +132,17 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// Attach router-local session affinity using the header configured for this service.
+fn attach_session_affinity_from_headers<T: Send + Sync + 'static>(
+    request: &mut Context<T>,
+    headers: &HeaderMap,
+    header_name: &axum::http::HeaderName,
+) {
+    if let Some(session_affinity) = session_affinity_from_headers(headers, header_name) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
+}
+
 /// Top-level HTTP handler for POST /v1/messages.
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
@@ -181,11 +192,11 @@ async fn handler_anthropic_messages(
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
-    if let Some(session_affinity) =
-        session_affinity_from_headers(&headers, state.session_affinity_header_name())
-    {
-        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
-    }
+    attach_session_affinity_from_headers(
+        &mut request,
+        &headers,
+        state.session_affinity_header_name(),
+    );
     let context = request.context();
 
     // Create connection handles
@@ -891,7 +902,7 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Respo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::common::extensions::parse_nvext;
+    use crate::protocols::common::extensions::{SessionAffinityId, parse_nvext};
 
     fn request_with_nvext() -> AnthropicCreateMessageRequest {
         serde_json::from_value(serde_json::json!({
@@ -937,6 +948,25 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn anthropic_context_uses_configured_session_affinity_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-customer-session", "session-456".parse().unwrap());
+        headers.insert("x-dynamo-session-id", "ignored".parse().unwrap());
+        let mut request = Context::new(());
+
+        attach_session_affinity_from_headers(
+            &mut request,
+            &headers,
+            &axum::http::HeaderName::from_static("x-customer-session"),
+        );
+
+        let affinity = request
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+        assert_eq!(affinity.as_str(), "session-456");
     }
 
     #[test]
