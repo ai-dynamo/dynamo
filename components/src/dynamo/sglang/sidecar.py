@@ -5,7 +5,12 @@
 
 import sys
 
-from dynamo._core.backend import _run_sglang_remote
+from dynamo._core import backend as _backend
+from dynamo.runtime.logging import configure_dynamo_logging
+
+configure_dynamo_logging(service_name="dynamo.sglang.sidecar")
+
+_run_sglang_remote = _backend._run_sglang_remote
 
 
 def main(argv: list[str] | None = None) -> None:

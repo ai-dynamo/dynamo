@@ -93,7 +93,7 @@ areas:
   - components/src/dynamo/sglang/request_handlers/
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
-  - lib/sglang-sidecar/
+  - lib/sglang-remote/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:

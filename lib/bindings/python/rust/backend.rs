@@ -86,11 +86,12 @@ fn sglang_remote_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_remote(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_remote_argv(argv.unwrap_or_default());
-    py.allow_threads(move || -> anyhow::Result<()> {
-        let (engine, config) = dynamo_sglang_remote::SglangRemoteEngine::from_args(Some(cli_argv))?;
-        dynamo_backend_common::run(Arc::new(engine), config)
-    })
-    .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+    let (engine, config) = py
+        .allow_threads(move || dynamo_sglang_remote::SglangRemoteEngine::from_args(Some(cli_argv)))
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
 }
 
 // ---------------------------------------------------------------------------
