@@ -271,6 +271,15 @@ class HandlerBase(BaseGenerativeHandler):
         # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
         # engine-side assignment of conversation-affinity regardless of engine detection.
         self._engine_conversation_affinity_override: bool = config.conversation_affinity
+        if (
+            self._engine_conversation_affinity_override
+            and not CONVERSATION_PARAMS_AVAILABLE
+        ):
+            raise RuntimeError(
+                "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                "release newer than 1.3.0rc20)."
+            )
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
