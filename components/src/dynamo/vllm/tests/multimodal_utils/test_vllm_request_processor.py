@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import torch
 from PIL import Image
 
 from dynamo.common.constants import DisaggregationMode
@@ -308,6 +309,28 @@ def test_build_tokens_prompt_preserves_grouped_forwarded_hashes():
         "image": ["image_hash".ljust(64, "0")],
         "audio": ["audio_hash".ljust(64, "0")],
     }
+
+
+def test_build_tokens_prompt_can_suppress_forwarded_raw_media_hashes():
+    embedding_payload = {
+        "image": {
+            "image_embeds": torch.zeros((1, 4)),
+            "image_grid_thw": torch.tensor([[1, 2, 2]]),
+        }
+    }
+
+    prompt = _processor().build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "extra_args": {"mm_hashes": ["raw-image-hash"]},
+        },
+        embedding_payload,
+        None,
+        uuid_policy=mod.MultimodalUUIDPolicy.EXTERNAL_ARTIFACT,
+    )
+
+    assert prompt["multi_modal_data"] is embedding_payload
+    assert "multi_modal_uuids" not in prompt
 
 
 def test_build_tokens_prompt_remaps_grouped_image_hashes_to_vision_chunk():

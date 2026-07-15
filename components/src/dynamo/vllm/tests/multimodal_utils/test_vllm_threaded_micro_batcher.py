@@ -118,7 +118,7 @@ async def test_on_start_fn_and_on_stop_share_one_non_main_thread():
     assert rec.stop_thread == rec.start_thread
 
 
-def test_on_stop_not_run_if_on_start_failed():
+def test_on_stop_runs_if_on_start_partially_failed():
     ran = {"stop": False}
 
     def bad_start():
@@ -130,7 +130,7 @@ def test_on_stop_not_run_if_on_start_failed():
     b = ThreadedMicroBatcher(_echo, on_start=bad_start, on_stop=on_stop)
     with pytest.raises(RuntimeError, match="start failed"):
         b.start()
-    assert ran["stop"] is False
+    assert ran["stop"] is True
 
 
 async def test_eager_drain_pulls_all_queued_when_free():

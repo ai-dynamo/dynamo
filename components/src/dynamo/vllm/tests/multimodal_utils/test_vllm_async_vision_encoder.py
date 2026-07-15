@@ -16,7 +16,11 @@ import torch
 
 from dynamo.vllm.multimodal_utils.async_vision_encoder import AsyncVisionEncoder
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+    BackendEncodingSpecV1,
+    EncodedMediaResultV1,
+    ForwardItemV1,
     Preprocessed,
+    Qwen2VLImageEncodingV1,
     VisionEncoderBackend,
 )
 
@@ -270,3 +274,50 @@ def test_load_bad_batch_cost_fails_without_spawning_pool():
         enc.load("m")
     assert enc._pool is None
     assert enc._batcher is None
+
+
+class _TypedQwenBackend(VisionEncoderBackend):
+    encoding_spec = BackendEncodingSpecV1(
+        adapter_abi="vllm-qwen2-vl-external-v1",
+        producer_fingerprint="test-backend-v1",
+        expected_decoder_config_fingerprint=None,
+        output_dtype="bfloat16",
+        hidden_size=4,
+        spatial_merge_size=2,
+    )
+
+    def build(self, model_id):
+        pass
+
+    def forward_batch(self, items, target_bucket=None):
+        assert all(isinstance(item, ForwardItemV1) for item in items)
+        results = [
+            EncodedMediaResultV1(
+                correlation_id=item.correlation_id,
+                media=Qwen2VLImageEncodingV1(
+                    projected=torch.full(
+                        (1, 4), float(len(item.item)), dtype=torch.bfloat16
+                    ),
+                    grid_thw=(1, 2, 2),
+                ),
+            )
+            for item in items
+        ]
+        return list(reversed(results))
+
+
+async def test_typed_backend_uses_correlation_tags_and_restores_request_order():
+    enc = AsyncVisionEncoder(_TypedQwenBackend())
+    enc.load("m")
+    try:
+        outputs = await enc.encode(["a", "three"])
+    finally:
+        enc.shutdown()
+
+    assert [output.projected[0, 0].item() for output in outputs] == [1, 5]
+
+
+def test_native_multimodal_backend_does_not_require_legacy_image_token_id():
+    enc = AsyncVisionEncoder(_TypedQwenBackend())
+    enc.load("m")
+    enc.shutdown()

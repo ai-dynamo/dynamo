@@ -96,8 +96,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
         on_start: Optional callable run once on the worker thread before serving
             (model build / warmup); its failure surfaces from ``start()``.
         on_stop: Optional callable run once on the worker thread at teardown (after
-            the serving loop ends), iff ``on_start`` succeeded. Its failure is
-            logged, never raised.
+            the serving loop ends), or after a failed ``on_start`` so partially
+            allocated resources can be released. Its failure is logged, never
+            raised. The callback must therefore tolerate partial initialization.
         name: Worker thread name.
         join_timeout_s: Seconds ``shutdown()`` waits for an in-flight ``fn``.
     """
@@ -280,6 +281,10 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._on_start()  # build / warmup / CUDA-graph capture HERE
         except BaseException as exc:  # noqa: BLE001 — surface to start()
             self._started.set_exception(exc)
+            # build() may have allocated CPU/GPU state before raising. Teardown
+            # on the same actor thread and require close() to tolerate a partial
+            # initialization rather than leaking until process exit.
+            self._run_on_stop()
             return
         self._started.set_result(None)
         try:
@@ -301,8 +306,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
             for req in live:
                 self._abort(req, exc)
         finally:
-            # on_stop runs on the actor thread (so CUDA teardown is same-thread),
-            # only after on_start succeeded (this finally is unreachable otherwise).
+            # on_stop runs on the actor thread (so CUDA teardown is same-thread).
             self._run_on_stop()
 
     def _run_on_stop(self) -> None:

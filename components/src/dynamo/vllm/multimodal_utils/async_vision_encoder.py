@@ -5,7 +5,7 @@
 
 ``AsyncVisionEncoder`` is the **Dynamo-owned** layer the worker talks to. It
 turns the author's synchronous, thread-affine backend into an awaitable
-``encode(raws) -> list[tensor]`` by:
+``encode(raws) -> list[encoded_media]`` by:
 
 - running ``backend.preprocess`` **off the event loop** on a bounded
   ``ThreadPoolExecutor`` (CPU-heavy fetch / resize / patchify must not serialize
@@ -17,7 +17,10 @@ turns the author's synchronous, thread-affine backend into an awaitable
   result;
 - handing the preprocessed items (with their off-thread-computed scalar ``cost``)
   to a ``ThreadedMicroBatcher``, which coalesces across concurrent ``encode`` calls
-  by cost and runs ``backend.forward_batch`` on the single actor thread.
+  by cost and runs ``backend.forward_batch`` on the single actor thread; and
+- for typed backends, correlation-tagging each physical batch, restoring input
+  order, validating the declared schema, and cloning owned CPU results before
+  positional scatter.
 
 The backend's ``build`` runs on the batcher's actor thread (so a CUDA graph it
 captures is replayed on the same thread) and its ``close`` runs there at
@@ -30,12 +33,19 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Generic, List
+from typing import Any, Generic, List
+from uuid import uuid4
 
 import torch
 
+from dynamo.vllm.multimodal_utils.custom_encoder_adapter import (
+    reconcile_and_canonicalize,
+)
 from dynamo.vllm.multimodal_utils.threaded_micro_batcher import ThreadedMicroBatcher
 from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
+    BackendEncodingSpecV1,
+    EncodedMediaV1,
+    ForwardItemV1,
     ItemT,
     Preprocessed,
     RawT,
@@ -96,10 +106,20 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
                 "drop the override and do the prep inside forward_batch."
             )
         self._backend = backend
+        encoding_spec = getattr(backend, "encoding_spec", None)
+        if encoding_spec is not None and not isinstance(
+            encoding_spec, BackendEncodingSpecV1
+        ):
+            raise TypeError(
+                "VisionEncoderBackend.encoding_spec must be a "
+                f"BackendEncodingSpecV1 or None, got {encoding_spec!r}"
+            )
+        self._encoding_spec = encoding_spec
         self._preprocess_concurrency = conc
         self._name = name
         self._batcher: ThreadedMicroBatcher | None = None
         self._pool: ThreadPoolExecutor | None = None
+        self._closing = False
 
     # ---- lifecycle ---------------------------------------------------------
 
@@ -120,7 +140,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         # nothing to reap in that case.
         try:
             self._batcher = ThreadedMicroBatcher(
-                self._backend.forward_batch,
+                self._forward_batch,
                 max_batch_cost=self._backend.max_batch_cost,
                 on_start=lambda: self._backend.build(model_id),
                 on_stop=self._backend.close,
@@ -142,8 +162,12 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             raise
 
     def validate(self) -> None:
-        """Fail-fast check run by ``load`` after ``build``: the author hardcoded a
-        usable ``image_token_id``."""
+        """Fail fast on the legacy linear placeholder contract."""
+        if (
+            self._encoding_spec is not None
+            and self._encoding_spec.adapter_abi != "linear-rows-v1"
+        ):
+            return
         tid = getattr(self._backend, "image_token_id", None)
         if not isinstance(tid, int) or isinstance(tid, bool):
             raise ValueError(
@@ -153,28 +177,56 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
 
     def get_image_placeholder_token_id(self) -> int:
         """The token id marking image positions (the backend's hardcoded value)."""
+        if (
+            self._encoding_spec is not None
+            and self._encoding_spec.adapter_abi != "linear-rows-v1"
+        ):
+            raise RuntimeError(
+                "native multimodal CustomEncoder output does not use the legacy "
+                "image placeholder splice"
+            )
         return self._backend.image_token_id
+
+    @property
+    def encoding_spec(self) -> BackendEncodingSpecV1 | None:
+        """The backend's setup-time encoded-media contract, if declared."""
+        return self._encoding_spec
+
+    def _forward_batch(self, items: list[ItemT]) -> list[torch.Tensor | EncodedMediaV1]:
+        """Run one physical batch and reconcile typed results on the actor."""
+        spec = self._encoding_spec
+        if spec is None:
+            return self._backend.forward_batch(items)
+
+        tagged_items = [
+            ForwardItemV1(correlation_id=uuid4().bytes, item=item) for item in items
+        ]
+        returned: Any = self._backend.forward_batch(tagged_items)  # type: ignore[arg-type]
+        if not isinstance(returned, list):
+            raise TypeError("typed CustomEncoder forward_batch must return a list")
+        return reconcile_and_canonicalize(spec, tagged_items, returned)
 
     # ---- request path ------------------------------------------------------
 
-    async def encode(self, raws: List[RawT]) -> List[torch.Tensor]:
+    async def encode(self, raws: List[RawT]) -> List[torch.Tensor | EncodedMediaV1]:
         """Optionally preprocess (off-loop, with a request-atomicity barrier) then
         batched-encode.
 
         With no preprocess pool (``preprocess_concurrency == 0``) raws go straight
         to the batcher (the backend folds any prep into ``forward_batch``). Returns
-        one ``(n_visual_tokens, lm_hidden_dim)`` tensor per raw input, in order.
-        Raises if any image's preprocess fails (submitting nothing) or if the
-        batched forward fails.
+        one legacy tensor or typed encoded-media value per raw input, in order.
+        Raises if any image's preprocess fails (submitting nothing), correlation
+        reconciliation fails, or the batched forward fails.
         """
-        if self._batcher is None:
+        batcher = self._batcher
+        if batcher is None or self._closing:
             raise RuntimeError("AsyncVisionEncoder.encode() called before load()")
         if not raws:
             return []
         if self._pool is None:
             # No preprocess phase: raw IS the item (cost defaults to 1). No
             # barrier needed — the batched forward is all-or-nothing per request.
-            return await self._batcher.submit(list(raws))  # type: ignore[arg-type]
+            return await batcher.submit(list(raws))  # type: ignore[arg-type]
         loop = asyncio.get_running_loop()
         # Request-atomicity barrier: preprocess all images concurrently, wait for
         # EVERY one to settle, and submit only if all succeeded. return_exceptions=True makes
@@ -190,16 +242,21 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
                 # Fail the whole request atomically; no item was submitted (no GPU
                 # work). Surface the first failure, in order.
                 raise result
+        if self._closing:
+            raise RuntimeError("AsyncVisionEncoder shut down during preprocess")
         # No exception above ⇒ every settled entry is a Preprocessed. Alias the
         # list gather() already returned rather than copying it.
         preprocessed: List[Preprocessed] = settled  # type: ignore[assignment]
         items = [p.item for p in preprocessed]
         costs = [p.cost for p in preprocessed]
-        return await self._batcher.submit(items, costs)
+        return await batcher.submit(items, costs)
 
     def shutdown(self) -> None:
         """Stop the actor thread (running ``backend.close`` on it) and the
         preprocess pool. Safe before ``load`` and idempotent."""
+        # Close admission before waiting for preprocessing. An encode call that
+        # was already in the pool rechecks this flag before submitting GPU work.
+        self._closing = True
         # Detach both resources before teardown so repeated cleanup is a no-op,
         # including if teardown itself raises.
         batcher = self._batcher
@@ -207,7 +264,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         self._batcher = None
         self._pool = None
 
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
         if batcher is not None:
             batcher.shutdown()  # runs backend.close() on the actor thread
-        if pool is not None:
-            pool.shutdown(wait=False)

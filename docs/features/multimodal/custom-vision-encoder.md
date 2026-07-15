@@ -7,9 +7,9 @@ subtitle: Run a bespoke vision tower in an aggregated Dynamo vLLM worker
 
 A custom vision encoder lets an aggregated `dynamo.vllm` worker use an
 author-provided vision tower or projector instead of vLLM's built-in multimodal
-encoder. The encoder runs in the worker process, produces one embedding tensor
-per image, and Dynamo inserts those embeddings at the image-placeholder positions
-of a mixed prompt.
+encoder. The encoder runs in the worker process and produces encoded media for
+each image. Dynamo chooses a mixed prompt-embedding route or a model-native
+external multimodal route from the backend's setup-time contract.
 
 Use this path when the language model can consume external prompt embeddings but
 the vision encoder is private, experimental, or otherwise unavailable in vLLM.
@@ -24,14 +24,31 @@ process and GPU, and no embedding transfer occurs.
 | Topology | Aggregated only |
 | Input | `image_url` content |
 | Video and audio | Not supported |
-| Language-model input | Mixed token IDs and prompt embeddings |
+| Language-model input | Mixed prompt embeddings, or native Qwen2/2.5 multimodal embeddings |
 | Cross-request batching | Yes |
 | CUDA graph bucket selection | Reserved for future support; current dispatch is eager |
 
-The custom-encoder path requires `--enable-multimodal` and
-`--enable-prompt-embeds`. It is incompatible with frontend decoding, the vLLM
+The custom-encoder path requires `--enable-multimodal`. Linear-row backends also
+require `--enable-prompt-embeds`; Qwen2/2.5 native-multimodal backends require
+`--enable-mm-embeds`. It is incompatible with frontend decoding, the vLLM
 tokenizer mode, legacy multimodal worker roles, and non-aggregated disaggregation
 modes. Dynamo validates these combinations during startup.
+
+The native Qwen adapter is currently validated against vLLM 0.24.0 and 0.25.1
+(current Dynamo main pins 0.25.1). It requires TP=PP=DP=1 and rejects
+`--language-model-only` and vLLM multimodal-encoder CUDA graphs. The latter graph
+path expects pixel inputs and is not compatible with external image embeddings.
+Prefix caching and chunked prefill are also rejected in the correctness MVP until
+their image-span boundary and cache-identity parity matrices are complete; the
+included launcher disables both in native mode.
+
+| Backend result | Engine request | Position semantics |
+| --- | --- | --- |
+| Legacy tensor or `LinearRowsV1` | `EmbedsPrompt` | Ordinary one-dimensional positions |
+| `Qwen2VLImageEncodingV1(projected, grid_thw)` | `TokensPrompt` with `image_embeds` and `image_grid_thw` | Qwen grid-driven M-RoPE |
+
+Qwen backends must use the native route. A mixed `EmbedsPrompt` has no place for
+`image_grid_thw`, so vLLM would assign ordinary text positions to the image rows.
 
 ## Run the Included Path
 
@@ -55,9 +72,27 @@ DYN_ENCODER_CLASS=my_package.encoders.MyVisionEncoder \
 bash examples/custom_encoder/launch/agg_custom.sh --gpu 0
 ```
 
-The launcher supplies the required multimodal and prompt-embedding flags. If the
+The launcher supplies the required multimodal and selected engine-input flag. If the
 language model's chat template does not render an image-placeholder token, also
 provide `DYN_CUSTOM_JINJA_TEMPLATE` or `--custom-jinja-template`.
+
+To run the eager Qwen2.5-VL correctness backend with the registered full model
+wrapper, select the native input mode:
+
+```bash
+DYN_MODEL=Qwen/Qwen2.5-VL-3B-Instruct \
+DYN_ENCODER_CLASS=examples.custom_encoder.qwen2_5_vl_vision_encoder.Qwen2_5VLVisionEncoder \
+DYN_ENCODER_INPUT_MODE=native \
+bash examples/custom_encoder/launch/agg_custom.sh --gpu 0 \
+  --revision 66285546d2b821cf421d4f5eb2576359d3770cd3
+```
+
+The included backend accepts base64 image data URLs and is intentionally eager.
+It loads the stock vision tower outside vLLM for parity testing. The full Qwen
+wrapper remains resident inside vLLM, but supplying external image embeddings
+skips that wrapper's vision forward for the request. vLLM may still execute its
+resident tower during startup profiling; this MVP does not claim zero tower
+forwards across the entire process lifecycle.
 
 <Warning>
 The backend owns any media retrieval performed by `preprocess()`. Apply Dynamo's
@@ -74,16 +109,41 @@ implement the following contract:
 
 | Member | Execution context | Responsibility |
 | --- | --- | --- |
-| `image_token_id` | Configuration | Hardcoded placeholder token ID used by the model or custom template |
+| `encoding_spec` | Configuration | Optional typed output/engine-adapter handshake; omitted for legacy tensor backends |
+| `image_token_id` | Configuration | Placeholder token ID for the linear route; unused by native Qwen adapters |
 | `build(model_id)` | Encoder actor thread, once | Load the encoder, choose its device, and initialize thread-affine resources |
 | `preprocess(raw)` | Optional CPU thread pool | Fetch, decode, resize, or patchify one image and return `Preprocessed(item, cost)` |
-| `forward_batch(items, target_bucket=None)` | Encoder actor thread | Run one synchronous batched forward and return one CPU tensor per item, in order |
+| `forward_batch(items, target_bucket=None)` | Encoder actor thread | Return legacy CPU tensors, or correlation-tagged typed media declared by `encoding_spec` |
 | `close()` | Encoder actor thread, once | Release thread-affine resources |
 
 `forward_batch()` returns one tensor shaped
 `(number_of_visual_tokens, language_model_hidden_size)` for every input item. It
 must synchronize any device work and copy the results to CPU before returning;
 the request coroutine consumes them from a different thread.
+
+A typed backend declares `BackendEncodingSpecV1`. Dynamo then passes
+`ForwardItemV1(correlation_id, item)` values and expects
+`EncodedMediaResultV1(correlation_id, media)` values. Results may be returned in
+any order: Dynamo verifies a complete correlation-ID bijection, restores input
+order, validates every tensor, and clones it into owned CPU storage before the
+batcher resolves request futures.
+
+For Qwen2/2.5, set `adapter_abi="vllm-qwen2-vl-external-v1"` and return one
+`Qwen2VLImageEncodingV1` per image. Its `projected` tensor has shape
+`(T * H * W / spatial_merge_size**2, decoder_hidden_size)` and `grid_thw` is the
+corresponding positive `(T, H, W)` tuple. The initial image-only contract requires
+`T == 1` and CPU, dense, contiguous, finite tensors in the declared dtype.
+The tensor is after the vision projector/patch merger and is in canonical
+`(t, merged_h, merged_w)` raster order. In particular, Qwen2.5 producers must
+apply the model's inverse window permutation before returning it. A tensor in the
+temporary window order has the right shape but receives spatially incorrect
+M-RoPE positions.
+
+Native Qwen specs must provide `expected_decoder_config_fingerprint`; matching
+only hidden width and dtype is not sufficient to establish projector/decoder
+compatibility. The producer fingerprint should bind the encoder/projector
+weights, processor and tokenizer revisions, resize/normalization policy, and row
+layout version used to produce the artifact.
 
 Preprocessing is disabled by default. To enable it, override `preprocess()` and
 set `preprocess_concurrency` to a positive value. The method must be synchronous,
@@ -131,6 +191,11 @@ The encoder and vLLM share GPU memory. Leave enough memory outside vLLM's
 `gpu_memory_utilization` for the encoder weights and the peak activation memory
 at `max_batch_cost`, and exercise that maximum legal batch during startup or
 deployment validation.
+
+The included Qwen2.5 correctness backend runs a near-maximum square-image canary
+during `build()`, after the vLLM engine has allocated its model and KV cache. A
+co-residency failure therefore stops startup instead of becoming the first legal
+request's OOM.
 
 ### Failure and Cancellation Behavior
 

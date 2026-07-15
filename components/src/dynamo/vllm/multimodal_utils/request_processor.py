@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import pickle
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Any, Optional
 
 import torch
@@ -47,6 +48,13 @@ IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
 URL_VARIANT_KEY = "Url"
+
+
+class MultimodalUUIDPolicy(Enum):
+    """Select which artifact owns multimodal cache identity."""
+
+    RAW_MEDIA = auto()
+    EXTERNAL_ARTIFACT = auto()
 
 
 def pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
@@ -546,20 +554,30 @@ class VllmMultimodalRequestProcessor:
         request: dict[str, Any],
         multi_modal_data: Optional[dict[str, Any]],
         mm_processor_kwargs: Optional[dict[str, Any]],
+        *,
+        uuid_policy: MultimodalUUIDPolicy = MultimodalUUIDPolicy.RAW_MEDIA,
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
-        extra_args = request.get("extra_args") or {}
-        mm_uuids = _build_forwarded_mm_uuids(
-            extra_args,
-            self.use_unified_vision_chunk,
-        )
-        if mm_uuids is None and self.embedding_loader is None:
-            mm_uuids = compute_mm_uuids(multi_modal_data)
-            if mm_uuids is not None:
-                logger.warning(
-                    "No frontend multimodal hashes were provided; recomputed "
-                    "image UUIDs may not match routing decisions"
-                )
+        if uuid_policy is MultimodalUUIDPolicy.RAW_MEDIA:
+            extra_args = request.get("extra_args") or {}
+            mm_uuids = _build_forwarded_mm_uuids(
+                extra_args,
+                self.use_unified_vision_chunk,
+            )
+            if mm_uuids is None and self.embedding_loader is None:
+                mm_uuids = compute_mm_uuids(multi_modal_data)
+                if mm_uuids is not None:
+                    logger.warning(
+                        "No frontend multimodal hashes were provided; recomputed "
+                        "image UUIDs may not match routing decisions"
+                    )
+        elif uuid_policy is MultimodalUUIDPolicy.EXTERNAL_ARTIFACT:
+            # Never reuse request-controlled/raw-media hashes for a transformed
+            # artifact. Omitting UUIDs makes vLLM hash each immutable external
+            # embedding slice together with its grid metadata.
+            mm_uuids = None
+        else:
+            raise ValueError(f"Unsupported multimodal UUID policy: {uuid_policy!r}")
 
         prompt_kwargs: dict[str, Any] = {
             "prompt_token_ids": request["token_ids"],

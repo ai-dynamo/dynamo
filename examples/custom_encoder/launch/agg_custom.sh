@@ -9,10 +9,11 @@
 #   - Worker:   dynamo.vllm with a CustomEncoder loaded in-process
 #
 # The CustomEncoder is called for each multimodal request:
-#   1. encoder.encode(image_urls) → list[(n_visual_tokens, lm_hidden_dim)]
-#   2. Dynamo builds a mixed token-ids/embeds EmbedsPrompt: vLLM embeds the text
-#      itself and substitutes the encoder's image embeds at the placeholder span.
-#   3. vLLM engine runs transformer layers on the EmbedsPrompt.
+#   1. encoder.encode(image_urls) → typed encoded-media results
+#   2. Dynamo selects the backend-declared engine adapter:
+#      - linear rows → mixed token-ids/embeds EmbedsPrompt
+#      - Qwen2/2.5 rows + grid → native multimodal TokensPrompt
+#   3. vLLM runs the language model without invoking a custom backend's tower.
 #
 # No separate encode worker, no NIXL inter-process transfer.
 #
@@ -42,6 +43,7 @@ source "$SCRIPT_DIR/../../common/launch_utils.sh"
 # ── Defaults ──────────────────────────────────────────────────────────────────
 MODEL="${DYN_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_vision_encoder.HitchhikersVisionEncoder}"
+ENCODER_INPUT_MODE="${DYN_ENCODER_INPUT_MODE:-linear}"
 # Precedence: explicit DYN_WORKER_GPU/--gpu > harness-set CUDA_VISIBLE_DEVICES
 # (e.g. the pytest profile runner) > device 0 (portable default; on a generic
 # host or single-GPU container, GPU 0 is the natural choice).
@@ -50,7 +52,7 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 MAX_MODEL_LEN="${DYN_MAX_MODEL_LEN:-16384}"
 # A text-only LM's own chat template can't render image content parts, so default
 # to the bundled minimal template that emits the <|image_pad|> placeholder.
-CUSTOM_JINJA_TEMPLATE="${DYN_CUSTOM_JINJA_TEMPLATE:-$SCRIPT_DIR/../templates/qwen_vl.jinja}"
+CUSTOM_JINJA_TEMPLATE="${DYN_CUSTOM_JINJA_TEMPLATE-}"
 EXTRA_ARGS=()
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -60,6 +62,8 @@ while [[ $# -gt 0 ]]; do
             MODEL=$2; shift 2 ;;
         --encoder-class)
             ENCODER_CLASS=$2; shift 2 ;;
+        --encoder-input-mode)
+            ENCODER_INPUT_MODE=$2; shift 2 ;;
         --gpu)
             WORKER_GPU=$2; shift 2 ;;
         -h|--help)
@@ -71,15 +75,19 @@ Aggregated serving with a CustomEncoder (no separate encode worker).
 Options:
   --model <id>           LLM checkpoint (default: Qwen/Qwen2.5-1.5B-Instruct)
   --encoder-class <path> Dotted module.ClassName for CustomEncoder subclass
+  --encoder-input-mode <linear|native>
+                         Engine input route (default: linear)
   --gpu <index>          GPU index for the worker (default: 0)
   -h, --help             Show this help
 
 Environment variables:
   DYN_MODEL                      LLM model checkpoint
   DYN_ENCODER_CLASS              Dotted class path for the CustomEncoder subclass
+  DYN_ENCODER_INPUT_MODE         linear or native (default: linear)
   DYN_WORKER_GPU                 GPU index (default: 0)
-  DYN_CUSTOM_JINJA_TEMPLATE      Path to a .jinja chat template (defaults to the
-                                 bundled templates/qwen_vl.jinja)
+  DYN_CUSTOM_JINJA_TEMPLATE      Path to a .jinja chat template (linear mode
+                                 defaults to bundled templates/qwen_vl.jinja;
+                                 native mode uses the model default)
   DYN_CUSTOM_PHRASE             Phrase the HitchhikersEncoder embeds as the "image"
 EOF
             exit 0 ;;
@@ -87,6 +95,23 @@ EOF
             EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
+
+if [[ "$ENCODER_INPUT_MODE" != "linear" && "$ENCODER_INPUT_MODE" != "native" ]]; then
+    echo "--encoder-input-mode must be 'linear' or 'native'" >&2
+    exit 2
+fi
+if [[ -z "$CUSTOM_JINJA_TEMPLATE" && "$ENCODER_INPUT_MODE" == "linear" ]]; then
+    CUSTOM_JINJA_TEMPLATE="$SCRIPT_DIR/../templates/qwen_vl.jinja"
+fi
+if [[ "$ENCODER_INPUT_MODE" == "native" ]]; then
+    ENCODER_ENGINE_ARGS=(
+        --enable-mm-embeds
+        --no-enable-prefix-caching
+        --no-enable-chunked-prefill
+    )
+else
+    ENCODER_ENGINE_ARGS=(--enable-prompt-embeds)
+fi
 
 # VRAM sizing: honors the profiler/test-harness override
 # (_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES) when set, else falls back to a sane
@@ -97,6 +122,7 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 print_launch_banner --no-curl "CustomEncoder — Aggregated Serving" "$MODEL" "$HTTP_PORT" \
     "Worker GPU:  $WORKER_GPU" \
     "Encoder:     $ENCODER_CLASS" \
+    "Input mode:  $ENCODER_INPUT_MODE" \
     "Jinja tmpl:  ${CUSTOM_JINJA_TEMPLATE:-(model default)}" \
     "NOTE: HitchhikersVisionEncoder fakes an image as a fixed-phrase embedding;" \
     "      replace with a real CustomEncoder subclass for production use."
@@ -119,7 +145,7 @@ python -m dynamo.vllm \
     --model "$MODEL" \
     --custom-encoder-class "$ENCODER_CLASS" \
     --enable-multimodal \
-    --enable-prompt-embeds \
+    "${ENCODER_ENGINE_ARGS[@]}" \
     --max-model-len "$MAX_MODEL_LEN" \
     $GPU_MEM_ARGS \
     "${JINJA_ARG[@]}" \
