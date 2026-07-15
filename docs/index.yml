@@ -691,3 +691,15 @@ navigation:
       - page: "DEP-Nova: Active Messaging (Demo)"
         path: proposals/0000-nova.mdx
         slug: 0000-nova
+      # Prototype of build-time DEP sync: the body of this page lives ONLY in
+      # ai-dynamo/enhancements (branch ryan/nova, deps/0000-nova.md). Every
+      # Fern build runs fern/scripts/sync_deps.py first, which regenerates
+      # docs/proposals/_generated/dep-nova-synced.mdx from the source and
+      # wraps it with <DepMetadata> + <PrInlineComments>. The generated dir
+      # is gitignored — nothing from it may be committed. This entry is
+      # deliberately parked alongside the hand-copied demo above so the two
+      # can be compared side-by-side; once the sync is trusted, the hand-copy
+      # goes away.
+      - page: "DEP-Nova: Active Messaging (Synced)"
+        path: proposals/_generated/dep-nova-synced.mdx
+        slug: dep-nova-synced

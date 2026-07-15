@@ -1,0 +1,33 @@
+{
+  "$comment": [
+    "Manifest for fern/scripts/sync_deps.py — the list of DEP bodies to pull",
+    "into docs/proposals/_generated/ at Fern build time. This repo NEVER commits",
+    "the DEP body itself; only this manifest, the sync script, and the generated",
+    "dir's .gitignore entry live here.",
+    "",
+    "Each entry:",
+    "  output          slug for the generated .mdx (docs/proposals/_generated/<output>.mdx)",
+    "  dep             DEP number (rendered on the metadata card and in the H1 eyebrow)",
+    "  subtitle        optional subtitle rendered under the H1 title",
+    "  pr              PR number to link + mirror comments from",
+    "  tracking_issue  issue number (int) for the 'Design discussion' thread — omit to show empty state",
+    "  tracking_issue_url  URL for the 'Tracking issue' action button on the metadata card",
+    "  source          { owner, repo, ref, path } — raw.githubusercontent.com coordinates"
+  ],
+  "deps": [
+    {
+      "output": "dep-nova-synced",
+      "dep": "Nova",
+      "subtitle": "Build-time synced mirror of ai-dynamo/enhancements#61 — a transport-agnostic active messaging layer for Dynamo.",
+      "pr": 61,
+      "tracking_issue": null,
+      "tracking_issue_url": null,
+      "source": {
+        "owner": "ai-dynamo",
+        "repo": "enhancements",
+        "ref": "ryan/nova",
+        "path": "deps/0000-nova.md"
+      }
+    }
+  ]
+}

@@ -109,6 +109,15 @@ jobs:
           path: source-checkout
           fetch-depth: 1
 
+      - name: Sync external DEP bodies
+        # Regenerates docs/proposals/_generated/*.mdx from the DEP manifest at
+        # fern/scripts/deps.json (source of truth: ai-dynamo/enhancements).
+        # Runs BEFORE the rsync below so the synced pages appear under
+        # source-checkout/docs/proposals/_generated/ and flow into
+        # docs-checkout/fern/pages-dev/proposals/_generated/ verbatim. The
+        # generated dir is gitignored — nothing from it is ever committed.
+        run: python3 source-checkout/fern/scripts/sync_deps.py --root source-checkout
+
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -403,6 +412,13 @@ jobs:
           ref: ${{ steps.version.outputs.tag }}
           path: source-checkout
           fetch-depth: 1
+
+      - name: Sync external DEP bodies at tag
+        # Freezes the DEP body into the versioned snapshot: sync runs against
+        # the tagged docs/ (using the tag's manifest), then rsync copies the
+        # generated files into fern/pages-<TAG>/. If the manifest's ref drifts
+        # upstream after the tag, this snapshot remains pinned.
+        run: python3 source-checkout/fern/scripts/sync_deps.py --root source-checkout
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
