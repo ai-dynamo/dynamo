@@ -121,7 +121,10 @@ class TRTLLMWorkerProcess(ManagedProcess):
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", _check_ready)
             ],
-            timeout=900,
+            # Worker load + engine warmup is ~150-180s with the token-capped KV
+            # pool; 360 keeps ~2x margin for slow runners without bloating the
+            # test-level timeout budget.
+            timeout=360,
             straggler_commands=["-m dynamo.trtllm"],
             log_dir=_prepare_log_dir(request, "trtllm-worker"),
             **_COMMON_PROCESS_KWARGS,
@@ -293,7 +296,10 @@ def _send_request_get_overlap(
 # 16640 tokens per THREE_IMAGE_TOTAL_BLOCKS_RANGE), leaving ample reuse headroom.
 @pytest.mark.profiled_vram_gib(12.0)  # measured device peak ~11 GiB w/ token cap
 @pytest.mark.requested_trtllm_kv_tokens(32768)
-@pytest.mark.timeout(1800)
+# ~3x the measured deterministic runtime (~311s w/ the token cap, at 8 and 16
+# slots). Clears the worst-case fixture startup budget (worker 360 + router 240
+# + frontend 240) plus the ~150s of scenarios.
+@pytest.mark.timeout(960)
 def test_trtllm_mm_overlap_all(start_trtllm_mm_services, predownload_models):
     """Run all TRT-LLM MM overlap scenarios under one worker startup."""
     _check_text_only_overlap_repeated_prompt(
