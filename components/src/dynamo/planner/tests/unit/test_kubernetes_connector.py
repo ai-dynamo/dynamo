@@ -1688,3 +1688,46 @@ def test_initialize_gpu_counts_agg_mode_reads_from_dgd(
     )
 
     assert config.decode_engine_num_gpu == 4
+
+
+def test_get_worker_info_agg_mode_mdc_present_dgd_down(
+    kubernetes_connector, mock_kube_api
+):
+    """k8s_name must remain 'VllmWorker' when MDC is populated but DGD is temporarily down.
+
+    Pins the `dgd_service_name or component_name` guard in get_worker_info: when
+    _resolve_dgd_service returns None (DGD fetch fails), the explicit component_name
+    parameter must be used as the k8s_name_override so the agg worker is still
+    identified correctly in subsequent scaling calls.
+    """
+    mdc_cr = {
+        "metadata": {"name": "test-graph-0-VllmWorker-abc123"},
+        "spec": {
+            "data": {
+                "model_cards": {
+                    "model": {
+                        "type": "Model",
+                        "component": "backend",
+                        "endpoint": "generate",
+                        "card_json": {"display_name": "test-model"},
+                    }
+                }
+            }
+        },
+    }
+    mock_kube_api.custom_api.list_namespaced_custom_object.return_value = {
+        "items": [mdc_cr]
+    }
+    # Simulate DGD temporarily unavailable — _resolve_dgd_service must fall back
+    # to component_name so k8s_name is preserved.
+    mock_kube_api.get_graph_deployment.side_effect = DynamoGraphDeploymentNotFoundError(
+        "test-graph", "default"
+    )
+
+    info = kubernetes_connector.get_worker_info(
+        sub_component_type=SubComponentType.DECODE,
+        backend="vllm",
+        component_name="VllmWorker",
+    )
+
+    assert info.k8s_name == "VllmWorker"

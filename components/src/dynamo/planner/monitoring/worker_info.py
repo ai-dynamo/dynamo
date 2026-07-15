@@ -86,13 +86,17 @@ def build_worker_info_from_defaults(
         return WorkerInfo(k8s_name=k8s_name_override)
     if sub_component_type == SubComponentType.PREFILL:
         return WorkerInfo(
-            k8s_name=k8s_name_override or names.prefill_worker_k8s_name,
+            k8s_name=k8s_name_override
+            if k8s_name_override is not None
+            else names.prefill_worker_k8s_name,
             component_name=names.prefill_worker_component_name,
             endpoint=names.prefill_worker_endpoint,
         )
     else:
         return WorkerInfo(
-            k8s_name=k8s_name_override or names.decode_worker_k8s_name,
+            k8s_name=k8s_name_override
+            if k8s_name_override is not None
+            else names.decode_worker_k8s_name,
             component_name=names.decode_worker_component_name,
             endpoint=names.decode_worker_endpoint,
         )
