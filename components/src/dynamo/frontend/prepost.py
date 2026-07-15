@@ -136,19 +136,15 @@ def _prepare_request(
         )
         else None
     )
-    # The Rust bindings serialize this field as `chat_template_args` (serde
-    # `alias = "chat_template_kwargs"` applies on deserialize only), so a request
-    # arriving as a raw dict carries the client's kwargs there rather than under
-    # the vLLM-native `chat_template_kwargs`. Fall back to it so per-request
-    # template control is not silently dropped, mirroring sglang_prepost.py.
+    # serde's `alias` is deserialize-only, so pythonize emits the Rust field
+    # name `chat_template_args`; read it too or client kwargs are dropped.
     raw_template_args = (
         request.get("chat_template_args") if isinstance(request, dict) else None
     )
     chat_template_kwargs = dict(
         request_for_sampling.chat_template_kwargs or raw_template_args or {}
     )
-    # A top-level reasoning_effort wins; otherwise keep a nested one and fall back
-    # to None so the key is always present for templates that consult it.
+    # Don't let an absent top-level field clobber a nested reasoning_effort.
     if request_for_sampling.reasoning_effort is not None:
         chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
     else:
@@ -169,9 +165,7 @@ def _prepare_request(
     chat_params = ChatParams(
         chat_template=request_for_sampling.chat_template,
         chat_template_content_format="auto",
-        # Renderer-managed keys are authoritative and applied last so a client
-        # that nests one of them in chat_template_kwargs can't trigger a
-        # duplicate-keyword TypeError.
+        # Renderer-managed keys last so a nested duplicate can't raise TypeError.
         chat_template_kwargs={
             **chat_template_kwargs,
             "add_generation_prompt": request_for_sampling.add_generation_prompt,

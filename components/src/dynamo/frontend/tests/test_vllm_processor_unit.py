@@ -155,14 +155,12 @@ class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool strip
         ), "No tools in request should produce None tools in template"
 
 
-class TestChatTemplateArgsPassthrough:  # regression for #11704 — client template kwargs must reach the template
+class TestChatTemplateArgsPassthrough:
     """Per-request chat template kwargs must survive into the rendered template.
 
-    The Rust bindings serialize the request field as ``chat_template_args``
-    (serde ``alias = "chat_template_kwargs"`` only applies on deserialize), so a
-    request arriving as a raw dict carries the client's kwargs under
-    ``chat_template_args``. The vLLM processor previously read only
-    ``chat_template_kwargs`` and silently dropped it.
+    pythonize serializes the request field under its Rust name
+    ``chat_template_args`` (serde ``alias`` is deserialize-only), so the vLLM
+    processor must read that key, not only vLLM's native ``chat_template_kwargs``.
     """
 
     def test_chat_template_args_reaches_template(self, tokenizer):
