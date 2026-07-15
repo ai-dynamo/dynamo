@@ -27,7 +27,7 @@ case). All labels are protocol/API terms carried over from the reference
 tensor descriptors) -- no invented numbers. Renders deterministically.
 
 Usage:
-    python3 gen_fig_1_coldstart_sequence.py   # -> images/fig-1-modelexpress-coldstart.png
+    python3 gen_fig_1_coldstart_sequence.py   # -> images/fig-1-modelexpress-coldstart.{png,svg}
 """
 
 from __future__ import annotations
@@ -455,10 +455,14 @@ def main() -> None:
         showlegend=False,
     )
 
-    out = Path(__file__).parent / "images" / "fig-1-modelexpress-coldstart.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.write_image(str(out), scale=2)
-    print(f"Wrote {out}")
+    out_dir = Path(__file__).parent / "images"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    png = out_dir / "fig-1-modelexpress-coldstart.png"
+    svg = out_dir / "fig-1-modelexpress-coldstart.svg"
+    fig.write_image(str(png), scale=2)
+    fig.write_image(str(svg))
+    print(f"Wrote {png}")
+    print(f"Wrote {svg}")
 
 
 if __name__ == "__main__":

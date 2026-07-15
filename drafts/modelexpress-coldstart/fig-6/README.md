@@ -6,13 +6,14 @@ reference light-theme figure into the **Dynamo Dark** aesthetic.
 **Takeaway:** ModelExpress delivers weights peer-to-peer in 11 s (2.6 %, the
 single green accent), so the 420 s cold start is now dominated by the cold
 JIT-cache warmup cluster — profiling + DeepGEMM compile + CUDA graph capture =
-350 s / 83 % — rendered in the coral "cost" family.
+350 s / 83 % — rendered in the gold "warmup" family (matching fig-4).
 
 ## Figure Inventory
 
 | File | Description |
 |---|---|
 | `images/fig-6-coldstart-anatomy.png` | Stacked single-row cold-start timeline with a 420 s KPI, 8 labeled phases, minute ticks, and a two-column breakdown legend (1600×840 @2x) |
+| `images/fig-6-coldstart-anatomy.svg` | Vector render (for Fern / Confluence embedding) |
 
 ## Type & Pathway
 
@@ -30,15 +31,17 @@ Phase durations in seconds; percentages derived (`dur / 420`). Order is time ord
 | Engine config & core spawn | 14 s | 3.3 % | setup → grey |
 | Worker spawn & distributed init | 17 s | 4.0 % | setup → grey |
 | Model load via MX P2P | 11 s | 2.6 % | **MX win → green (single accent)** |
-| Memory profiling (JIT wave) | 100 s | 23.8 % | cost → coral (muted) |
-| JIT warmup (DeepGEMM compile) | 142 s | 33.8 % | cost peak → coral |
-| CUDA graph capture | 108 s | 25.7 % | cost → coral (muted) |
+| Memory profiling (JIT wave) | 100 s | 23.8 % | warmup → gold (muted) |
+| JIT warmup (DeepGEMM compile) | 142 s | 33.8 % | warmup peak → gold |
+| CUDA graph capture | 108 s | 25.7 % | warmup → gold (muted) |
 | API server ready | 1 s | 0.2 % | setup → grey |
 | **Total** | **420 s (7 m)** | | |
 
 Color encodes role: grey recedes for process/infra setup, green marks the single
-ModelExpress win, and the coral family carries the cold-JIT-cache cost cluster
-(the peak DeepGEMM phase is the brightest coral).
+ModelExpress win, and the gold warmup family carries the cold-JIT-cache cluster
+(the peak DeepGEMM phase is the brightest gold) — the same gold used for the
+warmup phase in fig-4. Coral stays reserved for a baseline/slow path, which this
+single optimized run does not contain.
 
 ## Reproduce
 
