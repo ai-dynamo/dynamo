@@ -20,6 +20,12 @@ RUN --mount=type=bind,source=./container/patches/sglang/inkling-remote-quant-con
     cd /sgl-workspace/sglang && \
     git apply --unidiff-zero --check /tmp/inkling-remote-quant-config.patch && \
     git apply --unidiff-zero /tmp/inkling-remote-quant-config.patch
+
+# Keep the min-new-tokens penalizer aligned with SGLang's finish EOS sources.
+RUN --mount=type=bind,source=./container/patches/sglang/inkling-min-new-tokens-eos.patch,target=/tmp/inkling-min-new-tokens-eos.patch \
+    cd /sgl-workspace/sglang && \
+    git apply --check /tmp/inkling-min-new-tokens-eos.patch && \
+    git apply /tmp/inkling-min-new-tokens-eos.patch
 {% endif %}
 
 {% if device != "xpu" %}
