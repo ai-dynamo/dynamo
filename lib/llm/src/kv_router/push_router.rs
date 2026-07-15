@@ -20,6 +20,7 @@ use crate::{
     kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
+        extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData},
     },
@@ -171,11 +172,36 @@ impl KvPushRouter {
         let operation = affinity
             .acquire_with_context(&session_id, explicit, request_context.as_ref())
             .await?;
-        let worker = operation.target().and_then(affinity_worker);
+        let mut worker = operation.target().and_then(affinity_worker);
+        // Opt-in parent affinity: when this session has no binding yet, place its
+        // first request on the worker bound to its parent session so subagents
+        // co-locate with the prefix they share. `operation` still binds this
+        // session's own id on route, so the parent only influences initial
+        // placement; the parent lookup is a non-binding peek that reuses the
+        // coordinator's eligibility/expiry checks.
+        let used_parent_affinity = if worker.is_none() && explicit.is_none() {
+            match parent_affinity_target(request, affinity)? {
+                Some(parent_worker) => {
+                    tracing::debug!(
+                        session_id = %session_id.as_str(),
+                        worker_id = parent_worker.worker_id,
+                        dp_rank = ?parent_worker.dp_rank,
+                        "placing unbound session via parent affinity"
+                    );
+                    worker = Some(parent_worker);
+                    true
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
         match self.select_request(request, phase, false, worker).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
-            Err(_) if operation.target().is_some() && explicit.is_none() => {
+            Err(_)
+                if (operation.target().is_some() || used_parent_affinity) && explicit.is_none() =>
+            {
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
@@ -583,6 +609,43 @@ fn affinity_worker(target: AffinityTarget) -> Option<WorkerWithDpRank> {
         .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
 }
 
+fn parse_parent_affinity_flag(value: Option<&str>) -> bool {
+    matches!(value, Some(value) if value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+/// Whether opt-in parent session affinity is enabled via `DYN_ROUTER_PARENT_AFFINITY`.
+/// Read once and cached for the process lifetime.
+fn parent_affinity_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_parent_affinity_flag(std::env::var("DYN_ROUTER_PARENT_AFFINITY").ok().as_deref())
+    })
+}
+
+/// Peek the worker currently bound to the request's parent session, when parent
+/// affinity is enabled and a parent session id is present. Non-binding: it never
+/// creates or mutates the parent's affinity entry (uses `query_target`), so it
+/// only biases the child's initial placement.
+fn parent_affinity_target(
+    request: &SingleIn<PreprocessedRequest>,
+    affinity: &AffinityCoordinator,
+) -> Result<Option<WorkerWithDpRank>, Error> {
+    if !parent_affinity_enabled() {
+        return Ok(None);
+    }
+    let Some(parent_session_id) = request
+        .agent_context
+        .as_ref()
+        .and_then(|context| context.parent_session_id.clone())
+    else {
+        return Ok(None);
+    };
+    let parent_id = SessionAffinityId::new(parent_session_id);
+    Ok(affinity
+        .query_target(&parent_id, None)?
+        .and_then(affinity_worker))
+}
+
 /// A direct routing wrapper for `RouterMode::Direct`.
 ///
 /// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
@@ -646,6 +709,18 @@ mod tests {
         local_model::runtime_config::ModelRuntimeConfig,
         protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
     };
+
+    #[test]
+    fn parent_affinity_flag_parses_truthy_values() {
+        assert!(parse_parent_affinity_flag(Some("1")));
+        assert!(parse_parent_affinity_flag(Some("true")));
+        assert!(parse_parent_affinity_flag(Some("TRUE")));
+        assert!(!parse_parent_affinity_flag(Some("0")));
+        assert!(!parse_parent_affinity_flag(Some("false")));
+        assert!(!parse_parent_affinity_flag(Some("no")));
+        assert!(!parse_parent_affinity_flag(Some("")));
+        assert!(!parse_parent_affinity_flag(None));
+    }
 
     fn request() -> PreprocessedRequest {
         PreprocessedRequest::builder()
