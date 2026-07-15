@@ -56,12 +56,14 @@ function statusVariant(status: string): string {
   return "draft";
 }
 
+/* Theme-aware via Fern's --pst-color-* vars (defined for both light and dark in
+ * fern/main.css). Every background is paired with an explicit foreground so the
+ * card never inherits an adjacent callout's color. */
 const DEP_META_CSS = `
-.dep-meta{margin:0 0 2rem;padding:20px 22px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-radius:14px;background:var(--pst-color-surface,#f7f7f7);}
-.dark .dep-meta{background:var(--nv-dark-grey-2,#1a1a1a);border-color:#333;}
+.dep-meta{margin:0 0 2rem;padding:20px 22px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-radius:14px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);}
 .dep-meta-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;}
 .dep-meta-eyebrow{margin:0 0 4px;color:var(--nv-color-green,#76b900);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;}
-.dep-meta-title{margin:0;font-size:1.35rem;line-height:1.25;}
+.dep-meta-title{margin:0;font-size:1.35rem;line-height:1.25;color:var(--pst-color-heading,inherit);}
 .dep-meta-pill{display:inline-flex;align-items:center;gap:6px;min-height:26px;padding:3px 12px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:.02em;white-space:nowrap;}
 .dep-meta-pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;opacity:.9;}
 .dep-meta-pill--draft{background:rgba(224,168,0,.18);color:#8a6100;}
@@ -77,10 +79,8 @@ const DEP_META_CSS = `
 .dep-meta-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
 .dep-meta-field b{font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--pst-color-text-muted,#777);}
 .dep-meta-field span{font-size:13.5px;line-height:1.35;color:var(--pst-color-text-base,#1a1a1a);overflow-wrap:break-word;}
-.dark .dep-meta-field span{color:#eee;}
 .dep-meta-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;}
 .dep-meta-action{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:6px 14px;border:1px solid var(--nv-color-green,#76b900);border-radius:8px;color:var(--pst-color-text-base,#1a1a1a);font-size:13px;font-weight:600;line-height:1;text-decoration:none;white-space:nowrap;}
-.dark .dep-meta-action{color:#eee;}
 .dep-meta-action:hover{background:rgba(118,185,0,.12);text-decoration:none;}
 `;
 

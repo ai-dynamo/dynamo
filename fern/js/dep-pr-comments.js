@@ -72,27 +72,38 @@
     H5: true, H6: true, TD: true, TH: true, DD: true, DT: true, FIGCAPTION: true, PRE: true
   };
 
+  /* Theme-aware: every background is paired with an EXPLICIT foreground so
+   * nothing depends on inherited color (the comment card is anchored next to a
+   * [!WARNING] callout, whose amber text was leaking into the card in dark
+   * mode). Colors come from Fern's NVIDIA theme vars (--pst-color-*), which are
+   * defined for BOTH light and dark in fern/main.css, so a single var adapts to
+   * either theme without a per-theme selector. Light-mode literals are only
+   * fallbacks. */
   var CSS =
-    ".dep-pr-mark{background:rgba(118,185,0,.22);border-bottom:2px solid var(--nv-color-green,#76b900);border-radius:2px;padding:0 1px;cursor:pointer;}" +
+    /* Highlight: keep the wrapped prose's own color (inherit) instead of the
+     * UA <mark> default of black-on-yellow, which was unreadable on dark. */
+    ".dep-pr-mark{background:rgba(118,185,0,.22);color:inherit;border-bottom:2px solid var(--nv-color-green,#76b900);border-radius:2px;padding:0 1px;cursor:pointer;}" +
+    ".dark .dep-pr-mark,html[data-theme=dark] .dep-pr-mark{background:rgba(118,185,0,.34);}" +
     ".dep-pr-badge{display:inline-flex;align-items:center;gap:3px;vertical-align:super;margin:0 2px;padding:0 6px;height:17px;border:0;border-radius:9px;background:var(--nv-color-green,#76b900);color:#111;font:700 10px/17px system-ui,sans-serif;cursor:pointer;user-select:none;}" +
     ".dep-pr-badge:hover{filter:brightness(1.05);}" +
-    ".dep-pr-card{margin:8px 0 16px;padding:12px 14px;border:1px solid var(--border,#dcdcdc);border-left:3px solid var(--nv-color-green,#76b900);border-radius:8px;background:var(--pst-color-surface,#f7f7f7);}" +
-    ".dark .dep-pr-card{background:var(--nv-dark-grey-2,#1a1a1a);border-color:#333;}" +
-    ".dep-pr-card-eyebrow{font:700 10px/1 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--nv-color-green,#76b900);margin-bottom:8px;}" +
-    ".dep-pr-comment + .dep-pr-comment{margin-top:12px;padding-top:12px;border-top:1px solid var(--border,#e2e2e2);}" +
-    ".dep-pr-comment-head{display:flex;align-items:center;gap:8px;margin-bottom:4px;}" +
+    ".dep-pr-card{margin:6px 0 12px;padding:9px 11px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-left:3px solid var(--nv-color-green,#76b900);border-radius:8px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);}" +
+    ".dep-pr-card-eyebrow{font:700 10px/1 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--nv-color-green,#76b900);margin-bottom:6px;}" +
+    ".dep-pr-comment{color:var(--pst-color-text-base,#1a1a1a);}" +
+    ".dep-pr-comment + .dep-pr-comment{margin-top:9px;padding-top:9px;border-top:1px solid var(--border,var(--grayscale-a5,#e2e2e2));}" +
+    ".dep-pr-comment-head{display:flex;align-items:center;gap:8px;margin-bottom:3px;}" +
     ".dep-pr-avatar{border-radius:50%;}" +
-    ".dep-pr-author{font-weight:700;font-size:13px;}" +
+    ".dep-pr-author{font-weight:700;font-size:13px;color:var(--pst-color-text-base,#1a1a1a);}" +
     ".dep-pr-date{font-size:11px;color:var(--pst-color-text-muted,#777);}" +
-    ".dep-pr-body{font-size:13.5px;line-height:1.5;}" +
-    ".dep-pr-body p{margin:0 0 6px;}" +
-    ".dep-pr-link{display:inline-block;margin-top:6px;font-size:12px;font-weight:600;color:var(--nv-color-green,#5a8f00);text-decoration:none;}" +
+    ".dep-pr-body{font-size:13px;line-height:1.45;color:var(--pst-color-text-base,#1a1a1a);}" +
+    ".dep-pr-body p{margin:0 0 4px;}" +
+    ".dep-pr-body p:last-child{margin-bottom:0;}" +
+    ".dep-pr-link{display:inline-block;margin-top:4px;font-size:12px;font-weight:600;color:var(--nv-color-green,#76b900);text-decoration:none;}" +
     ".dep-pr-link:hover{text-decoration:underline;}" +
-    "#dep-pr-comments{display:block;margin-top:2.5rem;padding-top:1.25rem;border-top:1px solid var(--grayscale-a4,#e5e5e5);}" +
-    ".dep-pr-heading{font-size:1.15rem;font-weight:600;margin-bottom:.15rem;}" +
+    "#dep-pr-comments{display:block;margin-top:2.5rem;padding-top:1.25rem;border-top:1px solid var(--border,var(--grayscale-a4,#e5e5e5));}" +
+    ".dep-pr-heading{font-size:1.15rem;font-weight:600;margin-bottom:.15rem;color:var(--pst-color-heading,inherit);}" +
     ".dep-pr-note{font-size:.85rem;color:var(--pst-color-text-muted,#777);margin-bottom:1rem;}" +
-    ".dep-pr-unanchored{margin-top:1rem;padding:12px 14px;border:1px dashed var(--border,#cfcfcf);border-radius:8px;}" +
-    ".dep-pr-unanchored h4{margin:0 0 8px;font-size:.9rem;}" +
+    ".dep-pr-unanchored{margin-top:1rem;padding:10px 12px;border:1px dashed var(--border,var(--grayscale-a5,#cfcfcf));border-radius:8px;color:var(--pst-color-text-base,#1a1a1a);}" +
+    ".dep-pr-unanchored h4{margin:0 0 8px;font-size:.9rem;color:var(--pst-color-text-base,#1a1a1a);}" +
     ".dep-pr-unanchored li{margin:0 0 8px;font-size:13px;}" +
     ".dep-pr-quote{color:var(--pst-color-text-muted,#777);font-style:italic;}";
 
