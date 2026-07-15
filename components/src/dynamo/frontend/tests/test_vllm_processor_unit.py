@@ -208,6 +208,20 @@ class TestChatTemplateArgsPassthrough:
             chat_params.chat_template_kwargs.get("reasoning_effort") == "high"
         ), "nested reasoning_effort must not be overwritten by an absent top-level field"
 
+    def test_top_level_reasoning_effort_wins_over_nested(self, tokenizer):
+        """An explicit top-level reasoning_effort overrides a nested one."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "low",
+                "chat_template_args": {"reasoning_effort": "high"},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
+
     def test_reserved_render_key_in_template_args_does_not_crash(self, tokenizer):
         """A renderer-reserved key nested in template kwargs must not raise TypeError."""
         _, _, _, _, chat_params = _prepare_request(
@@ -219,8 +233,8 @@ class TestChatTemplateArgsPassthrough:
             tokenizer=tokenizer,
             tool_parser_class=None,
         )
-        # The renderer-managed value wins; the point is that merging does not raise.
-        assert "documents" in chat_params.chat_template_kwargs
+        # Renderer-managed value wins over the client's nested key (no crash either).
+        assert chat_params.chat_template_kwargs["documents"] is None
 
 
 class TestMultimodalFeatureMetadata:
