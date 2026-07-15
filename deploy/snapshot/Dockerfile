@@ -251,10 +251,15 @@ FROM agent_pre AS licenses
 
 USER root
 RUN mkdir -p /legal /sboms
-# Install python3 + python3-yaml. PyYAML is required for the override
-# lookup — without it, license_overrides.yaml silently no-ops and
-# NVIDIA-proprietary dpkgs (libnccl2 etc.) come back UNKNOWN despite
-# having hand-curated overrides.
+# Freeze the shipped dpkg database and copyright files before installing
+# compliance-only helpers. The final image is FROM agent_pre, so packages
+# installed below must not appear in dpkg NOTICES/OSRB output.
+RUN mkdir -p /runtime-root/var/lib /runtime-root/usr/share \
+    && cp -a /var/lib/dpkg /runtime-root/var/lib/ \
+    && cp -a /usr/share/doc /runtime-root/usr/share/
+# Install python3 + python3-yaml for the compliance tooling only. PyYAML is
+# required for license_overrides.yaml; dpkg scanning reads /runtime-root so
+# these helper packages are not attributed as shipped content.
 RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-yaml \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY --from=compliance . /opt/compliance
@@ -280,6 +285,7 @@ RUN python3 -m compliance.generators \
     --native-image snapshot-agent \
     --output-dir /legal \
     --policy /opt/compliance/policy/licenses.toml \
+    --dpkg-root /runtime-root \
     ${BASELINE_SBOM_FILE:+--subtract-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
     -v
 # Policy gate on the single unified CSV (its `ecosystem` column scopes each row).
@@ -298,12 +304,18 @@ COPY --from=licenses /legal/ /
 # =============================================================================
 # Stage: Compliance: sources
 # =============================================================================
-# Collects third-party Go module sources + preserved native source tarballs
-# for OSRB submission. Output is a separate sources zip cross-referenced in
-# the OSRB bundle's build-provenance.json; never COPY'd into the runtime.
-FROM python:3.12-slim AS sources_collect
+# Collects source archives for dpkg deltas, third-party Go modules, and
+# preserved native source trees for OSRB submission. Output is a separate
+# sources zip cross-referenced in the OSRB bundle's build-provenance.json;
+# never COPY'd into the runtime.
+FROM agent_pre AS sources_collect
 WORKDIR /
-RUN mkdir -p /sources /opt/compliance /opt/go-vendor /opt/native-sources
+RUN mkdir -p /sources /opt/compliance /opt/go-vendor /opt/native-sources /runtime-root/var/lib \
+    && cp -a /var/lib/dpkg /runtime-root/var/lib/
+# Python is needed only to run compliance.collect_sources. The dpkg package
+# set comes from /runtime-root, captured before this install.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 COPY --from=compliance . /opt/compliance
 ENV PYTHONPATH=/opt
 COPY --from=builder /tmp/go-vendor/ /opt/go-vendor/
@@ -319,13 +331,17 @@ COPY --from=criu-builder /tmp/criu/ /opt/native-sources/criu/
 COPY --from=criu-builder /tmp/cuda-checkpoint/ /opt/native-sources/cuda-checkpoint/
 
 ARG ENABLE_SOURCE_ARCHIVAL=false
+ARG BASELINE_SBOM_FILE=""
+ARG TARGETARCH
 RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
         python3 -m compliance.collect_sources \
-            --ecosystem go --ecosystem native \
+            --ecosystem dpkg --ecosystem go --ecosystem native \
             --output-zip /sources.zip \
             --sources-root /sources \
+            --dpkg-root /runtime-root \
             --go-vendor-dir /opt/go-vendor \
             --native-source-dir /opt/native-sources \
+            ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \
         : > /sources.zip ; \
