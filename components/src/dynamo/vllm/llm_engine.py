@@ -70,6 +70,9 @@ from dynamo.vllm.cache_info import (
     get_configured_kv_event_block_size,
 )
 from dynamo.vllm.capacity import per_rank_kv_blocks
+from dynamo.vllm.kv_connector_protocols import (
+    disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
+)
 
 from .handlers import (
     VllmEnginePauseController,
@@ -293,6 +296,7 @@ class VllmLLMEngine(LLMEngine):
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
+        disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
         self._vllm_config = vllm_config
         self._default_sampling_params = (
             vllm_config.model_config.get_diff_sampling_param()

@@ -16,12 +16,12 @@
 # =============================================================================
 ARG DOCKER_PROXY
 ARG GO_VERSION=1.26.3
-# Default to upstream CRIU development branch. Custom forks can override both
+# Default to a pinned upstream CRIU commit. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
-ARG CRIU_REF=criu-dev
+ARG CRIU_REF=b47c692bb3a73ae45ee1c4ab215a8f6869d40efd
 ARG AGENT_BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:25.11-cuda13.0-devel-ubuntu24.04
 
 # For placeholder target only - this default allows agent builds to succeed,
