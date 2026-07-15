@@ -25,7 +25,7 @@ from tests.fault_tolerance.cancellation.utils import (
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.device import (
     build_nixl_kv_transfer_config_json,
     get_default_vllm_block_size,
@@ -56,7 +56,8 @@ class DynamoWorkerProcess(ManagedProcess):
         timeout_s: int = 300,
     ):
         # Allocate system port for this worker
-        system_port = allocate_port(9100)
+        system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=system_port: deallocate_port(port))
         self.system_port = system_port
         self.frontend_port = frontend_port
 
@@ -296,8 +297,12 @@ def test_request_cancellation_vllm_aggregated(
                 logger.info(f"Testing {description.lower()}...")
 
                 # Send the request (non-blocking)
+                # 2096 is an empirically chosen repro size that still exercises
+                # cancellation while avoiding the XPU crash seen with 16384 tokens.
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, request_type
+                    frontend.frontend_port,
+                    request_type,
+                    max_tokens=2096,
                 )
 
                 # Poll for "Decode Request ID" pattern (vLLM v2 pattern)

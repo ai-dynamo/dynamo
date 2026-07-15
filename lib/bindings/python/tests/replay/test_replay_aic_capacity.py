@@ -5,17 +5,8 @@ import json
 
 import pytest
 
-import dynamo._internal.aic as aic
 import dynamo.replay.main as replay_main
-from dynamo.mocker import MockEngineArgs, PlannerReplayBridge
-from dynamo.replay import run_synthetic_trace_replay
-
-from .replay_utils import _write_trace_and_args
-
-# Tests in this file drive the Rust AIC callback, which imports
-# aiconfigurator.sdk.engine (Phase 1.5 compile_engine API). Skip if absent —
-# PyPI aiconfigurator releases predating PR #1200 don't ship it.
-pytest.importorskip("aiconfigurator.sdk.engine")
+from dynamo.mocker import MockEngineArgs
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -25,7 +16,9 @@ pytestmark = [
 ]
 
 
-def test_load_engine_args_estimates_aic_blocks(monkeypatch):
+def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
+    # Keep capacity estimation at the config boundary. A full replay also builds
+    # the independent Rust latency engine, which requires real model/perf data.
     calls = []
 
     def fake_estimate_num_gpu_blocks(**kwargs):
@@ -66,6 +59,11 @@ def test_load_engine_args_estimates_aic_blocks(monkeypatch):
             "moe_tp_size": None,
             "moe_ep_size": None,
             "attention_dp_size": None,
+            "gemm_dtype": None,
+            "moe_dtype": None,
+            "fmha_dtype": None,
+            "kv_cache_dtype": None,
+            "comm_dtype": None,
         }
     ]
 
@@ -128,166 +126,6 @@ def test_resolve_aic_blocks_keeps_per_rank_capacity_for_attention_dp(monkeypatch
     assert _resolve(8) == (1000, 8)
     assert _resolve(1) == (1000, None)
     assert _resolve(None) == (1000, None)
-
-
-def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
-    calls = []
-
-    class FakeAicSession:
-        def predict_prefill(self, batch_size, effective_isl, prefix):
-            return float(batch_size + effective_isl + prefix)
-
-        def predict_decode(self, batch_size, isl, osl):
-            return float(batch_size + isl + osl)
-
-    def fake_estimate_num_gpu_blocks(**kwargs):
-        calls.append(kwargs)
-        return 100
-
-    def fake_create_session(*_args):
-        return FakeAicSession()
-
-    monkeypatch.setattr(aic, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
-    monkeypatch.setattr(aic, "create_session", fake_create_session)
-
-    engine_args = MockEngineArgs(
-        aic_backend="vllm",
-        aic_system="h200_sxm",
-        aic_model_path="/models/mock",
-        aic_tp_size=2,
-        block_size=2,
-        max_num_batched_tokens=16,
-        max_num_seqs=2,
-    )
-
-    report = run_synthetic_trace_replay(
-        4,
-        2,
-        1,
-        extra_engine_args=engine_args,
-        replay_concurrency=1,
-        replay_mode="offline",
-        arrival_interval_ms=0.0,
-    )
-
-    assert report["num_requests"] == 1
-    assert calls == [
-        {
-            "backend_name": "vllm",
-            "system": "h200_sxm",
-            "model_path": "/models/mock",
-            "tp_size": 2,
-            "block_size": 2,
-            "max_num_batched_tokens": 16,
-            "gpu_memory_utilization": 0.9,
-            "mem_fraction_static": 0.88,
-            "free_gpu_memory_fraction": None,
-            "backend_version": None,
-            "moe_tp_size": None,
-            "moe_ep_size": None,
-            "attention_dp_size": None,
-            "gemm_dtype": None,
-            "moe_dtype": None,
-            "fmha_dtype": None,
-            "kv_cache_dtype": None,
-            "comm_dtype": None,
-        }
-    ]
-
-
-def test_planner_bridge_materializes_unset_aic_blocks(tmp_path, monkeypatch):
-    calls = []
-
-    class FakeAicSession:
-        def predict_prefill(self, batch_size, effective_isl, prefix):
-            return float(batch_size + effective_isl + prefix)
-
-        def predict_decode(self, batch_size, isl, osl):
-            return float(batch_size + isl + osl)
-
-    def fake_estimate_num_gpu_blocks(**kwargs):
-        calls.append(kwargs)
-        return 100
-
-    def fake_create_session(*_args):
-        return FakeAicSession()
-
-    monkeypatch.setattr(aic, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
-    monkeypatch.setattr(aic, "create_session", fake_create_session)
-
-    trace_path = _write_trace_and_args(tmp_path)
-    agg_args = MockEngineArgs(
-        aic_backend="vllm",
-        aic_system="h200_sxm",
-        aic_model_path="/models/agg",
-        aic_tp_size=2,
-        block_size=2,
-        max_num_batched_tokens=16,
-        max_num_seqs=2,
-    )
-
-    PlannerReplayBridge(
-        trace_file=trace_path,
-        extra_engine_args=agg_args,
-        num_workers=1,
-    )
-
-    prefill_args = MockEngineArgs(
-        aic_backend="vllm",
-        aic_system="h200_sxm",
-        aic_model_path="/models/prefill",
-        aic_tp_size=2,
-        block_size=2,
-        max_num_batched_tokens=16,
-        max_num_seqs=2,
-        worker_type="prefill",
-    )
-    decode_args = MockEngineArgs(
-        aic_backend="vllm",
-        aic_system="h200_sxm",
-        aic_model_path="/models/decode",
-        aic_tp_size=2,
-        block_size=2,
-        max_num_batched_tokens=16,
-        max_num_seqs=2,
-        worker_type="decode",
-    )
-
-    PlannerReplayBridge.create_disagg(
-        trace_file=trace_path,
-        prefill_engine_args=prefill_args,
-        decode_engine_args=decode_args,
-        num_prefill_workers=1,
-        num_decode_workers=1,
-    )
-
-    def expected(model_path):
-        return {
-            "backend_name": "vllm",
-            "system": "h200_sxm",
-            "model_path": model_path,
-            "tp_size": 2,
-            "block_size": 2,
-            "max_num_batched_tokens": 16,
-            "gpu_memory_utilization": 0.9,
-            "mem_fraction_static": 0.88,
-            "free_gpu_memory_fraction": None,
-            "backend_version": None,
-            "moe_tp_size": None,
-            "moe_ep_size": None,
-            "attention_dp_size": None,
-            "gemm_dtype": None,
-            "moe_dtype": None,
-            "fmha_dtype": None,
-            "kv_cache_dtype": None,
-            "comm_dtype": None,
-        }
-
-    assert calls == [
-        expected("/models/agg"),
-        expected("/models/prefill"),
-        expected("/models/decode"),
-    ]
 
 
 def test_invalid_json_num_gpu_blocks_type_is_rejected():
