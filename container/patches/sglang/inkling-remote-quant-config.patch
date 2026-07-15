@@ -1,0 +1,40 @@
+diff --git a/python/sglang/srt/models/inkling.py b/python/sglang/srt/models/inkling.py
+index 29b38b40..3834e510 100644
+--- a/python/sglang/srt/models/inkling.py
++++ b/python/sglang/srt/models/inkling.py
+@@ -966 +966,6 @@ class InklingForConditionalGeneration(nn.Module):
+-            SimpleNamespace(hf_config=self.config, model_path=server_args.model_path)
++            SimpleNamespace(
++                hf_config=self.config,
++                model_path=server_args.model_path,
++                revision=server_args.revision,
++                download_dir=server_args.download_dir,
++            )
+diff --git a/python/sglang/srt/models/inkling_common/quantization/config.py b/python/sglang/srt/models/inkling_common/quantization/config.py
+index 24c014fe..bfca1586 100644
+--- a/python/sglang/srt/models/inkling_common/quantization/config.py
++++ b/python/sglang/srt/models/inkling_common/quantization/config.py
+@@ -7,0 +8 @@ from typing import Any
++import huggingface_hub.constants
+@@ -8,0 +10,2 @@ import torch
++from huggingface_hub import hf_hub_download
++from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
+@@ -44,3 +47,15 @@ def _get_raw_quant_config(
+-    quant_config_file = os.path.join(model_name_or_path, "hf_quant_config.json")
+-    if not os.path.exists(quant_config_file):
+-        return None
++    if os.path.isdir(model_name_or_path):
++        quant_config_file = os.path.join(model_name_or_path, "hf_quant_config.json")
++        if not os.path.exists(quant_config_file):
++            return None
++    else:
++        try:
++            quant_config_file = hf_hub_download(
++                repo_id=model_name_or_path,
++                filename="hf_quant_config.json",
++                revision=getattr(model_config, "revision", None),
++                cache_dir=getattr(model_config, "download_dir", None),
++                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
++            )
++        except (EntryNotFoundError, LocalEntryNotFoundError):
++            return None

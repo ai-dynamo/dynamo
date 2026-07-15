@@ -13,6 +13,15 @@ FROM framework AS runtime
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
+{% if device != "xpu" and context[framework][device_key].runtime_image_tag == "inkling-cu13" %}
+# Resolve Inkling's external hf_quant_config.json for remote Hugging Face model IDs.
+# Drop this patch once the upstream Inkling image contains sgl-project/sglang#31358.
+RUN --mount=type=bind,source=./container/patches/sglang/inkling-remote-quant-config.patch,target=/tmp/inkling-remote-quant-config.patch \
+    cd /sgl-workspace/sglang && \
+    git apply --unidiff-zero --check /tmp/inkling-remote-quant-config.patch && \
+    git apply --unidiff-zero /tmp/inkling-remote-quant-config.patch
+{% endif %}
+
 {% if device != "xpu" %}
 # SGLang 0.5.15 JIT-compiles its native HiCache hash extension, which includes
 # OpenSSL headers and links libcrypto.
