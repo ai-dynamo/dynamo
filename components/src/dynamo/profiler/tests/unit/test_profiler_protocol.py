@@ -130,6 +130,36 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
 
 
+def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
+    """Canonical worker roles must replace deprecated vLLM role flags."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=["--is-prefill-worker", "--is-decode-worker"],
+        decode_cli_args=["--is-prefill-worker", "--is-decode-worker"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+
+    for args, expected_mode in ((prefill_args, "prefill"), (decode_args, "decode")):
+        assert "--is-prefill-worker" not in args
+        assert "--is-decode-worker" not in args
+        assert args.count("--disaggregation-mode") == 1
+        assert args[args.index("--disaggregation-mode") + 1] == expected_mode
+
+
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     """DP-only workers keep per-node GPU shaping without multinode inflation."""
     modifier = CONFIG_MODIFIERS["sglang"]

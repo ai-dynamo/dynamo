@@ -71,8 +71,11 @@ def _set_valued_arg(args: list[str], key: str, value: str) -> list[str]:
 
 def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
     """Restore the Dynamo runtime arguments omitted by AIC engine tuning."""
+    cleaned_args = [
+        arg for arg in args if arg not in ("--is-prefill-worker", "--is-decode-worker")
+    ]
     finalized = set_unique_argument_value(
-        list(args), "--disaggregation-mode", role.value
+        cleaned_args, "--disaggregation-mode", role.value
     )
     if (
         role == SubComponentType.PREFILL
