@@ -180,8 +180,7 @@ vllm_configs = {
             pytest.mark.profiled_vram_gib(20.0),
             pytest.mark.requested_vllm_kv_cache_bytes(1_073_741_824),
             pytest.mark.timeout(900),
-            # Temporarily pre_merge to validate in PR CI; will flip to nightly once green.
-            pytest.mark.pre_merge,
+            pytest.mark.nightly,
         ],
         model="meta-llama/Meta-Llama-3.1-8B-Instruct",
         # 8B weights leave little KV room on the 24 GiB gpu_1 lane; cap context (payloads are tiny).
