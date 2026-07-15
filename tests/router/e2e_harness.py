@@ -14,7 +14,7 @@ from tests.router.common import (
     _test_router_indexers_sync,
 )
 from tests.router.helper import generate_random_suffix, managed_runtime
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DynamoPortRange
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
 
@@ -33,7 +33,7 @@ TEST_PROMPT = (
 
 
 def allocate_frontend_ports(request, count: int) -> list[int]:
-    ports = allocate_ports(count, DefaultPort.FRONTEND.value)
+    ports = allocate_ports(count, DynamoPortRange.FRONTEND.value)
     request.addfinalizer(lambda: deallocate_ports(ports))
     return ports
 

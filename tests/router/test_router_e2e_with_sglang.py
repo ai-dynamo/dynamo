@@ -19,7 +19,7 @@ from tests.router.e2e_harness import (
     run_router_decisions_test,
 )
 from tests.router.helper import generate_random_suffix
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -105,16 +105,16 @@ class SGLangProcess(ManagedEngineProcessMixin):
 
         # Dynamically allocate unique system and KV event ports to avoid
         # conflicts in parallel test runs.
-        self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        self._system_ports = allocate_ports(num_workers, DynamoPortRange.ROUTER.value)
         kv_event_rank_span = data_parallel_size or 1
         self._kv_event_ports = allocate_contiguous_ports(
-            num_workers, kv_event_rank_span, DefaultPort.SYSTEM1.value
+            num_workers, kv_event_rank_span, DynamoPortRange.ROUTER.value
         )
         # Forward-pass metrics: SGLang publishes FPM over a per-worker ipc://
         # socket (path derived from the worker's connection_id), so unlike vLLM
         # it never binds this port -- the env var only flips the feature on. One
         # shared value across workers is therefore sufficient (no collision).
-        self._fpm_port = allocate_port(DefaultPort.SYSTEM1.value)
+        self._fpm_port = allocate_port(DynamoPortRange.FPM.value)
         request.addfinalizer(
             lambda: deallocate_ports(
                 self._system_ports + self._kv_event_ports + [self._fpm_port]
