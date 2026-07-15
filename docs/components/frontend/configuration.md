@@ -186,9 +186,14 @@ The frontend exposes the following HTTP endpoints:
 | `POST` | `/v1/embeddings` | Text embeddings |
 | `POST` | `/v1/responses` | Responses API |
 | `POST` | `/v1/images/generations` | Image generation |
-| `POST` | `/v1/videos/generations` | Video generation |
-| `POST` | `/v1/videos/generations/stream` | Video generation (streaming) |
+| `POST` | `/v1/images/edits` | Image editing |
+| `POST` | `/v1/videos` | Video generation |
+| `POST` | `/v1/videos/stream` | Video generation (streaming) |
+| `POST` | `/v1/audio/speech` | Speech generation |
+| `GET` | `/v1/realtime` | Bidirectional streaming over WebSocket |
 | `GET` | `/v1/models` | List available models |
+| `GET` | `/v1/models/{model}` | Retrieve metadata for one ready model |
+| `GET` | `/v1/models/{model}/ready` | Inspect per-Dynamo-namespace worker readiness for one registered model |
 
 ### Anthropic (Experimental)
 
@@ -196,6 +201,12 @@ The frontend exposes the following HTTP endpoints:
 |--------|------|-------------|
 | `POST` | `/v1/messages` | Anthropic Messages API (requires `--enable-anthropic-api`) |
 | `POST` | `/v1/messages/count_tokens` | Token counting for Anthropic API |
+
+### Engine-Native (Experimental)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/inference/v1/generate` | vLLM-compatible token-in/token-out generation; disabled by default. Set `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE=1` to register the route |
 
 ### Infrastructure
 

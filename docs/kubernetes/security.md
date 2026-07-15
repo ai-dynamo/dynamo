@@ -37,8 +37,8 @@ user-facing security boundary.
 - [ ] **Protect the inference API.** Put the frontend behind an authenticating gateway. Configure
   [frontend TLS](../components/frontend/configuration.md#tls-and-client-authentication) when the frontend terminates
   TLS directly, and review the [Gateway API integration](gateway-api/README.mdx) when deploying an inference gateway.
-- [ ] **Limit exposed frontend routes.** Keep metrics, health, OpenAPI, Swagger UI, and administration routes private.
-  Disable the `/busy_threshold` administration API when it is not needed. See
+- [ ] **Limit exposed frontend routes.** Keep metrics, health, model discovery and readiness, OpenAPI, Swagger UI,
+  and administration routes private. Disable the `/busy_threshold` administration API when it is not needed. See
   [Frontend HTTP Endpoints](../components/frontend/configuration.md#http-endpoints) and
   [Frontend Feature Switches](../components/frontend/configuration.md#frontend-feature-switches).
 - [ ] **Isolate internal transports.** Restrict request-plane, event-plane, discovery, and peer ports to the workloads
@@ -47,8 +47,10 @@ user-facing security boundary.
 - [ ] **Use least-privilege Kubernetes identities.** Review the operator's cluster scope in the
   [Operator Deployment Guide](dynamo-operator.md), and use role-specific ServiceAccounts as described in
   [Service Discovery](service-discovery.md#use-a-pre-created-serviceaccount).
-- [ ] **Constrain pods and secrets.** Set backend-compatible security contexts, use workload identity where available,
-  and expose each Secret only to the components that need it. See the [security context](api-reference.md#security-context),
+- [ ] **Constrain pods and secrets.** Apply a compatible
+  [Pod Security Admission policy](https://kubernetes.io/docs/concepts/security/pod-security-admission/), set
+  backend-compatible security contexts, use workload identity where available, and expose each Secret only to the
+  components that need it. See the [security context](api-reference.md#security-context),
   [ServiceAccounts](api-reference.md#service-accounts), and [image pull secrets](api-reference.md#image-pull-secrets)
   references.
 - [ ] **Keep standalone router services private.** The [KV indexer](../components/router/standalone-indexer.md),
