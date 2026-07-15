@@ -564,6 +564,42 @@ class TestRoutedEnginePath:
         assert "usage" not in chunks[0]["data"]
 
     @pytest.mark.asyncio
+    async def test_continuous_usage_stats_requires_include_usage(
+        self, vllm_processor_module
+    ):
+        # continuous_usage_stats is a sub-option of include_usage; without
+        # include_usage=True it must not emit per-chunk usage.
+        routed_engine = _FakeRoutedEngine(
+            [{"token_ids": [101], "index": 0, "finish_reason": None}]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        request = {
+            "model": MODEL,
+            "stream_options": {"continuous_usage_stats": True},
+        }
+        preproc = _base_preproc()
+        chunks = [
+            item
+            async for item in processor._generate_and_stream(
+                "request-id",
+                request,
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-request",
+                    external_req_id=None,
+                ),
+                {0: _FakePostProcessor()},
+                mm_routing_info=None,
+                context=None,
+            )
+        ]
+
+        assert "usage" not in chunks[0]["data"]
+
+    @pytest.mark.asyncio
     async def test_continuous_usage_stats_on_emits_per_chunk_usage(
         self, vllm_processor_module
     ):
