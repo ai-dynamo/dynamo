@@ -1644,6 +1644,21 @@ async def test_validate_deployment_agg_mode(kubernetes_connector, mock_kube_api)
     )
 
 
+@pytest.mark.asyncio
+async def test_validate_deployment_agg_mode_explicit_decode_worker_name(
+    kubernetes_connector, mock_kube_api
+):
+    """validate_deployment must also work when the hint is the real agg name."""
+    mock_kube_api.get_graph_deployment.return_value = _agg_deployment()
+
+    await kubernetes_connector.validate_deployment(
+        prefill_component_name=None,
+        decode_component_name="VllmDecodeWorker",
+        require_prefill=False,
+        require_decode=True,
+    )
+
+
 def test_get_gpu_counts_agg_mode(kubernetes_connector, mock_kube_api):
     """get_gpu_counts must return the GPU count from the agg worker, not fall back to CLI."""
     mock_kube_api.get_graph_deployment.return_value = _agg_deployment(gpu=4)

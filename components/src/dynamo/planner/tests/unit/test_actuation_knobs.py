@@ -783,8 +783,8 @@ class TestGetComponentPodsLabelSelector:
         """mode=agg + backend=sglang must select the decode component.
 
         SGLang v1beta1 agg DGDs name the single worker ``decode``, which
-        matches the backend decode fallback. This also works through the unique
-        generic-worker path if the fallback ever drifts.
+        matches the backend decode fallback, so this covers the explicit-name
+        branch. The vLLM/TRT-LLM tests cover unique generic-worker resolution.
         """
         deployment = {
             "metadata": {"name": "test-dgd"},
