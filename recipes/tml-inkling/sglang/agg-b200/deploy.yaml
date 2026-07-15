@@ -55,6 +55,11 @@ spec:
             ephemeral-storage: "200Gi"
       extraPodSpec:
         hostIPC: true
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Equal
+            value: "true"
+            effect: NoSchedule
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:

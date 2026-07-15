@@ -15,6 +15,11 @@ spec:
         app: inkling-model-download
     spec:
       restartPolicy: Never
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
       containers:
         - name: model-download
           image: python:3.10-slim
@@ -35,8 +40,8 @@ spec:
               value: "1"
           resources:
             requests:
-              cpu: "16"
-              memory: "64Gi"
+              cpu: "8"
+              memory: "24Gi"
           args:
             - |
               set -eux
