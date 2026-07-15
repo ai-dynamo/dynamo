@@ -33,6 +33,9 @@ const (
 	// Experimental since: v1.2.0
 	// Beta since: N/A
 	// GA since: N/A
+	// Configuration: DYN_OPERATOR_ALLOW_GMS_SNAPSHOT=1
+	// Auto-detection: N/A
+	// Requires: N/A
 	// Default: false
 	GMSSnapshot Name = "gmsSnapshot"
 
@@ -42,72 +45,83 @@ const (
 	// Experimental since: v1.0.0
 	// Beta since: N/A
 	// GA since: N/A
+	// Configuration: checkpoint.enabled
+	// Auto-detection: N/A
+	// Requires: N/A
 	// Default: false
 	Checkpoint Name = "checkpoint"
 
 	// Grove enables Grove-backed workload orchestration.
-	// The configuration override is merged with API auto-detection. Grove must be
-	// installed and serve grove.io/v1alpha1.
 	//
 	// Owner: @julienmancuso
 	// Experimental since: v0.4.0
 	// Beta since: N/A
 	// GA since: N/A
-	// Default: false
+	// Configuration: orchestrators.grove.enabled
+	// Auto-detection: grove.io API group
+	// Requires: Grove serving grove.io/v1alpha1
+	// Default: true when the grove.io API group is detected; false otherwise
 	Grove Name = "grove"
 
 	// LWS enables LeaderWorkerSet-backed workload orchestration.
-	// The configuration override is merged with API auto-detection. LWS must serve
-	// leaderworkerset.x-k8s.io/v1 and Volcano must serve scheduling.volcano.sh/v1beta1.
 	//
 	// Owner: @julienmancuso
 	// Experimental since: v0.3.0
 	// Beta since: N/A
 	// GA since: N/A
-	// Default: false
+	// Configuration: orchestrators.lws.enabled
+	// Auto-detection: leaderworkerset.x-k8s.io and scheduling.volcano.sh API groups
+	// Requires: LWS serving leaderworkerset.x-k8s.io/v1 and Volcano serving
+	// scheduling.volcano.sh/v1beta1
+	// Default: true when both API groups are detected; false otherwise
 	LWS Name = "lws"
 
 	// KaiScheduler enables Kai Scheduler integration.
-	// The configuration override is merged with API auto-detection. Kai Scheduler
-	// must be installed and serve scheduling.run.ai/v2 Queue resources.
 	//
 	// Owner: @julienmancuso
 	// Experimental since: v0.5.0
 	// Beta since: N/A
 	// GA since: N/A
-	// Default: false
+	// Configuration: orchestrators.kaiScheduler.enabled
+	// Auto-detection: scheduling.run.ai API group
+	// Requires: Kai Scheduler serving scheduling.run.ai/v2 Queue resources
+	// Default: true when the scheduling.run.ai API group is detected; false otherwise
 	KaiScheduler Name = "kaiScheduler"
 
 	// VolcanoScheduler injects Volcano scheduler settings into Grove PodCliqueSets.
-	// It is opt-in and requires Volcano to serve scheduling.volcano.sh/v1beta1.
 	//
 	// Owner: @xianlubird
 	// Experimental since: v1.4.0
 	// Beta since: N/A
 	// GA since: N/A
+	// Configuration: orchestrators.volcanoScheduler.enabled
+	// Auto-detection: N/A; API availability is verified when explicitly enabled
+	// Requires: Volcano serving scheduling.volcano.sh/v1beta1
 	// Default: false
 	VolcanoScheduler Name = "volcanoScheduler"
 
 	// DRA enables Dynamic Resource Allocation using resource.k8s.io/v1.
-	// The configuration override is merged with API auto-detection. This optional
-	// gate requires Kubernetes 1.34 or later, where the v1 API is available.
 	//
 	// Owner: @julienmancuso
 	// Experimental since: v1.2.0
 	// Beta since: N/A
 	// GA since: N/A
-	// Default: false
+	// Configuration: dra.enabled
+	// Auto-detection: resource.k8s.io/v1 API
+	// Requires: Kubernetes 1.34 or later
+	// Default: true when resource.k8s.io/v1 is detected; false otherwise
 	DRA Name = "dra"
 
 	// Istio enables Istio DestinationRule reconciliation.
-	// The configuration override is merged with API auto-detection. Istio must be
-	// installed and serve networking.istio.io/v1beta1 DestinationRule resources.
 	//
 	// Owner: @atchernych
 	// Experimental since: N/A
 	// Beta since: N/A
 	// GA since: v1.2.0
-	// Default: false
+	// Configuration: serviceMesh.provider=istio and serviceMesh.enabled
+	// Auto-detection: networking.istio.io/v1beta1 DestinationRule resource
+	// Requires: Istio serving networking.istio.io/v1beta1 DestinationRule resources
+	// Default: true when provider is istio and DestinationRule is detected; false otherwise
 	Istio Name = "istio"
 
 	// GPUDiscovery enables automatic GPU hardware discovery.
@@ -116,6 +130,10 @@ const (
 	// Experimental since: N/A
 	// Beta since: N/A
 	// GA since: v1.0.0
+	// Configuration: gpu.discoveryEnabled in namespace-restricted mode;
+	// cluster-wide mode always enables the gate
+	// Auto-detection: N/A
+	// Requires: N/A
 	// Default: true, since v1.0.0
 	GPUDiscovery Name = "gpuDiscovery"
 )
@@ -226,6 +244,7 @@ func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool
 	return detectAPIGroup(ctx, mgr, "inference.networking.k8s.io", "")
 }
 
+// resolve uses auto-detection when unset, disables on false, and requires availability on true.
 func resolve(configured *bool, available bool, unavailableMessage string) (bool, error) {
 	if configured == nil {
 		return available, nil
