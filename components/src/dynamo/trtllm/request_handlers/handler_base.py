@@ -1144,14 +1144,16 @@ class HandlerBase(BaseGenerativeHandler):
                     "the installed TensorRT-LLM build has no ConversationParams API (requires a "
                     "release newer than 1.3.0rc20)."
                 )
-        conv_affinity = self._conversation_affinity
+        conv_affinity = (
+            self._conversation_affinity or self._engine_conversation_affinity_override
+        )
 
         # Extract dp_rank from request's routing hints for attention DP routing
         routing = request.get("routing", {})
         dp_rank = routing.get("dp_rank") if routing else None
         conversation_params = None
         scheduling_params = None
-        if conv_affinity or self._engine_conversation_affinity_override:
+        if conv_affinity:
             # Let the engine pick the rank from the conversation id (agent_context.session_id);
             # do NOT force a rank (an explicit rank is honored before affinity and bypasses it).
             conversation_params = conversation_params_for(
