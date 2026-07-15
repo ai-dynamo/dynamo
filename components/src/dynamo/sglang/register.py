@@ -13,6 +13,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.image_tokenization import IMAGE_TOKENIZATION_SPEC_RUNTIME_KEY
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
@@ -33,6 +34,7 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.image_tokenization import get_sglang_image_tokenization_spec
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
@@ -403,6 +405,17 @@ async def _get_runtime_config(
                 "Failed to attach SGLang worker group metadata to registration: %s",
                 e,
             )
+
+    image_tokenization_spec = get_sglang_image_tokenization_spec(engine)
+    if image_tokenization_spec is not None:
+        runtime_config.set_engine_specific(
+            IMAGE_TOKENIZATION_SPEC_RUNTIME_KEY,
+            json.dumps(image_tokenization_spec.value),
+        )
+        logging.info(
+            "Published SGLang image-tokenization contract: %s",
+            image_tokenization_spec.value,
+        )
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)

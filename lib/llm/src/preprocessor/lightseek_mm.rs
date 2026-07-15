@@ -9,12 +9,15 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
-use llm_multimodal::vision::{PreProcessorConfig, VisionPreProcessor, VisionProcessorRegistry};
+use llm_multimodal::vision::{
+    PreProcessorConfig, Qwen2VLProcessor, Qwen3VLProcessor, VisionPreProcessor,
+    VisionProcessorRegistry,
+};
 use llm_multimodal::{ModelMetadata, ModelRegistry};
 use llm_tokenizer::traits::Tokenizer;
 use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTokens};
 
-use crate::protocols::TokenIdType;
+use crate::{local_model::runtime_config::ImageTokenizationSpec, protocols::TokenIdType};
 
 /// No-op `Tokenizer` impl used when a model directory has no `tokenizer.json`
 /// (e.g. Kimi-K2.5 ships `tiktoken.model` instead of an HF fast tokenizer).
@@ -65,122 +68,23 @@ impl Tokenizer for NullTokenizer {
     }
 }
 
-// Both registries borrow processor refs that callers hold across requests,
-// so they must outlive every consumer — `LazyLock` gives them `'static`.
-static REGISTRY: LazyLock<VisionProcessorRegistry> =
+// Routing keeps the broad best-effort registry that predates the usage metric.
+// Usage counting has a separate semantic binding below: tightening metric
+// exactness must not remove MM-aware routing support for other families.
+static ROUTING_REGISTRY: LazyLock<VisionProcessorRegistry> =
     LazyLock::new(VisionProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
-/// Whether this model's analytic `count_tokens` output can be trusted as a
-/// usage/billing figure — i.e. it provably equals what the backend tokenizes.
-///
-/// The `llm-multimodal` crate computes the count differently per family:
-/// Qwen3 rebuilds its processor from the loaded config (honors it), but Kimi's
-/// `calculate_num_tokens` *ignores* the passed config and uses the processor's
-/// hardcoded defaults. So a count is trustworthy only when the crate's math is
-/// actually driven by (or coincides with) the model's real config. See the
-/// DIS-2313 scoping finding for the cross-version experiment behind these rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenCountTrust {
-    /// `count_tokens` matches the backend's tokenization; safe to emit.
-    Trusted,
-    /// Family/config not verified against the backend; caller should skip
-    /// emission and bump `image_tokens_skipped_total{reason="unverified_family"}`.
-    Unverified,
-}
-
-// `llm-multimodal 1.7.0` KimiK25Processor defaults (private in the crate; the
-// counter uses these, ignoring per-model config). A Kimi model is only trusted
-// when its real `media_proc_cfg` equals every one of these — else the crate
-// would silently count with the wrong values. Bump the crate => re-verify here.
-const KIMI_CRATE_IN_PATCH_LIMIT: u64 = 16384;
-const KIMI_CRATE_PATCH_LIMIT_ON_ONE_SIDE: u64 = 512;
-const KIMI_CRATE_PATCH_SIZE: u64 = 14;
-const KIMI_CRATE_MERGE_SIZE: u64 = 2;
-
-/// Resolve token-count trust once at construction from the family + parsed config.
-fn resolve_token_count_trust(
-    model_id: &str,
-    model_type: Option<&str>,
-    config: &PreProcessorConfig,
-) -> TokenCountTrust {
-    // Classify by the authoritative `model_type` (from config.json) when present;
-    // fall back to `model_id` only when it's absent. `model_id` can be an
-    // arbitrary local path (`mdc.source_path()`), so its directory names must NOT
-    // drive trust — e.g. a Kimi model under `/models/qwen3-tests/` must not inherit
-    // Qwen3's blanket trust and skip the Kimi config check.
-    let hint = match model_type {
-        Some(mt) if !mt.trim().is_empty() => mt.to_ascii_lowercase(),
-        _ => model_id.to_ascii_lowercase(),
-    };
-
-    // Kimi first — the fragile family: the crate IGNORES its config and counts with
-    // hardcoded defaults, so trust iff the model's real `media_proc_cfg` equals
-    // those defaults exactly. Verified for nvidia/Kimi-K2.5-NVFP4 and Kimi-K2.6-NVFP4
-    // — both `model_type kimi_k25`, identical `media_proc_cfg` on all 4 params, and
-    // byte-identical `media_utils.py` (the resize/token math). `media_proc_cfg` lands
-    // in `config.extra` via serde(flatten); missing => Unverified (conservative).
-    if hint.contains("kimi") {
-        let media = config.extra.get("media_proc_cfg");
-        let get = |k: &str| media.and_then(|m| m.get(k)).and_then(|v| v.as_u64());
-        let matches = get("in_patch_limit") == Some(KIMI_CRATE_IN_PATCH_LIMIT)
-            && get("patch_limit_on_one_side") == Some(KIMI_CRATE_PATCH_LIMIT_ON_ONE_SIDE)
-            && get("patch_size") == Some(KIMI_CRATE_PATCH_SIZE)
-            && get("merge_kernel_size") == Some(KIMI_CRATE_MERGE_SIZE)
-            // The crate has no `fixed_output_tokens` field, so a non-null value
-            // would diverge. `null`/absent is the only trustworthy case.
-            && media
-                .and_then(|m| m.get("fixed_output_tokens"))
-                .map(|v| v.is_null())
-                .unwrap_or(true);
-        return if matches {
-            TokenCountTrust::Trusted
-        } else {
-            TokenCountTrust::Unverified
-        };
-    }
-    // Qwen3 / Qwen3.5 (incl. qwen3_vl, qwen3_5_moe): the crate honors the config
-    // AND its built-in defaults coincide with the shipped `size.{shortest,longest}_edge`,
-    // so the count is robust even if a config strips the limits.
-    if hint.contains("qwen3") {
-        return TokenCountTrust::Trusted;
-    }
-    // Qwen2 / Qwen2.5: the crate honors the config, but its defaults differ from
-    // HF's, so the count is right only when the config explicitly pins the limits.
-    if hint.contains("qwen2") {
-        return if config.min_pixels.is_some() && config.max_pixels.is_some() {
-            TokenCountTrust::Trusted
-        } else {
-            TokenCountTrust::Unverified
-        };
-    }
-
-    // LLaVA / Llama-4 / Phi-3 / unknown families: token-math parity not verified
-    // for usage purposes — skip rather than emit a possibly-wrong number.
-    TokenCountTrust::Unverified
-}
-
-/// Maps `(width, height) → num_image_tokens` for a single model using the
-/// model's HF `preprocessor_config.json`.
-pub struct LightseekMmCounter {
+/// Best-effort image-token expansion used only to build the router's synthetic
+/// token sequence. This deliberately remains broader than the exact usage
+/// counter and is never an authority for billing/usage metrics.
+pub struct RoutingImageTokenCounter {
     processor: &'static dyn VisionPreProcessor,
     config: PreProcessorConfig,
     model_id: String,
-    token_count_trust: TokenCountTrust,
 }
 
-impl LightseekMmCounter {
-    /// Returns `Err` when `preprocessor_config.json` is missing or unparseable
-    /// or no registered processor matches `model_id` / `model_type`. Callers
-    /// should treat the error as "MM-aware routing disabled for this model"
-    /// rather than failing the request.
-    ///
-    /// Uses sync filesystem I/O. This is intentional: `try_new` is called
-    /// once per model during preprocessor construction (a startup-time path
-    /// already guarded by sync setup like `PromptFormatter::from_mdc` and
-    /// `ModelDeploymentCard::tokenizer`), not from a per-request hot path.
-    /// Switching to async would cascade through `OpenAIPreprocessor::new`
-    /// and every caller of it.
+impl RoutingImageTokenCounter {
     pub fn try_new(model_id: &str, model_type: Option<&str>, model_dir: &Path) -> Result<Self> {
         let cfg_path = model_dir.join("preprocessor_config.json");
         let json = std::fs::read_to_string(&cfg_path).with_context(|| {
@@ -195,22 +99,16 @@ impl LightseekMmCounter {
                 cfg_path.display()
             )
         })?;
-
-        let processor = REGISTRY.find(model_id, model_type).ok_or_else(|| {
+        let processor = ROUTING_REGISTRY.find(model_id, model_type).ok_or_else(|| {
             anyhow!(
-                "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
-                model_id,
-                model_type
+                "mm-routing: no image processor registered for model_id={model_id:?} model_type={model_type:?}"
             )
         })?;
-
-        let token_count_trust = resolve_token_count_trust(model_id, model_type, &config);
 
         Ok(Self {
             processor,
             config,
             model_id: model_id.to_string(),
-            token_count_trust,
         })
     }
 
@@ -222,10 +120,225 @@ impl LightseekMmCounter {
     pub fn model_id(&self) -> &str {
         &self.model_id
     }
+}
 
-    /// Whether this model's `count_tokens` output is a trustworthy usage figure.
-    pub fn token_count_trust(&self) -> TokenCountTrust {
-        self.token_count_trust
+/// Typed MoonViT-v1 parameters parsed from `media_proc_cfg`.
+///
+/// This is intentionally independent of `llm-multimodal`'s Kimi processor:
+/// version 1.7.0 constructs that processor with crate defaults and ignores the
+/// nested per-model values. Keeping the complete count-affecting schema here
+/// lets the semantic contract work for non-default configs without an
+/// artifact allowlist or file digest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MoonvitV1Config {
+    patch_size: usize,
+    merge_kernel_size: usize,
+    in_patch_limit: usize,
+    patch_limit_on_one_side: usize,
+    fixed_output_tokens: Option<usize>,
+}
+
+impl MoonvitV1Config {
+    fn try_from_preprocessor_config(config: &PreProcessorConfig) -> Result<Self> {
+        let media = config
+            .extra
+            .get("media_proc_cfg")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| anyhow!("moonvit_v1 requires an object media_proc_cfg"))?;
+
+        let required_usize = |key: &str| -> Result<usize> {
+            let value = media
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow!("moonvit_v1 requires integer media_proc_cfg.{key}"))?;
+            let value = usize::try_from(value)
+                .with_context(|| format!("media_proc_cfg.{key} does not fit usize"))?;
+            if value == 0 {
+                return Err(anyhow!("media_proc_cfg.{key} must be greater than zero"));
+            }
+            Ok(value)
+        };
+
+        let fixed_output_tokens = match media.get("fixed_output_tokens") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => {
+                let value = value.as_u64().ok_or_else(|| {
+                    anyhow!("media_proc_cfg.fixed_output_tokens must be an integer or null")
+                })?;
+                Some(
+                    usize::try_from(value)
+                        .context("media_proc_cfg.fixed_output_tokens does not fit usize")?,
+                )
+            }
+        };
+
+        let result = Self {
+            patch_size: required_usize("patch_size")?,
+            merge_kernel_size: required_usize("merge_kernel_size")?,
+            in_patch_limit: required_usize("in_patch_limit")?,
+            patch_limit_on_one_side: required_usize("patch_limit_on_one_side")?,
+            fixed_output_tokens,
+        };
+        result
+            .patch_size
+            .checked_mul(result.merge_kernel_size)
+            .ok_or_else(|| anyhow!("moonvit_v1 patch/merge factor overflows usize"))?;
+        result
+            .patch_limit_on_one_side
+            .checked_mul(result.patch_size)
+            .ok_or_else(|| anyhow!("moonvit_v1 one-side pixel limit overflows usize"))?;
+        Ok(result)
+    }
+
+    /// Exact port of MoonViT's versioned `navit_resize_image` token math.
+    fn count_tokens(self, width: u32, height: u32) -> usize {
+        if let Some(fixed) = self.fixed_output_tokens {
+            return fixed;
+        }
+
+        let width = width as usize;
+        let height = height as usize;
+        let patches_w = (width / self.patch_size).max(1) as f64;
+        let patches_h = (height / self.patch_size).max(1) as f64;
+        let s1 = (self.in_patch_limit as f64 / (patches_w * patches_h)).sqrt();
+        let max_side_pixels = self.patch_limit_on_one_side * self.patch_size;
+        let s2 = max_side_pixels as f64 / width as f64;
+        let s3 = max_side_pixels as f64 / height as f64;
+        let scale = 1.0_f64.min(s1).min(s2).min(s3);
+        let new_width = ((width as f64 * scale) as usize)
+            .max(1)
+            .min(max_side_pixels);
+        let new_height = ((height as f64 * scale) as usize)
+            .max(1)
+            .min(max_side_pixels);
+        let factor = self.patch_size * self.merge_kernel_size;
+
+        new_width.div_ceil(factor) * new_height.div_ceil(factor)
+    }
+}
+
+enum ExactCounterImpl {
+    Qwen2(Qwen2VLProcessor),
+    Qwen3(Qwen3VLProcessor),
+    Moonvit(MoonvitV1Config),
+}
+
+/// A single, typed binding between the worker's declared semantic algorithm,
+/// the effective model config, and the corresponding frontend implementation.
+/// Selection and trust therefore cannot disagree.
+struct ProcessorBinding {
+    spec: ImageTokenizationSpec,
+    config: PreProcessorConfig,
+    counter: ExactCounterImpl,
+}
+
+impl ProcessorBinding {
+    fn try_new(spec: ImageTokenizationSpec, config: PreProcessorConfig) -> Result<Self> {
+        let counter = match spec {
+            ImageTokenizationSpec::Qwen2VlV1 => {
+                if config.do_resize == Some(false) {
+                    return Err(anyhow!(
+                        "qwen2_vl_v1 with do_resize=false is not implemented exactly"
+                    ));
+                }
+                if config.min_pixels.is_none() || config.max_pixels.is_none() {
+                    return Err(anyhow!(
+                        "qwen2_vl_v1 requires explicit min_pixels and max_pixels"
+                    ));
+                }
+                ExactCounterImpl::Qwen2(Qwen2VLProcessor::new())
+            }
+            ImageTokenizationSpec::Qwen3VlV1 => {
+                if config.do_resize == Some(false) {
+                    return Err(anyhow!(
+                        "qwen3_vl_v1 with do_resize=false is not implemented exactly"
+                    ));
+                }
+                ExactCounterImpl::Qwen3(Qwen3VLProcessor::new())
+            }
+            ImageTokenizationSpec::MoonvitV1 => {
+                ExactCounterImpl::Moonvit(MoonvitV1Config::try_from_preprocessor_config(&config)?)
+            }
+        };
+
+        Ok(Self {
+            spec,
+            config,
+            counter,
+        })
+    }
+
+    fn count_tokens(&self, width: u32, height: u32) -> usize {
+        match &self.counter {
+            ExactCounterImpl::Qwen2(processor) => {
+                processor.calculate_num_tokens(width, height, &self.config)
+            }
+            ExactCounterImpl::Qwen3(processor) => {
+                processor.calculate_num_tokens(width, height, &self.config)
+            }
+            ExactCounterImpl::Moonvit(config) => config.count_tokens(width, height),
+        }
+    }
+}
+
+/// Exact `(width, height) -> image tokens` counter for one worker-attested
+/// semantic processor contract.
+pub struct ExactImageTokenCounter {
+    binding: ProcessorBinding,
+    model_id: String,
+}
+
+impl ExactImageTokenCounter {
+    /// Returns `Err` when `preprocessor_config.json` is missing or unparseable
+    /// or the worker's semantic spec cannot represent the effective config.
+    /// Callers should withhold exact image-token usage rather than failing the
+    /// request.
+    ///
+    /// Uses sync filesystem I/O. This is intentional: `try_new` is called
+    /// once per model during preprocessor construction (a startup-time path
+    /// already guarded by sync setup like `PromptFormatter::from_mdc` and
+    /// `ModelDeploymentCard::tokenizer`), not from a per-request hot path.
+    /// Switching to async would cascade through `OpenAIPreprocessor::new`
+    /// and every caller of it.
+    pub fn try_new(model_id: &str, spec: ImageTokenizationSpec, model_dir: &Path) -> Result<Self> {
+        let cfg_path = model_dir.join("preprocessor_config.json");
+        let json = std::fs::read_to_string(&cfg_path).with_context(|| {
+            format!(
+                "mm-routing: failed to read preprocessor_config.json at {}",
+                cfg_path.display()
+            )
+        })?;
+        let config = PreProcessorConfig::from_json(&json).with_context(|| {
+            format!(
+                "mm-routing: failed to parse preprocessor_config.json at {}",
+                cfg_path.display()
+            )
+        })?;
+
+        let binding = ProcessorBinding::try_new(spec, config).with_context(|| {
+            format!(
+                "mm-routing: image tokenization spec {} is incompatible with {}",
+                spec.as_str(),
+                cfg_path.display()
+            )
+        })?;
+
+        Ok(Self {
+            binding,
+            model_id: model_id.to_string(),
+        })
+    }
+
+    pub fn count_tokens(&self, width: u32, height: u32) -> usize {
+        self.binding.count_tokens(width, height)
+    }
+
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    pub fn spec(&self) -> ImageTokenizationSpec {
+        self.binding.spec
     }
 }
 
@@ -431,157 +544,133 @@ fn extract_bos_token_from_tokenizer_config(cfg: &serde_json::Value) -> Option<St
 
 #[cfg(test)]
 mod tests {
-    //! Contract tests against the upstream `llm-multimodal` image-processor
-    //! registry. Pin the behavior `OpenAIPreprocessor::new_with_parts`
-    //! relies on so a future upstream matcher change shows up here instead
-    //! of as a silent runtime fallback to text-prefix-only routing.
     use super::*;
 
-    #[test]
-    fn image_processor_registry_resolves_qwen3vl_via_path_substring() {
-        // HF id and any path containing "qwen3-vl" (or its underscore variant)
-        // match without a model_type hint — the existing happy path.
-        assert!(REGISTRY.find("Qwen/Qwen3-VL-2B-Instruct", None).is_some());
-        assert!(REGISTRY.find("/models/Qwen3-VL-2B/", None).is_some());
+    fn cfg(json: &str) -> PreProcessorConfig {
+        PreProcessorConfig::from_json(json).unwrap()
+    }
+
+    fn moonvit_json(in_patch_limit: usize, fixed: &str) -> String {
+        format!(
+            r#"{{"media_proc_cfg":{{"in_patch_limit":{in_patch_limit},
+                "patch_size":14,"merge_kernel_size":2,
+                "patch_limit_on_one_side":512,"fixed_output_tokens":{fixed}}}}}"#
+        )
     }
 
     #[test]
-    fn image_processor_registry_uses_model_type_fallback() {
-        // Custom dir without a family substring would fail substring match;
-        // the model_type fallback parameter rescues those cases.
-        assert!(REGISTRY.find("/models/my-finetune", None).is_none());
+    fn routing_registry_remains_broad_and_model_type_aware() {
         assert!(
-            REGISTRY
-                .find("/models/my-finetune", Some("qwen3_vl"))
+            ROUTING_REGISTRY
+                .find("Qwen/Qwen3-VL-2B-Instruct", None)
+                .is_some()
+        );
+        assert!(
+            ROUTING_REGISTRY
+                .find("/models/custom-finetune", Some("qwen3_vl"))
+                .is_some()
+        );
+        assert!(
+            ROUTING_REGISTRY
+                .find("llava-hf/llava-1.5-7b-hf", Some("llava"))
                 .is_some()
         );
     }
 
-    /// Coverage table for the VLM families we claim to support. Each row is
-    /// a `(family_label, hf_id, model_type)` triple. A row "passes" when the
-    /// upstream registry can match it via either the HF id substring OR the
-    /// `model_type` config field. A failure here means either:
-    ///
-    /// - the documented family lost coverage in a smg release (need to
-    ///   pin or pick up the fix upstream), or
-    /// - we should remove that family from our supported-list claim.
-    ///
-    /// Update this list whenever we add a new supported family in docs.
     #[test]
-    fn image_processor_registry_covers_documented_families() {
-        // (family, hf_id, model_type)
-        const FAMILIES: &[(&str, &str, &str)] = &[
-            ("Qwen3-VL", "Qwen/Qwen3-VL-2B-Instruct", "qwen3_vl"),
-            ("Qwen2-VL", "Qwen/Qwen2-VL-7B-Instruct", "qwen2_vl"),
-            ("Qwen2.5-VL", "Qwen/Qwen2.5-VL-7B-Instruct", "qwen2_5_vl"),
-            (
-                "LLaVA-NeXT",
-                "llava-hf/llava-v1.6-mistral-7b-hf",
-                "llava_next",
-            ),
-            ("LLaVA-1.5", "llava-hf/llava-1.5-7b-hf", "llava"),
-            ("Llama-4", "meta-llama/Llama-4-Scout-17B-16E", "llama4"),
-            ("Kimi-K2.5", "moonshotai/Kimi-K2.5-Instruct", "kimi_k2_5"),
-            ("Kimi-K2.6", "moonshotai/Kimi-K2.6-Instruct", "kimi_k2_6"),
-            ("Qwen3.5", "Qwen/Qwen3.5-0.8B", "qwen3_5"),
-            ("Qwen3.6", "Qwen/Qwen3.6-35B-A3B", "qwen3_6"),
-        ];
+    fn semantic_spec_selects_counter_independent_of_model_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("preprocessor_config.json"),
+            moonvit_json(16384, "null"),
+        )
+        .unwrap();
 
-        let mut missing: Vec<&str> = Vec::new();
-        for (family, hf_id, model_type) in FAMILIES {
-            let by_id = REGISTRY.find(hf_id, None).is_some();
-            let by_type = REGISTRY.find("/local/finetune", Some(model_type)).is_some();
-            if !(by_id || by_type) {
-                missing.push(family);
-            }
-        }
+        // The arbitrary source path says Qwen, but the worker's semantic
+        // capability is the sole selector. MoonViT 64x64 -> ceil(64/28)^2 = 9.
+        let counter = ExactImageTokenCounter::try_new(
+            "/models/qwen3-tests/custom",
+            ImageTokenizationSpec::MoonvitV1,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(counter.spec(), ImageTokenizationSpec::MoonvitV1);
+        assert_eq!(counter.count_tokens(64, 64), 9);
+    }
+
+    #[test]
+    fn moonvit_v1_honors_effective_config_and_fixed_output() {
+        let defaults = ProcessorBinding::try_new(
+            ImageTokenizationSpec::MoonvitV1,
+            cfg(&moonvit_json(16384, "null")),
+        )
+        .unwrap();
+        let lower_limit = ProcessorBinding::try_new(
+            ImageTokenizationSpec::MoonvitV1,
+            cfg(&moonvit_json(4096, "null")),
+        )
+        .unwrap();
+        let fixed = ProcessorBinding::try_new(
+            ImageTokenizationSpec::MoonvitV1,
+            cfg(&moonvit_json(4096, "256")),
+        )
+        .unwrap();
+
+        assert_eq!(defaults.count_tokens(1024, 1024), 1369);
+        assert_eq!(lower_limit.count_tokens(1024, 1024), 1089);
+        assert_eq!(fixed.count_tokens(1024, 1024), 256);
+    }
+
+    #[test]
+    fn semantic_bindings_fail_closed_on_unrepresented_config() {
+        let qwen2_no_resize = cfg(r#"{"do_resize":false,"patch_size":14,"merge_size":2,
+                "temporal_patch_size":2,"min_pixels":3136,
+                "max_pixels":12845056}"#);
         assert!(
-            missing.is_empty(),
-            "image-processor registry has no processor for: {:?}. \
-             Either pick up an upstream release that registers these, or trim \
-             the supported-families list in docs.",
-            missing
+            ProcessorBinding::try_new(ImageTokenizationSpec::Qwen2VlV1, qwen2_no_resize)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("do_resize=false")
+        );
+
+        assert!(
+            ProcessorBinding::try_new(ImageTokenizationSpec::Qwen2VlV1, cfg("{}"))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("explicit min_pixels")
+        );
+
+        assert!(
+            ProcessorBinding::try_new(
+                ImageTokenizationSpec::MoonvitV1,
+                cfg(r#"{"media_proc_cfg":{"patch_size":14}}"#),
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("merge_kernel_size")
         );
     }
 
-    /// The image-token trust gate that PR2's usage metric depends on. Kimi is the
-    /// sharp case: the crate ignores its config, so trust hinges on the real
-    /// `media_proc_cfg` matching the crate defaults exactly.
     #[test]
-    fn token_count_trust_gates_by_family_and_config() {
-        let cfg = |json: &str| PreProcessorConfig::from_json(json).unwrap();
+    fn qwen_specs_use_their_declared_algorithms() {
+        let qwen2 = ProcessorBinding::try_new(
+            ImageTokenizationSpec::Qwen2VlV1,
+            cfg(r#"{"patch_size":14,"merge_size":2,"temporal_patch_size":2,
+                    "min_pixels":3136,"max_pixels":12845056}"#),
+        )
+        .unwrap();
+        let qwen3 = ProcessorBinding::try_new(
+            ImageTokenizationSpec::Qwen3VlV1,
+            cfg(r#"{"patch_size":16,"merge_size":2,"temporal_patch_size":2,
+                    "size":{"shortest_edge":65536,"longest_edge":16777216}}"#),
+        )
+        .unwrap();
 
-        // Kimi with config == crate defaults (nvidia/Kimi-K2.5-NVFP4) -> Trusted.
-        let kimi_ok = cfg(
-            r#"{"media_proc_cfg":{"in_patch_limit":16384,"patch_size":14,
-                "merge_kernel_size":2,"patch_limit_on_one_side":512,
-                "fixed_output_tokens":null}}"#,
-        );
-        assert_eq!(
-            resolve_token_count_trust("moonshotai/Kimi-K2.5", Some("kimi_k25"), &kimi_ok),
-            TokenCountTrust::Trusted
-        );
-
-        // k2.6 ships the identical config + processor (model_type still kimi_k25),
-        // so the same matching config is trusted with no code change.
-        assert_eq!(
-            resolve_token_count_trust("nvidia/Kimi-K2.6-NVFP4", Some("kimi_k25"), &kimi_ok),
-            TokenCountTrust::Trusted
-        );
-
-        // Kimi whose in_patch_limit drifts from the crate default -> Unverified
-        // (the crate would silently count with 16384 anyway).
-        let kimi_drift = cfg(r#"{"media_proc_cfg":{"in_patch_limit":8192,"patch_size":14,
-                "merge_kernel_size":2,"patch_limit_on_one_side":512}}"#);
-        assert_eq!(
-            resolve_token_count_trust("moonshotai/Kimi-K2.6", Some("kimi_k25"), &kimi_drift),
-            TokenCountTrust::Unverified
-        );
-
-        // A Kimi model whose local dir path contains "qwen3" must still be
-        // Kimi-gated (classified by the authoritative model_type, not the
-        // arbitrary source path) — a drifted config is NOT falsely trusted.
-        assert_eq!(
-            resolve_token_count_trust(
-                "/models/qwen3-tests/kimi-k2.5",
-                Some("kimi_k25"),
-                &kimi_drift
-            ),
-            TokenCountTrust::Unverified
-        );
-
-        // Kimi that pins fixed_output_tokens -> Unverified (crate can't represent it).
-        let kimi_fixed = cfg(
-            r#"{"media_proc_cfg":{"in_patch_limit":16384,"patch_size":14,
-                "merge_kernel_size":2,"patch_limit_on_one_side":512,
-                "fixed_output_tokens":256}}"#,
-        );
-        assert_eq!(
-            resolve_token_count_trust("kimi-k2", Some("kimi_k25"), &kimi_fixed),
-            TokenCountTrust::Unverified
-        );
-
-        // Qwen3/3.5: crate honors config and defaults coincide -> always Trusted.
-        assert_eq!(
-            resolve_token_count_trust("Qwen/Qwen3.5-397B", Some("qwen3_5_moe"), &cfg("{}")),
-            TokenCountTrust::Trusted
-        );
-
-        // Qwen2.5: Trusted only with explicit pixel limits.
-        let qwen2_pixels = cfg(r#"{"min_pixels":3136,"max_pixels":12845056}"#);
-        assert_eq!(
-            resolve_token_count_trust("Qwen/Qwen2.5-VL-7B", Some("qwen2_5_vl"), &qwen2_pixels),
-            TokenCountTrust::Trusted
-        );
-        assert_eq!(
-            resolve_token_count_trust("Qwen/Qwen2.5-VL-7B", Some("qwen2_5_vl"), &cfg("{}")),
-            TokenCountTrust::Unverified
-        );
-
-        // Unknown / unverified family -> Unverified.
-        assert_eq!(
-            resolve_token_count_trust("llava-hf/llava-1.5-7b-hf", Some("llava"), &cfg("{}")),
-            TokenCountTrust::Unverified
-        );
+        assert_eq!(qwen2.spec, ImageTokenizationSpec::Qwen2VlV1);
+        assert_eq!(qwen3.spec, ImageTokenizationSpec::Qwen3VlV1);
+        assert_ne!(qwen2.count_tokens(64, 64), qwen3.count_tokens(64, 64));
     }
 }

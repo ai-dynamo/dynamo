@@ -18,23 +18,26 @@ pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
 /// carry `usage` to the payload `DeltaAggregator` and is never sent to the client.
 pub const ANNOTATION_PAYLOAD_USAGE: &str = "payload_usage";
 
-/// Why a request's analytic image-token count was withheld. Emitted as the
+/// Why a request's exact image-token count was withheld. Emitted as the
 /// `reason` label on `image_tokens_skipped_total` so operators can see *why* a
 /// model has no image-token data instead of a silently-missing series. Bounded
 /// set (never a URL / config value) to keep label cardinality fixed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageTokenSkipReason {
-    /// Model family/config not verified against the backend tokenization
-    /// (e.g. the crate's analytic count would use values that don't match the
-    /// model's real processor config).
+    /// The worker did not advertise a supported semantic processor contract,
+    /// or the frontend could not represent the effective processor config.
     UnverifiedFamily,
     /// Not every image's dimensions resolved, so a summed count would be a
     /// plausible-but-wrong partial total.
     PartialResolution,
     /// Request carried `mm_processor_kwargs`, which the backend applies but the
-    /// analytic counter cannot see — the estimate can't be trusted.
+    /// frontend counter cannot see — the result can't be trusted.
     RequestOverride,
+    /// The frontend only fetched dimensions while the worker later fetched the
+    /// URL independently, so mutable/content-negotiated URLs could yield
+    /// different image bytes.
+    UrlPassthrough,
 }
 
 impl ImageTokenSkipReason {
@@ -44,6 +47,7 @@ impl ImageTokenSkipReason {
             Self::UnverifiedFamily => "unverified_family",
             Self::PartialResolution => "partial_resolution",
             Self::RequestOverride => "request_override",
+            Self::UrlPassthrough => "url_passthrough",
         }
     }
 }
@@ -63,7 +67,7 @@ pub struct LLMMetricAnnotation {
     /// Number of `audio_url` content parts in the request (0 for text-only).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub audio_count: usize,
-    /// Analytic vision-token count for the request's images, set by the Rust
+    /// Exact vision-token count for the request's images, set by the Rust
     /// frontend only when it can be trusted as a usage figure (see the guard in
     /// `preprocessor::resolve_image_token_usage`). `None` = not applicable
     /// (text-only), guard-skipped (see `image_tokens_skip_reason`), or a frontend
@@ -147,6 +151,7 @@ mod tests {
             ImageTokenSkipReason::UnverifiedFamily,
             ImageTokenSkipReason::PartialResolution,
             ImageTokenSkipReason::RequestOverride,
+            ImageTokenSkipReason::UrlPassthrough,
         ] {
             let serde_form = serde_json::to_string(&reason).unwrap();
             // to_string wraps in quotes: "unverified_family"

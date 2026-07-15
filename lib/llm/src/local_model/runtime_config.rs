@@ -55,6 +55,57 @@ pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// Worker-advertised semantic contract for the image-tokenization algorithm
+/// used by the running engine.
+///
+/// The frontend must not infer this from a model id, `model_type`, or artifact
+/// file contents: custom processors can reuse all three while changing the
+/// token math. Backends publish one of [`ImageTokenizationSpec`]'s stable wire
+/// values only after resolving the processor implementation they actually
+/// started.
+pub const IMAGE_TOKENIZATION_SPEC_CAPABILITY: &str = "image_tokenization_spec";
+
+/// Versioned image-tokenization algorithms the Rust frontend can reproduce
+/// exactly from image dimensions and the model's processor configuration.
+///
+/// Adding a variant is a compatibility promise: its wire value and math must
+/// remain stable. Changed semantics require a new versioned variant.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageTokenizationSpec {
+    /// Hugging Face Qwen2-VL / Qwen2.5-VL smart-resize semantics.
+    Qwen2VlV1,
+    /// Hugging Face Qwen3-VL / Qwen3.5-VL smart-resize semantics.
+    Qwen3VlV1,
+    /// MoonViT NaViT resize/pad semantics used by Kimi-K2.5/K2.6.
+    MoonvitV1,
+}
+
+impl ImageTokenizationSpec {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Qwen2VlV1 => "qwen2_vl_v1",
+            Self::Qwen3VlV1 => "qwen3_vl_v1",
+            Self::MoonvitV1 => "moonvit_v1",
+        }
+    }
+}
+
+impl FromStr for ImageTokenizationSpec {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "qwen2_vl_v1" => Ok(Self::Qwen2VlV1),
+            "qwen3_vl_v1" => Ok(Self::Qwen3VlV1),
+            "moonvit_v1" => Ok(Self::MoonvitV1),
+            _ => Err(format!(
+                "invalid image tokenization spec '{value}' (expected qwen2_vl_v1, qwen3_vl_v1, or moonvit_v1)"
+            )),
+        }
+    }
+}
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -651,6 +702,43 @@ mod tests {
         assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
         let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
+    }
+
+    #[test]
+    fn image_tokenization_spec_has_stable_wire_values() {
+        for (spec, wire) in [
+            (ImageTokenizationSpec::Qwen2VlV1, "qwen2_vl_v1"),
+            (ImageTokenizationSpec::Qwen3VlV1, "qwen3_vl_v1"),
+            (ImageTokenizationSpec::MoonvitV1, "moonvit_v1"),
+        ] {
+            assert_eq!(spec.as_str(), wire);
+            assert_eq!(wire.parse::<ImageTokenizationSpec>().unwrap(), spec);
+            assert_eq!(serde_json::to_string(&spec).unwrap(), format!("\"{wire}\""));
+        }
+    }
+
+    #[test]
+    fn image_tokenization_spec_runtime_capability_roundtrips() {
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(
+                IMAGE_TOKENIZATION_SPEC_CAPABILITY,
+                ImageTokenizationSpec::MoonvitV1,
+            )
+            .unwrap();
+
+        assert_eq!(
+            config
+                .get_engine_specific::<ImageTokenizationSpec>(IMAGE_TOKENIZATION_SPEC_CAPABILITY)
+                .unwrap(),
+            Some(ImageTokenizationSpec::MoonvitV1)
+        );
+        assert!(
+            ModelRuntimeConfig::default()
+                .get_engine_specific::<ImageTokenizationSpec>(IMAGE_TOKENIZATION_SPEC_CAPABILITY)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

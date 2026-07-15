@@ -52,6 +52,7 @@ from dynamo.common.backend.metrics import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.image_tokenization import IMAGE_TOKENIZATION_SPEC_RUNTIME_KEY
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.llm import (
     ModelInput,
@@ -82,6 +83,7 @@ from .handlers import (
     build_sampling_params,
     get_dp_range_for_worker,
 )
+from .image_tokenization import get_vllm_image_tokenization_spec
 from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
@@ -394,9 +396,19 @@ class VllmLLMEngine(LLMEngine):
         block_size = get_configured_kv_event_block_size(vllm_config)
         self._kv_event_block_size = block_size
 
+        runtime_data: dict[str, Any] = {}
+        image_tokenization_spec = get_vllm_image_tokenization_spec(
+            self.engine_client, vllm_config.model_config
+        )
+        if image_tokenization_spec is not None:
+            runtime_data[
+                IMAGE_TOKENIZATION_SPEC_RUNTIME_KEY
+            ] = image_tokenization_spec.value
+
         return EngineConfig(
             model=self.engine_args.model,
             served_model_name=self._served_model_name,
+            runtime_data=runtime_data or None,
             llm=LlmRegistration(
                 context_length=self._model_max_len,
                 kv_cache_block_size=block_size,

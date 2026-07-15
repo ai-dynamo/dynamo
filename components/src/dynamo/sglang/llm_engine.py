@@ -57,6 +57,7 @@ from dynamo.common.backend.health_check import (
 from dynamo.common.backend.publisher import ComponentSnapshot, KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.image_tokenization import IMAGE_TOKENIZATION_SPEC_RUNTIME_KEY
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
@@ -75,6 +76,7 @@ from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.image_tokenization import get_sglang_image_tokenization_spec
 from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import format_zmq_endpoint
@@ -96,7 +98,9 @@ def _warmup_enabled() -> bool:
 
 
 def _get_runtime_data(
-    server_args, scheduler_info: dict[str, Any] | None = None
+    server_args,
+    scheduler_info: dict[str, Any] | None = None,
+    engine: Any = None,
 ) -> dict[str, Any] | None:
     runtime_data: dict[str, Any] = {}
     worker_group_id = get_sglang_worker_group_id(server_args)
@@ -107,6 +111,12 @@ def _get_runtime_data(
     )
     if offloading_capacity is not None:
         runtime_data[NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY] = offloading_capacity
+    if engine is not None:
+        image_tokenization_spec = get_sglang_image_tokenization_spec(engine)
+        if image_tokenization_spec is not None:
+            runtime_data[
+                IMAGE_TOKENIZATION_SPEC_RUNTIME_KEY
+            ] = image_tokenization_spec.value
     return runtime_data or None
 
 
@@ -244,7 +254,9 @@ class SglangLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
-            runtime_data=_get_runtime_data(self.server_args, scheduler_info),
+            runtime_data=_get_runtime_data(
+                self.server_args, scheduler_info, self.engine
+            ),
             llm=LlmRegistration(
                 context_length=self.server_args.context_length,
                 kv_cache_block_size=page_size,

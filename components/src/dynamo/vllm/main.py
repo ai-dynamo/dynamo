@@ -24,6 +24,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
+from dynamo.common.image_tokenization import IMAGE_TOKENIZATION_SPEC_RUNTIME_KEY
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -59,6 +60,7 @@ from .capacity import (
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .headless import run_dynamo_headless
+from .image_tokenization import get_vllm_image_tokenization_spec
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
@@ -722,6 +724,19 @@ async def register_vllm_model(
     stream_interval = getattr(config.engine_args, "stream_interval", None)
     if stream_interval is not None:
         runtime_config.set_engine_specific("stream_interval", str(stream_interval))
+
+    image_tokenization_spec = get_vllm_image_tokenization_spec(
+        engine_client, vllm_config.model_config
+    )
+    if image_tokenization_spec is not None:
+        runtime_config.set_engine_specific(
+            IMAGE_TOKENIZATION_SPEC_RUNTIME_KEY,
+            json.dumps(image_tokenization_spec.value),
+        )
+        logging.info(
+            "Published vLLM image-tokenization contract: %s",
+            image_tokenization_spec.value,
+        )
 
     spec_decode = get_spec_decode_runtime_data(config, vllm_config)
     if spec_decode is not None:

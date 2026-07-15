@@ -42,6 +42,10 @@ use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 #[cfg(feature = "mm-routing")]
+use crate::local_model::runtime_config::{
+    IMAGE_TOKENIZATION_SPEC_CAPABILITY, ImageTokenizationSpec,
+};
+#[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
@@ -216,9 +220,10 @@ impl MultimodalCounts {
 /// Per-request analytic image-token usage, carried from preprocessing to the
 /// metrics annotation alongside [`MultimodalCounts`]. Image-only; detached from
 /// the MM-routing *decision* (sourced from the per-image counts computed for
-/// every fetched image, not the routing-gated `n_total`), though it still
-/// requires the `mm-routing` feature's counter to exist. `Default` (both `None`)
-/// means "nothing to record": text-only, no counter, or a non-mm-routing build.
+/// every frontend-decoded image, not the routing-gated `n_total`). A count
+/// requires the `mm-routing` feature and a worker-attested semantic contract.
+/// `Default` (both `None`) means "nothing to record": text-only or a
+/// non-mm-routing build.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ImageTokenUsage {
     /// Trusted summed vision-token count, or `None` when withheld/not applicable.
@@ -245,6 +250,36 @@ impl ImageTokenUsage {
             skip_reason: Some(reason),
         }
     }
+}
+
+/// Pure trust-boundary decision for exact image-token usage. Keeping this
+/// separate from request/media plumbing makes every fail-closed condition and
+/// its precedence directly testable.
+#[cfg(feature = "mm-routing")]
+fn finalize_image_token_usage(
+    total_image_count: usize,
+    resolved_image_count: usize,
+    image_tokens_acc: usize,
+    has_exact_counter: bool,
+    has_request_override: bool,
+    frontend_decoded: bool,
+) -> ImageTokenUsage {
+    if total_image_count == 0 {
+        return ImageTokenUsage::default();
+    }
+    if !has_exact_counter {
+        return ImageTokenUsage::skipped(ImageTokenSkipReason::UnverifiedFamily);
+    }
+    if has_request_override {
+        return ImageTokenUsage::skipped(ImageTokenSkipReason::RequestOverride);
+    }
+    if !frontend_decoded {
+        return ImageTokenUsage::skipped(ImageTokenSkipReason::UrlPassthrough);
+    }
+    if resolved_image_count != total_image_count {
+        return ImageTokenUsage::skipped(ImageTokenSkipReason::PartialResolution);
+    }
+    ImageTokenUsage::counted(image_tokens_acc)
 }
 
 /// `true` when a JSON value carries no request-level override worth distrusting:
@@ -327,11 +362,16 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
-    /// Per-image token-count engine. `None` when the feature is disabled, the
-    /// model isn't covered by the registry, or `preprocessor_config.json` is
-    /// unreadable.
+    /// Exact per-image token-count engine. `None` unless the running worker
+    /// advertises a supported semantic processor contract and the local
+    /// processor config is fully representable by that contract.
     #[cfg(feature = "mm-routing")]
-    image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
+    image_token_counter: Option<lightseek_mm::ExactImageTokenCounter>,
+    /// Best-effort counter used only for synthetic MM routing expansion. Kept
+    /// separate from `image_token_counter` so metric exactness and fastokens
+    /// constraints cannot silently disable existing routing support.
+    #[cfg(feature = "mm-routing")]
+    routing_image_token_counter: Option<lightseek_mm::RoutingImageTokenCounter>,
     /// Image-placeholder token id the routing-side sequence fills per image.
     /// Resolved from `config.json`'s `image_token_id` field when present,
     /// otherwise falls back to the `ModelProcessorSpec` registry value. This
@@ -627,34 +667,29 @@ impl OpenAIPreprocessor {
         let runtime_config = mdc.runtime_config.clone();
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
-        // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
-        // model_type comes from config.json (e.g. "qwen3_vl") and lets the
-        // image-processor registry resolve fine-tunes loaded from
-        // custom-named directories where the family substring isn't in the path.
+        // Capture MM inputs before mdc is partially moved into MediaLoader.
         #[cfg(feature = "mm-routing")]
-        let model_dir_for_routing: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
-        // TODO(mm-routing): fastokens lacks a special-token mutator, so it
-        // can't merge tokenizer_config.json specials and would BPE-shatter
-        // placeholders (e.g. Qwen2-VL `<|image_pad|>`). Disable MM-routing
-        // here; remove once fastokens upstream exposes the mutator.
+        let model_dir_for_mm: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
         #[cfg(feature = "mm-routing")]
-        let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
-            if fastokens_active && model_dir_for_routing.is_some() {
+        let model_id_for_mm = mdc.source_path().to_string();
+        #[cfg(feature = "mm-routing")]
+        let model_type_for_mm = model_info.model_type();
+
+        // Usage is authorized by a worker-advertised semantic processor
+        // contract. It is intentionally independent of the routing registry,
+        // model id/path, and model_type heuristics.
+        #[cfg(feature = "mm-routing")]
+        let image_tokenization_spec = match runtime_config
+            .get_engine_specific::<ImageTokenizationSpec>(IMAGE_TOKENIZATION_SPEC_CAPABILITY)
+        {
+            Ok(spec) => spec,
+            Err(error) => {
                 tracing::warn!(
                     target: "mm_routing",
-                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
-                     Use the default tokenizer backend to re-enable."
+                    %error,
+                    "worker advertised an invalid image-tokenization capability; exact usage disabled"
                 );
                 None
-            } else {
-                model_dir_for_routing.as_ref().map(|p| {
-                    (
-                        mdc.source_path().to_string(),
-                        model_info.model_type(),
-                        p.clone(),
-                    )
-                })
             }
         };
 
@@ -666,80 +701,136 @@ impl OpenAIPreprocessor {
         };
 
         #[cfg(feature = "mm-routing")]
-        let (image_token_counter, routing_image_token_id, bos_token_string) =
-            match image_token_inputs {
-                Some((model_id, model_type, model_dir)) => {
-                    // Resolve counter + image-token id independently so the
-                    // summary log can name which piece is missing.
-                    let (counter, counter_err): (
-                        Option<lightseek_mm::LightseekMmCounter>,
-                        Option<String>,
-                    ) = match lightseek_mm::LightseekMmCounter::try_new(
-                        &model_id,
-                        Some(&model_type),
-                        &model_dir,
-                    ) {
-                        Ok(c) => (Some(c), None),
-                        Err(e) => (None, Some(e.to_string())),
-                    };
-                    // One-shot config/tokenizer_config read for all
-                    // routing-side token info. Parsing lives next to the
-                    // spec resolution in the MM-routing module.
-                    let routing_tokens =
-                        lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
-                    // `chat_placeholder_token_id` already prefers config.json's
-                    // explicit field and falls back to the spec value, so it's
-                    // the single id used both for the engagement gate and the
-                    // routing-fill below.
-                    let img_tok = routing_tokens.chat_placeholder_token_id;
-                    let bos_tok_string = routing_tokens.bos_token_string;
-
-                    match (counter.is_some(), img_tok.is_some()) {
-                        (true, true) => tracing::info!(
+        let image_token_counter = match (&model_dir_for_mm, image_tokenization_spec) {
+            (Some(model_dir), Some(spec)) => {
+                match lightseek_mm::ExactImageTokenCounter::try_new(
+                    &model_id_for_mm,
+                    spec,
+                    model_dir,
+                ) {
+                    Ok(counter) => {
+                        tracing::info!(
                             target: "mm_routing",
-                            model = %model_id,
-                            model_dir = %model_dir.display(),
-                            "MM-aware KV routing enabled"
-                        ),
-                        (counter_ok, img_ok) => {
-                            let mut reasons: Vec<String> = Vec::new();
-                            if !counter_ok {
-                                reasons.push(format!(
-                                    "model not supported by the MM-routing registry ({})",
-                                    counter_err.as_deref().unwrap_or("unknown error")
-                                ));
-                            }
-                            if !img_ok {
-                                reasons.push(
-                                    "image-placeholder token unresolvable from \
-                                 config.json / processor_config.json / \
-                                 tokenizer_config.json / vocab probe"
-                                        .to_string(),
+                            model = %model_id_for_mm,
+                            spec = spec.as_str(),
+                            "exact frontend image-token usage enabled"
+                        );
+                        Some(counter)
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "mm_routing",
+                            model = %model_id_for_mm,
+                            spec = spec.as_str(),
+                            %error,
+                            "image-tokenization capability is incompatible with model config; exact usage disabled"
+                        );
+                        None
+                    }
+                }
+            }
+            (Some(_), None) => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    model = %model_id_for_mm,
+                    "worker did not advertise an image-tokenization capability; exact usage disabled"
+                );
+                None
+            }
+            (None, _) => None,
+        };
+
+        // TODO(mm-routing): fastokens lacks a special-token mutator, so it
+        // can't merge tokenizer_config.json specials and would BPE-shatter
+        // placeholders (e.g. Qwen2-VL `<|image_pad|>`). Disable only the
+        // routing expansion here. The exact usage counter above does not
+        // depend on placeholder tokenization and remains available.
+        #[cfg(feature = "mm-routing")]
+        let (routing_image_token_counter, routing_image_token_id, bos_token_string) = {
+            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
+            if fastokens_active && model_dir_for_mm.is_some() {
+                tracing::warn!(
+                    target: "mm_routing",
+                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
+                     Exact image-token usage remains enabled when the worker advertises a supported spec."
+                );
+                (None, None, None)
+            } else {
+                match model_dir_for_mm.as_ref() {
+                    Some(model_dir) => {
+                        // Resolve routing counter + image-token id independently so
+                        // the summary log can name which piece is missing.
+                        let (counter, counter_err): (
+                            Option<lightseek_mm::RoutingImageTokenCounter>,
+                            Option<String>,
+                        ) = match lightseek_mm::RoutingImageTokenCounter::try_new(
+                            &model_id_for_mm,
+                            Some(&model_type_for_mm),
+                            model_dir,
+                        ) {
+                            Ok(c) => (Some(c), None),
+                            Err(e) => (None, Some(e.to_string())),
+                        };
+                        // One-shot config/tokenizer_config read for all
+                        // routing-side token info. Parsing lives next to the
+                        // spec resolution in the MM-routing module.
+                        let routing_tokens =
+                            lightseek_mm::resolve_routing_tokens(&model_id_for_mm, model_dir);
+                        // `chat_placeholder_token_id` already prefers config.json's
+                        // explicit field and falls back to the spec value, so it's
+                        // the single id used both for the engagement gate and the
+                        // routing-fill below.
+                        let img_tok = routing_tokens.chat_placeholder_token_id;
+                        let bos_tok_string = routing_tokens.bos_token_string;
+
+                        match (counter.is_some(), img_tok.is_some()) {
+                            (true, true) => tracing::info!(
+                                target: "mm_routing",
+                                model = %model_id_for_mm,
+                                model_dir = %model_dir.display(),
+                                "MM-aware KV routing enabled"
+                            ),
+                            (counter_ok, img_ok) => {
+                                let mut reasons: Vec<String> = Vec::new();
+                                if !counter_ok {
+                                    reasons.push(format!(
+                                        "model not supported by the MM-routing registry ({})",
+                                        counter_err.as_deref().unwrap_or("unknown error")
+                                    ));
+                                }
+                                if !img_ok {
+                                    reasons.push(
+                                        "image-placeholder token unresolvable from \
+                                         config.json / processor_config.json / \
+                                         tokenizer_config.json / vocab probe"
+                                            .to_string(),
+                                    );
+                                }
+                                tracing::warn!(
+                                    target: "mm_routing",
+                                    model = %model_id_for_mm,
+                                    reasons = %reasons.join("; "),
+                                    "{} is not supported for MM-aware KV routing ({}). \
+                                     Falling back to KV routing without MM awareness — \
+                                     text-prefix overlap still works but the router \
+                                     cannot distinguish requests by image content.",
+                                    model_id_for_mm,
+                                    reasons.join("; ")
                                 );
                             }
-                            tracing::warn!(
-                                target: "mm_routing",
-                                model = %model_id,
-                                reasons = %reasons.join("; "),
-                                "{} is not supported for MM-aware KV routing ({}). \
-                                 Falling back to KV routing without MM awareness — \
-                                 text-prefix overlap still works but the router \
-                                 cannot distinguish requests by image content.",
-                                model_id,
-                                reasons.join("; ")
-                            );
                         }
+                        (counter, img_tok, bos_tok_string)
                     }
-                    (counter, img_tok, bos_tok_string)
+                    None => {
+                        tracing::debug!(
+                            target: "mm_routing",
+                            "model directory not derivable from MDC; MM-aware routing disabled"
+                        );
+                        (None, None, None)
+                    }
                 }
-                None => {
-                    tracing::debug!(
-                        target: "mm_routing",
-                        "model directory not derivable from MDC; MM-aware routing disabled"
-                    );
-                    (None, None, None)
-                }
-            };
+            }
+        };
 
         // Force the dim-fetch HTTP client to build at startup for any
         // MM-routable preprocessor, so TLS / env-var / reqwest-init
@@ -748,7 +839,7 @@ impl OpenAIPreprocessor {
         // force (both MM-routing hooks resolved to `None`) — no point
         // building a client they'll never use.
         #[cfg(feature = "mm-routing")]
-        if image_token_counter.is_some() || routing_image_token_id.is_some() {
+        if routing_image_token_counter.is_some() || routing_image_token_id.is_some() {
             std::sync::LazyLock::force(&DIM_FETCH_MEDIA_FETCHER);
             std::sync::LazyLock::force(&DIM_FETCH_HTTP_CLIENT);
         }
@@ -806,6 +897,8 @@ impl OpenAIPreprocessor {
             context_length,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
+            #[cfg(feature = "mm-routing")]
+            routing_image_token_counter,
             #[cfg(feature = "mm-routing")]
             routing_image_token_id,
             #[cfg(feature = "mm-routing")]
@@ -1290,12 +1383,11 @@ impl OpenAIPreprocessor {
         // Cleared and returned to the caller; empty for non-image / text-only requests.
         #[cfg(feature = "mm-routing")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
-        // Sum of per-image analytic vision-token counts for the images whose
-        // dimensions resolved. Accumulated from the same `count_tokens` calls the
-        // routing path makes below, but independent of the routing *decision*
-        // (placeholder-match / block-size gates) — so a valid count isn't dropped
-        // just because MM-aware routing didn't engage. Surfaced as image-token
-        // usage after the fetch loops (guarded by `resolve_image_token_usage`).
+        // Sum of exact per-image vision-token counts for frontend-decoded
+        // images. Independent of the best-effort routing counter and routing
+        // decision (placeholder-match / block-size gates), so valid usage isn't
+        // dropped just because MM-aware routing didn't engage. Surfaced after
+        // the fetch loops via `resolve_image_token_usage`.
         #[cfg(feature = "mm-routing")]
         let mut image_tokens_acc: usize = 0;
         // Total `image_url` content parts in the request. Bumped at every
@@ -1455,20 +1547,6 @@ impl OpenAIPreprocessor {
             for ((mm_hash, url), dim_res) in url_passthrough_images.into_iter().zip(dim_results) {
                 match dim_res {
                     Ok((w, h)) => {
-                        if let Some(counter) = self.image_token_counter.as_ref() {
-                            let n = counter.count_tokens(w, h);
-                            image_tokens_acc += n;
-                            tracing::debug!(
-                                target: "mm_routing",
-                                model = counter.model_id(),
-                                width = w,
-                                height = h,
-                                tokens = n,
-                                mm_hash = mm_hash,
-                                source = "url_passthrough_header_fetch",
-                                "image-token count"
-                            );
-                        }
                         mm_image_entries.push(MmImageEntry {
                             mm_hash,
                             width: w,
@@ -1594,9 +1672,9 @@ impl OpenAIPreprocessor {
         Ok((Vec::new(), ImageTokenUsage::default()))
     }
 
-    /// Decide whether the accumulated analytic image-token count is trustworthy
-    /// enough to emit as a usage figure, or which skip reason to record. Image
-    /// only; see [`ImageTokenUsage`]. Never bumps skip for text-only requests.
+    /// Decide whether the accumulated exact image-token count can be emitted,
+    /// or which fail-closed reason to record. Image only; see
+    /// [`ImageTokenUsage`]. Never bumps skip for text-only requests.
     #[cfg(feature = "mm-routing")]
     fn resolve_image_token_usage<R: OAIChatLikeRequest>(
         &self,
@@ -1605,35 +1683,17 @@ impl OpenAIPreprocessor {
         resolved_image_count: usize,
         image_tokens_acc: usize,
     ) -> ImageTokenUsage {
-        // No images -> nothing to record (text-only). Never a skip.
-        if total_image_count == 0 {
-            return ImageTokenUsage::default();
-        }
-        // Counter absent (model unsupported by the registry, or no config): the
-        // count was never computed. Unverified rather than a misleading 0.
-        let Some(counter) = self.image_token_counter.as_ref() else {
-            return ImageTokenUsage::skipped(ImageTokenSkipReason::UnverifiedFamily);
-        };
-        // Family/config not provably equal to the backend's tokenization.
-        if counter.token_count_trust() != lightseek_mm::TokenCountTrust::Trusted {
-            return ImageTokenUsage::skipped(ImageTokenSkipReason::UnverifiedFamily);
-        }
-        // A per-request resize override the analytic counter can't see. Any
-        // non-empty `mm_processor_kwargs` is grounds to distrust the estimate —
-        // we don't enumerate keys, since the counter has no channel to receive
-        // any of them.
-        if request
+        let has_request_override = request
             .mm_processor_kwargs()
-            .is_some_and(|v| !is_empty_json_value(v))
-        {
-            return ImageTokenUsage::skipped(ImageTokenSkipReason::RequestOverride);
-        }
-        // Some image's dimensions didn't resolve (URL-passthrough header-fetch
-        // failure); a summed count would be a plausible-but-wrong partial total.
-        if resolved_image_count != total_image_count {
-            return ImageTokenUsage::skipped(ImageTokenSkipReason::PartialResolution);
-        }
-        ImageTokenUsage::counted(image_tokens_acc)
+            .is_some_and(|value| !is_empty_json_value(value));
+        finalize_image_token_usage(
+            total_image_count,
+            resolved_image_count,
+            image_tokens_acc,
+            self.image_token_counter.is_some(),
+            has_request_override,
+            self.media_loader.is_some(),
+        )
     }
 
     /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
@@ -1660,10 +1720,10 @@ impl OpenAIPreprocessor {
             );
             return Ok(());
         };
-        let Some(counter) = self.image_token_counter.as_ref() else {
+        let Some(counter) = self.routing_image_token_counter.as_ref() else {
             tracing::debug!(
                 target: "mm_routing",
-                "image_token_counter unavailable; skipping MM routing info"
+                "routing_image_token_counter unavailable; skipping MM routing info"
             );
             return Ok(());
         };
@@ -3868,6 +3928,39 @@ mod tests {
         assert_eq!(counts.image, 2);
         assert_eq!(counts.video, 1);
         assert_eq!(counts.audio, 0);
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn exact_image_token_usage_fails_closed_at_each_trust_boundary() {
+        let usage = |total, resolved, has_counter, request_override, decoded| {
+            finalize_image_token_usage(total, resolved, 123, has_counter, request_override, decoded)
+        };
+
+        let text_only = usage(0, 0, false, false, false);
+        assert_eq!(text_only.tokens, None);
+        assert_eq!(text_only.skip_reason, None);
+
+        assert_eq!(
+            usage(1, 1, false, false, true).skip_reason,
+            Some(ImageTokenSkipReason::UnverifiedFamily)
+        );
+        assert_eq!(
+            usage(1, 1, true, true, true).skip_reason,
+            Some(ImageTokenSkipReason::RequestOverride)
+        );
+        assert_eq!(
+            usage(1, 1, true, false, false).skip_reason,
+            Some(ImageTokenSkipReason::UrlPassthrough)
+        );
+        assert_eq!(
+            usage(2, 1, true, false, true).skip_reason,
+            Some(ImageTokenSkipReason::PartialResolution)
+        );
+
+        let counted = usage(1, 1, true, false, true);
+        assert_eq!(counted.tokens, Some(123));
+        assert_eq!(counted.skip_reason, None);
     }
 
     #[test]

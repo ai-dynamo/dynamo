@@ -3,51 +3,46 @@
 //
 // Standalone harness for the MM-routing per-image token-count path: load a
 // HF model dir, decode an image header to get (w, h), call the image
-// processor's `calculate_num_tokens`, and print the count. Useful for
-// cross-checking against the same model's vLLM output when investigating
-// routing-cache mismatches.
+// processor's versioned semantic contract, and print the count. Useful for
+// cross-checking against the same model's worker output when investigating
+// routing-cache mismatches or exact usage.
 //
 //   cargo run -p dynamo-llm --example mm_token_count --features mm-routing \
-//     -- <model_dir> <image_path> [model_id]
+//     -- <model_dir> <image_path> <spec> [model_id]
 
 #[cfg(feature = "mm-routing")]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
-    use dynamo_llm::preprocessor::lightseek_mm::LightseekMmCounter;
+    use dynamo_llm::local_model::runtime_config::ImageTokenizationSpec;
+    use dynamo_llm::preprocessor::lightseek_mm::ExactImageTokenCounter;
     use std::path::PathBuf;
 
     let mut args = std::env::args().skip(1);
     let model_dir: PathBuf = args
         .next()
-        .context("usage: mm_token_count <model_dir> <image_path> [model_id]")?
+        .context("usage: mm_token_count <model_dir> <image_path> <spec> [model_id]")?
         .into();
     let image_path: PathBuf = args
         .next()
-        .context("usage: mm_token_count <model_dir> <image_path> [model_id]")?
+        .context("usage: mm_token_count <model_dir> <image_path> <spec> [model_id]")?
         .into();
+    let spec: ImageTokenizationSpec = args
+        .next()
+        .context("missing spec: qwen2_vl_v1, qwen3_vl_v1, or moonvit_v1")?
+        .parse()
+        .map_err(anyhow::Error::msg)?;
     let model_id = args
         .next()
         .unwrap_or_else(|| "Qwen/Qwen2.5-VL-3B-Instruct".to_string());
 
-    // model_type from config.json so the registry lookup is robust.
-    let cfg_path = model_dir.join("config.json");
-    let cfg_json: serde_json::Value = serde_json::from_reader(
-        std::fs::File::open(&cfg_path)
-            .with_context(|| format!("opening {}", cfg_path.display()))?,
-    )?;
-    let model_type = cfg_json
-        .get("model_type")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
     println!(
-        "model_dir = {}\nmodel_id  = {}\nmodel_type= {:?}",
+        "model_dir = {}\nmodel_id  = {}\nspec      = {}",
         model_dir.display(),
         model_id,
-        model_type
+        spec.as_str()
     );
 
-    let counter = LightseekMmCounter::try_new(&model_id, model_type.as_deref(), &model_dir)?;
+    let counter = ExactImageTokenCounter::try_new(&model_id, spec, &model_dir)?;
     println!("counter for '{}' constructed", counter.model_id());
 
     let img_bytes = std::fs::read(&image_path)?;
