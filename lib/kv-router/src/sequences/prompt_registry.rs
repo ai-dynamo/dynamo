@@ -66,8 +66,11 @@ pub(super) struct WorkerLoadSnapshot {
 
 impl WorkerLoadSnapshot {
     pub(super) fn active_decode_blocks(&self, prompt_stride: usize) -> usize {
-        (self.active_prompt_units * prompt_stride as f64 + self.active_output_blocks).round()
-            as usize
+        super::estimate_physical_active_blocks(
+            self.active_prompt_units,
+            self.active_output_blocks,
+            prompt_stride,
+        )
     }
 
     pub(super) fn active_tokens(&self, decay_now: Instant) -> usize {

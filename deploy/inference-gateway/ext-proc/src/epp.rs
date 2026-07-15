@@ -121,7 +121,7 @@ impl Router {
 
         // TODO(epp-rolling-namespace): Rebind both routers when the active
         // generation-suffixed worker namespace changes during a rolling update.
-        let mut kv_router_config = kv_router_config_from_dynamo_env();
+        let mut kv_router_config = kv_router_config_from_dynamo_env()?;
         // TODO(epp-multi-replica): Provide authoritative admission across EPP
         // replicas; replica-sync alone does not close the selection-to-booking race.
         kv_router_config.skip_initial_worker_wait = true;

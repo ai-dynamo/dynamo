@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -24,6 +25,7 @@ use crate::scheduling::{
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
+    SequenceTrackerOptions,
 };
 use crate::services::common::replica_sync::{
     ReplicaSyncConfig, ScopedReplicaEvent, ScopedSequencePublisher, setup_scoped_replica_sync,
@@ -443,18 +445,22 @@ impl SelectionCore {
             &key.routing_group,
             block_size,
         );
-        let slots = Arc::new(
-            ActiveSequencesMultiWorker::new_with_replica_worker_policy_and_active_sequence_stride(
-                scoped_replica_sync.publisher,
-                block_size as usize,
-                HashMap::new(),
-                scoped_replica_sync.enabled,
-                scoped_replica_sync.process_id,
-                WORKER_TYPE,
-                ReplicaWorkerPolicy::RequireRegistered,
-                self.kv_router_config.router_active_sequence_stride,
-            ),
-        );
+        let active_sequence_stride =
+            NonZeroUsize::new(self.kv_router_config.router_active_sequence_stride)
+                .expect("KvRouterConfig validates active-sequence stride");
+        let slots = Arc::new(ActiveSequencesMultiWorker::new_with_options(
+            scoped_replica_sync.publisher,
+            block_size as usize,
+            HashMap::new(),
+            scoped_replica_sync.process_id,
+            WORKER_TYPE,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::RequireRegistered,
+                replica_sync: scoped_replica_sync.enabled,
+                active_sequence_stride,
+                ..Default::default()
+            },
+        ));
         let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
             slots.start_replica_sync(subscriber, self.cancel_token.child_token());
             replica_tx

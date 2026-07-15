@@ -16,3 +16,11 @@ pub use multi_worker::*;
 pub use prefill_tracker::PrefillTokenDeltas;
 pub use prompt_registry::{PotentialLoadMaps, WorkerLoadProjection};
 pub use single::*;
+
+pub(super) fn estimate_physical_active_blocks(
+    prompt_units: f64,
+    output_blocks: f64,
+    prompt_stride: usize,
+) -> usize {
+    (prompt_units * prompt_stride as f64 + output_blocks).round() as usize
+}

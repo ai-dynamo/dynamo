@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -148,7 +149,9 @@ impl KvReplayRouter {
         let indexer =
             create_replay_indexer(args.block_size as u32, config.router_event_threads as usize);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
-        let slots = replay_slots(args, &workers_with_configs);
+        let active_sequence_stride = NonZeroUsize::new(config.router_active_sequence_stride)
+            .ok_or_else(|| anyhow!("router active-sequence stride must be greater than zero"))?;
+        let slots = replay_slots(args, &workers_with_configs, active_sequence_stride);
         let (_worker_config_tx, worker_config_rx) =
             tokio::sync::watch::channel(workers_with_configs);
         let selector = replay_selector(&config);

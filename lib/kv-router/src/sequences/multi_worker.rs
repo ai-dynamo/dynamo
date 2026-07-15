@@ -10,10 +10,11 @@
 //! this crate while the runtime glue stays in `lib/llm`.
 
 use dynamo_tokens::SequenceHash;
-use parking_lot::RwLock;
-use rustc_hash::FxHashMap;
+use parking_lot::{Mutex, RwLock};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::HashMap;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,8 +30,8 @@ use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
-    WorkerWithDpRank,
+    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, ActiveSequenceStrideError,
+    PrefillLoadHint, WorkerId, WorkerWithDpRank,
 };
 
 // How often we force expire stale requests across all workers. See the comment
@@ -84,7 +85,7 @@ pub trait SequencePublisher: Send + Sync {
     fn observe_replica_stride_mismatch(
         &self,
         _expected: usize,
-        _received: usize,
+        _received: Result<NonZeroUsize, ActiveSequenceStrideError>,
         _worker_type: &str,
     ) {
     }
@@ -119,11 +120,28 @@ pub enum ReplicaWorkerPolicy {
     RequireRegistered,
 }
 
+/// Construction options for a multi-worker active-sequence tracker.
 #[derive(Debug, Clone, Copy)]
-struct SequenceTrackerOptions {
-    replica_worker_policy: ReplicaWorkerPolicy,
-    expiry_enabled: bool,
-    active_sequence_stride: usize,
+pub struct SequenceTrackerOptions {
+    /// How replica events for workers outside the current topology are handled.
+    pub replica_worker_policy: ReplicaWorkerPolicy,
+    /// Whether stale requests are eligible for time-based expiry.
+    pub expiry_enabled: bool,
+    /// Whether local lifecycle events are published for replica synchronization.
+    pub replica_sync: bool,
+    /// Number of physical prompt blocks represented by each retained sequence hash.
+    pub active_sequence_stride: NonZeroUsize,
+}
+
+impl Default for SequenceTrackerOptions {
+    fn default() -> Self {
+        Self {
+            replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+            expiry_enabled: true,
+            replica_sync: false,
+            active_sequence_stride: NonZeroUsize::MIN,
+        }
+    }
 }
 
 /// Errors that can occur during sequence management operations.
@@ -177,6 +195,8 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     #[cfg(test)]
     remote_state_update_count: AtomicUsize,
     replica_sync: bool,
+    pub(super) warned_replica_stride_mismatches:
+        Mutex<FxHashSet<(u64, Result<NonZeroUsize, ActiveSequenceStrideError>)>>,
     pub(super) replica_worker_policy: ReplicaWorkerPolicy,
     worker_type: &'static str,
 }
@@ -193,38 +213,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         router_id: u64,
         worker_type: &'static str,
     ) -> Self {
-        Self::new_with_replica_worker_policy(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-            ReplicaWorkerPolicy::LazyRegister,
-        )
-    }
-
-    /// Create a new multi-worker sequence tracker with a uniform prompt-hash stride.
-    pub fn new_with_active_sequence_stride(
-        publisher: P,
-        block_size: usize,
-        dp_range: HashMap<u64, (u32, u32)>,
-        replica_sync: bool,
-        router_id: u64,
-        worker_type: &'static str,
-        active_sequence_stride: usize,
-    ) -> Self {
         Self::new_with_options(
             publisher,
             block_size,
             dp_range,
-            replica_sync,
             router_id,
             worker_type,
             SequenceTrackerOptions {
-                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-                expiry_enabled: true,
-                active_sequence_stride,
+                replica_sync,
+                ..Default::default()
             },
         )
     }
@@ -242,13 +239,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             publisher,
             block_size,
             dp_range,
-            replica_sync,
             router_id,
             worker_type,
             SequenceTrackerOptions {
-                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
                 expiry_enabled: false,
-                active_sequence_stride: 1,
+                replica_sync,
+                ..Default::default()
             },
         )
     }
@@ -263,59 +259,31 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker_type: &'static str,
         replica_worker_policy: ReplicaWorkerPolicy,
     ) -> Self {
-        Self::new_with_replica_worker_policy_and_active_sequence_stride(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-            replica_worker_policy,
-            1,
-        )
-    }
-
-    /// Create a tracker with explicit replica admission and prompt-hash stride.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_replica_worker_policy_and_active_sequence_stride(
-        publisher: P,
-        block_size: usize,
-        dp_range: HashMap<u64, (u32, u32)>,
-        replica_sync: bool,
-        router_id: u64,
-        worker_type: &'static str,
-        replica_worker_policy: ReplicaWorkerPolicy,
-        active_sequence_stride: usize,
-    ) -> Self {
         Self::new_with_options(
             publisher,
             block_size,
             dp_range,
-            replica_sync,
             router_id,
             worker_type,
             SequenceTrackerOptions {
                 replica_worker_policy,
-                expiry_enabled: true,
-                active_sequence_stride,
+                replica_sync,
+                ..Default::default()
             },
         )
     }
 
-    fn new_with_options(
+    /// Create a tracker with explicit lifecycle, replication, and sparsity options.
+    pub fn new_with_options(
         publisher: P,
         block_size: usize,
         dp_range: HashMap<u64, (u32, u32)>,
-        replica_sync: bool,
         router_id: u64,
         worker_type: &'static str,
         options: SequenceTrackerOptions,
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
-        assert!(
-            options.active_sequence_stride > 0,
-            "active sequence stride must be greater than 0"
-        );
+        let active_sequence_stride = options.active_sequence_stride.get();
         let (remote_state_updates, _) = watch::channel(());
         let workers = if options.expiry_enabled {
             WorkerTable::new(block_size, &dp_range)
@@ -323,10 +291,8 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             WorkerTable::new_without_expiry(block_size, &dp_range)
         };
         let initial_workers: Vec<_> = workers.workers().collect();
-        let prompt_registry = PromptRegistry::new(
-            initial_workers.iter().copied(),
-            options.active_sequence_stride,
-        );
+        let prompt_registry =
+            PromptRegistry::new(initial_workers.iter().copied(), active_sequence_stride);
         let publisher = Arc::new(publisher);
         for worker in &initial_workers {
             publisher.observe_worker_registered(worker, worker_type);
@@ -337,13 +303,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             request_index: RequestIndex::default(),
             prompt_registry,
             block_size,
-            active_sequence_stride: options.active_sequence_stride,
+            active_sequence_stride,
             router_id,
             publisher,
             remote_state_updates,
             #[cfg(test)]
             remote_state_update_count: AtomicUsize::new(0),
-            replica_sync,
+            replica_sync: options.replica_sync,
+            warned_replica_stride_mismatches: Mutex::new(FxHashSet::default()),
             replica_worker_policy: options.replica_worker_policy,
             worker_type,
         }
@@ -1353,7 +1320,7 @@ mod tests {
         observations: Mutex<Vec<(WorkerWithDpRank, usize, usize)>>,
         registered: Mutex<Vec<WorkerWithDpRank>>,
         removed: Mutex<Vec<WorkerWithDpRank>>,
-        stride_mismatches: Mutex<Vec<(usize, usize)>>,
+        stride_mismatches: Mutex<Vec<(usize, Result<NonZeroUsize, ActiveSequenceStrideError>)>>,
     }
 
     impl RecordingPublisherState {
@@ -1418,7 +1385,7 @@ mod tests {
         fn observe_replica_stride_mismatch(
             &self,
             expected: usize,
-            received: usize,
+            received: Result<NonZeroUsize, ActiveSequenceStrideError>,
             _worker_type: &str,
         ) {
             self.state
@@ -1457,16 +1424,19 @@ mod tests {
         Arc<RecordingPublisherState>,
     ) {
         let state = Arc::new(RecordingPublisherState::default());
-        let sequences = ActiveSequencesMultiWorker::new_with_active_sequence_stride(
+        let sequences = ActiveSequencesMultiWorker::new_with_options(
             RecordingPublisher {
                 state: Arc::clone(&state),
             },
             4,
             workers,
-            true,
             0,
             "test",
-            active_sequence_stride,
+            SequenceTrackerOptions {
+                replica_sync: true,
+                active_sequence_stride: NonZeroUsize::new(active_sequence_stride).unwrap(),
+                ..Default::default()
+            },
         );
         (sequences, state)
     }
@@ -1993,14 +1963,18 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn disabled_expiry_requires_explicit_cleanup_for_all_workers() {
-        let sequences = ActiveSequencesMultiWorker::new_without_expiry(
+    async fn sparse_tracker_without_expiry_requires_explicit_cleanup_for_all_workers() {
+        let sequences = ActiveSequencesMultiWorker::new_with_options(
             NoopSequencePublisher,
             4,
             HashMap::from([(1_u64, (0_u32, 1_u32))]),
-            false,
             0,
             "test",
+            SequenceTrackerOptions {
+                expiry_enabled: false,
+                active_sequence_stride: NonZeroUsize::new(3).unwrap(),
+                ..Default::default()
+            },
         );
         let initial_worker = WorkerWithDpRank::new(1, 0);
         let dynamic_worker = WorkerWithDpRank::new(2, 0);
@@ -2033,8 +2007,8 @@ mod tests {
 
         assert_eq!(active_request_count(&sequences, initial_worker), 1);
         assert_eq!(active_request_count(&sequences, dynamic_worker), 1);
-        assert_eq!(sequences.active_blocks().get(&initial_worker), Some(&2));
-        assert_eq!(sequences.active_blocks().get(&dynamic_worker), Some(&1));
+        assert_eq!(sequences.active_blocks().get(&initial_worker), Some(&6));
+        assert_eq!(sequences.active_blocks().get(&dynamic_worker), Some(&3));
 
         let now = Instant::now();
         sequences.free(&"initial".to_string(), now).unwrap();
@@ -2460,8 +2434,13 @@ mod tests {
         );
         assert_eq!(
             *publisher.stride_mismatches.lock().unwrap(),
-            vec![(2, 3), (2, 3), (2, 0)]
+            vec![
+                (2, Ok(NonZeroUsize::new(3).unwrap())),
+                (2, Ok(NonZeroUsize::new(3).unwrap())),
+                (2, Err(ActiveSequenceStrideError::Zero)),
+            ]
         );
+        assert_eq!(sequences.warned_replica_stride_mismatches.lock().len(), 2);
 
         sequences
             .run_replica_sync(
@@ -2492,6 +2471,7 @@ mod tests {
         assert!(sequences.request_worker(&good_request).is_none());
         assert_eq!(sequences.active_blocks().get(&worker), Some(&0));
         assert_eq!(publisher.stride_mismatches.lock().unwrap().len(), 4);
+        assert_eq!(sequences.warned_replica_stride_mismatches.lock().len(), 2);
     }
 
     #[tokio::test(start_paused = true)]

@@ -66,12 +66,6 @@ pub(super) struct BlockLoad {
     pub(super) output_blocks: f64,
 }
 
-impl BlockLoad {
-    pub(super) fn active_blocks(self, prompt_stride: usize) -> usize {
-        (self.prompt_units * prompt_stride as f64 + self.output_blocks).round() as usize
-    }
-}
-
 /// Exact per-worker prompt liveness backed by compressed arena edges.
 #[derive(Debug, Default)]
 pub(super) struct BlockTracker {
@@ -311,7 +305,8 @@ impl BlockTracker {
     }
 
     pub(super) fn active_blocks(&self) -> usize {
-        self.load().active_blocks(1)
+        let load = self.load();
+        super::estimate_physical_active_blocks(load.prompt_units, load.output_blocks, 1)
     }
 
     pub(super) fn load(&self) -> BlockLoad {

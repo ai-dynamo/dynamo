@@ -43,9 +43,11 @@
 //!
 //! See also: `docs/observability/metrics.md` (Router Metrics section).
 
+use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
+use dynamo_kv_router::protocols::ActiveSequenceStrideError;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
@@ -283,11 +285,13 @@ impl RouterWorkerStatusMetrics {
     pub fn increment_active_sequence_stride_mismatch(
         &self,
         expected: usize,
-        received: usize,
+        received: Result<NonZeroUsize, ActiveSequenceStrideError>,
         worker_type: &str,
     ) {
         let expected = expected.to_string();
-        let received = received.to_string();
+        let received = received
+            .map(|stride| stride.get().to_string())
+            .unwrap_or_else(|_| "malformed".to_string());
         self.active_sequence_stride_mismatches_total
             .with_label_values(&[&expected, &received, worker_type])
             .inc();
@@ -963,7 +967,16 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         metrics.set_registered(123, 0, "decode");
         metrics.set_kv_event_source_mismatch_workers("model-a", "decode", "ns-a", "decode", 2);
         metrics.set_kv_event_source_mismatch_workers("model-a", "prefill", "ns-a", "prefill", 0);
-        metrics.increment_active_sequence_stride_mismatch(4, 2, "decode");
+        metrics.increment_active_sequence_stride_mismatch(
+            4,
+            Ok(NonZeroUsize::new(2).unwrap()),
+            "decode",
+        );
+        metrics.increment_active_sequence_stride_mismatch(
+            4,
+            Err(ActiveSequenceStrideError::Zero),
+            "decode",
+        );
 
         let output = gather_pef(&registry);
         assert!(
@@ -987,6 +1000,12 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         assert!(
             output.contains(
                 "dynamo_component_router_active_sequence_stride_mismatches_total{expected_stride=\"4\",received_stride=\"2\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+        assert!(
+            output.contains(
+                "dynamo_component_router_active_sequence_stride_mismatches_total{expected_stride=\"4\",received_stride=\"malformed\",worker_type=\"decode\"} 1"
             ),
             "\nActual PEF:\n{output}"
         );

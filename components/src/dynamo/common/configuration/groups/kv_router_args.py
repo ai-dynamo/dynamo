@@ -302,7 +302,9 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "KV Router: Retain one active-sequence hash for every N complete prompt "
                 "blocks. A value of 1 disables sparsity. All router replicas must use "
-                "the same value."
+                "the same value. Active-block counts become estimates; prompts shorter "
+                "than N complete blocks and incomplete trailing groups contribute no "
+                "prompt hashes."
             ),
             arg_type=_positive_int,
         )

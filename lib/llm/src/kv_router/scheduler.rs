@@ -29,6 +29,7 @@ use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -100,15 +101,25 @@ where
             workers_with_configs.borrow().clone();
 
         let router_id = component.drt().discovery().instance_id();
+        let active_sequence_stride =
+            NonZeroUsize::new(kv_router_config.router_active_sequence_stride).ok_or_else(|| {
+                KvSchedulerError::InitFailed(
+                    "router active-sequence stride must be greater than zero".to_string(),
+                )
+            })?;
+        let tracker_options = super::sequence::SequenceTrackerOptions {
+            replica_sync: kv_router_config.router_replica_sync,
+            active_sequence_stride,
+            ..Default::default()
+        };
         let slots = create_multi_worker_sequences(
             component.clone(),
             block_size as usize,
-            kv_router_config.router_active_sequence_stride,
             initial_workers,
-            kv_router_config.router_replica_sync,
             router_id,
             worker_type,
             cancellation_token.child_token(),
+            tracker_options,
         )
         .await
         .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;

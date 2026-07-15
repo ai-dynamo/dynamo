@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::future::poll_fn;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::task::Poll;
 
@@ -150,15 +151,24 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             return;
         }
 
-        let received_stride = event.effective_stride().unwrap_or(0);
-        if received_stride != self.active_sequence_stride {
-            tracing::warn!(
-                source_router_id = event.router_id,
-                request_id = %event.request_id,
-                expected_stride = self.active_sequence_stride,
-                received_stride,
-                "Dropping active-sequence replica event with incompatible stride"
-            );
+        let received_stride = event.normalized_stride();
+        if received_stride.map(NonZeroUsize::get) != Ok(self.active_sequence_stride) {
+            if self
+                .warned_replica_stride_mismatches
+                .lock()
+                .insert((event.router_id, received_stride))
+            {
+                let received_stride_label = received_stride
+                    .map(|stride| stride.get().to_string())
+                    .unwrap_or_else(|_| "malformed".to_string());
+                tracing::warn!(
+                    source_router_id = event.router_id,
+                    request_id = %event.request_id,
+                    expected_stride = self.active_sequence_stride,
+                    received_stride = %received_stride_label,
+                    "Dropping active-sequence replica event with incompatible stride"
+                );
+            }
             self.publisher.observe_replica_stride_mismatch(
                 self.active_sequence_stride,
                 received_stride,

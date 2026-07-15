@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -631,14 +632,19 @@ pub struct ActiveSequenceEvent {
 }
 
 impl ActiveSequenceEvent {
-    /// Return the sender's effective stride, or `None` for a malformed zero.
-    pub fn effective_stride(&self) -> Option<usize> {
+    /// Normalize the sender's stride, treating a missing value as the legacy stride of 1.
+    pub fn normalized_stride(&self) -> Result<NonZeroUsize, ActiveSequenceStrideError> {
         match self.stride {
-            None | Some(1) => Some(1),
-            Some(0) => None,
-            Some(stride) => Some(stride),
+            None => Ok(NonZeroUsize::MIN),
+            Some(stride) => NonZeroUsize::new(stride).ok_or(ActiveSequenceStrideError::Zero),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum ActiveSequenceStrideError {
+    #[error("active-sequence stride must be greater than zero")]
+    Zero,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -2067,7 +2073,7 @@ mod tests {
         let serialized = serde_json::to_value(&event).unwrap();
         assert!(serialized.get("stride").is_none());
         let decoded: ActiveSequenceEvent = serde_json::from_value(serialized).unwrap();
-        assert_eq!(decoded.effective_stride(), Some(1));
+        assert_eq!(decoded.normalized_stride(), Ok(NonZeroUsize::MIN));
     }
 
     #[test]
@@ -2086,10 +2092,13 @@ mod tests {
             serialized.get("stride").and_then(|value| value.as_u64()),
             Some(4)
         );
-        assert_eq!(event.effective_stride(), Some(4));
+        assert_eq!(event.normalized_stride(), Ok(NonZeroUsize::new(4).unwrap()));
 
         event.stride = Some(0);
-        assert_eq!(event.effective_stride(), None);
+        assert_eq!(
+            event.normalized_stride(),
+            Err(ActiveSequenceStrideError::Zero)
+        );
     }
 
     #[test]
