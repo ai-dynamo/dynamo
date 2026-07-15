@@ -262,17 +262,14 @@ def generate_mocker_config(
 def _mount_model_cache_pvc(service_dict: dict, dgdr) -> None:
     """Mount the DGDR's model-cache PVC into a service's mainContainer.
 
-    No-op unless the model-cache PVC is fully specified — the same fields
-    resolve_model_path needs to point --model-path at the mount, so we never
-    add a mount the worker's load path won't reference.
+    Mirrors the real-backend path (protocol.py): mount whenever the PVC is
+    configured. When pvcModelPath is set the weights live at a known path and
+    --model-path already points there (resolve_model_path); when it is absent
+    the PVC is an HF cache, so point HF_HOME at the mount so an offline worker
+    reads from it instead of fetching from HuggingFace.
     """
     model_cache = dgdr.modelCache
-    if not (
-        model_cache
-        and model_cache.pvcName
-        and model_cache.pvcMountPath
-        and model_cache.pvcModelPath
-    ):
+    if not (model_cache and model_cache.pvcName and model_cache.pvcMountPath):
         return
 
     volume_name = "model-cache"
@@ -280,20 +277,22 @@ def _mount_model_cache_pvc(service_dict: dict, dgdr) -> None:
     extra_pod_spec.setdefault("volumes", []).append(
         {
             "name": volume_name,
-            "persistentVolumeClaim": {
-                "claimName": model_cache.pvcName,
-                "readOnly": True,
-            },
+            "persistentVolumeClaim": {"claimName": model_cache.pvcName},
         }
     )
     main_container = extra_pod_spec.setdefault("mainContainer", {})
     main_container.setdefault("volumeMounts", []).append(
-        {
-            "name": volume_name,
-            "mountPath": model_cache.pvcMountPath,
-            "readOnly": True,
-        }
+        {"name": volume_name, "mountPath": model_cache.pvcMountPath}
     )
+
+    if not model_cache.pvcModelPath:
+        # HF-cache PVC mode: no explicit checkpoint dir, so --model-path stays
+        # the HF id and the PVC serves as the HF cache. Point HF_HOME at it.
+        env = main_container.setdefault("env", [])
+        env[:] = [
+            e for e in env if not (isinstance(e, dict) and e.get("name") == "HF_HOME")
+        ]
+        env.append({"name": "HF_HOME", "value": model_cache.pvcMountPath})
 
 
 def enable_planner_worker_scaling_adapters(
