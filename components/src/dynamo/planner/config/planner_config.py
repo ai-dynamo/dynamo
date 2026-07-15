@@ -358,9 +358,9 @@ class PlannerConfig(BaseModel):
         ),
     )
 
-    environment: Literal[
-        "kubernetes", "virtual", "global-planner"
-    ] = SLAPlannerDefaults.environment
+    environment: Literal["kubernetes", "virtual", "global-planner"] = (
+        SLAPlannerDefaults.environment
+    )
     namespace: str = Field(
         default_factory=lambda: os.environ.get("DYN_NAMESPACE", "dynamo"),
         exclude=True,
@@ -532,9 +532,9 @@ class PlannerConfig(BaseModel):
     metric_reporting_prometheus_port: int = Field(
         default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
     )
-    throughput_metrics_source: Literal[
-        "frontend", "router"
-    ] = SLAPlannerDefaults.throughput_metrics_source
+    throughput_metrics_source: Literal["frontend", "router"] = (
+        SLAPlannerDefaults.throughput_metrics_source
+    )
 
     model_name: Optional[str] = None
 
@@ -715,7 +715,7 @@ class PlannerConfig(BaseModel):
     scheduling: SchedulingConfig = Field(
         default_factory=SchedulingConfig,
         description=(
-            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` " "docstring."
+            "Plugin-pipeline scheduling config — see ``SchedulingConfig`` docstring."
         ),
     )
 
