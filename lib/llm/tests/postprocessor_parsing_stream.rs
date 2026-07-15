@@ -8,8 +8,11 @@ use std::sync::Arc;
 
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::openai::ParsingOptions;
+use dynamo_llm::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use dynamo_llm::protocols::openai::chat_completions::{
-    NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
+    NvCreateChatCompletionStreamResponse,
 };
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionNamedToolChoice, ChatCompletionTool,
@@ -686,6 +689,101 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_to
 
     assert_eq!(reasoning, "");
     assert_eq!(content, "This is plain content");
+}
+
+/// DYN-3525 non-streaming parity: a `stream=false` request is served by folding
+/// the SAME reasoning-parsed, `<think>`-stripped delta stream that streaming
+/// clients receive (the engine always runs internally in streaming mode; only
+/// the HTTP layer folds). This test drives `postprocessor_parsing_stream` — where
+/// the `force_nonempty_content` strip lives — and then aggregates through the
+/// production `NvCreateChatCompletionResponse::from_annotated_stream` entrypoint
+/// used by the non-streaming handler. It asserts the aggregated message has
+/// non-empty, `<think>`-stripped `content` and empty `reasoning_content`, i.e.
+/// the guarantee clients that require non-empty content depend on.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_strips_start_token() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    // Leading `<think>` arrives split across chunks (same input as the streaming
+    // test), then a terminal stop chunk closes the choice.
+    let input_chunks = vec![
+        mock_content_chunk("<thi"),
+        mock_content_chunk("nk>This is plain content"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+
+    // Step 1: the shared postprocessor stream (reasoning gate + `<think>` strip).
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    // Step 2: the non-streaming fold, identical to the `stream=false` HTTP path.
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("aggregation should succeed");
+
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("This is plain content"),
+        "aggregated content must be non-empty with the leading <think> stripped"
+    );
+    assert_eq!(
+        choice.message.reasoning_content, None,
+        "reasoning_content must stay empty when force_nonempty_content=true"
+    );
+}
+
+/// DYN-3525 non-streaming parity, EOF-flush case: when the stream ends after only
+/// a partial `<think>` prefix, those bytes are valid content that the strip flushes
+/// on the terminal chunk. Confirm the non-streaming fold preserves that flushed
+/// content rather than dropping it.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flushes_partial_prefix()
+{
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![mock_content_chunk("<thi"), mock_final_chunk()];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("aggregation should succeed");
+
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("<thi"),
+        "a partial <think> prefix is valid content and must survive aggregation"
+    );
+    assert_eq!(choice.message.reasoning_content, None);
 }
 
 /// Regression: if the stream ends after a partial `<think>` prefix, those bytes
