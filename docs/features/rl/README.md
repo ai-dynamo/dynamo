@@ -17,6 +17,7 @@ updates directly to the selected engine.
 | Run rollouts | `POST /v1/completions` or `POST /v1/chat/completions` | `8000` | Routes inference through the Dynamo frontend. |
 | Discover RL workers | `GET /v1/rl/workers` | `8001` | Returns live workers, their advertised routes, and direct system URLs. |
 | Administer one engine | `POST <system_url>/engine/<route>` | Worker-specific | Calls one worker without frontend routing or fan-out. |
+| Refit weights with ModelExpress | `POST <system_url>/engine/update_weights_via_mx` | Worker-specific | Pulls a published policy version directly from trainer GPUs when the worker advertises the route. |
 
 The discovery API runs on a dedicated frontend listener. It is not mounted on the main frontend
 port, and it does not proxy `/engine/` calls. The request-plane URL in its response is used
@@ -308,6 +309,19 @@ both the HTTP status and the JSON result before advancing the rollout state.
 The `/v1/rl/workers` endpoint is read-only. It intentionally does not expose `/v1/rl/engine` or
 `/v1/rl/engines` proxy routes, which prevents an accidental frontend fan-out of a mutating engine
 operation.
+
+### Refit Weights with ModelExpress
+
+ModelExpress is an optional mid-training weight-update path for RL jobs whose
+trainer and rollout workers run on separate GPUs or use different parallel
+layouts. Trainer owner ranks publish native local tensors; rollout workers
+discover the requested version and pull selected GPU ranges over NIXL.
+
+Use the worker's advertised `update_weights_via_mx` route rather than assuming
+the integration is present. The dedicated
+[ModelExpress Weight Refit](model-express-weight-refit.md) guide covers
+publisher requirements, worker configuration, partial updates, resharding,
+cache invalidation, failure handling, and timing.
 
 ## Register a Custom Engine Route
 

@@ -321,8 +321,13 @@ navigation:
                 path: agents/agent-harnesses.md
               - page: ThunderAgent Program Scheduler
                 path: agents/thunderagent-router.md
-          - page: Reinforcement Learning
+          - section: Reinforcement Learning
             path: features/rl/README.md
+            contents:
+              - page: Integration Overview
+                path: features/rl/README.md
+              - page: ModelExpress Weight Refit
+                path: features/rl/model-express-weight-refit.md
           - page: LoRA Adapters
             path: features/lora/README.md
           - section: Multimodal
