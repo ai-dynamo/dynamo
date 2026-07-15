@@ -76,6 +76,8 @@ configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
 
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+
 
 class TRTLLMEnginePauseController:
     """Adapts TRT-LLM sleep/wake to the standard pause controller interface.
@@ -714,10 +716,20 @@ class HandlerBase(BaseGenerativeHandler):
         disaggregated_params = None
         epd_metadata: dict[str, Any] = {}
 
-        # Canary probe: use its pre-built disagg params (skip prefill_result decode
-        # and skip the mode-specific request_type overrides).
-        if request.get(HEALTH_CHECK_KEY) and request.get("disaggregated_params"):
-            return LlmDisaggregatedParams(**request["disaggregated_params"]), None, {}
+        use_request_disagg_params = request.get(HEALTH_CHECK_KEY) or (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        )
+
+        # Canary probes and conditional-disagg bypasses run a full
+        # context+generation request on a disagg-mode worker, so they use
+        # the pre-built params and skip the normal prefill-result handoff.
+        if use_request_disagg_params and request.get("disaggregated_params"):
+            return (
+                LlmDisaggregatedParams(**request["disaggregated_params"]),
+                ep_disaggregated_params,
+                {},
+            )
 
         # PREFILL mode: setup context_only params
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -995,6 +1007,16 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Normalize OpenAI format to TRT-LLM internal format
         self._normalize_request_format(request)
+        bypass_remote_prefill = (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        )
+        if bypass_remote_prefill:
+            logging.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running request as AGG (prefill+decode on this worker)."
+            )
+            request["disaggregated_params"] = {"request_type": "context_and_generation"}
 
         # Setup disaggregated params based on PREFILL/DECODE mode
         (
@@ -1024,6 +1046,7 @@ class HandlerBase(BaseGenerativeHandler):
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE
             and disaggregated_params is None
+            and not bypass_remote_prefill
         ):
             logging.error("DECODE: disaggregated_params is None but required!")
             logging.error(f"DECODE: Request keys: {list(request.keys())}")
@@ -1180,11 +1203,13 @@ class HandlerBase(BaseGenerativeHandler):
                 cache_salt=cache_salt,
             )
 
-            # In disagg decode mode, wrap abort() to defer until first token
-            # (KV transfer complete).
+            # In disagg decode mode with remote prefill, wrap abort() to defer
+            # until the first token is received (KV transfer complete).
             abort_guard = (
                 _DeferredAbort(generation_result)
                 if self.disaggregation_mode == DisaggregationMode.DECODE
+                and disaggregated_params is not None
+                and not bypass_remote_prefill
                 else None
             )
 

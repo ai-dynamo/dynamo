@@ -102,6 +102,11 @@ from .multimodal_utils.vision_encoder_backend import VisionEncoderBackend
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# Marker set by the Rust conditional-disagg bypass path. When present on a
+# DECODE-mode worker, the request runs as local prefill+decode instead of
+# expecting KV-transfer metadata from an upstream prefill worker.
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
@@ -3054,6 +3059,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         mode = cast(DisaggregationMode, self.config.disaggregation_mode)
         is_decode_only = mode == DisaggregationMode.DECODE
+        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+            request.get("annotations") or []
+        ):
+            logger.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running request as AGG (prefill+decode on this worker)."
+            )
+            is_decode_only = False
+            mode = DisaggregationMode.AGGREGATED
         has_mm_data = request.get("multi_modal_data") is not None
         mixed_embeds: tuple[torch.Tensor, list[int], list[bool]] | None = None
 
@@ -3264,11 +3278,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
 
+        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+            request.get("annotations") or []
+        ):
+            logger.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running text-mode request as AGG (prefill+decode on this worker)."
+            )
+            is_decode_only = False
+
         # Mirror _generate_token_mode: in disagg decode mode route aborts through
         # the per-request deferred guard so engine_client.abort() never fires in
         # the unsafe pre-first-token window, and the admin abort_request route can
         # reach this request via self._deferred_aborts.
-        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         async with _deferred_abort_guard(
             self.engine_client,
             request_id,

@@ -40,6 +40,17 @@ _SAMPLING_OPTION_FIELDS = (
     "top_k",
     "min_p",
 )
+BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+
+
+def _raise_if_conditional_disagg_bypass(request: Dict[str, Any]) -> None:
+    if BYPASS_REMOTE_PREFILL_ANNOTATION not in (request.get("annotations") or []):
+        return
+    raise RuntimeError(
+        "SGLang backend does not support conditional-disagg bypass yet. "
+        "Disable --router-conditional-disagg or use a backend with "
+        "decode-side local prefill support."
+    )
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
@@ -342,6 +353,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        _raise_if_conditional_disagg_bypass(request)
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)

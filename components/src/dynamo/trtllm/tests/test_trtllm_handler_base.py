@@ -24,7 +24,10 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.request_handlers.handler_base import HandlerBase
+from dynamo.trtllm.request_handlers.handler_base import (
+    BYPASS_REMOTE_PREFILL_ANNOTATION,
+    HandlerBase,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -641,6 +644,13 @@ class TestDisaggRequestId:
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         return handler
 
+    def _make_decode_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        handler = _ConcreteHandler(config)
+        handler.disaggregation_mode = DisaggregationMode.DECODE
+        return handler
+
     def test_disagg_request_id_populated_in_prefill_mode(self):
         """When mode is PREFILL and no ep_disaggregated_params, disagg_request_id is set."""
         handler = self._make_prefill_handler()
@@ -705,6 +715,39 @@ class TestDisaggRequestId:
             request={}, ep_disaggregated_params=None
         )
         assert params_a.disagg_request_id != params_b.disagg_request_id
+
+    def test_decode_conditional_bypass_uses_request_disagg_params(self):
+        """Conditional-disagg bypass runs full context+generation on decode."""
+        handler = self._make_decode_handler()
+        params, _, _ = handler._setup_disaggregated_params_for_mode(
+            request={
+                "annotations": [BYPASS_REMOTE_PREFILL_ANNOTATION],
+                "disaggregated_params": {"request_type": "context_and_generation"},
+            },
+            ep_disaggregated_params=None,
+        )
+        assert params.request_type == "context_and_generation"
+
+    def test_decode_conditional_bypass_preserves_epd_params(self):
+        """Conditional-disagg bypass keeps EPD params for multimodal handling."""
+        handler = self._make_decode_handler()
+        ep_disaggregated_params = MagicMock()
+
+        (
+            params,
+            returned_ep_params,
+            epd_metadata,
+        ) = handler._setup_disaggregated_params_for_mode(
+            request={
+                "annotations": [BYPASS_REMOTE_PREFILL_ANNOTATION],
+                "disaggregated_params": {"request_type": "context_and_generation"},
+            },
+            ep_disaggregated_params=ep_disaggregated_params,
+        )
+
+        assert params.request_type == "context_and_generation"
+        assert returned_ep_params is ep_disaggregated_params
+        assert epd_metadata == {}
 
 
 class TestHealthCheckPriority:

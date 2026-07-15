@@ -367,9 +367,16 @@ def setup_kv_event_publisher(
     if not config.engine_args.enable_prefix_caching:
         return None
 
-    # Skip KV event publishing for decode workers
-    if config.disaggregation_mode == DisaggregationMode.DECODE:
-        logger.info("Skipping KV event publisher setup for decode worker")
+    # Decode workers do not publish KV events by default. Conditional disagg
+    # opts in because decode-side cache visibility is needed for bypass routing.
+    if (
+        config.disaggregation_mode == DisaggregationMode.DECODE
+        and not config.enable_conditional_disagg
+    ):
+        logger.info(
+            "Skipping KV event publisher setup for decode worker "
+            "(pass --enable-conditional-disagg to opt in)"
+        )
         return None
 
     if config.engine_args.kv_events_config is None:
