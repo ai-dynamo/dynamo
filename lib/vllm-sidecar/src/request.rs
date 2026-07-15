@@ -31,6 +31,12 @@ struct TitoSampling {
     logprobs: Option<u32>,
     prompt_logprobs: Option<u32>,
     skip_special_tokens: Option<bool>,
+    // Prime's renderer requests token IDs explicitly. TITO always returns
+    // them, so this is a compatibility hint rather than a wire-level option.
+    return_token_ids: Option<bool>,
+    // Dynamo's OpenAI adapter currently places Prime's cache salt inside the
+    // sampling object. Preserve it through the native vLLM KV parameters.
+    cache_salt: Option<String>,
     n: Option<u8>,
     best_of: Option<u8>,
     use_beam_search: Option<bool>,
@@ -92,6 +98,7 @@ pub(crate) fn build_generate_request(
             ));
         }
         let _ = options.skip_special_tokens;
+        let _ = options.return_token_ids;
         let _ = options.routed_experts_prompt_start;
     }
     let sampling = &request.sampling_options;
@@ -246,7 +253,12 @@ pub(crate) fn build_generate_request(
             bypass_prefix_cache: false,
             cache_salt: tito
                 .as_ref()
-                .and_then(|value| value.cache_salt.as_ref())
+                .and_then(|value| {
+                    value
+                        .cache_salt
+                        .as_ref()
+                        .or(value.sampling_params.cache_salt.as_ref())
+                })
                 .or_else(|| {
                     request
                         .routing

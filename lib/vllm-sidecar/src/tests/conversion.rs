@@ -260,6 +260,24 @@ fn build_request_preserves_prime_tito_sampling_logprobs_and_cache_salt() {
 }
 
 #[test]
+fn build_request_accepts_prime_cache_salt_in_sampling_params() {
+    let mut request = request(Some(8));
+    request.extra_args = Some(serde_json::json!({
+        "vllm_tito": {
+            "sampling_params": {
+                "cache_salt": "rollout-sampling-9"
+            }
+        }
+    }));
+
+    let wire = build_generate_request(&request, "req-tito-sampling-salt", false).unwrap();
+    assert_eq!(
+        wire.kv.unwrap().cache_salt,
+        "dynamo-cache-salt:rollout-sampling-9"
+    );
+}
+
+#[test]
 fn build_request_rejects_unsupported_tito_sampling_fields() {
     let mut request = request(Some(8));
     request.extra_args = Some(serde_json::json!({
@@ -271,6 +289,17 @@ fn build_request_rejects_unsupported_tito_sampling_fields() {
         ErrorType::Backend(BackendError::InvalidArgument)
     );
     assert!(error.message().contains("beam_width"));
+}
+
+#[test]
+fn build_request_accepts_prime_return_token_ids_hint() {
+    let mut request = request(Some(8));
+    request.extra_args = Some(serde_json::json!({
+        "vllm_tito": {"sampling_params": {"return_token_ids": true}}
+    }));
+
+    let wire = build_generate_request(&request, "req-return-token-ids", false).unwrap();
+    assert!(wire.response.unwrap().output_token_ids);
 }
 
 #[test]
