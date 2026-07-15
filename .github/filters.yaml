@@ -193,7 +193,7 @@ vllm:
 sglang:
   - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
-  - 'components/src/dynamo/sglang/**'
+  - 'components/src/dynamo/sglang*/**'
   - 'lib/sglang-remote/**'
   - 'container/templates/sglang_*'
   - 'container/deps/sglang/**'
