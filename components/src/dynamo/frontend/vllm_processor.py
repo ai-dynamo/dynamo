@@ -671,6 +671,14 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        # When stream_options.continuous_usage_stats is set, OpenAI/vLLM emit a
+        # usage object on every streamed chunk (not just the final one). The
+        # underlying engine only reports completion_usage on the final chunk, so
+        # synthesize per-chunk usage here from the running token counters.
+        stream_options = request.get("stream_options") or {}
+        continuous_usage_stats = bool(
+            stream_options.get("continuous_usage_stats", False)
+        )
         _mm_counts = extract_mm_urls(request.get("messages") or []) or {}
         image_count = len(_mm_counts.get("image_url", []))
         video_count = len(_mm_counts.get("video_url", []))
@@ -795,6 +803,14 @@ class VllmProcessor:
                     }
                     if usage := engine_response.get("completion_usage"):
                         dynamo_out["usage"] = usage
+                    elif continuous_usage_stats:
+                        # No engine-provided usage on this chunk, but the client
+                        # asked for per-chunk stats: emit running counts.
+                        dynamo_out["usage"] = {
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": cumulative_output_tokens,
+                            "total_tokens": input_tokens + cumulative_output_tokens,
+                        }
                     envelope["data"] = dynamo_out
 
                 metrics = {

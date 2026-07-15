@@ -549,6 +549,124 @@ class TestRoutedEnginePath:
         }
 
     @pytest.mark.asyncio
+    async def test_continuous_usage_stats_off_omits_intermediate_usage(
+        self, vllm_processor_module
+    ):
+        # Without stream_options.continuous_usage_stats, intermediate chunks
+        # carry no usage (only a final engine-provided completion_usage would).
+        routed_engine = _FakeRoutedEngine(
+            [{"token_ids": [101], "index": 0, "finish_reason": None}]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        chunks = await _run_generate(processor, _base_preproc())
+
+        assert "usage" not in chunks[0]["data"]
+
+    @pytest.mark.asyncio
+    async def test_continuous_usage_stats_on_emits_per_chunk_usage(
+        self, vllm_processor_module
+    ):
+        # With continuous_usage_stats, every chunk carries running usage counts
+        # synthesized from input + cumulative output tokens.
+        routed_engine = _FakeRoutedEngine(
+            [
+                {"token_ids": [101, 102], "index": 0, "finish_reason": None},
+                {"token_ids": [103], "index": 0, "finish_reason": None},
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        request = {
+            "model": MODEL,
+            "stream_options": {
+                "include_usage": True,
+                "continuous_usage_stats": True,
+            },
+        }
+        preproc = _base_preproc()  # token_ids == [1, 2, 3] -> 3 prompt tokens
+        chunks = [
+            item
+            async for item in processor._generate_and_stream(
+                "request-id",
+                request,
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-request",
+                    external_req_id=None,
+                ),
+                {0: _FakePostProcessor()},
+                mm_routing_info=None,
+                context=None,
+            )
+        ]
+
+        # First chunk: 3 prompt + 2 completion; second: 3 prompt + 3 cumulative.
+        assert chunks[0]["data"]["usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+        }
+        assert chunks[1]["data"]["usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": 3,
+            "total_tokens": 6,
+        }
+
+    @pytest.mark.asyncio
+    async def test_continuous_usage_stats_prefers_engine_completion_usage(
+        self, vllm_processor_module
+    ):
+        # When the engine provides completion_usage (final chunk), use it
+        # verbatim rather than the synthesized running counts.
+        engine_usage = {
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+            "total_tokens": 4,
+        }
+        routed_engine = _FakeRoutedEngine(
+            [
+                {
+                    "token_ids": [101],
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "completion_usage": engine_usage,
+                }
+            ]
+        )
+        processor = _make_processor(vllm_processor_module, routed_engine)
+
+        request = {
+            "model": MODEL,
+            "stream_options": {
+                "include_usage": True,
+                "continuous_usage_stats": True,
+            },
+        }
+        preproc = _base_preproc()
+        chunks = [
+            item
+            async for item in processor._generate_and_stream(
+                "request-id",
+                request,
+                preproc,
+                preproc["token_ids"],
+                SimpleNamespace(
+                    sampling_params=SimpleNamespace(n=1),
+                    request_id="vllm-request",
+                    external_req_id=None,
+                ),
+                {0: _FakePostProcessor()},
+                mm_routing_info=None,
+                context=None,
+            )
+        ]
+
+        assert chunks[0]["data"]["usage"] == engine_usage
+
+    @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
         # The Rust postprocessor is bypassed on this path, so the processor must
         # emit per-request multimodal content-part counts itself.
