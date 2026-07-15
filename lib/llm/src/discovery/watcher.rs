@@ -1623,6 +1623,7 @@ impl ModelWatcher {
                             router_config.router_mode,
                             card.kv_cache_block_size,
                             Some(prefill_config),
+                            kv_chooser.clone(),
                             self.prefill_load_estimator.clone(),
                             router_config.session_affinity_ttl_secs,
                             model_name.clone(),

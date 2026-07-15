@@ -202,10 +202,30 @@ impl DefaultWorkerSelector {
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
-        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
-        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
+
+        // Decode routers normally force `overlap_score_credit=0` through the
+        // per-request override, which preserves load-only disagg routing. When
+        // conditional disagg leaves a positive overlap credit in place, prefer
+        // cache-hot decode workers while still charging decode backlog.
+        if self.worker_type == "decode"
+            && !request.track_prefill_tokens
+            && weights.overlap_score_credit > 0.0
+        {
+            let logit = decode_cost_blocks - overlap_credit_blocks;
+            tracing::debug!(
+                "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
+                 = decode_blocks - overlap_credit_blocks \
+                 = {decode_cost_blocks:.3} - {overlap_credit_blocks:.3}",
+                worker.worker_id,
+                worker.dp_rank,
+            );
+            return logit;
+        }
+
+        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks;
 
         if shared_beyond > 0 {
@@ -327,6 +347,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks: request.worker_load_for(worker).potential_decode_blocks(),
             });
         }
 
@@ -438,6 +459,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 required_blocks: request_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
+                potential_decode_blocks: request
+                    .worker_load_for(best_worker)
+                    .potential_decode_blocks(),
             });
         }
 
@@ -466,6 +490,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             required_blocks: request_blocks,
             effective_overlap_blocks: best_overlap,
             cached_tokens: best_cached_tokens,
+            potential_decode_blocks: request
+                .worker_load_for(best_worker)
+                .potential_decode_blocks(),
         })
     }
 }
@@ -1285,6 +1312,33 @@ mod tests {
         assert_eq!(
             selector.worker_logit(&request, worker, 16, 0, weights, "test"),
             5.0
+        );
+    }
+
+    #[test]
+    fn test_decode_worker_logit_credits_overlap_without_prefill_tracking() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.track_prefill_tokens = false;
+        request.overlap.tier_overlap_blocks.device.insert(worker, 3);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 10,
+                ..Default::default()
+            },
+        );
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "decode");
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 0.0,
+        };
+
+        assert_eq!(
+            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            7.0
         );
     }
 

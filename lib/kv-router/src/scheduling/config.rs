@@ -106,6 +106,12 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
         router_track_prefill_tokens = config.router_track_prefill_tokens,
         router_queue_threshold = ?config.router_queue_threshold,
         router_policy_config = ?config.router_policy_config,
+        conditional_disagg_enabled = config.conditional_disagg_enabled,
+        conditional_disagg_policy = ?config.conditional_disagg_policy,
+        conditional_disagg_eff_isl_threshold = config.conditional_disagg_eff_isl_threshold,
+        conditional_disagg_eff_isl_ratio_threshold = config.conditional_disagg_eff_isl_ratio_threshold,
+        conditional_disagg_prefill_busy_threshold = ?config.conditional_disagg_prefill_busy_threshold,
+        conditional_disagg_decode_busy_threshold = ?config.conditional_disagg_decode_busy_threshold,
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
@@ -114,6 +120,10 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
 
 fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvRouterConfig {
     fn parse_f64(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<f64> {
+        get_env(key).and_then(|value| value.parse().ok())
+    }
+
+    fn parse_usize(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<usize> {
         get_env(key).and_then(|value| value.parse().ok())
     }
 
@@ -173,6 +183,35 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     }
     if let Some(value) = get_env("DYN_ROUTER_POLICY_CONFIG") {
         config.router_policy_config = Some(value);
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG") {
+        config.conditional_disagg_enabled = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_CONDITIONAL_DISAGG_POLICY")
+        && let Ok(policy) = value.parse()
+    {
+        config.conditional_disagg_policy = policy;
+    }
+    if let Some(value) = parse_usize(&get_env, "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD") {
+        config.conditional_disagg_eff_isl_threshold = value;
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD",
+    ) {
+        config.conditional_disagg_eff_isl_ratio_threshold = value;
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_CONDITIONAL_DISAGG_PREFILL_BUSY_THRESHOLD",
+    ) {
+        config.conditional_disagg_prefill_busy_threshold = Some(value);
+    }
+    if let Some(value) = parse_f64(
+        &get_env,
+        "DYN_ROUTER_CONDITIONAL_DISAGG_DECODE_BUSY_THRESHOLD",
+    ) {
+        config.conditional_disagg_decode_busy_threshold = Some(value);
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREDICTED_TTL_SECS") {
         config.router_predicted_ttl_secs = Some(value);
@@ -294,6 +333,44 @@ impl RouterPrefillLoadModel {
     }
 }
 
+/// Which conditional-disagg bypass policy to run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionalDisaggPolicyKind {
+    /// Bypass when effective ISL is below both the absolute and ratio thresholds.
+    #[default]
+    IslBounding,
+    /// Bypass when the chosen prefill worker is over the prefill-busy line.
+    PrefillLoad,
+    /// Bypass when either `isl_bounding` or `prefill_load` would bypass.
+    IslOrLoad,
+}
+
+impl fmt::Display for ConditionalDisaggPolicyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IslBounding => f.write_str("isl_bounding"),
+            Self::PrefillLoad => f.write_str("prefill_load"),
+            Self::IslOrLoad => f.write_str("isl_or_load"),
+        }
+    }
+}
+
+impl FromStr for ConditionalDisaggPolicyKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "isl_bounding" => Ok(Self::IslBounding),
+            "prefill_load" => Ok(Self::PrefillLoad),
+            "isl_or_load" => Ok(Self::IslOrLoad),
+            _ => Err(format!(
+                "unknown conditional_disagg_policy: {s:?}, expected 'isl_bounding', 'prefill_load', or 'isl_or_load'"
+            )),
+        }
+    }
+}
+
 impl FromStr for RouterQueuePolicy {
     type Err = String;
 
@@ -410,6 +487,14 @@ struct KvRouterConfigSerde {
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
+    conditional_disagg_enabled: bool,
+    conditional_disagg_policy: ConditionalDisaggPolicyKind,
+    conditional_disagg_eff_isl_threshold: usize,
+    conditional_disagg_eff_isl_ratio_threshold: f64,
+    #[serde(default)]
+    conditional_disagg_prefill_busy_threshold: Option<f64>,
+    #[serde(default)]
+    conditional_disagg_decode_busy_threshold: Option<f64>,
 }
 
 impl Default for KvRouterConfigSerde {
@@ -444,6 +529,15 @@ impl Default for KvRouterConfigSerde {
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
+            conditional_disagg_enabled: config.conditional_disagg_enabled,
+            conditional_disagg_policy: config.conditional_disagg_policy,
+            conditional_disagg_eff_isl_threshold: config.conditional_disagg_eff_isl_threshold,
+            conditional_disagg_eff_isl_ratio_threshold: config
+                .conditional_disagg_eff_isl_ratio_threshold,
+            conditional_disagg_prefill_busy_threshold: config
+                .conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold: config
+                .conditional_disagg_decode_busy_threshold,
         }
     }
 }
@@ -586,6 +680,44 @@ pub struct KvRouterConfig {
     #[serde(default)]
     #[validate(range(min = 0.0))]
     pub router_predicted_ttl_secs: Option<f64>,
+
+    /// Enable conditional-disagg bypass. When true, the `PrefillRouter`
+    /// may short-circuit selected requests to prefill+decode on a decode worker.
+    #[serde(default)]
+    pub conditional_disagg_enabled: bool,
+
+    /// Which conditional-disagg policy to run.
+    #[serde(default)]
+    pub conditional_disagg_policy: ConditionalDisaggPolicyKind,
+
+    /// `IslBoundingPolicy` absolute effective-ISL cutoff in tokens.
+    #[serde(default = "default_conditional_disagg_eff_isl_threshold")]
+    pub conditional_disagg_eff_isl_threshold: usize,
+
+    /// `IslBoundingPolicy` effective-ISL/prompt-token ratio cutoff.
+    #[serde(default = "default_conditional_disagg_eff_isl_ratio_threshold")]
+    #[validate(range(min = 0.0, max = 1.0))]
+    pub conditional_disagg_eff_isl_ratio_threshold: f64,
+
+    /// `PrefillLoadPolicy` busy-line fraction for the chosen prefill worker.
+    /// When unset, the prefill-load condition falls back to `router_queue_threshold`.
+    #[serde(default)]
+    #[validate(range(min = 0.0))]
+    pub conditional_disagg_prefill_busy_threshold: Option<f64>,
+
+    /// Decode-busy guard fraction for the chosen decode worker. When unset,
+    /// the guard is disabled.
+    #[serde(default)]
+    #[validate(range(min = 0.0))]
+    pub conditional_disagg_decode_busy_threshold: Option<f64>,
+}
+
+fn default_conditional_disagg_eff_isl_threshold() -> usize {
+    crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD
+}
+
+fn default_conditional_disagg_eff_isl_ratio_threshold() -> f64 {
+    crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD
 }
 
 impl Default for KvRouterConfig {
@@ -620,6 +752,13 @@ impl Default for KvRouterConfig {
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
+            conditional_disagg_enabled: false,
+            conditional_disagg_policy: ConditionalDisaggPolicyKind::default(),
+            conditional_disagg_eff_isl_threshold: default_conditional_disagg_eff_isl_threshold(),
+            conditional_disagg_eff_isl_ratio_threshold:
+                default_conditional_disagg_eff_isl_ratio_threshold(),
+            conditional_disagg_prefill_busy_threshold: None,
+            conditional_disagg_decode_busy_threshold: None,
         }
     }
 }
@@ -669,6 +808,15 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
+            conditional_disagg_enabled: compat.conditional_disagg_enabled,
+            conditional_disagg_policy: compat.conditional_disagg_policy,
+            conditional_disagg_eff_isl_threshold: compat.conditional_disagg_eff_isl_threshold,
+            conditional_disagg_eff_isl_ratio_threshold: compat
+                .conditional_disagg_eff_isl_ratio_threshold,
+            conditional_disagg_prefill_busy_threshold: compat
+                .conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold: compat
+                .conditional_disagg_decode_busy_threshold,
         })
     }
 }
@@ -709,6 +857,44 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
         return Err(ValidationError::new(
             "router_predicted_ttl_secs requires use_kv_events=true",
         ));
+    }
+    if config.conditional_disagg_enabled
+        && matches!(
+            config.conditional_disagg_policy,
+            ConditionalDisaggPolicyKind::PrefillLoad | ConditionalDisaggPolicyKind::IslOrLoad,
+        )
+    {
+        match (
+            config.conditional_disagg_prefill_busy_threshold,
+            config.router_queue_threshold,
+        ) {
+            (Some(threshold), _) => {
+                tracing::info!(
+                    busy_threshold = threshold,
+                    "conditional_disagg prefill-load condition using --router-conditional-disagg-prefill-busy-threshold"
+                );
+            }
+            (None, Some(threshold)) => {
+                tracing::info!(
+                    inherited_threshold = threshold,
+                    "conditional_disagg prefill-load condition using --router-queue-threshold because --router-conditional-disagg-prefill-busy-threshold is unset"
+                );
+            }
+            (None, None) => {
+                tracing::warn!(
+                    policy = ?config.conditional_disagg_policy,
+                    "conditional_disagg prefill-load condition disabled: set --router-conditional-disagg-prefill-busy-threshold or --router-queue-threshold, or use policy=isl_bounding"
+                );
+            }
+        }
+    }
+    if config.conditional_disagg_enabled
+        && let Some(threshold) = config.conditional_disagg_decode_busy_threshold
+    {
+        tracing::info!(
+            decode_busy_threshold = threshold,
+            "conditional_disagg decode-busy guard enabled: bypass is disabled when the selected decode worker's projected decode load exceeds this fraction of KV capacity"
+        );
     }
     if let Err(error) = config.loaded_policy_config() {
         let mut validation_error = ValidationError::new("router_policy_config");

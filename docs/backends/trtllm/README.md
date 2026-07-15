@@ -20,7 +20,7 @@ Dynamo TensorRT-LLM integrates [TensorRT-LLM](https://github.com/NVIDIA/TensorRT
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
 | [**Disaggregated Serving**](../../design-docs/disagg-serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../design-docs/disagg-serving.md) | 🚧 | Not supported yet |
+| [**Conditional Disaggregation**](../../components/router/router-disaggregated-serving.md#conditional-disaggregation) | ✅ | Requires KV-aware routing and `--publish-kv-events` on prefill and decode workers |
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ |  |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ |  |
 | [**Load Based Planner**](../../components/planner/README.md) | 🚧 | Planned |

@@ -84,6 +84,18 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
+            flag_name="--enable-conditional-disagg",
+            env_var="DYN_VLLM_ENABLE_CONDITIONAL_DISAGG",
+            default=False,
+            help=(
+                "Opt this decode worker into conditional-disagg support. Decode "
+                "workers publish KV events so the Dynamo router can see decode-side "
+                "cache, and annotated bypass requests run as local prefill+decode."
+            ),
+        )
+
+        add_negatable_bool_argument(
+            g,
             flag_name="--use-vllm-tokenizer",
             env_var="DYN_VLLM_USE_TOKENIZER",
             default=False,
@@ -418,6 +430,7 @@ class DynamoVllmConfig(ConfigBase):
     ]  # None when not provided; resolved to enum in validate()
     is_prefill_worker: bool
     is_decode_worker: bool
+    enable_conditional_disagg: bool
     use_vllm_tokenizer: bool
 
     # Multimodal
