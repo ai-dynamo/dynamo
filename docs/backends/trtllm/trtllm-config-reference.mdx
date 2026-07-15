@@ -234,7 +234,7 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 
 ## Diffusion (experimental)
 
-_These flags configure the experimental diffusion pipeline (video and image generation). They are only relevant when `--modality` is set to `video_diffusion` or `image_diffusion`. See [TensorRT-LLM Diffusion](trtllm-diffusion.md) for usage details._
+_These flags configure the experimental diffusion pipeline (video and image generation). They are only relevant when `--modality` is set to `video_diffusion` or `image_diffusion`. See [TensorRT-LLM Diffusion](../../features/diffusion/README.md) for usage details._
 
 <ParamField path="--quant-algo" type="string" default="null">
   Quantization algorithm for diffusion models. BF16 weights are quantized on-the-fly during loading. When unset, no quantization is applied.
@@ -340,7 +340,7 @@ _These flags configure the experimental diffusion pipeline (video and image gene
 
 ## Diffusion request defaults (experimental)
 
-_These flags set the default values applied to video and image generation requests that do not specify the corresponding parameter. They are only relevant when `--modality` is `video_diffusion` or `image_diffusion`. See [TensorRT-LLM Diffusion](trtllm-diffusion.md) for usage details._
+_These flags set the default values applied to video and image generation requests that do not specify the corresponding parameter. They are only relevant when `--modality` is `video_diffusion` or `image_diffusion`. See [TensorRT-LLM Diffusion](../../features/diffusion/README.md) for usage details._
 
 <ParamField path="--default-height" type="integer" default="480">
   Default output height in pixels for video or image generation requests that do not specify a height.

@@ -9,7 +9,7 @@ sidebar-title: FastVideo
 This guide covers deploying [FastVideo](https://github.com/hao-ai-lab/FastVideo) text-to-video generation on Dynamo using a custom worker (`worker.py`) exposed through the `/v1/videos` endpoint.
 
 <Note>
-Dynamo also supports diffusion through built-in backends: [SGLang Diffusion](../../backends/sglang/sglang-diffusion.md) (LLM diffusion, image, video), [vLLM-Omni](../../backends/vllm/vllm-omni.md) (text-to-image, text-to-video), and [TRT-LLM Diffusion](../../backends/trtllm/trtllm-diffusion.md) (text-to-image, text-to-video). See the [Diffusion Overview](README.md) for the full support matrix.
+Dynamo also supports text-to-video through built-in backends: [vLLM-Omni](vllm-omni.md), [SGLang](sglang.md), and [TensorRT-LLM](trtllm.md). See the [Diffusion Overview](../README.md) for the full support matrix across all modalities.
 </Note>
 
 ## Overview
@@ -333,9 +333,7 @@ The example source lives at [`examples/diffusers/`](https://github.com/ai-dynamo
 
 ## See Also
 
-- [vLLM-Omni Text-to-Video](../../backends/vllm/vllm-omni.md#text-to-video) — vLLM-Omni video generation via `/v1/videos`
-- [vLLM-Omni Text-to-Image](../../backends/vllm/vllm-omni.md#text-to-image) — vLLM-Omni image generation
-- [SGLang Video Generation](../../backends/sglang/sglang-diffusion.md#video-generation) — SGLang video generation worker
-- [SGLang Image Diffusion](../../backends/sglang/sglang-diffusion.md#image-diffusion) — SGLang image diffusion worker
-- [TRT-LLM Diffusion](../../backends/trtllm/trtllm-diffusion.md#quick-start) — TensorRT-LLM diffusion quick start
-- [Diffusion Overview](README.md) — Full backend support matrix
+- [Text-to-Video with vLLM-Omni](vllm-omni.md) — vLLM-Omni video generation via `/v1/videos`
+- [Text-to-Video with SGLang](sglang.md) — SGLang video generation worker
+- [Text-to-Video with TensorRT-LLM](trtllm.md) — TensorRT-LLM diffusion quick start
+- [Diffusion Overview](../README.md) — Full backend support matrix

@@ -57,7 +57,7 @@ For development, use the [devcontainer](https://github.com/ai-dynamo/dynamo/tree
 | [**KVBM**](../../components/kvbm/README.md) | ✅ | |
 | [**LMCache**](../../integrations/lmcache-integration.md) | ✅ | CUDA 12.9 and arm64/aarch64 containers may require building LMCache from source |
 | [**FlexKV**](../../integrations/flexkv-integration.md) | ✅ | |
-| [**Multimodal Support**](vllm-omni.md) | ✅ | Via vLLM-Omni integration |
+| [**Multimodal Support**](../../features/diffusion/README.md) | ✅ | Via vLLM-Omni integration |
 | [**Observability**](vllm-observability.md) | ✅ | Metrics and monitoring |
 | **WideEP** | ✅ | Support for DeepEP |
 | **DP Rank Routing** | ✅ | [Hybrid load balancing](https://docs.vllm.ai/en/stable/serving/data_parallel_deployment/?h=external+dp#hybrid-load-balancing) via external DP rank control |
@@ -156,6 +156,6 @@ reaches feature and operational parity with the Python vLLM backend.
 - **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
 - **[KV Cache Offloading](vllm-kv-offloading.md)**: KVBM, LMCache, and FlexKV integrations
 - **[Observability](vllm-observability.md)**: Metrics and monitoring
-- **[vLLM-Omni](vllm-omni.md)**: Multimodal model serving
+- **[vLLM-Omni](../../features/diffusion/README.md)**: Multimodal model serving
 - **[Kubernetes Deployment](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**: Kubernetes deployment guide
 - **[vLLM Documentation](https://docs.vllm.ai/en/stable/)**: Upstream vLLM serve arguments

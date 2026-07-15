@@ -1,0 +1,98 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: vLLM-Omni Configuration
+subtitle: CLI flag reference for the vLLM-Omni multimodal backend (python -m dynamo.vllm.omni).
+---
+
+The vLLM-Omni backend uses a dedicated entrypoint: `python -m dynamo.vllm.omni`. This page documents its CLI flags. For deployment guides and per-modality examples, see the [Diffusion Overview](../../features/diffusion/README.md).
+
+<Note>
+These are the vLLM-Omni orchestration flags. The omni worker also accepts the same underlying vLLM engine arguments and the cross-cutting [Dynamo Runtime](../../reference/runtime-config-reference.mdx) flags (`--namespace`, `--endpoint`, and others).
+</Note>
+
+## General Flags
+
+<ParamField path="--omni" type="flag">
+  Enable the vLLM-Omni orchestrator (required for all omni workloads).
+</ParamField>
+<ParamField path="--output-modalities" type="text | image | video | audio">
+  Output modality the worker registers endpoints for.
+</ParamField>
+<ParamField path="--stage-configs-path" type="path">
+  Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted).
+</ParamField>
+<ParamField path="--boundary-ratio" type="float" default="0.875">
+  MoE expert switching boundary.
+</ParamField>
+<ParamField path="--flow-shift" type="float">
+  Scheduler flow_shift (5.0 for 720p, 12.0 for 480p).
+</ParamField>
+<ParamField path="--default-video-fps" type="int" default="16">
+  Default frames per second for generated videos.
+</ParamField>
+
+## Memory & Performance
+
+<ParamField path="--vae-use-slicing" type="flag">
+  Enable VAE slicing for memory optimization.
+</ParamField>
+<ParamField path="--vae-use-tiling" type="flag">
+  Enable VAE tiling for memory optimization.
+</ParamField>
+<ParamField path="--enable-layerwise-offload" type="flag">
+  Enable layerwise offloading on DiT modules to reduce GPU memory.
+</ParamField>
+<ParamField path="--layerwise-num-gpu-layers" type="int" default="1">
+  Number of ready layers to keep on GPU during generation.
+</ParamField>
+<ParamField path="--enforce-eager" type="flag">
+  Disable torch.compile for diffusion models.
+</ParamField>
+<ParamField path="--enable-cpu-offload" type="flag">
+  Enable CPU offloading for diffusion models.
+</ParamField>
+
+## Diffusion Cache
+
+<ParamField path="--cache-backend" type="cache_dit | tea_cache">
+  Diffusion cache backend.
+</ParamField>
+<ParamField path="--cache-config" type="json">
+  Cache configuration as a JSON string (overrides defaults).
+</ParamField>
+<ParamField path="--enable-cache-dit-summary" type="flag">
+  Enable cache-dit summary logging after diffusion forward passes.
+</ParamField>
+
+## Parallelism
+
+<ParamField path="--ulysses-degree" type="int" default="1">
+  GPUs for Ulysses sequence parallelism in diffusion.
+</ParamField>
+<ParamField path="--ring-degree" type="int" default="1">
+  GPUs for ring sequence parallelism in diffusion.
+</ParamField>
+<ParamField path="--cfg-parallel-size" type="int" default="1">
+  GPUs for classifier-free guidance parallelism (1 or 2).
+</ParamField>
+
+## Disaggregated Mode
+
+See [vLLM-Omni Disaggregated Serving](../../design-docs/vllm-omni-disaggregated.md) for usage.
+
+<ParamField path="--stage-id" type="int">
+  Run as a single-stage worker for the given stage ID. Requires `--stage-configs-path`.
+</ParamField>
+<ParamField path="--omni-router" type="flag">
+  Run as the stage router. Requires `--stage-configs-path`. Mutually exclusive with `--stage-id`.
+</ParamField>
+
+## Media Storage
+
+<ParamField path="--media-output-fs-url" type="url" default="file:///tmp/dynamo_media">
+  Filesystem URL for storing generated media.
+</ParamField>
+<ParamField path="--media-output-http-url" type="url">
+  Base URL for rewriting media paths in responses (optional).
+</ParamField>

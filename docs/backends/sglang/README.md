@@ -124,7 +124,7 @@ pip install -e .
 | [**KV-Aware Routing**](../../components/router/README.md) | ✅ | |
 | [**SLA-Based Planner**](../../components/planner/planner-guide.md) | ✅ | |
 | [**Multimodal Support**](../../features/multimodal/multimodal-sglang.md) | ✅ | Image via EPD, E/PD, E/P/D patterns |
-| [**Diffusion Models**](sglang-diffusion.md) | ✅ | LLM diffusion, image, and video generation |
+| [**Diffusion Models**](../../features/diffusion/README.md) | ✅ | LLM diffusion, image, and video generation |
 | [**Request Cancellation**](../../design-docs/request-cancellation.md) | ✅ | Aggregated full; disaggregated decode-only |
 | [**Graceful Shutdown**](../../fault-tolerance/graceful-shutdown.md) | ✅ | Discovery unregister + grace period |
 | [**Observability**](sglang-observability.md) | ✅ | Metrics, tracing, and Grafana dashboards |
@@ -208,6 +208,6 @@ You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`.
 - **[Reference Guide](sglang-reference-guide.md)**: Worker types, architecture, and configuration
 - **[Examples](sglang-examples.md)**: All deployment patterns with launch scripts
 - **[Disaggregation](sglang-disaggregation.md)**: P/D architecture and KV transfer details
-- **[Diffusion](sglang-diffusion.md)**: LLM, image, and video diffusion models
+- **[Diffusion](../../features/diffusion/README.md)**: LLM, image, and video diffusion models
 - **[Observability](sglang-observability.md)**: Metrics, tracing, and Grafana dashboards
 - **[Deploying SGLang with Dynamo on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy)**: Kubernetes deployment guide

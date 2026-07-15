@@ -62,7 +62,7 @@ Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to
 
 ## Diffusion Support (Experimental)
 
-Dynamo supports video and image generation using diffusion models through TensorRT-LLM. For requirements, supported models, API usage, and configuration options, see the [Diffusion Guide](./trtllm-diffusion.md).
+Dynamo supports video and image generation using diffusion models through TensorRT-LLM. For requirements, supported models, API usage, and configuration options, see the [Text-to-Image](../../features/diffusion/text-to-image/trtllm.md) and [Text-to-Video](../../features/diffusion/text-to-video/trtllm.md) guides.
 
 ## Logits Processing
 

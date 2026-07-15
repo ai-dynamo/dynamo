@@ -142,7 +142,7 @@ cd $DYNAMO_HOME/examples/backends/sglang
 
 Options: `--wan-size 1b|14b`, `--num-frames`, `--height`, `--width`, `--num-inference-steps`.
 
-For full details on all diffusion worker types (LLM, image, video), see [Diffusion](sglang-diffusion.md).
+For full details on all diffusion worker types (LLM, image, video), see [Diffusion](../../features/diffusion/README.md).
 
 ## Kubernetes Deployment
 

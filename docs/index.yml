@@ -24,12 +24,16 @@ tabs:
     icon: house
     skip-slug: true
   user-guide:
-    display-name: User Guide
-    icon: book-open
+    display-name: Kubernetes Guide
+    icon: fa-brands fa-kubernetes
+    skip-slug: true
+  cli-guide:
+    display-name: CLI Guide
+    icon: rectangle-terminal
     skip-slug: true
   use-cases:
-    display-name: Use Cases
-    icon: magnifying-glass-chart
+    display-name: Features
+    icon: star
     skip-slug: true
   well-lit-paths:
     display-name: Walkthroughs
@@ -127,8 +131,8 @@ navigation:
                   path: kubernetes/cloud-providers/gke/gke.md
 
       # ==================== Usage ====================
-      - section: Model Deployment (K8s) # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
-        icon: kubernetes
+      - section: Model Deployment # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
+        icon: microchip
         contents:
           - page: Introduction
             path: getting-started/kubernetes-deployment.md
@@ -182,15 +186,38 @@ navigation:
               - page: Planner Simulation Benchmarking
                 path: dynosim/planner-benchmarking.md
 
-      - section: Local Deployment
-        icon: rectangle-terminal
+  - tab: cli-guide
+    layout:
+      - section: Getting Started
+        icon: rocket
         contents:
+          - page: Introduction
+            path: getting-started/cli-introduction.md
           - page: Quickstart
+            path: getting-started/quickstart.mdx
+
+      - section: Installation
+        icon: download
+        contents:
+          - page: Install Dynamo
             path: getting-started/local-installation.md
           - page: Building from Source
             path: getting-started/building-from-source.md
           - page: Minikube Setup
             path: kubernetes/deployment/minikube.md
+          - section: Observability Setup
+            collapsed: true
+            contents:
+              - page: Overview
+                path: observability/README.md
+              - page: Prometheus + Grafana
+                path: observability/prometheus-grafana.md
+
+      - section: Model Deployment
+        icon: microchip
+        contents:
+          - page: Overview
+            path: getting-started/cli-model-deployment.md
           - section: Backends
             collapsed: true
             contents:
@@ -200,19 +227,6 @@ navigation:
               path: backends/sglang/sglang-examples.md
             - page: TRT-LLM Deployments
               path: backends/trtllm/trtllm-examples.md
-          - section: Observability Setup
-            collapsed: true
-            contents:
-              - page: Overview
-                path: observability/README.md
-              - page: Prometheus + Grafana
-                path: observability/prometheus-grafana.md
-              - page: Health Checks
-                path: observability/health-checks.md
-              - page: Tracing
-                path: observability/tracing.md
-              - page: Logging
-                path: observability/logging.md
           - section: KV Cache Offloading
             collapsed: true
             contents:
@@ -225,40 +239,18 @@ navigation:
               - page: Custom KV Events
                 path: integrations/kv-events-custom-engines.md
 
+      - section: Operations
+        icon: screwdriver-wrench
+        contents:
+          - page: Health Checks
+            path: observability/health-checks.md
+          - page: Tracing
+            path: observability/tracing.md
+          - page: Logging
+            path: observability/logging.md
+
   - tab: use-cases
     layout:
-      # ==================== Key Features ====================
-      - section: Key Features
-        icon: star
-        contents:
-          - section: Tool Calling & Reasoning
-            slug: parsing
-            contents:
-              - page: Introduction
-                path: tool-calling/introduction.mdx
-              - page: Chat Processors
-                path: tool-calling/chat-processors.mdx
-              - page: Tool Call Parsing
-                path: tool-calling/README.mdx
-              - page: Reasoning Parsing
-                path: reasoning/README.md
-              - page: Troubleshooting Tool Calls
-                path: tool-calling/troubleshooting.md
-          - page: Fastokens Tokenizer
-            path: features/tokenizer/README.md
-          - page: LoRA Adapters
-            path: features/lora/README.md
-          - section: Fault Tolerance
-            contents:
-              - page: Introduction
-                path: fault-tolerance/README.md
-              - page: Request Migration
-                path: fault-tolerance/request-migration.md
-              - page: Request Rejection
-                path: fault-tolerance/request-rejection.md
-              - page: Graceful Shutdown
-                path: fault-tolerance/graceful-shutdown.md
-
       # ==================== Use Cases ====================
       - section: Use Cases
         icon: magnifying-glass-chart
@@ -293,16 +285,72 @@ navigation:
             contents:
               - page: Overview
                 path: features/diffusion/README.md
-              - page: FastVideo
-                slug: fastvideo
-                path: features/diffusion/fastvideo.md
-              - page: vLLM-Omni
-                path: backends/vllm/vllm-omni.md
-              - page: SGLang Diffusion
-                path: backends/sglang/sglang-diffusion.md
-              - page: TRT-LLM Diffusion
-                path: backends/trtllm/trtllm-diffusion.md
+              - section: Text-to-Image
+                contents:
+                  - page: vLLM-Omni
+                    path: features/diffusion/text-to-image/vllm-omni.md
+                  - page: SGLang
+                    path: features/diffusion/text-to-image/sglang.md
+                  - page: TensorRT-LLM
+                    path: features/diffusion/text-to-image/trtllm.md
+              - section: Text-to-Video
+                contents:
+                  - page: vLLM-Omni
+                    path: features/diffusion/text-to-video/vllm-omni.md
+                  - page: SGLang
+                    path: features/diffusion/text-to-video/sglang.md
+                  - page: TensorRT-LLM
+                    path: features/diffusion/text-to-video/trtllm.md
+                  - page: FastVideo
+                    slug: fastvideo
+                    path: features/diffusion/text-to-video/fastvideo.md
+              - section: Image-to-Video
+                contents:
+                  - page: vLLM-Omni
+                    path: features/diffusion/image-to-video/vllm-omni.md
+                  - page: SGLang
+                    path: features/diffusion/image-to-video/sglang.md
+              - section: Text-to-Audio
+                contents:
+                  - page: vLLM-Omni
+                    path: features/diffusion/text-to-audio/vllm-omni.md
+              - section: Text-to-Text (LLM Diffusion)
+                contents:
+                  - page: SGLang
+                    path: features/diffusion/text-to-text/sglang.md
           # TODO: add Reinforcement Learning (RL) use-case docs here when available.
+
+      # ==================== Key Features ====================
+      - section: Key Features
+        icon: star
+        contents:
+          - section: Tool Calling & Reasoning
+            slug: parsing
+            contents:
+              - page: Introduction
+                path: tool-calling/introduction.mdx
+              - page: Chat Processors
+                path: tool-calling/chat-processors.mdx
+              - page: Tool Call Parsing
+                path: tool-calling/README.mdx
+              - page: Reasoning Parsing
+                path: reasoning/README.md
+              - page: Troubleshooting Tool Calls
+                path: tool-calling/troubleshooting.md
+          - page: Fastokens Tokenizer
+            path: features/tokenizer/README.md
+          - page: LoRA Adapters
+            path: features/lora/README.md
+          - section: Fault Tolerance
+            contents:
+              - page: Introduction
+                path: fault-tolerance/README.md
+              - page: Request Migration
+                path: fault-tolerance/request-migration.md
+              - page: Request Rejection
+                path: fault-tolerance/request-rejection.md
+              - page: Graceful Shutdown
+                path: fault-tolerance/graceful-shutdown.md
 
   - tab: well-lit-paths
     layout:
@@ -529,6 +577,8 @@ navigation:
                 path: design-docs/dynamo-flow.md
               - page: Disaggregated Serving
                 path: design-docs/disagg-serving.md
+              - page: vLLM-Omni Disaggregated Serving
+                path: design-docs/vllm-omni-disaggregated.md
               - page: Distributed Runtime
                 path: design-docs/distributed-runtime.md
               - page: Mocker Engine Architecture
@@ -691,6 +741,8 @@ navigation:
         contents:
           - page: vLLM Configuration
             path: backends/vllm/vllm-config-reference.mdx
+          - page: vLLM-Omni Configuration
+            path: backends/vllm/vllm-omni-config-reference.mdx
           - page: SGLang Configuration
             path: backends/sglang/sglang-config-reference.mdx
           - page: TensorRT-LLM Configuration

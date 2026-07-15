@@ -118,7 +118,7 @@ Run **Meta-Llama-3.1-8B-Instruct** with **Eagle3** as a draft model for faster i
 
 Serve multimodal models using the vLLM-Omni integration.
 
-**Guide:** [vLLM-Omni](vllm-omni.md)
+**Guide:** [vLLM-Omni](../../features/diffusion/README.md)
 
 ### Multi-Node
 
