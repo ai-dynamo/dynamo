@@ -146,6 +146,7 @@ const (
 	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
 	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
 	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"
+	DynamoNamespacePrefixStrictEnvVar = "DYN_NAMESPACE_PREFIX_STRICT"
 	DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"

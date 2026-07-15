@@ -19,6 +19,7 @@ use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::namespace::{NamespaceFilter, namespace_prefix_mode_from_env};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
@@ -30,6 +31,12 @@ use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
+#[derive(Debug, Clone, Copy)]
+pub enum NamespaceMatchKind {
+    Exact,
+    Prefix,
+}
 
 fn validate_kube_discovery_mode() -> Result<()> {
     match std::env::var(DYN_KUBE_DISCOVERY_MODE) {
@@ -105,6 +112,15 @@ impl Router {
     /// This waits for at least one decode worker to appear, fetches the model
     /// card, initializes the preprocessor, and creates both routers.
     pub async fn from_discovery(namespace: &str, component: &str) -> Result<Self> {
+        Self::from_discovery_with_namespace_match(namespace, NamespaceMatchKind::Exact, component)
+            .await
+    }
+
+    pub async fn from_discovery_with_namespace_match(
+        namespace: &str,
+        namespace_match_kind: NamespaceMatchKind,
+        component: &str,
+    ) -> Result<Self> {
         validate_kube_discovery_mode()?;
 
         let runtime = Runtime::from_settings()?;
@@ -113,7 +129,7 @@ impl Router {
         // Wait for workers
         wait_for_discovery_sync(&drt).await;
 
-        let bootstrap = init_preprocessor(&drt, namespace).await?;
+        let bootstrap = init_preprocessor(&drt, namespace, namespace_match_kind).await?;
         let block_size = bootstrap.card.kv_cache_block_size;
         let model_name = bootstrap.card.display_name.clone();
         let enable_eagle = bootstrap.card.runtime_config.enable_eagle;
@@ -545,14 +561,17 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime) {
 async fn init_preprocessor(
     drt: &DistributedRuntime,
     target_namespace: &str,
+    target_namespace_kind: NamespaceMatchKind,
 ) -> Result<DiscoveredModelBootstrap> {
     loop {
-        match fetch_preprocessor_from_discovery(drt, target_namespace).await {
+        match fetch_preprocessor_from_discovery(drt, target_namespace, target_namespace_kind).await
+        {
             Ok(result) => return Ok(result),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     target_namespace,
+                    ?target_namespace_kind,
                     "Model card not available yet, retrying in 5s..."
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -564,6 +583,7 @@ async fn init_preprocessor(
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
     target_namespace: &str,
+    target_namespace_kind: NamespaceMatchKind,
 ) -> Result<DiscoveredModelBootstrap> {
     let discovery = drt.discovery();
     let instances = discovery.list(DiscoveryQuery::AllModels).await?;
@@ -584,13 +604,26 @@ async fn fetch_preprocessor_from_discovery(
     tracing::debug!(
         ?discovered_namespaces,
         target_namespace,
+        ?target_namespace_kind,
         "Discovery returned {} model instances",
         discovered_namespaces.len()
     );
 
+    let namespace_filter = match target_namespace_kind {
+        NamespaceMatchKind::Exact => NamespaceFilter::from_namespace_and_prefix_with_mode(
+            Some(target_namespace),
+            None,
+            namespace_prefix_mode_from_env(),
+        ),
+        NamespaceMatchKind::Prefix => NamespaceFilter::from_namespace_and_prefix_with_mode(
+            None,
+            Some(target_namespace),
+            namespace_prefix_mode_from_env(),
+        ),
+    };
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            if !namespace.starts_with(target_namespace) {
+            if !namespace_filter.matches(namespace) {
                 continue;
             }
 

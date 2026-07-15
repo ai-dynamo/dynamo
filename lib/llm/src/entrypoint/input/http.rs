@@ -11,7 +11,7 @@ use crate::{
     entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
     http::service::service_v2::{self, HttpService},
     local_model::runtime_config::TokenizerBackend,
-    namespace::NamespaceFilter,
+    namespace::{NamespaceFilter, namespace_prefix_mode_from_env},
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -86,9 +86,10 @@ pub async fn run(
             let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to HTTP service
             // Create namespace filter from model configuration
-            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix_with_mode(
                 model.namespace(),
                 model.namespace_prefix(),
+                namespace_prefix_mode_from_env(),
             );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
