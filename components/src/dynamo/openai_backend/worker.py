@@ -62,7 +62,9 @@ class _ToolCallCoalescer:
 
     def push(self, chunk: dict[str, Any]) -> list[dict[str, Any]]:
         choices = chunk.get("choices")
-        if not isinstance(choices, list):
+        if not isinstance(choices, list) or not choices:
+            # Chunks without choices (e.g. the terminal stream_options
+            # include_usage frame) carry no tool-call deltas to merge.
             return [chunk]
 
         output_choices = []
@@ -95,6 +97,12 @@ class _ToolCallCoalescer:
             output_choices.append(choice)
 
         if not output_choices:
+            if chunk.get("usage") is not None:
+                # Never swallow usage: some engines attach it to a chunk
+                # whose choices were all buffered as tool-call deltas.
+                output_chunk = dict(chunk)
+                output_chunk["choices"] = []
+                return [output_chunk]
             return []
 
         output_chunk = dict(chunk)
