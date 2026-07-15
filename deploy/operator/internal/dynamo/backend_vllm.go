@@ -329,7 +329,7 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 	}
 
 	// Step 2: Check operator origin version gate
-	return compatibility.VLLMMultiprocessing.IsEnabled(annotations)
+	return compatibility.VLLMMultiprocessing.Enabled(annotations)
 }
 
 // injectMpDistributedLaunchFlags injects vLLM multiprocessing flags for multi-node TP/PP deployments.

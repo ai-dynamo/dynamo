@@ -23,21 +23,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// OperatorOriginFeatureGate represents a feature gated on the operator version
+// Gate represents a feature gated on the operator version
 // that originally created the DGD (nvidia.com/dynamo-operator-origin-version).
 //
 // The origin version is stamped by the mutating webhook at CREATE time and never
 // changes afterwards. This allows the operator to introduce new default behaviors
 // for newly created resources while preserving backward compatibility for existing ones.
 //
-// When the annotation is absent (pre-upgrade DGD), IsEnabled returns false
+// When the annotation is absent (pre-upgrade DGD), Enabled returns false
 // to preserve backward compatibility.
-type OperatorOriginFeatureGate struct {
+type Gate struct {
 	Name             string         // Human-readable feature name (for logging)
 	MinOriginVersion semver.Version // Minimum origin version required (semver)
 }
 
-// IsEnabled returns true if the origin version in annotations meets or exceeds
+// Enabled returns true if the origin version in annotations meets or exceeds
 // the gate's MinOriginVersion threshold.
 //
 // Returns false when:
@@ -45,7 +45,7 @@ type OperatorOriginFeatureGate struct {
 //   - origin version annotation is absent (pre-upgrade DGD)
 //   - origin version is not valid semver
 //   - origin version < MinOriginVersion
-func (fg OperatorOriginFeatureGate) IsEnabled(annotations map[string]string) bool {
+func (fg Gate) Enabled(annotations map[string]string) bool {
 	logger := log.Log.WithName("featuregate").WithValues("feature", fg.Name)
 
 	originVersion, exists := annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]

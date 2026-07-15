@@ -24,8 +24,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
-func TestOperatorOriginFeatureGate_IsEnabled(t *testing.T) {
-	gate := OperatorOriginFeatureGate{
+func TestGateEnabled(t *testing.T) {
+	gate := Gate{
 		Name:             "TestFeature",
 		MinOriginVersion: *semver.MustParse("1.0.0"),
 	}
@@ -105,15 +105,15 @@ func TestOperatorOriginFeatureGate_IsEnabled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := gate.IsEnabled(tt.annotations)
+			got := gate.Enabled(tt.annotations)
 			if got != tt.want {
-				t.Errorf("IsEnabled() = %v, want %v", got, tt.want)
+				t.Errorf("Enabled() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestOperatorOriginFeatureGate_DifferentThresholds(t *testing.T) {
+func TestGateDifferentThresholds(t *testing.T) {
 	annotations := map[string]string{
 		consts.KubeAnnotationDynamoOperatorOriginVersion: "0.9.0",
 	}
@@ -142,13 +142,13 @@ func TestOperatorOriginFeatureGate_DifferentThresholds(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gate := OperatorOriginFeatureGate{
+			gate := Gate{
 				Name:             "TestFeature",
 				MinOriginVersion: tt.minOriginVersion,
 			}
-			got := gate.IsEnabled(annotations)
+			got := gate.Enabled(annotations)
 			if got != tt.want {
-				t.Errorf("IsEnabled() with threshold %v = %v, want %v", tt.minOriginVersion, got, tt.want)
+				t.Errorf("Enabled() with threshold %v = %v, want %v", tt.minOriginVersion, got, tt.want)
 			}
 		})
 	}
