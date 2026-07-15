@@ -8,13 +8,11 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
   - [project].version in every Dynamo pyproject.toml (PEP 440 form)
   - [package].version / [workspace.package].version in every Cargo.toml
     (SemVer form: dash instead of dot before 'dev', so '1.1.0-dev20260423')
-  - The `ai-dynamo-runtime==1.1.0` and other internal wheel pins in the root
-    pyproject
+  - The `ai-dynamo-runtime==1.1.0` pin in the root pyproject
   - The `version = "1.1.0"` pins on dynamo-*/kvbm-* path deps in root Cargo.toml
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -25,7 +23,6 @@ from pathlib import Path
 PYPROJECT_TARGETS = [
     "pyproject.toml",
     "lib/bindings/python/pyproject.toml",
-    "lib/backend/sglang-remote/pyproject.toml",
     "lib/bindings/kvbm/pyproject.toml",
     "lib/gpu_memory_service/pyproject.toml",
 ]
@@ -53,10 +50,8 @@ SUBCRATE_CARGO_TARGETS = [
 # the `name = { version = "..." }` inline-table form which this regex skips.
 VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")\s*$', re.MULTILINE)
 
-# Root pyproject cross-refs to wheels released in lockstep with ai-dynamo.
-PY_INTERNAL_WHEEL_PIN_RE = re.compile(
-    r'("ai-dynamo-(?:runtime|sglang-remote)==)([^"]+)(")'
-)
+# Root pyproject cross-ref to the runtime wheel.
+PY_RUNTIME_PIN_RE = re.compile(r'("ai-dynamo-runtime==)([^"]+)(")')
 
 
 def pep440(suffix: str, base: str) -> str:
@@ -97,7 +92,7 @@ def rewrite_pyproject(path: Path, suffix: str, is_root: bool) -> None:
     assert n == 1  # guaranteed by the search above
 
     if is_root:
-        text = PY_INTERNAL_WHEEL_PIN_RE.sub(
+        text = PY_RUNTIME_PIN_RE.sub(
             lambda m: f"{m.group(1)}{pep440(suffix, m.group(2))}{m.group(3)}",
             text,
         )

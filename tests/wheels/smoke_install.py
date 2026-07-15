@@ -18,7 +18,6 @@ from urllib.parse import unquote, urlparse
 GLIBC_FLOOR = (2, 28)
 MANYLINUX_POLICY = "manylinux_2_28"
 RUNTIME_PY_TAGS = {"cp310", "cp311", "cp312"}
-SGLANG_REMOTE_DIST = "ai-dynamo-sglang-remote"
 # First-party optional wheel that must ship with the core wheels.
 REQUIRED_OPTIONAL_DIST = "kvbm"
 # Wheels we ship but do not own / do not validate as manylinux: nixl lives under the
@@ -110,7 +109,6 @@ def assert_arch_tag(wheel: Path, target_arch: str | None) -> None:
 def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> None:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
-    sglang_remote = require_one_wheel(wheelhouse, SGLANG_REMOTE_DIST)
 
     py_tag, abi_tag, platform_tag = wheel_tags(ai_dynamo)
     if (py_tag, abi_tag, platform_tag) != ("py3", "none", "any"):
@@ -139,44 +137,8 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
         raise AssertionError(
             f"{ai_dynamo.name} does not pin local runtime version {runtime_version}"
         )
-    if f"ai-dynamo-sglang-remote=={runtime_version}" not in requires.replace(" ", ""):
-        raise AssertionError(
-            f"{ai_dynamo.name} does not pin local SGLang remote version "
-            f"{runtime_version} in its sglang extra"
-        )
 
-    remote_py_tag, remote_abi_tag, remote_platform_tag = wheel_tags(sglang_remote)
-    if remote_py_tag != "py3" or remote_abi_tag != "none":
-        raise AssertionError(
-            f"{sglang_remote.name} should use py3-none tags, "
-            f"got {remote_py_tag}-{remote_abi_tag}"
-        )
-    if MANYLINUX_POLICY not in remote_platform_tag:
-        raise AssertionError(
-            f"{sglang_remote.name} should target {MANYLINUX_POLICY}, "
-            f"got {remote_platform_tag}"
-        )
-
-    remote_meta = wheel_metadata(sglang_remote)
-    if remote_meta["Version"] != runtime_version:
-        raise AssertionError(
-            f"{sglang_remote.name} version {remote_meta['Version']} does not match "
-            f"{runtime.name} version {runtime_version}"
-        )
-
-    with zipfile.ZipFile(sglang_remote) as archive:
-        scripts = [
-            name
-            for name in archive.namelist()
-            if name.endswith(".data/scripts/dynamo-sglang-remote")
-        ]
-    if len(scripts) != 1:
-        raise AssertionError(
-            f"{sglang_remote.name} should contain one dynamo-sglang-remote "
-            f"wheel script, found {scripts}"
-        )
-
-    for wheel in (ai_dynamo, runtime, sglang_remote):
+    for wheel in (ai_dynamo, runtime):
         assert_arch_tag(wheel, target_arch)
 
 
@@ -241,16 +203,10 @@ def assert_auditwheel_show(wheelhouse: Path) -> None:
             )
 
 
-def extracted_elf_files(wheel: Path, destination: Path) -> list[Path]:
+def extracted_shared_libraries(wheel: Path, destination: Path) -> list[Path]:
     with zipfile.ZipFile(wheel) as archive:
         archive.extractall(destination)
-    result = []
-    for path in destination.rglob("*"):
-        if path.is_file():
-            with path.open("rb") as handle:
-                if handle.read(4) == b"\x7fELF":
-                    result.append(path)
-    return sorted(result)
+    return sorted(destination.rglob("*.so")) + sorted(destination.rglob("*.so.*"))
 
 
 def parse_glibc_versions(version_info: str) -> set[tuple[int, int]]:
@@ -282,20 +238,20 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
         offenders: list[str] = []
         for wheel in binary_wheels(wheelhouse):
             wheel_tmp = tmp_path / wheel.name.removesuffix(".whl")
-            elf_files = extracted_elf_files(wheel, wheel_tmp)
-            if not elf_files:
+            shared_libraries = extracted_shared_libraries(wheel, wheel_tmp)
+            if not shared_libraries:
                 raise AssertionError(
-                    f"{wheel.name} is tagged binary but has no ELF files"
+                    f"{wheel.name} is tagged binary but has no .so files"
                 )
 
-            for elf_file in elf_files:
-                versions = glibc_version_needs(elf_file)
+            for shared_library in shared_libraries:
+                versions = glibc_version_needs(shared_library)
                 too_new = sorted(
                     version for version in versions if version > GLIBC_FLOOR
                 )
                 if too_new:
                     offenders.append(
-                        f"{wheel.name}:{elf_file.relative_to(wheel_tmp)} "
+                        f"{wheel.name}:{shared_library.relative_to(wheel_tmp)} "
                         f"requires GLIBC_{too_new[-1][0]}.{too_new[-1][1]}"
                     )
 
@@ -452,25 +408,5 @@ def install_core(
             assert_local_direct_url(venv_python, dist, wheel, wheelhouse)
             import_name = OPTIONAL_IMPORT_NAMES.get(dist, dist)
             run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
-    finally:
-        shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
-
-
-def install_sglang_remote(wheelhouse: Path, python_spec: str) -> None:
-    wheel = require_one_wheel(wheelhouse, SGLANG_REMOTE_DIST)
-    venv_python = create_venv(python_spec)
-    try:
-        pip_install(venv_python, wheelhouse, [str(wheel)])
-        pip_check(venv_python)
-        assert_local_direct_url(venv_python, SGLANG_REMOTE_DIST, wheel, wheelhouse)
-
-        executable = venv_python.parent / "dynamo-sglang-remote"
-        if not executable.is_file():
-            raise AssertionError(f"missing installed executable: {executable}")
-        run(
-            [str(executable), "--help"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)

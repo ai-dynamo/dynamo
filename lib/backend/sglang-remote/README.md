@@ -5,12 +5,16 @@ out-of-process SGLang engine through SGLang's native gRPC service. It is a
 standalone Rust executable, not a Python extension or importable sidecar
 module.
 
-Install the binary-only wheel to place the executable on `PATH`:
+Build and run it directly from the Dynamo workspace:
 
 ```bash
-pip install ai-dynamo-sglang-remote
-dynamo-sglang-remote --sglang-endpoint http://127.0.0.1:30001
+cargo build --release -p dynamo-sglang-remote
+./target/release/dynamo-sglang-remote \
+    --sglang-endpoint http://127.0.0.1:30001
 ```
+
+Distribution and container packaging for the executable are intentionally
+outside the scope of this crate.
 
 ## SGLang-managed process contract
 
