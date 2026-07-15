@@ -113,7 +113,7 @@ class MultimodalRequestProcessor:
             )
             return len(token_ids) - num_placeholders + image_tokens
         except Exception as e:
-            logging.debug("Could not compute expanded prompt length: %s", e)
+            logging.warning("Could not compute expanded prompt length: %s", e)
             return None
 
     def is_url(self, path: str) -> bool:
