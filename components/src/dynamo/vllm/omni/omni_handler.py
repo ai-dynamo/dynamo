@@ -339,15 +339,15 @@ class OmniHandler(BaseOmniHandler):
 
         lock = self._get_lora_lock(lora_name)
         async with lock:
-            lora = self.loaded_loras.get(lora_name)
-            if lora is None:
-                yield {
-                    "status": "error",
-                    "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
-                }
-                return
-
             try:
+                lora = self.loaded_loras.get(lora_name)
+                if lora is None:
+                    yield {
+                        "status": "error",
+                        "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
+                    }
+                    return
+
                 lora_id = lora.id
                 lora_path = lora.path
 
