@@ -233,7 +233,7 @@ def generate_mocker_config(
             ].get("mainContainer"):
                 service_config["extraPodSpec"]["mainContainer"]["image"] = image
 
-    # DGH-1124: the served name stays the model id (so requests match), but the
+    # #11650: the served name stays the model id (so requests match), but the
     # load path must prefer the local PVC mount — otherwise an offline mocker
     # worker tries to fetch the tokenizer from HuggingFace, fails, and never
     # registers. resolve_model_path returns the local PVC path when the model
@@ -256,7 +256,7 @@ def generate_mocker_config(
             if pick is not None and aic_spec is not None:
                 args_list = _inject_mocker_aic_args(args_list, aic_spec, pick)
             main_container["args"] = args_list
-            # DGH-1124: mount the model-cache PVC so an offline mocker worker can
+            # #11650: mount the model-cache PVC so an offline mocker worker can
             # read the model from the PVC instead of reaching for HuggingFace.
             _mount_model_cache_pvc(service_config, dgdr)
 
@@ -269,7 +269,7 @@ def _mount_model_cache_pvc(service_dict: dict, dgdr) -> None:
     No-op when no model cache PVC is configured. Idempotent — skips if a volume
     or mount for the PVC is already present (e.g. user override).
     """
-    model_cache = getattr(dgdr, "modelCache", None)
+    model_cache = dgdr.modelCache
     if not (model_cache and model_cache.pvcName and model_cache.pvcMountPath):
         return
 

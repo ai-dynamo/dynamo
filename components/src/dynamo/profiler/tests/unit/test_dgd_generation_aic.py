@@ -532,7 +532,7 @@ class TestEnableVllmBenchmarkMode:
 
 
 class TestMockerModelCachePvc:
-    """DGH-1124: mocker workers must load from the local PVC path (not the HF
+    """#11650: mocker workers must load from the local PVC path (not the HF
     id) and get the model-cache PVC mounted, so offline deployments work."""
 
     def _mocker_worker_args(self, cfg, worker):
@@ -565,12 +565,16 @@ class TestMockerModelCachePvc:
             assert args[args.index("--model-name") + 1] == "org/model"
             # load path is the local PVC path, not the HF id
             assert args[args.index("--model-path") + 1] == str(model_dir)
-            # the model-cache PVC is mounted onto the worker
+            # the model-cache PVC is mounted read-only onto the worker
             mounts = svc["extraPodSpec"]["mainContainer"]["volumeMounts"]
-            assert any(m["mountPath"] == str(mount) for m in mounts)
+            assert any(
+                m["mountPath"] == str(mount) and m.get("readOnly") is True
+                for m in mounts
+            )
             volumes = svc["extraPodSpec"]["volumes"]
             assert any(
                 v.get("persistentVolumeClaim", {}).get("claimName") == "model-cache"
+                and v.get("persistentVolumeClaim", {}).get("readOnly") is True
                 for v in volumes
             )
 
