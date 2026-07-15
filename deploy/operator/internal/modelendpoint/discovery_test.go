@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 const (
@@ -389,9 +388,7 @@ func TestExtractCandidates(t *testing.T) {
 				Items: []discoveryv1.EndpointSlice{
 					{
 						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-							discoveryv1.LabelServiceName:              "component-service",
-							consts.KubeLabelDynamoComponent:           "prefill",
-							consts.KubeLabelDynamoGraphDeploymentName: "graph",
+							discoveryv1.LabelServiceName: "component-service",
 						}},
 						Endpoints: []discoveryv1.Endpoint{{
 							Addresses:  []string{"10.0.1.5"},
@@ -422,12 +419,6 @@ func TestExtractCandidates(t *testing.T) {
 					t.Fatalf("expected one candidate, got %d", len(candidates))
 				}
 				candidate := candidates[0]
-				if candidate.WorkloadName != "component-service" {
-					t.Fatalf("expected DCD resource identity to survive deduplication, got %#v", candidate)
-				}
-				if candidate.ComponentName != "prefill" || candidate.GraphDeploymentName != "graph" {
-					t.Fatalf("expected graph/component identity to survive deduplication, got %#v", candidate)
-				}
 				if !candidate.KubernetesReady {
 					t.Fatal("expected Kubernetes readiness to survive deduplication")
 				}

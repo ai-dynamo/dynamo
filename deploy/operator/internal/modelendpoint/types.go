@@ -22,10 +22,7 @@ type Candidate struct {
 	Address             string
 	PodName             string
 	WorkloadName        string
-	ComponentName       string
 	GraphDeploymentName string
-	PodIdentityResolved bool
-	ControllerOwnerKind string
 	KubernetesReady     bool
 	// AllowLoRAManagementUnavailable permits a rolling-upgrade fallback only
 	// when this endpoint explicitly reports that no LoRA lifecycle handler is
