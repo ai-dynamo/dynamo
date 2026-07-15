@@ -2,34 +2,58 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Dynamo Enhancement Proposals"
-subtitle: "How DEPs are proposed, reviewed, and discussed: SIG-owned in ai-dynamo/enhancements, rendered here."
+subtitle: "SIG-owned DEPs live in ai-dynamo/enhancements; the Dynamo docs site renders them and mirrors their GitHub review inline."
 ---
 
-A Dynamo Enhancement Proposal (DEP) captures an architecture, design, or process decision along with the motivation behind it. DEPs are owned by a SIG (Special Interest Group) and live in the dedicated `ai-dynamo/enhancements` repository. This Proposals tab renders them on docs.nvidia.com so the design content, its line-level review, and its discussion stay visible alongside the rest of the Dynamo docs.
+A Dynamo Enhancement Proposal (DEP) captures an architecture, design, or process decision along with the motivation behind it. This Proposals tab is the **rendering and discussion layer** for those DEPs — the DEPs themselves are authored and owned by a [Special Interest Group (SIG)](https://github.com/kubernetes/community/blob/master/governance.md) and live in the dedicated `ai-dynamo/enhancements` repository. The docs site publishes each DEP as a page here and mirrors its GitHub review (line comments, PR conversation, and tracking-issue thread) read-only, so the proposal, its status, and its debate share one shareable public link.
 
-Dynamo is multi-product and multi-repo, and is adopting SIGs. Enhancement proposals are cross-cutting, so they belong in a dedicated repository owned by the relevant SIG rather than inside any one code repo. This follows the Kubernetes model, where SIGs own KEPs in `kubernetes/enhancements` while implementation lands across many repos, and the same dedicated-repo pattern used by [Rust](https://github.com/rust-lang/rfcs), [React](https://github.com/reactjs/rfcs), [Swift](https://github.com/swiftlang/swift-evolution), and [Python](https://github.com/python/peps). The full process is defined in DEP-0001.
-
-The docs site adds a visibility and discussion layer on top of that repository, reusing infrastructure that already exists: GitHub issues, pull requests, and this docs site. There is no separate comment service. The rendered page mirrors the DEP's GitHub comments read-only and deep-links back to GitHub for every reply.
+The full process, roles, and lifecycle are specified in **DEP-0001** (the meta-DEP that ratifies this model). This overview describes just the model and where each artifact lives.
 
 > [!NOTE]
-> **Current State.** What renders today is a DEP page on this tab plus a read-only mirror of its GitHub review and discussion, with comments pulled cross-repo from the DEP's pull request and tracking issue (see the Nova page, which mirrors `ai-dynamo/enhancements` PR #61). Rendering DEPs directly from the enhancements repo is the next step; until it lands, a DEP is surfaced here by adding a page that points the comment mirror at its enhancements PR.
+> **Current State.** What renders today is a DEP page on this tab plus a read-only, cross-repo mirror of its GitHub review and discussion (the Nova demo mirrors `ai-dynamo/enhancements` PR #61). A build-time content sync (`fern/scripts/sync_deps.py`) is prototyped: it fetches the DEP body from `ai-dynamo/enhancements` on every Fern build and renders the synced version at `dep-nova-synced`, alongside the existing hand-copied `0000-nova` demo. The prototype has known caveats — the sync manifest pins a source branch rather than per-DEP SHAs, the hand-copy has not been removed yet, and the two pages coexist for side-by-side comparison. Hardening (SHA pinning, hand-copy removal, promotion into the production nav) is tracked alongside DEP-0001 acceptance.
 
-## The Model: Issue + PR, Mirrored on the Page
+## Why the Enhancements Repository, Not This One
 
-A DEP is backed by two GitHub objects and rendered as one page, each doing the job it is best at:
+Dynamo is a multi-product, multi-repo project. The `ai-dynamo` GitHub organization ships many products alongside the inference framework — `dynamo` itself, `aiperf` (benchmarking), `nixl` (transfer library), `modelexpress`, `aiconfigurator`, `grove` (Kubernetes scheduling), `openengine` — plus the public `enhancements` repository where DEPs live. Most DEPs cut across several of those products (a router change touches the frontend, the operator, and one or more backends; a KV-memory decision touches the runtime, the planner, and Deploy). **No single code repository is the natural home for a cross-cutting proposal**, and copying the same DEP into several code repositories creates drift.
 
-- **Pull request** (the revision): the PR in `ai-dynamo/enhancements` that adds or edits the DEP markdown. Reviewers leave **inline line-level comments** on the exact text, plus general **conversation** on the PR.
-- **Tracking issue**: the stable anchor for the DEP's status and cross-references, and the home for durable, open-ended **design discussion**. Any GitHub user can join it without repository write access. A Linear issue (`DYN-####`) links implementation PRs across the code repos to the DEP, which GitHub's own same-repo issue linking cannot do across a multi-repo estate.
-- **Content**: the DEP markdown in `ai-dynamo/enhancements`, owned by its SIG.
-- **Rendered mirror**: the published page shows a read-only mirror of the comment surfaces: inline review comments anchored as highlights on the quoted text, a "Revision discussion" thread (PR conversation), and a "Design discussion" thread (the tracking issue). Each has a deep-link button to reply on GitHub.
+Dynamo is adopting **SIG-based governance** — the Kubernetes model, where a Special Interest Group owns a body of work across many code repositories. Under that model, a SIG owns a DEP, not a code repo, and a dedicated proposals repository is the right structure rather than a compromise. `ai-dynamo/enhancements` is that repository.
+
+SIGs formalize the ownership taxonomy the `ai-dynamo/dynamo` repository already enforces. Its CODEOWNERS Infrastructure-as-Code (`.github/codeowners/areas.yaml`) partitions the repository into first-class areas — for example `frontend`, `router`, `kv-memory`, `planner`, `operator`, `backend-vllm`, `backend-trtllm`, `backend-sglang`, `observability`, `fault-tolerance`, `runtime`, `ops`, `docs`, `process` — each backed by an `@ai-dynamo/dynamo-<area>-codeowners` team. SIGs are expected to map onto those existing area boundaries as they stand up, so this is formalizing what the repository already enforces, not net-new bureaucracy.
+
+**One honest note on history.** An earlier iteration of the DEP process tracked proposals as GitHub issues inside the code repository. That predated Dynamo's move to SIG-based governance, and with SIGs now being adopted the process moves to the dedicated repository they naturally live in. DEP-0001 carries the full narrative.
+
+**Precedent for the dedicated-repo choice.** Other multi-repo projects made the same call:
+
+| Project | Proposals repository | Notes |
+| :--- | :--- | :--- |
+| Kubernetes | [`kubernetes/enhancements`](https://github.com/kubernetes/enhancements) | The SIG + KEP (Kubernetes Enhancement Proposal) model that Dynamo's SIG adoption follows. |
+| Rust | [`rust-lang/rfcs`](https://github.com/rust-lang/rfcs) | Language and tooling RFCs, implemented across many `rust-lang/*` repositories. |
+| React | [`reactjs/rfcs`](https://github.com/reactjs/rfcs) | Cross-package RFCs owned by the React team. |
+| Swift | [`swiftlang/swift-evolution`](https://github.com/swiftlang/swift-evolution) | Language evolution proposals separate from the compiler and standard-library repos. |
+| Python | [`python/peps`](https://github.com/python/peps) | Python Enhancement Proposals, the model DEP-0001 explicitly builds on. |
+
+## The Model
+
+A DEP is backed by three artifacts, each doing the job it is best at:
+
+- **The DEP markdown** in `ai-dynamo/enhancements` under `deps/NNNN-slug.md`. Owned by a SIG, versioned in the enhancements repository, and the source of truth for the proposal's content and status.
+- **A pull request** in `ai-dynamo/enhancements` that adds or edits the markdown. This is the **revision**: reviewers leave **line-level comments** on the exact text, plus general **conversation** on the PR.
+- **A tracking issue** in `ai-dynamo/enhancements` that anchors the DEP and hosts durable, open-ended **design discussion**. Any GitHub user can join without repository write access. A companion Linear issue (`DYN-####`) links implementation PRs across the `ai-dynamo` code repositories back to the DEP — a cross-repo view GitHub's own same-repo issue linking cannot provide across the multi-repo estate.
+
+The **Dynamo docs site (this Fern site) is the render + mirror layer**. Each DEP page renders the markdown from the enhancements repository (with a status banner and metadata card), and mirrors the three GitHub surfaces read-only, one-way:
+
+1. **Inline review**: line comments from the PR, anchored as highlights on the exact quoted text with expandable cards.
+2. **Revision discussion**: the PR's general conversation, as a threaded list.
+3. **Design discussion**: the tracking-issue thread — the durable debate.
+
+Each card deep-links back to GitHub to reply. The docs page never posts; GitHub remains the source of truth. This gives readers one clean, shareable, cross-linked page — the gap a plain dedicated proposals repository has always had.
 
 ## Workflow
 
-1. **Open a tracking issue and identify the owning SIG.** The issue is the anchor and the durable design-discussion thread for the DEP.
-2. **Author the DEP as a pull request in `ai-dynamo/enhancements`.** Start from the SIG's DEP template, fill in the required sections, and let reviewers use PR line comments and suggestions for precise, line-level review.
-3. **Render it on this tab.** Add a page that points the comment mirror at the DEP's enhancements PR and tracking issue (set `pr` / `issue` on the `<PrInlineComments>` block), with the status banner set to its current state. Auto-rendering from the enhancements repo is planned; today the page is added here.
-4. **Discuss on the tracking issue.** Open-ended debate lives on the tracking issue, so community members without repo access can participate; the rendered page mirrors it in the "Design discussion" section. Keep the issue linked from the metadata card.
-5. **Advance the status via follow-up PRs.** As the proposal moves through Under Review to Accepted (or to Rejected, Deferred, or Replaced), update the status banner and header. Significant changes after acceptance get a new DEP; the original is marked Replaced.
+1. **Open a tracking issue** in `ai-dynamo/enhancements`. This is the DEP's anchor and its durable design-discussion thread, owned by the SIG.
+2. **Open a DEP PR** in `ai-dynamo/enhancements` adding `deps/NNNN-slug.md`, following the KEP-style layout the repository uses. The SIG's approvers (chairs or technical leads) review the DEP; reviewers use PR line comments for precise, line-level review.
+3. **Render on the docs site.** The DEP page is published under this Proposals tab and mirrors the PR and tracking-issue comments read-only.
+4. **Advance the status via follow-up PRs.** As the proposal moves through the lifecycle (Draft → Under Review → Accepted, or to Rejected, Deferred, Implemented, or Replaced), update the status banner and header in a short follow-up PR. The banner tracks status on every rendered page. See DEP-0001 for the full lifecycle specification.
 
 ## Status Banner Convention
 
@@ -39,7 +63,7 @@ Every rendered DEP page opens with a status banner so an in-flight proposal neve
 | :----- | :---------------- | :--------- |
 | Draft | `> [!WARNING]` | Warning |
 | Under Review (a.k.a. Proposed) | `> [!IMPORTANT]` | Info |
-| Accepted (a.k.a. Approved) | `> [!NOTE]` | Note |
+| Accepted / Implemented (a.k.a. Approved) | `> [!NOTE]` | Note |
 | Rejected, Deferred, or Replaced (a.k.a. Superseded) | `> [!CAUTION]` | Error |
 
 Example banner for a Draft proposal:
@@ -53,25 +77,36 @@ Keep the `**Status**` header field and the banner in sync. The header field carr
 
 ## Commenting on a DEP
 
-Comments are hosted by GitHub, not by the docs site. The rendered page is a read-only mirror; every reply happens on GitHub, so nothing new needs to be installed or run. The `PrInlineComments` component (`fern/components/PrInlineComments.tsx`) renders a mount div, and the client runtime (`fern/js/dep-pr-comments.js`, injected site-wide via `docs.yml` `js:`) reads its `data-owner` / `data-repo` / `data-pr` / `data-issue` attributes and fetches three sources from GitHub's public REST API:
+Comments are hosted by GitHub, not by the docs site. The rendered page is a read-only mirror; every reply happens on GitHub, so nothing new needs to be installed or run. The `PrInlineComments` component (`fern/components/PrInlineComments.tsx`) renders a mount div, and the client runtime (`fern/js/dep-pr-comments.js`, injected site-wide via `docs.yml` `js:`) reads `owner` / `repo` / `pr` / `issue` / `path` from its `data-*` attributes and fetches three sources from GitHub's public REST API:
 
 - **Inline review** (`GET /repos/{owner}/{repo}/pulls/{pr}/comments`): line comments from the PR, anchored as highlights on the exact quoted text with expandable cards. Each links to that comment's reply UI on the PR.
 - **Revision discussion** (`GET /repos/{owner}/{repo}/issues/{pr}/comments`): the PR's general conversation, as a threaded list. (PR conversation lives on the issues endpoint.)
-- **Design discussion** (`GET /repos/{owner}/{repo}/issues/{issue}/comments`): the tracking-issue thread, the durable debate.
+- **Design discussion** (`GET /repos/{owner}/{repo}/issues/{issue}/comments`): the tracking-issue thread — the durable debate.
 
-Automation accounts (GitHub Copilot and anything ending in `[bot]`) are filtered out of every surface so the page shows human debate. Each thread has a "Comment on the PR/issue" deep-link, and the design section shows an "open a tracking issue" prompt when no issue is linked. Set the sources per page, pointing `owner` / `repo` at the DEP's home repository (`ai-dynamo/enhancements`):
+Each request uses the `application/vnd.github.full+json` Accept header, so comment bodies come back pre-rendered as GitHub's `body_html` (sanitized before injection) — bold, italic, inline code, fenced code blocks, links, lists, and blockquotes render as they do on github.com.
+
+Because DEPs live in `ai-dynamo/enhancements`, the **cross-repo case is the default**: pages point their mount at `owner="ai-dynamo" repo="enhancements"`, so the mirror pulls from the enhancements PR/issue rather than this repo. Automation accounts (anything ending in `[bot]`, plus `copy-pr-bot` and `github-actions`) are filtered out of every surface so the page shows human review only. Each thread has a "Comment on the PR/issue" deep-link, and the design section shows an "open a tracking issue" prompt when no issue is linked. Set the sources per page:
 
 ```mdx
-<PrInlineComments owner="ai-dynamo" repo="enhancements" pr={12345} issue={67890} />
+<PrInlineComments
+  pr={12345}
+  issue={67890}
+  owner="ai-dynamo"
+  repo="enhancements"
+  path="deps/NNNN-your-dep.md"
+/>
 ```
 
-The fetch is unauthenticated, so it is subject to GitHub's 60-requests/hour/IP limit; on a 403 the affected section degrades to a notice plus a link to the thread. For high-traffic production pages, bake the comments in at build time to remove that limit.
+The fetch is unauthenticated, so it is subject to GitHub's 60-requests/hour/IP limit; on a 403 the affected section degrades to a notice plus a link to the thread. For high-traffic production pages, bake the comments in at build time to remove that limit — this is called out as deferred work in DEP-0001.
 
-## Files in This Directory
+## What's Rendered Here vs. What's in `ai-dynamo/enhancements`
 
-- [`TEMPLATE.mdx`](./TEMPLATE.mdx): the DEP template. Copy it to start a new proposal.
-- [`0000-example-dep.mdx`](./0000-example-dep.mdx): a worked example that renders every section. Not a real decision.
+- **Source of truth: `ai-dynamo/enhancements`.** DEP markdown, review, and status advancement all happen there.
+- **This directory on the Dynamo docs site.** Today it holds the Fern-rendering scaffolding — a template, a worked example that shows the rendered format, and two Nova demos (one hand-copied, one build-time-synced) — plus this overview page. The render + comment-mirror capability is proven end-to-end on the Nova demo (`ai-dynamo/enhancements#61`, PR by [@ryanolson](https://github.com/ryanolson)) in both light and dark mode. Automated content sync from the enhancements repository is now **prototyped**: `fern/scripts/sync_deps.py` (invoked by the Fern preview job and the pre-merge `fern check` / broken-links jobs) fetches the DEP markdown from `ai-dynamo/enhancements` at build time and emits generated `.mdx` under `docs/proposals/_generated/`, which is gitignored so no DEP body copy is committed here. The prototype's honest caveats: the synced Nova page (`dep-nova-synced`) currently coexists with the hand-copied demo (`0000-nova`) for side-by-side comparison, the sync manifest (`fern/scripts/deps.json`) pins a source branch rather than per-DEP SHAs, and moving synced DEPs into the production nav is deferred to DEP-0001 acceptance.
 
-## Relationship to ai-dynamo/enhancements
+The files in this directory:
 
-`ai-dynamo/enhancements` is the home for DEPs and holds the approved [`0000-dep-process`](https://github.com/ai-dynamo/enhancements/blob/main/deps/0000-dep-process.md). DEP-0001 defines the current process for the SIG model and adds this rendered discussion layer; whether it formalizes and extends `0000-dep-process` or supersedes it is being settled in review. This tab does not move DEPs out of that repository. It renders them and mirrors their review and discussion so the design stays visible next to the code.
+- [`TEMPLATE.mdx`](./TEMPLATE.mdx): the DEP page template used by the docs-site scaffolding. The section vocabulary and ordering match the KEP-style layout in `ai-dynamo/enhancements`. Not a copy target for authors — a new DEP is authored in the enhancements repository directly.
+- [`0000-example-dep.mdx`](./0000-example-dep.mdx): a worked example that renders every section of the template. Illustrative only; it demonstrates the rendered format and is not a real decision.
+- [`0000-nova.mdx`](./0000-nova.mdx): a hand-copied cross-repo demo that mirrors `ai-dynamo/enhancements#61` (Ryan Olson's Nova DEP) end-to-end. Illustrative only; retained alongside the synced version below until the build-time sync is trusted enough to remove it.
+- `_generated/dep-nova-synced.mdx`: the build-time-synced counterpart of the Nova demo, regenerated on every Fern build by `fern/scripts/sync_deps.py` from the same enhancements PR. Not checked into this repository; see the "Current State" note above for what "prototype" means here.
