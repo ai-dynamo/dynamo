@@ -21,10 +21,11 @@ use crate::common::handoff::NormalizedHandoffConformance;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::OfflineDisaggReplayConfig;
+use crate::replay::session_affinity::ReplaySessionSimulationOptions;
 use crate::replay::{
-    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTimedKvEvent, ReplayTimedOutputSignal,
-    ReplayTimedRequest, ReplayWorkerArtifacts, SlaThresholds, TraceCollector,
-    TraceSimulationReport,
+    ReplayKvObservationMode, ReplayPrefillLoadEstimator, ReplayRouterMode,
+    ReplaySessionAffinityMode, ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest,
+    ReplayWorkerArtifacts, SlaThresholds, TraceCollector, TraceSimulationReport,
 };
 use crate::scheduler::RouterEventVisibility;
 
@@ -292,6 +293,37 @@ pub(crate) fn simulate_trace_workload(
         max_sim_time_ms,
         sla,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_session_affinity_workload_with_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    num_workers: usize,
+    session_affinity_mode: ReplaySessionAffinityMode,
+    kv_observation_mode: ReplayKvObservationMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let started_at = Instant::now();
+    let args = args.normalized()?;
+    let engine_block_size = args.block_size;
+    let driver = trace
+        .into_trace_driver_with_block_size(engine_block_size)?
+        .with_deterministic_request_ids();
+    let (collector, _) = AggRuntime::new_workload_with_session_affinity(
+        &args,
+        router_config,
+        None,
+        driver,
+        num_workers,
+        AggReplayMode::Trace,
+        ReplaySessionSimulationOptions::new(session_affinity_mode, kv_observation_mode),
+    )?
+    .with_per_request_records(record_per_request)
+    .run()?;
+    Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
 pub(crate) fn simulate_agentic_trace_workload(
