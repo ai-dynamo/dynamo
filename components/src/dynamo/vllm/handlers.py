@@ -2097,7 +2097,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if self.generate_endpoint is None:
             logger.debug(
                 "Cannot unregister LoRA '%s': generate_endpoint=%s",
-                lora_name, self.generate_endpoint,
+                lora_name,
+                self.generate_endpoint,
             )
             return
         await unregister_model(
