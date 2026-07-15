@@ -1419,6 +1419,10 @@ class MetricCheck:
     error_msg: Callable[[str, Any], str]
     success_msg: Callable[[str, Any], str]
     multiline: bool = False
+    # When True, skip (don't fail) if the metric is absent or has no parseable
+    # numeric value. Used for worker-type-dependent gauges (e.g. decode-only KV
+    # stats that a prefill worker legitimately reports as NaN/unset).
+    optional: bool = False
 
 
 @dataclass
@@ -1577,6 +1581,9 @@ class MetricsPayload(BasePayload):
                 validator=lambda value: float(value) >= 0,
                 error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+                # Decode-side KV stat; a prefill worker has no decode block pool
+                # and reports it as NaN/unset. Validate where present, skip otherwise.
+                optional=True,
             ),
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.kvstats.GPU_CACHE_USAGE_PERCENT}",
@@ -1586,6 +1593,7 @@ class MetricsPayload(BasePayload):
                     f"{name} should be between 0.0 and 1.0, but got {value}"
                 ),
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
+                optional=True,
             ),
             MetricCheck(
                 name=f"{prefix}_{prometheus_names.model_info.LOAD_TIME_SECONDS}",
@@ -1664,6 +1672,11 @@ class MetricsPayload(BasePayload):
             else:
                 # Standard single-value metric check
                 if metric.name not in content:
+                    if metric.optional:
+                        logger.info(
+                            "Skipping optional metric '%s' (absent)", metric.name
+                        )
+                        continue
                     raise AssertionError(
                         f"Metric '{metric.name}' not found in metrics output"
                     )
@@ -1671,6 +1684,12 @@ class MetricsPayload(BasePayload):
                 pattern = metric.pattern(metric.name)
                 matches = re.findall(pattern, content)
                 if not matches:
+                    if metric.optional:
+                        logger.info(
+                            "Skipping optional metric '%s' (no parseable value, e.g. NaN)",
+                            metric.name,
+                        )
+                        continue
                     raise AssertionError(
                         f"Could not parse value for metric '{metric.name}'"
                     )
