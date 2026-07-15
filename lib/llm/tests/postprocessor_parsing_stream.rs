@@ -527,83 +527,11 @@ async fn postprocessor_parsing_stream_deepseek_v4_tool_continuation_keeps_inject
     );
 }
 
-/// Regression for Kimi K2.5 tool-continuation turns.
-///
-/// Kimi K2.5 direct answers after tool results should remain normal content.
-/// The `last_is_tool` guard from PR #8442 must still suppress forced
-/// prompt-injected reasoning for Kimi, even though DeepSeek V4 preserves it.
-#[tokio::test]
-async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_suppresses_injected_reasoning() {
-    let preprocessor = build_preprocessor(Some("kimi_k25"), None);
-    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-        "messages": [
-            {"role": "user", "content": "Create and run a hello-world script."},
-            {
-                "role": "assistant",
-                "tool_calls": [{
-                    "id": "call_1",
-                    "type": "function",
-                    "function": {
-                        "name": "run_python",
-                        "arguments": "{\"path\":\"/tmp/hello.py\"}"
-                    }
-                }]
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "call_1",
-                "content": "Hello, world!"
-            }
-        ],
-        "model": "moonshotai/Kimi-K2.5-Instruct",
-        "stream": true
-    }))
-    .unwrap();
-
-    let input_chunks = vec![
-        mock_content_chunk("Done. Output: `Hello, world!`"),
-        mock_final_chunk(),
-    ];
-
-    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-
-    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
-        output_stream.collect().await;
-
-    let mut reasoning = String::new();
-    let mut content = String::new();
-    for output in &output_chunks {
-        let Some(data) = output.data.as_ref() else {
-            continue;
-        };
-        for choice in &data.inner.choices {
-            if let Some(r) = &choice.delta.reasoning_content {
-                reasoning.push_str(r);
-            }
-            if let Some(c) = &choice.delta.content {
-                content.push_str(get_text(c));
-            }
-        }
-    }
-
-    assert_eq!(
-        reasoning, "",
-        "direct post-tool Kimi answer must not be mislabeled as reasoning_content",
-    );
-    assert_eq!(content, "Done. Output: `Hello, world!`");
-}
-
-/// Kimi K2.6 can re-enter reasoning after a tool result when thinking is
-/// explicitly enabled. The rendered prompt supplies the opening `<think>`, so
-/// the completion may contain only implicit reasoning, `</think>`, and the
-/// final answer. The close marker may also be split across stream chunks.
-#[tokio::test]
-async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_with_thinking_parses_reasoning() {
-    let preprocessor = build_preprocessor(Some("kimi_k25"), None);
-    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+fn kimi_tool_continuation_request(
+    model: &str,
+    thinking: Option<bool>,
+) -> NvCreateChatCompletionRequest {
+    let mut request = serde_json::json!({
         "messages": [
             {"role": "user", "content": "What is the weather in London?"},
             {
@@ -623,48 +551,77 @@ async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_with_thinking_p
                 "content": "{\"temperature\":15,\"unit\":\"celsius\",\"condition\":\"cloudy\"}"
             }
         ],
-        "model": "moonshotai/Kimi-K2.6",
-        "stream": true,
-        "chat_template_kwargs": {"thinking": true}
-    }))
-    .unwrap();
+        "model": model,
+        "stream": true
+    });
+    if let Some(thinking) = thinking {
+        request["chat_template_kwargs"] = serde_json::json!({"thinking": thinking});
+    }
+    serde_json::from_value(request).unwrap()
+}
 
-    let input_chunks = vec![
-        mock_content_chunk("The tool returned 15°C and cloudy."),
-        mock_content_chunk("</thi"),
-        mock_content_chunk("nk>The current weather in London is 15°C and cloudy."),
-        mock_final_chunk(),
-    ];
-
+async fn run_kimi_tool_continuation(
+    request: NvCreateChatCompletionRequest,
+    input_chunks: Vec<NvCreateChatCompletionStreamResponse>,
+) -> DrainOutput {
+    let preprocessor = build_preprocessor(Some("kimi_k25"), None);
     let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
     let output_stream = preprocessor
         .postprocessor_parsing_stream(input_stream, &request, true, false)
         .expect("postprocessor_parsing_stream should build");
+    drain_stream(output_stream).await
+}
 
-    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
-        output_stream.collect().await;
+/// K2.6 explicit thinking can emit implicit reasoning and a split close marker.
+#[tokio::test]
+async fn postprocessor_parsing_stream_kimi_k25_tool_continuation_with_thinking_parses_reasoning() {
+    let request = kimi_tool_continuation_request("moonshotai/Kimi-K2.6", Some(true));
+    let output = run_kimi_tool_continuation(
+        request,
+        vec![
+            mock_content_chunk("The tool returned 15°C and cloudy."),
+            mock_content_chunk("</thi"),
+            mock_content_chunk("nk>The current weather in London is 15°C and cloudy."),
+            mock_final_chunk(),
+        ],
+    )
+    .await;
 
-    let mut reasoning = String::new();
-    let mut content = String::new();
-    for output in &output_chunks {
-        let Some(data) = output.data.as_ref() else {
-            continue;
-        };
-        for choice in &data.inner.choices {
-            if let Some(r) = &choice.delta.reasoning_content {
-                reasoning.push_str(r);
-            }
-            if let Some(c) = &choice.delta.content {
-                content.push_str(get_text(c));
-            }
-        }
-    }
-
-    assert_eq!(reasoning, "The tool returned 15°C and cloudy.");
-    assert_eq!(content, "The current weather in London is 15°C and cloudy.");
+    assert_eq!(output.reasoning, "The tool returned 15°C and cloudy.");
+    assert_eq!(
+        output.content,
+        "The current weather in London is 15°C and cloudy."
+    );
     assert!(
-        !content.contains("</think>"),
-        "literal closing tag leaked into content: {content:?}"
+        !output.content.contains("</think>"),
+        "literal closing tag leaked into content: {:?}",
+        output.content
+    );
+}
+
+/// Kimi K2.6 enables thinking by default. An omitted `thinking` argument must
+/// therefore parse post-tool reasoning exactly like an explicit `true`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_kimi_k26_omitted_thinking_parses_reasoning() {
+    let request = kimi_tool_continuation_request("moonshotai/Kimi-K2.6", None);
+
+    let output = run_kimi_tool_continuation(
+        request,
+        vec![
+            mock_content_chunk("The tool returned 15°C and cloudy."),
+            mock_content_chunk("</thi"),
+            mock_content_chunk("nk>The current weather in London is 15°C and cloudy."),
+            mock_final_chunk(),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        (output.reasoning.as_str(), output.content.as_str()),
+        (
+            "The tool returned 15°C and cloudy.",
+            "The current weather in London is 15°C and cloudy."
+        )
     );
 }
 
