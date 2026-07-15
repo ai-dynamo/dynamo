@@ -19,11 +19,10 @@ import typing
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from prometheus_api_client import PrometheusConnect
-from prometheus_api_client.exceptions import PrometheusApiClientException
+from prometheus_api_client import PrometheusApiClientException, PrometheusConnect
 from pydantic import BaseModel, ValidationError
-from requests.exceptions import ConnectionError as RequestsConnectionError
-from requests.exceptions import Timeout as RequestsTimeout
+from requests import ConnectionError as RequestsConnectionError
+from requests import Timeout as RequestsTimeout
 
 from dynamo import prometheus_names
 from dynamo.runtime.logging import configure_dynamo_logging

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from prometheus_api_client.exceptions import PrometheusApiClientException
+from prometheus_api_client import PrometheusApiClientException
 
 from dynamo import prometheus_names
 from dynamo.planner.core.throughput_scaling import ThroughputScalingMixin
