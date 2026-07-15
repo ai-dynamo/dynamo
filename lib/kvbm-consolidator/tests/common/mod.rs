@@ -18,6 +18,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use dynamo_kv_router::protocols::BlockExtraInfo;
 use futures::StreamExt as _;
 use kvbm_consolidator::wire::vllm_in::RawKvEvent;
 use kvbm_consolidator::zmq_util::{SharedPubSocket, bind_pub_socket, connect_sub_socket};
@@ -59,6 +60,8 @@ pub enum EventMirror {
         lora_name: Option<String>,
         #[serde(default, rename = "cache_salt")]
         cache_namespace: Option<String>,
+        #[serde(default)]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
         #[serde(default)]
         medium: Option<String>,
     },

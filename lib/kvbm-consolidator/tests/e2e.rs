@@ -176,6 +176,7 @@ fn convert_event(e: common::EventMirror) -> SnapEvent {
             lora_name,
             cache_namespace,
             medium,
+            ..
         } => SnapEvent::BlockStored {
             block_hashes,
             parent_block_hash,

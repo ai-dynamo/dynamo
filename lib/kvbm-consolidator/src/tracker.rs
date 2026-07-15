@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use dynamo_kv_hashing::Request;
+use dynamo_kv_router::protocols::BlockExtraInfo;
 use dynamo_tokens::PositionalLineageHash;
 use kvbm_logical::{BlockRegistry, SequenceHash, registry::BlockRegistrationHandle};
 
@@ -40,6 +41,7 @@ pub enum ConsolidatedEvent {
         block_size: usize,
         lora_name: Option<String>,
         cache_namespace: Option<Arc<str>>,
+        block_mm_info: Option<BlockExtraInfo>,
         source: EventSource,
     },
     Remove {
@@ -58,6 +60,7 @@ pub(crate) struct StoreInput {
     block_size: usize,
     lora_name: Option<String>,
     cache_namespace: Option<Arc<str>>,
+    block_mm_info: Option<BlockExtraInfo>,
 }
 
 impl StoreInput {
@@ -69,6 +72,7 @@ impl StoreInput {
         block_size: usize,
         lora_name: Option<String>,
         cache_namespace: Option<Arc<str>>,
+        block_mm_info: Option<BlockExtraInfo>,
     ) -> Self {
         Self {
             source,
@@ -78,8 +82,28 @@ impl StoreInput {
             block_size,
             lora_name,
             cache_namespace,
+            block_mm_info,
         }
     }
+}
+
+fn mm_cache_salt(
+    cache_namespace: Option<&str>,
+    block_mm_info: Option<&BlockExtraInfo>,
+) -> Option<String> {
+    let Some(block_mm_info) = block_mm_info else {
+        return cache_namespace.map(str::to_owned);
+    };
+    let mut objects: Vec<_> = block_mm_info.mm_objects.iter().collect();
+    objects.sort_unstable_by_key(|object| (object.mm_hash, &object.offsets));
+
+    let mut salt = cache_namespace.unwrap_or_default().to_owned();
+    salt.push_str("\u{1f}dynamo-mm:");
+    for object in objects {
+        use std::fmt::Write as _;
+        let _ = write!(&mut salt, "{:016x}:{:?};", object.mm_hash, object.offsets);
+    }
+    Some(salt)
 }
 
 /// Per-block state: which sources have it, an optional registry handle keeping the
@@ -139,11 +163,13 @@ impl Tracker {
         block_size: usize,
         lora_name: Option<&str>,
         cache_namespace: Option<&str>,
+        block_mm_info: Option<&BlockExtraInfo>,
     ) -> Option<PositionalLineageHash> {
+        let cache_salt = mm_cache_salt(cache_namespace, block_mm_info);
         let request = Request::builder()
             .tokens(token_ids.to_vec())
             .lora_name(lora_name.map(str::to_string))
-            .salt(cache_namespace.map(str::to_string))
+            .salt(cache_salt)
             .build()
             .ok()?;
         let blocks = request.into_blocks(block_size as u32).ok()?;
@@ -175,6 +201,7 @@ impl Tracker {
             block_size,
             lora_name,
             None,
+            None,
         ))
     }
 
@@ -188,6 +215,7 @@ impl Tracker {
             block_size,
             lora_name,
             cache_namespace,
+            block_mm_info,
         } = input;
         let parent_key = parent_external_hash
             .as_ref()
@@ -222,6 +250,7 @@ impl Tracker {
             block_size,
             lora_name.as_deref(),
             cache_namespace.as_deref(),
+            block_mm_info.as_ref(),
         ) {
             Some(h) => h,
             None => {
@@ -260,6 +289,7 @@ impl Tracker {
                         block_size,
                         lora_name,
                         cache_namespace,
+                        block_mm_info,
                         source,
                     });
                     return true;
@@ -288,6 +318,7 @@ impl Tracker {
                     block_size,
                     lora_name,
                     cache_namespace,
+                    block_mm_info,
                     source,
                 });
                 true
@@ -361,6 +392,7 @@ impl Tracker {
                         block_size,
                         lora_name,
                         cache_namespace: None,
+                        block_mm_info: None,
                         source: EventSource::Kvbm,
                     });
                     return true;
@@ -390,6 +422,7 @@ impl Tracker {
                         block_size,
                         lora_name,
                         cache_namespace: None,
+                        block_mm_info: None,
                         source: EventSource::Kvbm,
                     });
                     true
@@ -890,6 +923,7 @@ mod tests {
             4,
             None,
             Some(Arc::from("tenant-a")),
+            None,
         ));
         t.handle_store_input(StoreInput::new(
             EventSource::Vllm,
@@ -899,6 +933,7 @@ mod tests {
             4,
             None,
             Some(Arc::from("tenant-b")),
+            None,
         ));
 
         let events = t.drain_events();
@@ -944,6 +979,7 @@ mod tests {
             4,
             None,
             Some(Arc::clone(&namespace)),
+            None,
         ));
         t.handle_store_input(StoreInput::new(
             EventSource::Vllm,
@@ -951,6 +987,7 @@ mod tests {
             Some("parent".into()),
             vec![5, 6, 7, 8],
             4,
+            None,
             None,
             None,
         ));

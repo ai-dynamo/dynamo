@@ -96,6 +96,7 @@ fn consolidated_to_event(ev: ConsolidatedEvent) -> anyhow::Result<Event> {
             block_size,
             lora_name,
             cache_namespace,
+            block_mm_info,
             source: _,
         } => {
             let token_ids_i32: Vec<i32> = token_ids
@@ -118,6 +119,7 @@ fn consolidated_to_event(ev: ConsolidatedEvent) -> anyhow::Result<Event> {
                 block_size: block_size_i32,
                 lora_name,
                 cache_namespace,
+                block_mm_infos: block_mm_info.map(|info| vec![Some(info)]),
                 medium: None,
             })
         }
@@ -217,6 +219,7 @@ mod sort_tests {
             block_size: 0,
             lora_name: None,
             cache_namespace: None,
+            block_mm_info: None,
             source: EventSource::Vllm,
         }
     }

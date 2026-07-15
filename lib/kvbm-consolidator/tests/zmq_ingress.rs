@@ -10,6 +10,7 @@ mod common;
 use std::time::Duration;
 
 use common::{EventMirror, TestBatch, ZmqPubHandle, ZmqSubHandle, init_tracing, sync_pulse};
+use dynamo_kv_router::protocols::{BlockExtraInfo, BlockMmObjectInfo};
 use kvbm_consolidator::wire::vllm_in::{BlockHashValue, KvEventBatch, RawKvEvent};
 use kvbm_consolidator::{ConsolidatorBuilder, EventSource};
 
@@ -50,6 +51,52 @@ fn bs_event_with_cache_namespace(
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
     }
+}
+
+#[tokio::test]
+async fn zmq_multimodal_metadata_is_forwarded() {
+    init_tracing();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let pub_handle = ZmqPubHandle::spawn().await;
+        let egress_ep = common::make_endpoint(common::pick_port());
+        let consolidator = ConsolidatorBuilder::new(&egress_ep, EventSource::Trtllm)
+            .zmq_in(&pub_handle.endpoint)
+            .poll_interval(Duration::from_millis(20))
+            .build()
+            .await
+            .expect("build consolidator");
+        let mut sub = ZmqSubHandle::spawn(&egress_ep).await.expect("spawn sub");
+        assert!(sync_pulse(&pub_handle, &mut sub, Duration::from_secs(4)).await);
+
+        let mut event = bs_event(vec![101], None, vec![10, 20, 30, 40], 4, None);
+        if let RawKvEvent::BlockStored { block_mm_infos, .. } = &mut event {
+            *block_mm_infos = Some(vec![Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![],
+                }],
+            })]);
+        }
+        let payload = rmp_serde::to_vec_named(&TestBatch(1.0, vec![event], None))
+            .expect("encode multimodal event");
+        pub_handle
+            .send_frames(vec![vec![], vec![0u8; 8], payload])
+            .await
+            .unwrap();
+
+        let messages = sub.recv_n(1, Duration::from_secs(3)).await.unwrap();
+        assert!(matches!(
+            &messages[0].1.1[0],
+            EventMirror::BlockStored {
+                block_mm_infos: Some(infos),
+                ..
+            } if infos[0].as_ref().unwrap().mm_objects[0].mm_hash == 42
+        ));
+        consolidator.shutdown().await;
+    })
+    .await
+    .expect("test timed out");
 }
 
 #[tokio::test]

@@ -9,6 +9,8 @@
 use serde::Serialize;
 use std::sync::Arc;
 
+use dynamo_kv_router::protocols::BlockExtraInfo;
+
 /// Batch envelope: `(timestamp, events, data_parallel_rank)`.
 #[derive(Debug, Serialize)]
 pub struct EventBatch(pub f64, pub Vec<Event>, pub Option<i32>);
@@ -32,6 +34,8 @@ pub enum Event {
             skip_serializing_if = "Option::is_none"
         )]
         cache_namespace: Option<Arc<str>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
     },

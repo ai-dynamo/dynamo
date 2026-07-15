@@ -121,18 +121,14 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
                 return;
             }
 
-            // Multimodal info participates in the per-block hash (the placeholder slots
-            // are encoded with their `mm_hash`, not their raw token IDs). We don't yet
-            // thread `block_mm_infos` through to `kv_hashing::Request::mm_info`, so
-            // hashing as plain tokens would produce the wrong PLH and silently break
-            // cross-source dedup. Drop until plumbed through.
             if block_mm_infos
                 .as_ref()
-                .is_some_and(|v| v.iter().any(Option::is_some))
+                .is_some_and(|infos| infos.len() != block_hashes.len())
             {
                 tracing::warn!(
-                    "Multimodal BlockStored event not supported by consolidator yet; skipping ({} hashes)",
-                    block_hashes.len()
+                    "Multimodal metadata ({}) doesn't match block hashes ({}), skipping event",
+                    block_mm_infos.as_ref().map_or(0, Vec::len),
+                    block_hashes.len(),
                 );
                 return;
             }
@@ -164,6 +160,11 @@ fn process_event(tracker: &mut Tracker, event: RawKvEvent, engine_source: EventS
                     block_size,
                     lora_name.clone(),
                     cache_namespace.clone(),
+                    block_mm_infos
+                        .as_ref()
+                        .and_then(|infos| infos.get(i))
+                        .cloned()
+                        .flatten(),
                 ));
                 current_parent = Some(hash_str);
             }
