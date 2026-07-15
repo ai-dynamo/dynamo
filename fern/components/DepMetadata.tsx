@@ -154,17 +154,17 @@ export function DepMetadata({
       {(prUrl || trackingIssue || discussionsTo) && (
         <div className="dep-meta-actions">
           {prUrl && (
-            <a className="dep-meta-action" href={prUrl} target="_blank" rel="noopener">
+            <a className="dep-meta-action" href={prUrl} target="_blank" rel="noopener noreferrer">
               View PR #{pr} &rarr;
             </a>
           )}
           {trackingIssue && (
-            <a className="dep-meta-action" href={trackingIssue} target="_blank" rel="noopener">
+            <a className="dep-meta-action" href={trackingIssue} target="_blank" rel="noopener noreferrer">
               Tracking issue &rarr;
             </a>
           )}
           {discussionsTo && (
-            <a className="dep-meta-action" href={discussionsTo} target="_blank" rel="noopener">
+            <a className="dep-meta-action" href={discussionsTo} target="_blank" rel="noopener noreferrer">
               Discussion &rarr;
             </a>
           )}

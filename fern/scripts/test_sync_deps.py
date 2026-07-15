@@ -255,5 +255,117 @@ class RenderMdxTests(unittest.TestCase):
         )
 
 
+class SlugValidationTests(unittest.TestCase):
+    """Manifest 'output' becomes a filename via out_dir / f"{output}.mdx".
+    An unsafe value can escape docs/proposals/_generated/. load_manifest
+    must reject anything that isn't a bare slug.
+    """
+
+    def _manifest(self, output_value):
+        return {
+            "deps": [
+                {
+                    "output": output_value,
+                    "source": {
+                        "owner": "ai-dynamo",
+                        "repo": "enhancements",
+                        "ref": "main",
+                        "path": "deps/x.md",
+                    },
+                }
+            ]
+        }
+
+    def _load(self, output_value, tmp_path: Path) -> None:
+        manifest = tmp_path / "fern" / "scripts" / "deps.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            __import__("json").dumps(self._manifest(output_value)),
+            encoding="utf-8",
+        )
+        sync_deps.load_manifest(tmp_path)
+
+    def test_accepts_plain_slug(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            self._load("dep-nova-synced", Path(td))  # must not raise
+
+    def test_accepts_alphanumeric_and_underscore(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            self._load("dep_v1_2_synced", Path(td))  # must not raise
+
+    def test_rejects_parent_traversal(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit) as ctx:
+                self._load("../../etc/passwd", Path(td))
+            self.assertIn("output", str(ctx.exception).lower())
+
+    def test_rejects_slash_in_slug(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                self._load("nova/other", Path(td))
+
+    def test_rejects_absolute_path(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                self._load("/tmp/pwn", Path(td))
+
+    def test_rejects_empty_string(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                self._load("", Path(td))
+
+    def test_rejects_null_byte(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                self._load("nova\x00.mdx", Path(td))
+
+    def test_rejects_dot_prefix(self):
+        # Prevent .hidden / . / .. slugs
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit):
+                self._load(".secret", Path(td))
+
+
+class YamlStringEscapeTests(unittest.TestCase):
+    """_yaml_string must produce a valid YAML double-quoted string. Newlines
+    and carriage returns MUST be escaped so a multi-line title/subtitle does
+    not break the front-matter block.
+    """
+
+    def test_escapes_newline(self):
+        s = sync_deps._yaml_string("line1\nline2")
+        # No literal newline should remain inside the quoted string
+        self.assertNotIn("\n", s.strip('"'))
+        # \n escape sequence should be present
+        self.assertIn("\\n", s)
+
+    def test_escapes_carriage_return(self):
+        s = sync_deps._yaml_string("crlf\r\nline")
+        self.assertNotIn("\r", s.strip('"'))
+        self.assertIn("\\r", s)
+
+    def test_escapes_backslash_and_quote_still(self):
+        s = sync_deps._yaml_string('back\\slash and "quote"')
+        # Regressions on existing escape behavior
+        self.assertIn("\\\\", s)
+        self.assertIn('\\"', s)
+
+
 if __name__ == "__main__":
     unittest.main()

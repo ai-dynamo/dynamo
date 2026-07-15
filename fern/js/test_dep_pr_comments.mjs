@@ -188,6 +188,38 @@ test("SVG and MathML tags are stripped defensively", () => {
   assert.ok(out.includes("<p>ok</p>"));
 });
 
+// ----- audit-driven regression cases (quality-gate follow-ups) ----- //
+
+test("neutralizes UNQUOTED javascript:/data:/vbscript: URIs on href/src", () => {
+  // HTML5 allows unquoted attribute values. Prior sanitizer only matched
+  // quoted URIs; unquoted attack shapes slipped through the string pass.
+  // hardenLinks catches this at DOM time for <a>, but the string pass is
+  // the first defense and must be tight for other elements (img/track/source).
+  const cases = [
+    '<a href=javascript:alert(1)>c</a>',
+    '<img src=javascript:alert(1)>',
+    '<a href=data:text/html,x>c</a>',
+    '<a href=vbscript:msgbox>c</a>',
+  ];
+  for (const html of cases) {
+    const out = sanitizeHtml(html);
+    assert.ok(
+      !/href\s*=\s*[^"'\s>]*(?:javascript|data|vbscript)\s*:/i.test(out),
+      `unquoted URI survived: ${html} -> ${out}`
+    );
+    assert.ok(
+      !/src\s*=\s*[^"'\s>]*(?:javascript|data|vbscript)\s*:/i.test(out),
+      `unquoted URI survived: ${html} -> ${out}`
+    );
+  }
+});
+
+test("neutralizes URIs with leading whitespace before scheme", () => {
+  const html = '<a href="   javascript:alert(1)">c</a>';
+  const out = sanitizeHtml(html);
+  assert.ok(!/javascript:/i.test(out), `whitespace-prefixed js: survived: ${out}`);
+});
+
 console.log("");
 console.log(`${passes} passed, ${fails} failed`);
 if (fails) process.exit(1);

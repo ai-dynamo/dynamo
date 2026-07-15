@@ -357,7 +357,7 @@
       '<span class="dep-pr-author">' + esc(login) + '</span>' +
       '<span class="dep-pr-date">' + esc(fmtDate(c.created_at)) + '</span></div>' +
       '<div class="dep-pr-body">' + body + '</div>' +
-      '<a class="dep-pr-link" href="' + esc(c.html_url) + '" target="_blank" rel="noopener">' + esc(label) + ' &rarr;</a>' +
+      '<a class="dep-pr-link" href="' + esc(c.html_url) + '" target="_blank" rel="noopener noreferrer">' + esc(label) + ' &rarr;</a>' +
       '</div>';
   }
 
@@ -371,12 +371,21 @@
   function hardenLinks(root) {
     if (!root || !root.querySelectorAll) return;
     var anchors = root.querySelectorAll(".dep-pr-body a");
+    var UNSAFE = { "javascript:": 1, "data:": 1, "vbscript:": 1 };
     for (var i = 0; i < anchors.length; i++) {
       var a = anchors[i];
-      // Belt-and-suspenders scheme check in case the regex missed
-      // a weirdly-encoded URI on the string pass.
-      var href = a.getAttribute("href") || "";
-      if (/^\s*(javascript|data|vbscript)\s*:/i.test(href)) {
+      // Two-stage scheme check: (1) raw attribute for the string-only
+      // path — catches typical UA-normalised cases; (2) the reflected
+      // `a.protocol` property, which the URL parser canonicalises
+      // (whitespace/control-char stripped, case-normalised). The
+      // property-based check closes the whitespace-obfuscated-scheme
+      // gap (`ja\tvascript:...`) that a raw-attribute regex misses.
+      var raw = (a.getAttribute("href") || "").toLowerCase();
+      var scheme = (a.protocol || "").toLowerCase();
+      if (
+        /^\s*(javascript|data|vbscript)\s*:/i.test(raw) ||
+        UNSAFE[scheme] === 1
+      ) {
         a.setAttribute("href", "#");
       }
       a.setAttribute("target", "_blank");
@@ -423,7 +432,7 @@
     if (reviewErr) {
       return '<p class="dep-pr-heading">Inline review comments</p>' +
         '<p class="dep-pr-note">' + esc(rateMsg(reviewErr, "review comments")) +
-        ' View them on <a href="' + esc(prUrl) + '/files" target="_blank" rel="noopener">PR #' +
+        ' View them on <a href="' + esc(prUrl) + '/files" target="_blank" rel="noopener noreferrer">PR #' +
         esc(cfg.pr) + "</a>.</p>";
     }
     var total = comments.length;
@@ -431,10 +440,10 @@
       '<p class="dep-pr-heading">Inline review comments</p>' +
       '<p class="dep-pr-note">Read-only mirror of the ' + total + " review comment" +
       (total === 1 ? "" : "s") +
-      ' on this file from <a href="' + esc(prUrl) + '" target="_blank" rel="noopener">PR #' +
+      ' on this file from <a href="' + esc(prUrl) + '" target="_blank" rel="noopener noreferrer">PR #' +
       esc(cfg.pr) + "</a>" +
       " (" + anchoredCount + " anchored to text above). Authoring stays on GitHub &mdash; " +
-      '<a href="' + esc(prUrl) + '/files" target="_blank" rel="noopener">reply inline on the PR</a>.</p>';
+      '<a href="' + esc(prUrl) + '/files" target="_blank" rel="noopener noreferrer">reply inline on the PR</a>.</p>';
     var un = "";
     if (unanchored.length) {
       un = '<div class="dep-pr-unanchored"><h4>Comments not anchored to current text (' +
@@ -447,7 +456,7 @@
               esc((c.user && c.user.login) || "unknown") + ": " +
               esc(normWs(c.body).slice(0, 140)) +
               ' <a class="dep-pr-link" href="' + esc(c.html_url) +
-              '" target="_blank" rel="noopener">reply on the PR &rarr;</a></li>';
+              '" target="_blank" rel="noopener noreferrer">reply on the PR &rarr;</a></li>';
           }).join("");
         }).join("") + "</ul></div>";
     }
@@ -484,24 +493,24 @@
         '<div><p class="dep-pr-thread-title">' + esc(title) + '</p>' +
         '<p class="dep-pr-thread-sub">' + sub + "</p></div></div>" +
         '<div class="dep-pr-empty">No tracking issue is linked yet. ' +
-        '<a href="' + esc(newIssue) + '" target="_blank" rel="noopener">Open a tracking issue &rarr;</a>' +
+        '<a href="' + esc(newIssue) + '" target="_blank" rel="noopener noreferrer">Open a tracking issue &rarr;</a>' +
         " to start the design discussion, then set it on the DEP.</div></div>";
     }
 
     var head = '<div class="dep-pr-thread dep-pr-ui"><div class="dep-pr-thread-head">' +
       '<div><p class="dep-pr-thread-title">' + esc(title) + '</p>' +
       '<p class="dep-pr-thread-sub">' + sub + "</p></div>" +
-      '<a class="dep-pr-action" href="' + esc(threadUrl) + '" target="_blank" rel="noopener">' +
+      '<a class="dep-pr-action" href="' + esc(threadUrl) + '" target="_blank" rel="noopener noreferrer">' +
       esc(replyLabel) + " &rarr;</a></div>";
 
     if (err) {
       return head + '<div class="dep-pr-empty">' + esc(rateMsg(err, "discussion")) +
-        ' <a href="' + esc(threadUrl) + '" target="_blank" rel="noopener">Open the thread &rarr;</a></div></div>';
+        ' <a href="' + esc(threadUrl) + '" target="_blank" rel="noopener noreferrer">Open the thread &rarr;</a></div></div>';
     }
     var humans = filterHumans(comments);
     if (!humans.length) {
       return head + '<div class="dep-pr-empty">No discussion yet. ' +
-        '<a href="' + esc(threadUrl) + '" target="_blank" rel="noopener">' + esc(replyLabel) +
+        '<a href="' + esc(threadUrl) + '" target="_blank" rel="noopener noreferrer">' + esc(replyLabel) +
         " &rarr;</a></div></div>";
     }
     var list = humans.map(function (c) {
@@ -574,13 +583,18 @@
     s = s.replace(/\son[a-z0-9_-]+\s*=\s*"[^"]*"/gi, "");
     s = s.replace(/\son[a-z0-9_-]+\s*=\s*'[^']*'/gi, "");
     s = s.replace(/\son[a-z0-9_-]+\s*=\s*[^\s>]+/gi, "");
-    // Neutralize javascript: and data: URIs on href/src. Point them at
-    // "#" so the anchor still renders (as a no-op link) rather than
-    // detonating on click. `\s*` between colon and payload catches
-    // whitespace-obfuscated forms; leading whitespace before the value
-    // is tolerated in HTML parsers.
-    var badUri = /(\s(?:href|src|xlink:href)\s*=\s*)("|')\s*(?:javascript|data|vbscript)\s*:[^"']*\2/gi;
-    s = s.replace(badUri, '$1$2#$2');
+    // Neutralize javascript: / data: / vbscript: URIs on href/src.
+    // Three shapes matter — quoted (double or single) and unquoted:
+    //   href="javascript:..."    href='javascript:...'    href=javascript:...
+    // Prior version only caught the quoted forms; HTML5 lets unquoted
+    // attribute values through, and a compromised upstream could inject
+    // that shape. hardenLinks() below is the second line of defense for
+    // <a> at DOM time, but for <img>/<track>/<source> the string pass is
+    // the only pre-injection guard.
+    var badUriQuoted = /(\s(?:href|src|xlink:href)\s*=\s*)("|')\s*(?:javascript|data|vbscript)\s*:[^"']*\2/gi;
+    s = s.replace(badUriQuoted, '$1$2#$2');
+    var badUriUnquoted = /(\s(?:href|src|xlink:href)\s*=\s*)(?:javascript|data|vbscript)\s*:[^\s>]*/gi;
+    s = s.replace(badUriUnquoted, '$1"#"');
     return s;
   }
 

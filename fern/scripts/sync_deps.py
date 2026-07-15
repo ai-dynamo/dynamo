@@ -73,6 +73,11 @@ from typing import Any
 # (NNNN-complete-template.md) uses exactly this shape for every field.
 _META_LINE = re.compile(r"^\*\*(?P<key>[^*]+?)\*\*\s*:\s*(?P<value>.*)$")
 
+# Manifest `output` slug: becomes a filename via out_dir / f"{output}.mdx".
+# Restrict to a strict subset so a malicious/malformed entry cannot escape
+# docs/proposals/_generated/ via `..`, `/`, or leading `.` (dotfiles).
+_SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
 # Placeholder values that mean "not yet filled in" — drop the field entirely so
 # the DepMetadata card doesn't render "Sponsor: [TBD]" et al.
 _PLACEHOLDER_RE = re.compile(r"^\s*(?:\[?tbd\]?|n/?a|none|todo|—|-)\s*$", re.IGNORECASE)
@@ -254,13 +259,40 @@ _FIELD_MAP: list[tuple[str, str]] = [
 
 
 def _yaml_string(value: str) -> str:
-    """Double-quote-escape a string for YAML front-matter."""
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """Double-quote-escape a string for YAML front-matter.
+
+    YAML double-quoted strings accept C-style escapes; embedded literal
+    control characters break the front-matter block. We escape the ones
+    that actually appear in DEP metadata: backslash, double-quote, CR,
+    LF, and tab.
+    """
+    return (
+        '"'
+        + value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+        + '"'
+    )
 
 
 def _jsx_string(value: str) -> str:
-    """Quote a string for a JSX attribute (double-quoted attribute)."""
-    return '"' + value.replace("\\", "\\\\").replace('"', "&quot;") + '"'
+    """Quote a string for a JSX attribute (double-quoted attribute).
+
+    JSX attributes are HTML-attribute-shaped. Replace control chars with
+    a single space so a stray newline in a manifest field doesn't split
+    the tag; escape backslash and double-quote conservatively.
+    """
+    return (
+        '"'
+        + value.replace("\\", "\\\\")
+        .replace('"', "&quot;")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("\t", " ")
+        + '"'
+    )
 
 
 def render_mdx(*, entry: dict[str, Any], parsed: ParsedDep) -> str:
@@ -445,6 +477,14 @@ def load_manifest(root: Path) -> list[dict[str, Any]]:
                 raise SystemExit(
                     f"[sync-deps] manifest entry missing '{required}': {entry}"
                 )
+        output = entry["output"]
+        if not isinstance(output, str) or not _SLUG_RE.match(output):
+            raise SystemExit(
+                f"[sync-deps] manifest entry 'output' must match "
+                f"[A-Za-z0-9][A-Za-z0-9_-]* (got {output!r}); output "
+                f"becomes docs/proposals/_generated/<output>.mdx and must "
+                f"not escape that dir."
+            )
         source = entry["source"]
         for required in ("owner", "repo", "ref", "path"):
             if required not in source:
