@@ -243,43 +243,22 @@ OpenAI-compatible `tool_calls` entries on the response:
 
 You can optionally turn on **xgrammar structural tags** so guided decoding matches the parser's tool-call format at token granularity. See [Structural tag (guided decoding for tool calls)](structural-tag.md).
 
-## Release probe snapshot (Dynamo 1.2)
+## How well does tool calling work per model?
 
-This is a one-time Dynamo 1.2.0 release snapshot from the tool-calling probe
-harness, generated on 2026-06-05 at 07:24 UTC. It is **not** a live dashboard.
-The probe exercises tool-calling workflows; reasoning appears only where a
-model emits tool calls and reasoning in the same native format, or where
-final assistant text is misrouted into the reasoning channel by the parser.
+Tool-call parsing is model-specific, so real-world reliability varies by model.
+To give a concrete picture, Dynamo runs a **probe harness** that exercises a
+battery of tool-calling scenarios (single tool, parallel tools, multi-step
+workflows, literal-string edge cases, streaming and non-streaming) against each
+supported model, and counts how many requests come back wrong.
 
-Failures are non-passing probe requests, and lower is better. The same scenario
-can contribute separate failures for streaming and non-streaming request modes.
-**Dynamo errors** counts Dynamo/parser/API-contract failures, including boundary
-cases and runtime or endpoint/deployment failures where the request timed out
-before a usable OpenAI response was returned. **Other errors** counts
-engine/model behavior and mixed/needs-inspection failures. The probe classifier
-buckets each failure as:
+The tabs below are a **release snapshot** of that harness: for each model, how
+many scenarios failed on the Dynamo **1.2.0 release** versus **current main**,
+and what still breaks. Use it to gauge how much you can rely on tool calling
+with a given model today, and where the rough edges are. Lower failure counts
+are better; most Dynamo-side parser bugs are being fixed release over release.
 
-- **Dynamo/parser likely**: raw model-native tool-call syntax leaked into the
-  OpenAI response instead of structured `tool_calls`, final assistant text was
-  routed into reasoning output, delimiter-like literal text was not preserved in
-  a structured argument, or the parser/API contract was otherwise not satisfied.
-- **Engine/model behavior likely**: the endpoint returned a response, but the
-  model behavior did not satisfy the requested tool workflow.
-- **Endpoint/deployment**: the request timed out before a usable response.
-  Counted as a Dynamo runtime failure in this static table.
-- **Mixed/needs inspection**: raw request/response details need follow-up before
-  assigning ownership.
-
-Some current-main rows were run with a different number of probes than the
-Dynamo 1.2.0 snapshot. Compare each `failures / total` count directly instead
-of treating every row as an exact A/B pass-rate comparison. With this
-classification, Dynamo runtime/parser/API failures improve on Kimi K2.6,
-GLM 5.1, and Qwen3.6-35B-A3B. MiniMax 2.7 improves in total failures, but its
-remaining parser-boundary failure count is unchanged.
-
-Select a model to see its per-scenario results:
-
-<Tabs>
+<Card title="Tool-calling probe snapshot">
+  <Tabs>
   <Tab title="Kimi K2.6">
     **Tool-call format:** Kimi tool-call and reasoning format
 
@@ -408,4 +387,27 @@ Select a model to see its per-scenario results:
     the core multi-tool, parallel-tool, literal-marker, and final-answer gaps
     remain.
   </Tab>
-</Tabs>
+  </Tabs>
+</Card>
+
+### How to read the numbers
+
+This is a one-time snapshot generated on 2026-06-05 at 07:24 UTC — **not** a
+live dashboard. Each cell is a `failures / total` count over probe requests,
+where the same scenario can fail separately in streaming and non-streaming
+modes. Failures split into two buckets:
+
+- **Dynamo errors** — Dynamo/parser/API-contract failures: raw model-native
+  tool-call syntax leaked into the response instead of structured `tool_calls`,
+  final assistant text was routed into reasoning output, delimiter-like literal
+  text was not preserved in an argument, or the request timed out before a
+  usable OpenAI response returned. These are the ones Dynamo fixes.
+- **Other errors** — engine/model behavior or mixed/needs-inspection failures:
+  the endpoint responded, but the model itself did not satisfy the requested
+  tool workflow.
+
+Some current-main rows were run with a different number of probes than the
+1.2.0 snapshot, so compare each `failures / total` directly rather than as an
+exact A/B pass rate. Reasoning shows up only incidentally — where a model emits
+tool calls and reasoning in one native format, or where the parser misroutes
+final assistant text into the reasoning channel.
