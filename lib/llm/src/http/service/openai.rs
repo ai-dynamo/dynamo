@@ -13,7 +13,7 @@ use axum::{
     body::Body,
     extract::State,
     http::Request,
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header::HeaderName},
     middleware::{self, Next},
     response::{
         IntoResponse, Response,
@@ -543,6 +543,7 @@ pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request: T,
     request_id: String,
     headers: &HeaderMap,
+    session_affinity_header_name: &HeaderName,
 ) -> Result<Context<T>, ErrorResponse> {
     let metadata = extract_metadata_from_http(headers)
         .map_err(|err| ErrorMessage::request_headers_too_large(&err.to_string()))?;
@@ -551,7 +552,9 @@ pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     if let Some(agent_context) = agent_context_from_headers(headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
-    if let Some(session_affinity) = session_affinity_from_headers(headers) {
+    if let Some(session_affinity) =
+        session_affinity_from_headers(headers, session_affinity_header_name)
+    {
         request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
     }
     Ok(request)
@@ -655,7 +658,12 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request = context_from_headers(
+        request,
+        request_id,
+        &headers,
+        state.session_affinity_header_name(),
+    )?;
     let context = request.context();
 
     // create the connection handles
@@ -1095,7 +1103,12 @@ async fn embeddings(
         request.inner.model = canonical;
     }
     let request_id = get_or_create_request_id(&headers);
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request = context_from_headers(
+        request,
+        request_id,
+        &headers,
+        state.session_affinity_header_name(),
+    )?;
     let request_id = request.id().to_string();
 
     // The worker always emits base64-encoded vectors over NATS so we
@@ -1283,7 +1296,12 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(
+        request,
+        request_id,
+        &headers,
+        state.session_affinity_header_name(),
+    )?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2238,7 +2256,12 @@ async fn handler_responses(
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(
+        request,
+        request_id,
+        &headers,
+        state.session_affinity_header_name(),
+    )?;
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2971,7 +2994,12 @@ async fn images(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request = context_from_headers(
+        request,
+        request_id,
+        &headers,
+        state.session_affinity_header_name(),
+    )?;
     let request_id = request.id().to_string();
 
     // Images are typically not streamed, so we default to non-streaming
@@ -3109,7 +3137,12 @@ async fn videos(
     check_model_serving_ready(&state, &request.model)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request = context_from_headers(
+        request,
+        request_id,
+        &headers,
+        state.session_affinity_header_name(),
+    )?;
     let request_id = request.id().to_string();
 
     let streaming = request.stream.unwrap_or(false);
@@ -3230,7 +3263,12 @@ async fn video_stream(
     check_model_serving_ready(&state, &request.model)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request = context_from_headers(
+        request,
+        request_id,
+        &headers,
+        state.session_affinity_header_name(),
+    )?;
     let model = request.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -3399,7 +3437,12 @@ async fn audio_speech(
     check_ready(&state)?;
 
     let request_id = get_or_create_request_id(&headers);
-    let request = context_from_headers(request, request_id, &headers)?;
+    let request = context_from_headers(
+        request,
+        request_id,
+        &headers,
+        state.session_affinity_header_name(),
+    )?;
     let request_id = request.id().to_string();
 
     let streaming = false;
@@ -3728,7 +3771,13 @@ mod tests {
     fn test_context_metadata_preserves_session_affinity() {
         let mut headers = HeaderMap::new();
         headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
-        let source = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let source = context_from_headers(
+            (),
+            "request-1".to_string(),
+            &headers,
+            &HeaderName::from_static("x-dynamo-session-id"),
+        )
+        .unwrap();
         let affinity = source
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .expect("session affinity attached");
@@ -3740,6 +3789,48 @@ mod tests {
             .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
             .expect("session affinity copied");
         assert_eq!(affinity.as_str(), "session-123");
+    }
+
+    #[test]
+    fn test_x_session_id_populates_agent_context_and_affinity() {
+        let literal = "conversation-17:request-42";
+        let mut headers = HeaderMap::new();
+        headers.insert("x-session-id", literal.parse().unwrap());
+        let source = context_from_headers(
+            (),
+            "request-1".to_string(),
+            &headers,
+            &HeaderName::from_static("x-session-id"),
+        )
+        .unwrap();
+        let agent = source
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context attached");
+        let affinity = source
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+        assert_eq!(agent.session_id, literal);
+        assert_eq!(affinity.as_str(), literal);
+    }
+
+    #[test]
+    fn test_context_metadata_uses_configured_session_affinity_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-customer-session", "session-456".parse().unwrap());
+        headers.insert("x-dynamo-session-id", "ignored".parse().unwrap());
+
+        let source = context_from_headers(
+            (),
+            "request-1".to_string(),
+            &headers,
+            &HeaderName::from_static("x-customer-session"),
+        )
+        .unwrap();
+        let affinity = source
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+
+        assert_eq!(affinity.as_str(), "session-456");
     }
 
     #[test]

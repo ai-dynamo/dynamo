@@ -330,7 +330,11 @@ async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl(
     let coordinator = coordinator();
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let mut stream = operation
-        .into_stream(target(7, Some(0)), cancelled_response_stream())
+        .into_stream(
+            target(7, Some(0)),
+            RequestPhase::Aggregated,
+            cancelled_response_stream(),
+        )
         .unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
     assert!(stream.next().await.is_none());
