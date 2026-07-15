@@ -289,34 +289,17 @@ spec:
       subComponentType: decode
 ```
 
-> **KEY DIFFERENCE 2/2: publish KV events on the worker.** The `--kv-events-config` arg
-> (added to the router-ON worker above, absent from the router-OFF worker) is what populates the
-> router's prefix tree with the workers' **real** cache state. `DYN_ROUTER_MODE=kv` keeps event
-> consumption enabled by default, so without worker publishing the router stays in event-driven
-> mode but its prefix tree never fills: overlap scores are always zero and routing degrades to
-> active-block / load-based decisions. The A/B then measures load-aware routing vs round-robin,
-> not KV-reuse routing. The frontend flag and the worker flag are independent. From
-> [Router Operations](../components/router/router-operations.md#additional-notes):
+> **The worker must publish KV events.** `DYN_ROUTER_MODE=kv` only makes the frontend *consume*
+> events; the `--kv-events-config` arg above makes the worker *publish* them. Without it the
+> prefix tree stays empty, overlap scores are zero, and routing degrades to load-based, so the
+> A/B measures load-aware vs round-robin, not KV reuse. The two flags are independent (see
+> [Router Operations](../components/router/router-operations.md#additional-notes)).
 >
-> > Backend KV event publishing is independent of the frontend's `--no-router-kv-events` flag.
-> > The frontend flag controls whether the router consumes events; backend flags control whether
-> > workers publish them.
->
-> Approximate cache-state prediction is a *separate, explicit* mode, enabled with
-> `--no-router-kv-events` (or `DYN_ROUTER_USE_KV_EVENTS=false`). There the router records its own
-> routing decisions into the prefix tree with TTL-based expiration. That differs from the
-> empty-tree case above, where events are still expected but none arrive. Either way, without
-> worker publishing you are not benchmarking the event-driven KV router. The backend-specific
-> publish flags are listed under [Router Operations → Additional Notes](../components/router/router-operations.md#additional-notes)
-> (vLLM uses `--kv-events-config`; SGLang the same flag; TRT-LLM `--publish-events-and-metrics`).
->
-> **Verify events are flowing** before you trust the router-ON numbers. The frontend's
-> `dynamo_component_kv_cache_events_applied` metric should be `> 0`:
+> Verify before trusting router-ON numbers: `dynamo_component_kv_cache_events_applied` should be `> 0`.
 >
 > ```bash
 > FE=$(kubectl get pods -n dynamo-bench -l nvidia.com/dynamo-component-type=frontend -o jsonpath='{.items[0].metadata.name}')
 > kubectl -n dynamo-bench exec ${FE} -- curl -s localhost:8000/metrics | grep kv_cache_events_applied
-> # 0 (or the metric absent) means the prefix tree is empty (no real cache state): the worker isn't publishing events.
 > ```
 
 ### Step 2.2: Deploy Router-ON First
