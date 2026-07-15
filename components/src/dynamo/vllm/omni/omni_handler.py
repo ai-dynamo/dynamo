@@ -19,7 +19,7 @@ from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
-from dynamo.common.rl import RLAdminValidationError, require_lora_load_request
+from dynamo.common.rl import RLAdminValidationError, env_bool, require_lora_load_request
 from dynamo.common.utils.output_modalities import (
     RequestType,
     get_output_modalities,
@@ -141,6 +141,18 @@ class OmniHandler(BaseOmniHandler):
             return uri[len("file://") :]
         return uri
 
+    @staticmethod
+    def _lora_error_payload(
+        lora_name: str, message: str, **extra: Any
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "status": "error",
+            "message": message,
+            "lora_name": lora_name,
+        }
+        payload.update(extra)
+        return payload
+
     def __init__(
         self,
         runtime,
@@ -204,25 +216,28 @@ class OmniHandler(BaseOmniHandler):
             yield {"status": "error", "message": str(e)}
             return
         if lora_name in (self.config.served_model_name, self.config.model):
-            yield {
-                "status": "error",
-                "message": (
+            yield self._lora_error_payload(
+                lora_name,
+                (
                     "LoRA name must not match base model names "
                     f"('{self.config.served_model_name}' or '{self.config.model}')."
                 ),
-                "lora_name": lora_name,
-            }
+            )
             return
 
         lock = self._get_lora_lock(lora_name)
         async with lock:
-            if lora_name in self.loaded_loras:
-                lora_id = self.loaded_loras[lora_name].id
+            old_info = self.loaded_loras.get(lora_name)
+            hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
+            is_hot_swap = old_info is not None and hot_swap_enabled
+
+            if old_info is not None and not hot_swap_enabled:
                 yield {
                     "status": "success",
                     "message": f"LoRA adapter '{lora_name}' already loaded",
                     "lora_name": lora_name,
-                    "lora_id": lora_id,
+                    "lora_id": old_info.id,
+                    "hot_swap": False,
                 }
                 return
 
@@ -230,29 +245,51 @@ class OmniHandler(BaseOmniHandler):
                 if lora_uri.startswith("file://"):
                     lora_path = self._local_path_from_uri(lora_uri)
                     if not os.path.exists(lora_path):
-                        yield {
-                            "status": "error",
-                            "message": f"Local LoRA path does not exist: {lora_path}",
-                        }
+                        yield self._lora_error_payload(
+                            lora_name,
+                            f"Local LoRA path does not exist: {lora_path}",
+                        )
                         return
                 else:
                     lora_manager = get_lora_manager()
                     if lora_manager is None:
-                        yield {
-                            "status": "error",
-                            "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true for URI-based LoRA loading.",
-                        }
+                        yield self._lora_error_payload(
+                            lora_name,
+                            "LoRAManager not initialized. Set DYN_LORA_ENABLED=true for URI-based LoRA loading.",
+                        )
                         return
                     download_result = await lora_manager.download_lora(lora_uri)
                     if download_result.get("status") != "success":
-                        yield {
-                            "status": "error",
-                            "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
-                        }
+                        yield self._lora_error_payload(
+                            lora_name,
+                            f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                        )
                         return
                     lora_path = download_result["local_path"]
 
                 lora_id = lora_name_to_id(lora_name)
+
+                if is_hot_swap and old_info is not None:
+                    try:
+                        removed_old = await self.engine_client.remove_lora(old_info.id)
+                        if removed_old is False:
+                            raise RuntimeError(
+                                "Engine rejected existing LoRA removal before hot-swap"
+                            )
+                    except Exception as remove_err:
+                        logger.exception(
+                            "Failed to remove existing LoRA '%s' before hot-swap",
+                            lora_name,
+                        )
+                        yield self._lora_error_payload(
+                            lora_name,
+                            (
+                                f"Failed to remove existing LoRA '{lora_name}' "
+                                f"before hot-swap: {remove_err!s}"
+                            ),
+                        )
+                        return
+
                 add_ok = await self.engine_client.add_lora(
                     LoRARequest(
                         lora_name=lora_name,
@@ -261,19 +298,87 @@ class OmniHandler(BaseOmniHandler):
                     )
                 )
                 if add_ok is False:
-                    yield {
-                        "status": "error",
-                        "message": (
+                    if is_hot_swap and old_info is not None:
+                        try:
+                            await self.engine_client.add_lora(
+                                LoRARequest(
+                                    lora_name=lora_name,
+                                    lora_int_id=old_info.id,
+                                    lora_path=old_info.path,
+                                )
+                            )
+                        except Exception:
+                            self.loaded_loras.pop(lora_name, None)
+                            logger.exception(
+                                "Failed to rollback old LoRA '%s' after hot-swap add rejection",
+                                lora_name,
+                            )
+                    yield self._lora_error_payload(
+                        lora_name,
+                        (
                             "Engine rejected LoRA adapter. "
                             "Adapter may be incompatible with this base model."
                         ),
-                        "lora_name": lora_name,
-                    }
+                    )
                     return
                 self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
-                logger.info("LoRA '%s' loaded and available for use", lora_name)
+                action = "hot-swapped" if is_hot_swap else "loaded"
+                logger.info(
+                    "LoRA '%s' %s and available for use",
+                    lora_name,
+                    action,
+                )
 
-                if self.generate_endpoint is not None:
+                if is_hot_swap:
+                    try:
+                        await self.engine_client.reset_prefix_cache()
+                    except Exception as cache_reset_err:
+                        rolled_back = "tracking only"
+                        if old_info is not None:
+                            try:
+                                removed_new = await self.engine_client.remove_lora(
+                                    lora_id
+                                )
+                                if removed_new is False:
+                                    raise RuntimeError(
+                                        "Engine rejected new LoRA removal during hot-swap rollback"
+                                    )
+                                await self.engine_client.add_lora(
+                                    LoRARequest(
+                                        lora_name=lora_name,
+                                        lora_int_id=old_info.id,
+                                        lora_path=old_info.path,
+                                    )
+                                )
+                                self.loaded_loras[lora_name] = old_info
+                                rolled_back = "engine+tracking"
+                            except Exception as rollback_error:
+                                self.loaded_loras.pop(lora_name, None)
+                                logger.exception(
+                                    "LoRA '%s' hot-swap engine rollback failed: %s",
+                                    lora_name,
+                                    rollback_error,
+                                )
+                        else:
+                            self.loaded_loras.pop(lora_name, None)
+
+                        logger.error(
+                            "LoRA '%s' hot-swap rolled back (%s): prefix cache reset failed: %s",
+                            lora_name,
+                            rolled_back,
+                            cache_reset_err,
+                        )
+                        yield self._lora_error_payload(
+                            lora_name,
+                            (
+                                f"LoRA '{lora_name}' hot-swap aborted; prefix "
+                                f"cache reset failed: {cache_reset_err!s}"
+                            ),
+                            lora_id=lora_id,
+                        )
+                        return
+
+                if not is_hot_swap and self.generate_endpoint is not None:
                     try:
                         runtime_config = ModelRuntimeConfig()
                         model_type = get_output_modalities(
@@ -314,18 +419,20 @@ class OmniHandler(BaseOmniHandler):
                                 "Failed to rollback LoRA '%s' after discovery registration failure",
                                 lora_name,
                             )
-                        yield {
-                            "status": "error",
-                            "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {reg_err!s}",
-                            "lora_name": lora_name,
-                        }
+                        yield self._lora_error_payload(
+                            lora_name,
+                            f"Failed to register LoRA '{lora_name}' in discovery registry: {reg_err!s}",
+                        )
                         return
 
                 yield {
                     "status": "success",
-                    "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                    "message": (
+                        f"LoRA adapter '{lora_name}' " f"{action} successfully"
+                    ),
                     "lora_name": lora_name,
                     "lora_id": lora_id,
+                    "hot_swap": is_hot_swap,
                 }
             except Exception as e:
                 logger.exception("Failed to load LoRA adapter: %s", e)
