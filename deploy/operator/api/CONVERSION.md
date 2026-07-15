@@ -164,8 +164,9 @@ Allowed local helpers:
 
 - Preserve DGDR fields that the target version cannot represent only through
   the structural `nvidia.com/dgdr-spec` and `nvidia.com/dgdr-status` payloads.
-- Dynamo 1.0/1.1 per-field DGDR conversion annotations are retired and ignored.
-  Do not reintroduce per-field compatibility annotations.
+- Dynamo 1.0/1.1 per-field DGDR conversion annotations are retired and ignored
+  as conversion inputs, but remain scrubbed from converted metadata. Do not
+  reintroduce per-field compatibility annotations.
 
 ## API Changes
 

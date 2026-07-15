@@ -62,6 +62,20 @@ const (
 	annDGDRStatus = "nvidia.com/dgdr-status"
 )
 
+// Retired per-field annotations are no longer decoded, but must still be
+// scrubbed so stale internal conversion metadata is not re-emitted.
+var retiredDGDRAnnotationKeys = []string{
+	"nvidia.com/dgdr-config-map-ref",
+	"nvidia.com/dgdr-output-pvc",
+	"nvidia.com/dgdr-enable-gpu-discovery",
+	"nvidia.com/dgdr-deployment-overrides",
+	"nvidia.com/dgdr-profiling-config",
+	"nvidia.com/dgdr-status-backend",
+	"nvidia.com/dgdr-profiling-results",
+	"nvidia.com/dgdr-deployment-status",
+	"nvidia.com/dgdr-profiling-job-name",
+}
+
 type dgdrProfilingConfigBlob = map[string]any
 
 // ConvertTo converts this DynamoGraphDeploymentRequest (v1alpha1) to the Hub version (v1beta1).
@@ -148,6 +162,9 @@ func restoreDGDRSpokeAnnotations(obj metav1.Object) (*DynamoGraphDeploymentReque
 
 func scrubDGDRInternalAnnotations(obj metav1.Object) {
 	for _, key := range []string{annDGDRSpec, annDGDRStatus} {
+		delAnnFromObj(obj, key)
+	}
+	for _, key := range retiredDGDRAnnotationKeys {
 		delAnnFromObj(obj, key)
 	}
 }
