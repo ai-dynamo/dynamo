@@ -190,7 +190,7 @@ See the [LWS docs](https://lws.sigs.k8s.io/docs/) and [Volcano docs](https://git
 
 #### DisaggregatedSet on top of LWS
 
-If you want Dynamo to place multiple multinode worker roles into a single DisaggregatedSet, install an LWS release that serves the `disaggregatedset.x-k8s.io/v1` API. Dynamo detects that API at runtime; there is no Helm value for DS in the `dynamo-platform` chart.
+If you want Dynamo to place multiple multinode worker roles into a single DisaggregatedSet, install LWS `v0.9.0` or newer. Dynamo builds and tests against `v0.9.0` as the current compatibility baseline for the `disaggregatedset.x-k8s.io/v1` API. Dynamo detects that API at runtime; there is no Helm value for DS in the `dynamo-platform` chart. Validate DS behavior when upgrading beyond the tested baseline.
 
 To request the DS path on a `DynamoGraphDeployment`, add:
 

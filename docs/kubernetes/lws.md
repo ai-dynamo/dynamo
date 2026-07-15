@@ -18,7 +18,7 @@ Use LWS when you want a simpler multinode orchestrator than Grove, or when your 
 - Volcano installed for gang scheduling.
 - Dynamo Kubernetes Platform installed.
 
-If you want the DisaggregatedSet pathway, install an LWS release that serves the `disaggregatedset.x-k8s.io/v1` API. DS availability is detected separately from the LWS + Volcano pathway.
+If you want the DisaggregatedSet pathway, install LWS `v0.9.0` or newer. Dynamo builds and tests against `v0.9.0` as the current compatibility baseline for the `disaggregatedset.x-k8s.io/v1` API. DS availability is detected separately from the LWS + Volcano pathway.
 
 The installation guide includes the exact Helm commands for [LWS and Volcano](installation-guide.md#lws--volcano).
 
@@ -85,6 +85,14 @@ Dynamo falls back to the standard DCD pathway when the DS request cannot be hono
 - More than 10 eligible multinode worker roles are selected.
 
 DS does not depend on Volcano for API detection. The current non-DS LWS path still requires both LWS and Volcano.
+
+### Compatibility and readiness
+
+Dynamo treats `status.roleStatuses` as authoritative when the installed DS controller publishes it. LWS `v0.9.0` defines this field, but deployments where the parent DS status remains empty are also supported: Dynamo reads the target-revision child LeaderWorkerSets by the upstream DS name, role, and revision labels. This compatibility path prevents an empty parent status from blocking readiness indefinitely.
+
+If neither status source matches the requested roles and revision, Dynamo keeps the DS pending and retains the previous serving workload. It does not infer readiness or perform cutover. Validate newer LWS releases against this behavior before upgrading because the DS API and controller are owned by the LWS project.
+
+The role-count and replica-uniformity checks are enforced by both Dynamo and the LWS `v0.9.0` or newer CRD. Dynamo checks them before creating the DS so an unsupported request can produce a clear fallback reason instead of relying on an API-server rejection.
 
 ## Multinode Spec
 
