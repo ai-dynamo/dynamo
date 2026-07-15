@@ -96,8 +96,8 @@
 /components/src/dynamo/trtllm/logits_processing/                             @ai-dynamo/dynamo-backend-trtllm-codeowners
 
 # === backend-sglang  (@ai-dynamo/dynamo-backend-sglang-codeowners) ===
-/lib/sglang-remote/                                                          @ai-dynamo/dynamo-backend-sglang-codeowners
 /examples/backends/sglang/                                                   @ai-dynamo/dynamo-backend-sglang-codeowners
+/lib/backend/sglang-remote/                                                  @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/                                               @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/tests/                                         @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/request_handlers/                              @ai-dynamo/dynamo-backend-sglang-codeowners
