@@ -132,6 +132,7 @@ curl -X POST http://localhost:8081/v1/loras \
 | `AWS_ENDPOINT` | Custom S3 endpoint (for MinIO, etc.) | - |
 | `AWS_REGION` | AWS region | `us-east-1` |
 | `AWS_ALLOW_HTTP` | Allow HTTP (non-TLS) connections | `false` |
+| `LORA_DOWNLOAD_CONCURRENCY` | Maximum parallel S3 object downloads per LoRA adapter | `8` |
 
 ### vLLM Arguments
 
