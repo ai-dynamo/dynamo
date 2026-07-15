@@ -1542,6 +1542,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "crossbeam-queue",
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",

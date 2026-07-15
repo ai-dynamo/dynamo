@@ -262,9 +262,6 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 			$(YQ) eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
 		fi; \
 	done
-	echo "Copying CRD files to operator Helm chart crds/ directory"
-	mkdir -p ../helm/charts/platform/components/operator/crds/
-	cp config/crd/bases/*.yaml ../helm/charts/platform/components/operator/crds/
 	echo "Adding NVIDIA header to RBAC files"
 	for file in config/rbac/*.yaml; do \
 		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
