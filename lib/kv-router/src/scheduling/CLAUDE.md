@@ -69,12 +69,69 @@ PolicyClassQueue("agents")
 
 ## Policy-class admission lifecycle
 
-- `SchedulerQueueActor` is the sole authority for admission state, physical queue accounting, and worker booking. Do not mutate or free admission-managed state outside the actor.
-- `EnqueueLeased` transfers the lease with the request and arms it only after the actor establishes generation-scoped lifecycle ownership. Preserve this handoff across cancellation paths and request-ID reuse.
-- Lease drops append terminal cleanup to the lock-free `SegQueue` and coalesce bounded actor wakeups. Cleanup drains to quiescence so no wake is lost; do not replace this with an unbounded channel or task-per-drop cleanup. Any bounded/interleaved drain must preserve wake correctness and be benchmarked.
-- Strategy ownership and physical queue class are separate. Exact placement may reclassify and migrate queue storage/accounting while lifecycle callbacks remain with the strategy that admitted the request.
-- Per-class queue limits gate new arrivals; they are not strict occupancy invariants after reclassification or worker-count changes. Adding strict migration limits requires an explicit rejected-`MakeReady` contract.
-- Dispatch currently has a required two-step protocol: `AdmissionLease::mark_dispatched()` records the cancellation fallback, then `LocalScheduler::mark_dispatched(request_id)` sends the live actor event. Preserve this order until the lease becomes the single generation-aware dispatch authority.
+`SchedulerQueueActor` owns admission state, physical queue accounting, worker booking, and lifecycle delivery. The request path owns only the progress updater and one `AdmissionLease` after selection.
+
+```mermaid
+sequenceDiagram
+    participant C as Lifecycle owner
+    participant H as LocalScheduler / SchedulerQueue
+    participant A as SchedulerQueueActor
+    participant G as Admission strategy
+    participant Q as PolicyQueue
+    participant S as Worker slots
+    participant R as RequestGuard
+
+    C->>H: schedule(TrackedWithAdmission)
+    H->>A: EnqueueLeased(request, lease)
+    A->>G: admit(request facts + live progress)
+    alt Bypass
+        A->>A: Continue without strategy lifecycle
+    else Ready(Any or Exact)
+        A->>Q: Enter the physical ready class/lane if capacity blocks
+    else Defer
+        A->>Q: Retain as strategy-deferred
+        G-->>A: MakeReady(id, placement)
+        A->>Q: Reclassify/migrate into the physical ready class/lane
+    end
+    Note over A,H: The remaining flow applies only to Ready/Defer; Bypass disarms the lease
+    par Lease handoff after ownership
+        A->>A: Arm lease only after generation-scoped ownership exists
+        A-->>H: Return armed lease acknowledgement
+    and Selection when ready
+        Note over A,S: Immediate, or after deferred/blocked work becomes ready
+        A->>S: Select worker and book request state
+        A-->>H: SchedulingResponse(progress)
+    end
+    H->>H: Attach the armed lease
+    H-->>C: Selected worker + lifecycle capabilities
+    C->>R: Move progress and lease before next fallible await
+    R->>R: Backend dispatch succeeds
+    R->>R: AdmissionLease::mark_dispatched fallback
+    R->>H: LocalScheduler::mark_dispatched
+    H->>A: Bounded Dispatched command
+    A->>G: AdmissionEvent::Dispatched
+    loop Response items
+        R->>R: Publish monotonic context progress
+    end
+    alt Successful terminal item
+        R->>R: Mark Completed before yielding
+        R-->>C: Yield Stop / EoS / Length
+    else Natural EOF
+        R->>R: Mark Completed
+    else Cancellation or error
+        R->>R: Mark Aborted
+    end
+    Note over C,R: Drop after the terminal yield and normal resume converge on the same Completed lease drop
+    R->>A: Lease drop via SegQueue + coalesced bounded wake
+    A->>S: Release worker booking
+    A->>G: Completed or Aborted
+```
+
+- `EnqueueLeased` arms the lease only after actor ownership exists. Its lifecycle generation prevents stale cleanup from touching a reused request ID.
+- Lease drops use the lock-free `SegQueue` and coalesced bounded actor wakeups. Cleanup drains to quiescence so no wake is lost; do not replace it with an unbounded channel or task-per-drop cleanup. Any bounded/interleaved drain must preserve wake correctness and be benchmarked.
+- Strategy ownership and physical queue class are separate. Exact placement may migrate queue storage/accounting while callbacks remain with the strategy that admitted the request.
+- Queue limits gate new arrivals; they are not strict occupancy invariants after reclassification or worker-count changes. Strict migration limits require a rejected-`MakeReady` contract.
+- Dispatch remains a two-step protocol: `AdmissionLease::mark_dispatched()` records the cancellation fallback before `LocalScheduler::mark_dispatched(request_id)` sends the live actor event. If that send is canceled, terminal cleanup emits `Dispatched` before the terminal event.
 
 ## Guardrails
 
