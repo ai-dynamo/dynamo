@@ -61,6 +61,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         # required for installing dependencies from git repositories
         git \
         git-lfs \
+        # compliance audit bootstraps syft over HTTPS
+        curl \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
     && apt-get clean \
