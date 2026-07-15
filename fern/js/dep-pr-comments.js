@@ -445,11 +445,17 @@
     return head + list + "</div>";
   }
 
-  /* Drop automation accounts so a discussion shows human debate, not CI chatter
-   * (copy-pr-bot, github-actions, dependabot, and the like all end in [bot]). */
+  /* Drop automation accounts so a discussion shows human debate, not CI chatter.
+   * Two clean, generic rules cover the observed shapes:
+   *   - `user.type === "Bot"` — GitHub sets this on every automation account,
+   *     including GitHub Copilot review (login "Copilot", no [bot] suffix).
+   *   - login ending in "[bot]" — copy-pr-bot, github-actions, dependabot, and
+   *     the like, for cases where a legacy payload lacks `type`. */
   function filterHumans(comments) {
     return (comments || []).filter(function (c) {
-      var login = (c.user && c.user.login) || "";
+      var user = c.user || {};
+      if (user.type === "Bot") return false;
+      var login = user.login || "";
       return !/\[bot\]$/.test(login);
     });
   }
@@ -493,7 +499,11 @@
    * pass. Called only while `running` is held, so it can't interleave. */
   function renderInto(mount, cfg, root, data) {
     cleanup();
-    var comments = (data.review || []).filter(function (c) {
+    // Uniform bot filter: strip automation accounts (Copilot review, etc.)
+    // from the inline review set BEFORE anchoring/grouping so both the
+    // <mark> highlights and the unanchored fallback panel see the same
+    // human-only set as the two discussion threads below.
+    var comments = filterHumans(data.review || []).filter(function (c) {
       return !cfg.path || c.path === cfg.path;
     });
 

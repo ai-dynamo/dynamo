@@ -174,4 +174,3 @@ lib/llm/tests/data/sample-models/models--*/
 
 # DEP preview probe artifacts (headless browser screenshots + captured HTML)
 .dep-preview/
-pg.html
