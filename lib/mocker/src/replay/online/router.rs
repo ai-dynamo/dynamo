@@ -170,7 +170,7 @@ impl KvReplayRouter {
             scheduler_cancel.clone(),
             "replay",
             false,
-        ));
+        )?);
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let indexer_clone = indexer.clone();
         let event_task = tokio::spawn(async move {

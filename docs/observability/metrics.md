@@ -412,6 +412,7 @@ All metrics carry the standard hierarchy labels (`dynamo_namespace`, `dynamo_com
 
 | Metric | Type | Description |
 |--------|------|-------------|
+| `dynamo_component_router_requests_started_total` | Counter | Requests admitted by the router scheduler |
 | `dynamo_component_router_requests_total` | Counter | Total requests processed by the router |
 | `dynamo_component_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
 | `dynamo_component_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
