@@ -64,9 +64,10 @@ dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
-  # -- Whether the cluster-wide operator applies bundled CRDs via crd-apply.
-  # This must be false for namespace-restricted installations, which must also
-  # be installed with Helm's --skip-crds flag.
+  # -- Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container.
+  # When false, the chart installs no CRDs; apply them separately before starting a cluster-wide
+  # operator. Namespace-restricted installations must set this to false and use the CRDs managed by
+  # the cluster-wide operator.
   upgradeCRD: true
 
   # Environment variables to pass to operator Deployment.

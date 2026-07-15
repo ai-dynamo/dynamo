@@ -99,7 +99,7 @@ OPERATOR_VERSION = settings.get('operator_version', _read_chart_app_version())
 # ---------------------------------------------------------------------------
 OPERATOR_DIR = os.getcwd()                                     # deploy/operator
 HELM_CHART   = os.path.join(OPERATOR_DIR, '..', 'helm', 'charts', 'platform')  # deploy/helm/charts/platform
-CRD_DIR      = os.path.join(HELM_CHART, 'components', 'operator', 'crds')
+CRD_DIR      = os.path.join(OPERATOR_DIR, 'config', 'crd', 'bases')
 
 # ---------------------------------------------------------------------------
 # Local tool binaries — ensure kubectl and helm are downloaded via `make`
@@ -217,7 +217,6 @@ def render_helm():
         '--set', 'dynamo-operator.controllerManager.manager.image.pullPolicy=IfNotPresent',
         # We apply CRDs ourselves in the local_resource above
         '--set', 'dynamo-operator.upgradeCRD=false',
-        '--skip-crds',
     ]
 
     # Wire in imagePullSecrets when a pull secret is configured
