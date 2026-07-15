@@ -32,9 +32,6 @@ class VllmComponentName(ComponentName):
     decode_worker_k8s_name = "VllmDecodeWorker"
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
-    # Aggregated mode emits a single worker; name matches VllmWorker
-    # log identifier in dynamo.vllm.main.
-    agg_worker_k8s_name = "VllmWorker"
 
 
 class SGLangComponentName(ComponentName):
@@ -48,10 +45,6 @@ class SGLangComponentName(ComponentName):
     )
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
-    # Aggregated mode: the single worker component is also named "decode"
-    # (matches decode_worker_k8s_name, but made explicit to keep agg logic
-    # consistent across all backends and prevent future drift).
-    agg_worker_k8s_name = "decode"
 
 
 class TrtllmComponentName(ComponentName):
@@ -65,11 +58,6 @@ class TrtllmComponentName(ComponentName):
     decode_worker_k8s_name = "decode"
     decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
-    # Aggregated mode: the single worker component is named "TRTLLMWorker" in
-    # all v1beta1 agg DGD examples (agg.yaml, agg-with-config.yaml,
-    # agg_router.yaml).  Without this the sweep falls back to "decode" which
-    # does not match, so no pods are found and no annotations are written.
-    agg_worker_k8s_name = "TRTLLMWorker"
 
 
 class MockerComponentName(ComponentName):
@@ -90,17 +78,14 @@ WORKER_COMPONENT_NAMES: dict[str, type[ComponentName]] = {
 }
 
 
-def get_planner_k8s_component_names(
-    backend: str, mode: str
-) -> tuple["str | None", "str | None"]:
-    """Return the DGD/K8s component names for prefill and decode roles.
+def get_planner_k8s_component_names(backend: str) -> tuple["str | None", "str | None"]:
+    """Return the backend-default DGD/K8s component names.
 
-    In agg mode the single worker is registered under ``agg_worker_k8s_name``
-    (e.g. ``"VllmWorker"``), not ``decode_worker_k8s_name``.  This function
-    centralises that resolution so every callsite — validate_deployment,
-    get_gpu_counts, get_worker_info, _initialize_gpu_counts, and the annotation
-    sweep — uses the same name without duplicating the ``if mode == "agg"``
-    logic.
+    The returned names are only explicit-name fallbacks. The DGD is still the
+    source of truth: aggregated deployments often declare a single generic
+    ``type: worker`` component whose actual name varies by manifest. The
+    component resolver handles that by selecting the unique generic worker from
+    the DGD and returning its actual name.
 
     Returns:
         (prefill_k8s_name, decode_k8s_name), either of which may be None if
@@ -110,12 +95,5 @@ def get_planner_k8s_component_names(
     if defaults is None:
         return None, None
     prefill = defaults.prefill_worker_k8s_name or None
-    if mode == "agg":
-        decode = (
-            getattr(defaults, "agg_worker_k8s_name", None)
-            or defaults.decode_worker_k8s_name
-            or None
-        )
-    else:
-        decode = defaults.decode_worker_k8s_name or None
+    decode = defaults.decode_worker_k8s_name or None
     return prefill, decode

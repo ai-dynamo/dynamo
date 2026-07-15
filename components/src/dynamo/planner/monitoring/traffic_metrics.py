@@ -536,23 +536,24 @@ class PrometheusAPIClient:
         kubelet/CRI exposes pod info):
         - ``exported_namespace``: the Kubernetes namespace the workload runs in.
           The bare ``namespace`` label identifies the DCGM exporter pod itself.
-        - ``kubernetes_label_nvidia_com_dynamo_graph_deployment_name``: the
-          canonical DGD label that the operator stamps on every workload pod
-          (``nvidia.com/dynamo-graph-deployment-name``).  This is an exact
+        - ``nvidia_com_dynamo_graph_deployment_name``: the canonical DGD label
+          that the operator stamps on every workload pod
+          (``nvidia.com/dynamo-graph-deployment-name``), sanitized by the DCGM
+          exporter and emitted directly as a Prometheus label. This is an exact
           string match, so it is immune to Grove/LWS vs Deployment pod-name
           shape differences and does not require regex escaping.
 
         Prerequisite: the DCGM exporter must be configured to expose
-        ``nvidia.com/dynamo-graph-deployment-name`` via its ``kubernetes_labels``
-        section (see deploy/observability/dcgm-metrics-with-nvlink.csv for the
-        field list).  In clusters without this label enabled the query returns
-        no data; this is the expected failure mode for unconfigured deployments.
+        pod labels (for the upstream Helm chart, ``kubernetes.enablePodLabels``)
+        and include ``nvidia.com/dynamo-graph-deployment-name`` in any label
+        allowlist. In clusters without this label enabled the query returns no
+        data; this is the expected failure mode for unconfigured deployments.
         """
         try:
             result = self.prom.custom_query(
                 f"sum(DCGM_FI_DEV_POWER_USAGE{{"
                 f'exported_namespace="{self._quote_label_value(k8s_namespace)}",'
-                f"kubernetes_label_nvidia_com_dynamo_graph_deployment_name="
+                f"nvidia_com_dynamo_graph_deployment_name="
                 f'"{self._quote_label_value(dgd_name)}"}})'
             )
             if result:

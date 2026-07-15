@@ -686,61 +686,53 @@ class TestGetComponentPodsLabelSelector:
         call_args = mock_kube_api.list_pods_by_label.call_args[0][0]
         assert "nvidia.com/dynamo-component=VllmPrefillWorker" in call_args
 
-    def test_agg_worker_needs_component_name_fallback(self, connector, mock_kube_api):
+    def test_agg_worker_resolves_unique_generic_worker(self, connector, mock_kube_api):
         """Aggregated (mode=agg) DGDs label their single worker `type: worker`,
-        which does not map to the DECODE role. Real agg recipes name it
-        ``VllmWorker`` (see backend_components.agg_worker_k8s_name). Without the
-        fallback name, type-only resolution fails and the pod is silently
-        skipped; passing the expected worker name lets the resolver fall through
-        to the explicit-name path so agg pods are annotated.
+        which does not map to the DECODE role. When it is the unique generic
+        worker, the resolver should carry the actual DGD component name instead
+        of depending on a backend hard-coded agg name.
         """
         deployment = {
             "metadata": {"name": "test-dgd"},
             "spec": {
                 "components": [
-                    # Generic v1beta1 agg worker: name=VllmWorker, type=worker.
-                    {"name": "VllmWorker", "replicas": 1, "type": "worker"},
+                    # Real vLLM agg examples use both VllmDecodeWorker and
+                    # VllmWorker for the single generic worker component.
+                    {"name": "VllmDecodeWorker", "replicas": 1, "type": "worker"},
                 ]
             },
         }
         mock_kube_api.list_pods_by_label.return_value = []
 
-        # Regression: type-only resolution (no fallback name) skips agg workers.
-        assert (
-            connector.get_component_pods(SubComponentType.DECODE, deployment=deployment)
-            == []
-        )
-        mock_kube_api.list_pods_by_label.assert_not_called()
+        connector.get_component_pods(SubComponentType.DECODE, deployment=deployment)
+        call_args = mock_kube_api.list_pods_by_label.call_args[0][0]
+        assert "nvidia.com/dynamo-component=VllmDecodeWorker" in call_args
 
-        # The decode name (VllmDecodeWorker) must NOT resolve the agg worker —
-        # no aggregate DGD declares that component.
-        assert (
-            connector.get_component_pods(
-                SubComponentType.DECODE,
-                deployment=deployment,
-                component_name="VllmDecodeWorker",
-            )
-            == []
-        )
+        mock_kube_api.list_pods_by_label.reset_mock()
 
-        # The agg name (VllmWorker) resolves via the explicit-name path.
+        # Even a stale/wrong fallback name must not override the DGD source of
+        # truth when there is exactly one generic worker.
         connector.get_component_pods(
             SubComponentType.DECODE,
             deployment=deployment,
             component_name="VllmWorker",
         )
         call_args = mock_kube_api.list_pods_by_label.call_args[0][0]
-        assert "nvidia.com/dynamo-component=VllmWorker" in call_args
+        assert "nvidia.com/dynamo-component=VllmDecodeWorker" in call_args
 
+    @pytest.mark.parametrize("worker_name", ["VllmDecodeWorker", "VllmWorker"])
     @pytest.mark.asyncio
-    async def test_agg_mode_sweep_resolves_agg_worker(self, connector, mock_kube_api):
-        """End-to-end sweep for mode=agg must pick agg_worker_k8s_name
-        (VllmWorker), NOT decode_worker_k8s_name (VllmDecodeWorker), so the
-        single type:worker component is annotated instead of silently skipped.
+    async def test_agg_mode_sweep_resolves_actual_generic_worker(
+        self, connector, mock_kube_api, worker_name
+    ):
+        """End-to-end sweep for mode=agg must use the actual DGD worker name.
+
+        vLLM agg manifests in this repo use both VllmDecodeWorker and
+        VllmWorker for the single generic worker component.
         """
         deployment = {
             "metadata": {"name": "test-dgd"},
-            "spec": {"components": [{"name": "VllmWorker", "type": "worker"}]},
+            "spec": {"components": [{"name": worker_name, "type": "worker"}]},
         }
         mock_kube_api.get_graph_deployment.return_value = deployment
         mock_kube_api.list_pods_by_label.return_value = []
@@ -754,7 +746,7 @@ class TestGetComponentPodsLabelSelector:
         await planner._apply_power_annotations()
 
         call_args = mock_kube_api.list_pods_by_label.call_args[0][0]
-        assert "nvidia.com/dynamo-component=VllmWorker" in call_args
+        assert f"nvidia.com/dynamo-component={worker_name}" in call_args
 
     @pytest.mark.asyncio
     async def test_trtllm_agg_mode_sweep_resolves_trtllm_worker(
@@ -762,10 +754,8 @@ class TestGetComponentPodsLabelSelector:
     ):
         """mode=agg + backend=trtllm must select the TRTLLMWorker component.
 
-        All v1beta1 TRT-LLM agg DGD examples (agg.yaml, agg-with-config.yaml,
-        agg_router.yaml) name the single worker ``TRTLLMWorker``.  The fallback
-        ``decode_worker_k8s_name="decode"`` would miss it, so
-        ``TrtllmComponentName.agg_worker_k8s_name`` must be defined.
+        The fallback ``decode_worker_k8s_name="decode"`` would miss it, so the
+        resolver must select the unique generic worker from the DGD.
         """
         deployment = {
             "metadata": {"name": "test-dgd"},
@@ -793,9 +783,8 @@ class TestGetComponentPodsLabelSelector:
         """mode=agg + backend=sglang must select the decode component.
 
         SGLang v1beta1 agg DGDs name the single worker ``decode``, which
-        matches ``SGLangComponentName.agg_worker_k8s_name``.  This test pins
-        the explicit attribute so future refactors cannot silently fall through
-        to the wrong default.
+        matches the backend decode fallback. This also works through the unique
+        generic-worker path if the fallback ever drifts.
         """
         deployment = {
             "metadata": {"name": "test-dgd"},

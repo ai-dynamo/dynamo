@@ -27,6 +27,7 @@ try:
     )
 except ImportError:
     pytest.skip("forward_pass_metrics not available", allow_module_level=True)
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.base import NativePlannerBase
 from dynamo.planner.core.perf_model import (
@@ -840,9 +841,12 @@ class TestRefreshWorkerInfoFromConnector:
         assert planner.decode_worker_info.context_length == 4096
 
     def test_noop_when_already_set(self):
-        """Does not re-query once max_num_batched_tokens is populated."""
+        """Does not re-query once required refresh fields are populated."""
         planner = self._make_planner()
-        planner.decode_worker_info = WorkerInfo(max_num_batched_tokens=2048)
+        planner.decode_worker_info = WorkerInfo(
+            k8s_name="VllmDecodeWorker",
+            max_num_batched_tokens=2048,
+        )
 
         mock_connector = self._install_mock_connector(
             planner, max_num_batched_tokens=8192
@@ -851,6 +855,28 @@ class TestRefreshWorkerInfoFromConnector:
         planner._refresh_worker_info_from_connector()
         assert planner.decode_worker_info.max_num_batched_tokens == 2048
         mock_connector.get_worker_info.assert_not_called()
+
+    def test_refresh_populates_k8s_name_and_component_cache(self):
+        """A later DGD lookup can repair a missing k8s_name and cached fallback."""
+        planner = self._make_planner(require_prefill=False, require_decode=True)
+        planner._decode_k8s_name = "VllmDecodeWorker"
+        planner.decode_worker_info = WorkerInfo(max_num_batched_tokens=2048)
+
+        mock_connector = self._install_mock_connector(
+            planner,
+            k8s_name="VllmWorker",
+            max_num_batched_tokens=2048,
+        )
+
+        planner._refresh_worker_info_from_connector()
+
+        assert planner.decode_worker_info.k8s_name == "VllmWorker"
+        assert planner._decode_k8s_name == "VllmWorker"
+        mock_connector.get_worker_info.assert_called_once_with(
+            SubComponentType.DECODE,
+            "vllm",
+            component_name="VllmDecodeWorker",
+        )
 
     def test_noop_when_connector_lacks_get_worker_info(self):
         """Silently does nothing if the connector does not implement get_worker_info."""

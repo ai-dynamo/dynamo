@@ -233,6 +233,20 @@ def get_component_from_type_or_name(
         if not _can_use_explicit_component_name(component, component_type):
             raise SubComponentNotFoundError(component_type.value)
         matching_components.append((component_name, component))
+    elif not matching_components and component_type == SubComponentType.DECODE:
+        generic_workers = [
+            (curr_name, curr_component)
+            for curr_name, curr_component in components.items()
+            if get_component_type(curr_component)
+            == V1BETA1_GENERIC_WORKER_COMPONENT_TYPE
+        ]
+        if len(generic_workers) == 1:
+            matching_components.append(generic_workers[0])
+        elif len(generic_workers) > 1:
+            component_names = [name for name, _ in generic_workers]
+            raise DuplicateSubComponentError(component_type.value, component_names)
+        else:
+            raise SubComponentNotFoundError(component_type.value)
     elif not matching_components:
         raise SubComponentNotFoundError(component_type.value)
 

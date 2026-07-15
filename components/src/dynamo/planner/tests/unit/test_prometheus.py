@@ -738,10 +738,7 @@ class TestPowerAwareDcgmQueries:
             assert 'exported_namespace="kube-namespace"' in query_str
             # DGD identity is matched via the operator-stamped pod label,
             # not a pod-name regex.
-            assert (
-                'kubernetes_label_nvidia_com_dynamo_graph_deployment_name="my-dgd"'
-                in query_str
-            )
+            assert 'nvidia_com_dynamo_graph_deployment_name="my-dgd"' in query_str
 
     def test_get_total_dgd_power_label_is_exact_not_regex(self):
         """dgd_name is an exact label value, not a regex — dots are literal.
@@ -749,7 +746,7 @@ class TestPowerAwareDcgmQueries:
         A name like "my.dgd" must match only pods whose label value is
         exactly "my.dgd"; it must not be treated as a PromQL regex where
         "." matches any character.  Verifies the switch from exported_pod=~
-        to kubernetes_label_...="<exact>".
+        to nvidia_com_...="<exact>".
         """
         client = self._client()
 
@@ -758,10 +755,7 @@ class TestPowerAwareDcgmQueries:
             mock_query.return_value = []
             client.get_total_dgd_power(k8s_namespace="ns", dgd_name="my.dgd")
             query_str = mock_query.call_args[0][0]
-            assert (
-                'kubernetes_label_nvidia_com_dynamo_graph_deployment_name="my.dgd"'
-                in query_str
-            )
+            assert 'nvidia_com_dynamo_graph_deployment_name="my.dgd"' in query_str
             assert "exported_pod" not in query_str
 
         # Plain alphanumeric name: no stray backslashes or regex syntax.
@@ -770,8 +764,7 @@ class TestPowerAwareDcgmQueries:
             client.get_total_dgd_power(k8s_namespace="ns", dgd_name="qwen3quickstart")
             query_str = mock_query.call_args[0][0]
             assert (
-                'kubernetes_label_nvidia_com_dynamo_graph_deployment_name="qwen3quickstart"'
-                in query_str
+                'nvidia_com_dynamo_graph_deployment_name="qwen3quickstart"' in query_str
             )
 
     def test_get_total_dgd_power_returns_none_on_empty(self):
@@ -795,20 +788,17 @@ class TestPowerAwareDcgmQueries:
     def test_get_total_dgd_power_uses_dgd_label_not_pod_name(self):
         """DGD identity must be matched via the operator pod label, not pod name.
 
-        The label ``kubernetes_label_nvidia_com_dynamo_graph_deployment_name``
-        is stamped by the operator on every workload pod and is immune to
-        Grove/LWS vs Deployment pod-name shape differences.  Neither
-        ``exported_pod`` (name-regex) nor bare ``pod`` must appear.
+        The label ``nvidia_com_dynamo_graph_deployment_name`` is the
+        DCGM-exporter-sanitized form of the operator label stamped on every
+        workload pod. Neither ``exported_pod`` (name-regex) nor bare ``pod``
+        must appear.
         """
         client = self._client()
         with patch.object(client.prom, "custom_query") as mock_query:
             mock_query.return_value = []
             client.get_total_dgd_power(k8s_namespace="ns", dgd_name="my-dgd")
             query_str = mock_query.call_args[0][0]
-            assert (
-                'kubernetes_label_nvidia_com_dynamo_graph_deployment_name="my-dgd"'
-                in query_str
-            )
+            assert 'nvidia_com_dynamo_graph_deployment_name="my-dgd"' in query_str
             assert "exported_pod" not in query_str
             assert "{pod=" not in query_str
             assert ",pod=" not in query_str

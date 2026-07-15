@@ -362,6 +362,28 @@ def test_get_service_name_from_v1beta_worker_type_by_name(kubernetes_connector):
     assert service.number_replicas() == 2
 
 
+def test_get_service_name_from_unique_v1beta_worker_type_for_decode(
+    kubernetes_connector,
+):
+    deployment = _deployment(_component("VllmDecodeWorker", "worker", replicas=2))
+
+    service = get_component_from_type_or_name(
+        deployment, SubComponentType.DECODE, "VllmWorker"
+    )
+
+    assert service.name == "VllmDecodeWorker"
+    assert service.number_replicas() == 2
+
+
+def test_get_service_name_from_unique_worker_does_not_satisfy_prefill(
+    kubernetes_connector,
+):
+    deployment = _deployment(_component("VllmDecodeWorker", "worker", replicas=2))
+
+    with pytest.raises(SubComponentNotFoundError):
+        get_component_from_type_or_name(deployment, SubComponentType.PREFILL)
+
+
 def test_get_service_name_from_sub_component_type_not_found(kubernetes_connector):
     deployment = _deployment(_component("test-component-decode", "decode", replicas=3))
     with pytest.raises(SubComponentNotFoundError) as exc_info:
@@ -1594,11 +1616,11 @@ class TestResolveFrontendHttpPort:
 # ---------------------------------------------------------------------------
 
 
-def _agg_deployment(model_name="test-model", gpu=4):
-    """DGD with a single VllmWorker typed as 'worker' — the agg topology."""
+def _agg_deployment(model_name="test-model", gpu=4, worker_name="VllmDecodeWorker"):
+    """DGD with a single generic type:worker component — the agg topology."""
     return _deployment(
         _component(
-            "VllmWorker",
+            worker_name,
             "worker",
             replicas=1,
             args=["--served-model-name", model_name],
@@ -1609,11 +1631,11 @@ def _agg_deployment(model_name="test-model", gpu=4):
 
 @pytest.mark.asyncio
 async def test_validate_deployment_agg_mode(kubernetes_connector, mock_kube_api):
-    """validate_deployment must pass and resolve model name from VllmWorker in agg mode."""
+    """validate_deployment must resolve the actual generic worker name in agg mode."""
     mock_kube_api.get_graph_deployment.return_value = _agg_deployment()
 
     # Must not raise — both the component-existence check and model-name lookup
-    # must use the explicit agg component name rather than type-only resolution.
+    # must resolve the unique generic type:worker component from the DGD.
     await kubernetes_connector.validate_deployment(
         prefill_component_name=None,
         decode_component_name="VllmWorker",
@@ -1637,7 +1659,7 @@ def test_get_gpu_counts_agg_mode(kubernetes_connector, mock_kube_api):
 
 
 def test_get_worker_info_agg_mode_sets_k8s_name(kubernetes_connector, mock_kube_api):
-    """get_worker_info must set k8s_name to VllmWorker for agg mode (not VllmDecodeWorker)."""
+    """get_worker_info must set k8s_name to the actual generic worker name."""
     mock_kube_api.get_graph_deployment.return_value = _agg_deployment()
 
     info = kubernetes_connector.get_worker_info(
@@ -1646,7 +1668,7 @@ def test_get_worker_info_agg_mode_sets_k8s_name(kubernetes_connector, mock_kube_
         component_name="VllmWorker",
     )
 
-    assert info.k8s_name == "VllmWorker"
+    assert info.k8s_name == "VllmDecodeWorker"
 
 
 # Static fallback path (connector=None) — covers build_worker_info_from_defaults

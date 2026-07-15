@@ -78,8 +78,7 @@ def build_worker_info_from_defaults(
     """Build a WorkerInfo populated only from hard-coded backend defaults.
 
     ``k8s_name_override`` replaces the default DGD component name when the
-    caller already knows the correct name — e.g. agg mode where the single
-    worker is ``VllmWorker`` rather than ``VllmDecodeWorker``.
+    caller already resolved the deployment's actual component name.
     """
     names = WORKER_COMPONENT_NAMES.get(backend)
     if names is None:

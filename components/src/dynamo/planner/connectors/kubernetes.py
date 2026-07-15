@@ -403,12 +403,10 @@ class KubernetesConnector(PlannerConnector):
         ``component_name`` is the fallback DGD component name used when the
         role cannot be matched by ``type`` alone. Aggregated (``mode=agg``)
         deployments label their single worker ``type: worker`` (the generic
-        v1beta1 worker type), which does not map to the PREFILL/DECODE role;
-        passing the expected worker name (e.g.
-        ``WORKER_COMPONENT_NAMES[backend].agg_worker_k8s_name``) lets the
-        resolver fall through to the explicit-name path so agg workers are
-        annotated. Mirrors what ``validate_deployment`` already threads for
-        the same reason. Ignored when the role matches by type (disagg).
+        v1beta1 worker type), which does not map to the DECODE role; when that
+        generic worker is unique, the resolver carries the actual DGD component
+        name rather than depending on a backend hard-coded agg name. Ignored
+        when the role matches by type (disagg).
         """
         if deployment is None:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)

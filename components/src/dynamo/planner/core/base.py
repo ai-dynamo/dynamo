@@ -309,12 +309,13 @@ class NativePlannerBase:
         if hasattr(self, "connector") and hasattr(self.connector, "_async_init"):
             await self.connector._async_init()
 
-        # Resolve DGD component names once for this backend+mode and store
-        # them so _refresh_worker_info_from_connector can reuse them without
-        # recomputing.  In agg mode the decode slot resolves to the agg worker
-        # name (e.g. VllmWorker) rather than the disagg decode name.
+        # Resolve backend-default DGD component names once and store them so
+        # _refresh_worker_info_from_connector can reuse the explicit-name
+        # fallbacks. The DGD resolver may later replace these with the actual
+        # names from the deployment, e.g. a unique generic type:worker component
+        # in agg mode.
         self._prefill_k8s_name, self._decode_k8s_name = get_planner_k8s_component_names(
-            self.config.backend, self.config.mode
+            self.config.backend
         )
 
         logger.info("Validating deployment...")
@@ -349,6 +350,10 @@ class NativePlannerBase:
         # defaults (subscribers aren't attached yet) which is enough to
         # construct the FPM endpoint.
         await self._init_worker_info()
+        if self.require_prefill and self.prefill_worker_info.k8s_name:
+            self._prefill_k8s_name = self.prefill_worker_info.k8s_name
+        if self.require_decode and self.decode_worker_info.k8s_name:
+            self._decode_k8s_name = self.decode_worker_info.k8s_name
 
         if self.runtime is not None:
             if self.require_prefill:
@@ -480,6 +485,7 @@ class NativePlannerBase:
     # ------------------------------------------------------------------
 
     _MDC_REFRESH_FIELDS = (
+        "k8s_name",
         "total_kv_blocks",
         "kv_cache_block_size",
         "max_num_seqs",
@@ -508,7 +514,10 @@ class NativePlannerBase:
 
         changed = False
         for worker_info, sub_type in targets:
-            if worker_info.max_num_batched_tokens is not None:
+            if (
+                worker_info.max_num_batched_tokens is not None
+                and worker_info.k8s_name is not None
+            ):
                 continue
             component_name = (
                 getattr(self, "_prefill_k8s_name", None)
@@ -538,6 +547,11 @@ class NativePlannerBase:
                     and getattr(worker_info, field_name) != fresh_val
                 ):
                     setattr(worker_info, field_name, fresh_val)
+                    if field_name == "k8s_name":
+                        if sub_type == SubComponentType.PREFILL:
+                            self._prefill_k8s_name = fresh_val
+                        else:
+                            self._decode_k8s_name = fresh_val
                     updated = True
             if updated:
                 changed = True
@@ -928,7 +942,7 @@ class NativePlannerBase:
                 connector.graph_deployment_name
             )
             prefill_name, decode_name = get_planner_k8s_component_names(
-                self.config.backend, self.config.mode
+                self.config.backend
             )
 
             pods_to_clean: list = []
@@ -1015,14 +1029,11 @@ class NativePlannerBase:
                 connector.graph_deployment_name
             )
 
-            # Fallback component names so aggregated (mode=agg) DGDs — whose
-            # single worker is labelled ``type: worker`` rather than
-            # ``type: prefill/decode`` — still get annotated.  In agg mode the
-            # worker is named e.g. ``VllmWorker`` (agg_worker_k8s_name), not
-            # ``VllmDecodeWorker``; the fallback is a no-op for disagg (the
-            # role matches by type and the explicit name is ignored).
+            # Backend-default fallback names. If an aggregated DGD declares a
+            # single generic ``type: worker`` component with a different name,
+            # get_component_from_type_or_name resolves that actual DGD name.
             prefill_name, decode_name = get_planner_k8s_component_names(
-                self.config.backend, self.config.mode
+                self.config.backend
             )
 
             pods_and_limits: list[tuple] = []
