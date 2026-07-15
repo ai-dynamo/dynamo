@@ -63,6 +63,10 @@ impl SglangRemoteEngine {
         }
         .map_err(|err| client::invalid_arg(err.to_string()))?;
 
+        Self::from_parsed_args(args)
+    }
+
+    pub fn from_parsed_args(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         let endpoint = normalize_endpoint(&args.sglang_endpoint).map_err(client::invalid_arg)?;
         let transport = args.transport();
         let discovery = bootstrap_discover(&endpoint, &transport)?;

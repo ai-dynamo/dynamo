@@ -490,7 +490,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 ##################################
 ##### runtime_wheel_builder ######
 ##################################
-# Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels, sans nixl.
+# Builds ai-dynamo, ai-dynamo-runtime, ai-dynamo-sglang-remote, and
+# gpu_memory_service wheels, sans nixl.
 
 FROM wheel_builder_base AS runtime_wheel_builder
 
@@ -501,7 +502,8 @@ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml 
 COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
-# Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
+# Build ai-dynamo (pure Python), ai-dynamo-runtime (PyO3), and the
+# ai-dynamo-sglang-remote binary-only wheel.
 ARG USE_SCCACHE
 ARG ENABLE_MEDIA_FFMPEG
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -525,6 +527,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     fi && \
+    cd /opt/dynamo/lib/backend/sglang-remote && \
+    maturin build --release --locked --out /opt/dynamo/dist && \
     /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
@@ -558,7 +562,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 # the bare system python3 lacks it and the step would no-op with a warning.
 COPY container/compliance /opt/compliance
 RUN set -u; injected=0; \
-    for whl in /opt/dynamo/dist/ai_dynamo_runtime*.whl; do \
+    for whl in \
+        /opt/dynamo/dist/ai_dynamo_runtime*.whl \
+        /opt/dynamo/dist/ai_dynamo_sglang_remote*.whl; do \
         [ -e "$whl" ] || continue; \
         PYTHONPATH=/opt ${VIRTUAL_ENV}/bin/python3 -m compliance.bundle_wheel_notices \
             --wheel "$whl" --licenses-dir /opt/dynamo/rust-licenses -v \

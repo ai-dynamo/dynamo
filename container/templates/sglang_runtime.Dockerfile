@@ -106,6 +106,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% if device == "xpu" %}
 RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/ai_dynamo_sglang_remote*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         "distro==1.9.0"
@@ -114,7 +115,14 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/ai_dynamo_sglang_remote*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+
+# The binary-only wheel is the contract consumed by SGLang's executable
+# sidecar supervisor. Validate the installed PATH entry while building the
+# image so a packaging regression cannot produce an unusable runtime.
+RUN command -v dynamo-sglang-remote >/dev/null && \
+    dynamo-sglang-remote --help >/dev/null
 
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)

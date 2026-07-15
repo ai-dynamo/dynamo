@@ -585,6 +585,7 @@ jobs:
                 --wildcards \
                 'opt/dynamo/wheelhouse/ai_dynamo-*py3-none-any.whl' \
                 'opt/dynamo/wheelhouse/ai_dynamo_runtime-*x86_64*.whl' \
+                'opt/dynamo/wheelhouse/ai_dynamo_sglang_remote-*x86_64*.whl' \
                 'opt/dynamo/wheelhouse/kvbm-*x86_64*.whl'
 
           echo "Exporting arm64 filesystem from ${ECR_IMAGE}..."
@@ -592,6 +593,7 @@ jobs:
             | tar -x -C "${STAGE}/arm64" \
                 --wildcards \
                 'opt/dynamo/wheelhouse/ai_dynamo_runtime-*aarch64*.whl' \
+                'opt/dynamo/wheelhouse/ai_dynamo_sglang_remote-*aarch64*.whl' \
                 'opt/dynamo/wheelhouse/kvbm-*aarch64*.whl'
 
           OUT="${STAGE}/upload"
@@ -627,21 +629,27 @@ jobs:
           set -euo pipefail
 
           # Catches UTC-midnight drift between the build-time version stamp and
-          # prepare-release's wheel_version; ai_dynamo and ai_dynamo_runtime must agree.
+          # prepare-release's wheel_version; all first-party Dynamo wheels must agree.
           shopt -s nullglob
           AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
           AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
+          AI_DYNAMO_SGLANG_REMOTE_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_sglang_remote-*.whl)
           shopt -u nullglob
 
-          if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
-            echo "::error::Missing ai_dynamo or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
+          if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || \
+             [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ] || \
+             [ ${#AI_DYNAMO_SGLANG_REMOTE_WHEELS[@]} -eq 0 ]; then
+            echo "::error::Missing a required first-party Dynamo wheel in ${UPLOAD_DIR}"
             exit 1
           fi
 
           echo "Expected wheel version: ${EXPECTED_WHEEL_VERSION}"
 
           mismatch=0
-          for path in "${AI_DYNAMO_WHEELS[@]}" "${AI_DYNAMO_RUNTIME_WHEELS[@]}"; do
+          for path in \
+            "${AI_DYNAMO_WHEELS[@]}" \
+            "${AI_DYNAMO_RUNTIME_WHEELS[@]}" \
+            "${AI_DYNAMO_SGLANG_REMOTE_WHEELS[@]}"; do
             file="$(basename "${path}")"
             # PEP 427: <dist>-<version>-<tags>.whl; version sits between the 1st and 2nd hyphen.
             rest="${file#*-}"

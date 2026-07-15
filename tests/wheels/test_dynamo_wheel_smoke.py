@@ -81,6 +81,10 @@ def test_core_and_kvbm_install_clean_room(wheelhouse: Path) -> None:
     smoke_install.install_core(wheelhouse, sys.executable, also=("kvbm",))
 
 
+def test_sglang_remote_executable_install_clean_room(wheelhouse: Path) -> None:
+    smoke_install.install_sglang_remote(wheelhouse, sys.executable)
+
+
 def test_runtime_wheel_has_no_bundled_libraries(wheelhouse: Path) -> None:
     smoke_install.assert_no_bundled_libraries(wheelhouse)
 

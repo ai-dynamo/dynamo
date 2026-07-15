@@ -18,8 +18,9 @@ Why importlib.metadata vs pip-licenses:
   - importlib.metadata is in stdlib (3.8+) and reads the same METADATA
     files pip-licenses parses.
 
-First-party packages (`ai-dynamo`, `ai-dynamo-runtime`, `kvbm`, `nixl_*`,
-`nvidia-*`, `dynamo-*`) are KEPT in the output — same principle as Rust.
+First-party packages (`ai-dynamo`, `ai-dynamo-runtime`,
+`ai-dynamo-sglang-remote`, `kvbm`, `nixl_*`, `nvidia-*`, `dynamo-*`) are KEPT
+in the output — same principle as Rust.
 """
 
 from __future__ import annotations
