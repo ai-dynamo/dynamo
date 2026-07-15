@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package featuregate
+package compatibility
 
 import semver "github.com/Masterminds/semver/v3"
 

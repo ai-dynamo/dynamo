@@ -8,7 +8,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/featuregate"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -309,7 +309,7 @@ func getExpandedArgs(container *corev1.Container) []string {
 //
 // Decision logic:
 //  1. Explicit override annotation takes priority (user set "mp" or "ray")
-//  2. Operator origin version feature gate: uses featuregate.VLLMMultiprocessing
+//  2. Operator origin version compatibility gate: uses compatibility.VLLMMultiprocessing
 func shouldUseMpBackend(annotations map[string]string) bool {
 	logger := log.Log.WithName("vllm-backend")
 
@@ -329,7 +329,7 @@ func shouldUseMpBackend(annotations map[string]string) bool {
 	}
 
 	// Step 2: Check operator origin version gate
-	return featuregate.VLLMMultiprocessing.IsEnabled(annotations)
+	return compatibility.VLLMMultiprocessing.IsEnabled(annotations)
 }
 
 // injectMpDistributedLaunchFlags injects vLLM multiprocessing flags for multi-node TP/PP deployments.
