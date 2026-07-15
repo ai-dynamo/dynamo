@@ -5,7 +5,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,6 +29,7 @@ import (
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	snapshottypes "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
@@ -138,6 +141,27 @@ func makeSourcePod(checkpointID string) *corev1.Pod {
 			},
 		},
 	}
+}
+
+func writeValidCheckpointArtifact(t *testing.T, destination, checkpointID string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(destination, 0o755))
+
+	image := []byte("rootfs image")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(destination, snapshotruntime.RootfsDiffFilename),
+		image,
+		0o600,
+	))
+
+	manifest := snapshottypes.NewCheckpointManifest(
+		checkpointID,
+		snapshottypes.CRIUDumpManifest{},
+		snapshottypes.SourcePodManifest{},
+		snapshottypes.OverlayManifest{},
+	)
+	manifest.RootFSSHA256 = fmt.Sprintf("%x", sha256.Sum256(image))
+	require.NoError(t, snapshottypes.WriteManifest(destination, manifest))
 }
 
 // getContent reads a PodSnapshotContent back from the fake client.
@@ -355,13 +379,62 @@ func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
 	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
 	// Pre-create the artifact directory at the resolved destination so the resume check fires.
 	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
-	require.NoError(t, os.MkdirAll(dest, 0o755))
+	writeValidCheckpointArtifact(t, dest, "abc")
 
 	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 	assert.False(t, fc.wasCalled())
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
 	require.NotNil(t, cond)
+}
+
+func TestReconcileSnapshotContent_ResumeDigestMismatchFails(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod("abc")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
+	writeValidCheckpointArtifact(t, dest, "abc")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dest, snapshotruntime.RootfsDiffFilename),
+		[]byte("corrupted rootfs image"),
+		0o600,
+	))
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
+	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "InvalidCheckpointArtifact", cond.Reason)
+	assert.Contains(t, cond.Message, "rootfs SHA-256 mismatch")
+}
+
+func TestReconcileSnapshotContent_ResumeRejectsTarOnlyArtifact(t *testing.T) {
+	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
+	pod := makeSourcePod("abc")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 4242}
+	dest := filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1")
+	require.NoError(t, os.MkdirAll(dest, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dest, "rootfs-diff.tar"), nil, 0o600))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(dest, "manifest.yaml"),
+		[]byte("checkpointId: abc\n"),
+		0o600,
+	))
+
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	assert.False(t, fc.wasCalled())
+	got := getContent(t, w, content.Name)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
+	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "InvalidCheckpointArtifact", cond.Reason)
+	assert.Contains(t, cond.Message, "checkpoint manifest has invalid rootfsSha256")
 }
 
 func TestReconcileSnapshotContent_PodMountResolvesContainerPID(t *testing.T) {

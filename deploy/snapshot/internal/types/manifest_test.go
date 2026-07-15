@@ -32,6 +32,7 @@ func TestManifestRoundTrip(t *testing.T) {
 			BindMountDests: []string{"/data"},
 		},
 	)
+	original.RootFSSHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	original.CUDA = NewCUDAManifest([]int{42, 43}, []string{"GPU-aaa", "GPU-bbb"})
 
 	if err := WriteManifest(dir, original); err != nil {
@@ -46,6 +47,9 @@ func TestManifestRoundTrip(t *testing.T) {
 	// Verify key fields survived the round-trip
 	if loaded.CheckpointID != original.CheckpointID {
 		t.Errorf("CheckpointID = %q, want %q", loaded.CheckpointID, original.CheckpointID)
+	}
+	if loaded.RootFSSHA256 != original.RootFSSHA256 {
+		t.Errorf("RootFSSHA256 = %q, want %q", loaded.RootFSSHA256, original.RootFSSHA256)
 	}
 	if loaded.CRIUDump.CRIU.LogLevel != 4 {
 		t.Errorf("CRIU.LogLevel = %d, want 4", loaded.CRIUDump.CRIU.LogLevel)

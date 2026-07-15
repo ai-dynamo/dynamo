@@ -160,9 +160,8 @@ rbac:
 # Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
 config:
   overlay:
-    # Rootfs diff tar exclusions. Absolute-looking paths are normalized
-    # relative to the tar root, and patterns starting with * are passed
-    # through as tar globs unchanged.
+    # Rootfs SquashFS exclusions. Absolute-looking paths are normalized
+    # relative to the OverlayFS upperdir; wildcard patterns match recursively.
     exclusions:
       - /proc
       - /sys

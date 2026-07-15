@@ -5,6 +5,7 @@ package protocol
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,9 @@ const (
 	SnapshotAgentContainerName = "agent"
 	SnapshotAgentVolumeName    = "checkpoints"
 	SnapshotAgentLabelSelector = SnapshotAgentLabelKey + "=" + SnapshotAgentLabelValue
+
+	RootfsBackingWorkspaceMountPath = "/.dynamo-snapshot-backing"
+	rootfsBackingVolumePrefix       = "snapshot-rootfs-"
 )
 
 type PodOptions struct {
@@ -28,6 +32,110 @@ type PodOptions struct {
 	ArtifactVersion string
 	Storage         Storage
 	SeccompProfile  string
+}
+
+func validateRootfsBackingIsolation(
+	podSpec *corev1.PodSpec,
+	targetName, volumeName string,
+) error {
+	for _, candidate := range podSpec.Containers {
+		if candidate.Name == targetName {
+			continue
+		}
+		for _, mount := range candidate.VolumeMounts {
+			if mount.Name == volumeName {
+				return fmt.Errorf(
+					"rootfs backing volume %q is also mounted by container %q",
+					volumeName,
+					candidate.Name,
+				)
+			}
+		}
+	}
+	for _, candidate := range podSpec.InitContainers {
+		for _, mount := range candidate.VolumeMounts {
+			if mount.Name == volumeName {
+				return fmt.Errorf(
+					"rootfs backing volume %q is also mounted by init container %q",
+					volumeName,
+					candidate.Name,
+				)
+			}
+		}
+	}
+	for _, candidate := range podSpec.EphemeralContainers {
+		for _, mount := range candidate.VolumeMounts {
+			if mount.Name == volumeName {
+				return fmt.Errorf(
+					"rootfs backing volume %q is also mounted by ephemeral container %q",
+					volumeName,
+					candidate.Name,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func ensureRootfsBackingVolume(podSpec *corev1.PodSpec, container *corev1.Container) error {
+	name := rootfsBackingVolumeName(container.Name)
+	if err := validateRootfsBackingIsolation(podSpec, container.Name, name); err != nil {
+		return err
+	}
+	foundVolume := false
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == name {
+			if volume.EmptyDir == nil {
+				return fmt.Errorf("rootfs backing volume %q must be an emptyDir", name)
+			}
+			foundVolume = true
+			break
+		}
+	}
+	if !foundVolume {
+		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+			Name: name,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
+	hasBackingMount := false
+	for _, volumeMount := range container.VolumeMounts {
+		if volumeMount.MountPath == RootfsBackingWorkspaceMountPath &&
+			volumeMount.Name != name {
+			return fmt.Errorf(
+				"reserved rootfs backing path %s is already mounted by volume %q",
+				RootfsBackingWorkspaceMountPath,
+				volumeMount.Name,
+			)
+		}
+		if volumeMount.Name == name {
+			if volumeMount.MountPath != RootfsBackingWorkspaceMountPath ||
+				volumeMount.SubPath != "" ||
+				volumeMount.SubPathExpr != "" ||
+				volumeMount.ReadOnly {
+				return fmt.Errorf("rootfs backing volume %q has conflicting mount settings", name)
+			}
+			if hasBackingMount {
+				return fmt.Errorf("rootfs backing volume %q is mounted more than once", name)
+			}
+			hasBackingMount = true
+		}
+	}
+	if hasBackingMount {
+		return nil
+	}
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name:      name,
+		MountPath: RootfsBackingWorkspaceMountPath,
+	})
+	return nil
+}
+
+func rootfsBackingVolumeName(containerName string) string {
+	sum := sha256.Sum256([]byte(containerName))
+	return fmt.Sprintf("%s%x", rootfsBackingVolumePrefix, sum[:16])
 }
 
 const (
@@ -95,6 +203,9 @@ func PrepareRestorePodSpec(
 			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
+		if err := ensureRootfsBackingVolume(podSpec, container); err != nil {
+			return fmt.Errorf("restore target container %q: %w", name, err)
+		}
 		if isCheckpointReady {
 			// Dynamo standby entrypoints honor this env by writing restore
 			// context and sleeping. Keep command/args intact so generic images
@@ -204,6 +315,23 @@ func ValidateRestorePodSpec(
 		if container == nil {
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
+		hasBackingVolume := false
+		for _, volume := range podSpec.Volumes {
+			if volume.Name == rootfsBackingVolumeName(name) && volume.EmptyDir != nil {
+				hasBackingVolume = true
+				break
+			}
+		}
+		if !hasBackingVolume {
+			return fmt.Errorf("missing dedicated rootfs backing emptyDir for container %q", name)
+		}
+		if err := validateRootfsBackingIsolation(
+			podSpec,
+			name,
+			rootfsBackingVolumeName(name),
+		); err != nil {
+			return err
+		}
 		if storage.BasePath != "" {
 			hasMount := false
 			for _, mount := range container.VolumeMounts {
@@ -217,17 +345,36 @@ func ValidateRestorePodSpec(
 			}
 		}
 		hasControlMount := false
+		hasBackingMount := false
 		for _, mount := range container.VolumeMounts {
+			if mount.MountPath == RootfsBackingWorkspaceMountPath &&
+				mount.Name != rootfsBackingVolumeName(name) {
+				return fmt.Errorf("reserved rootfs backing path on container %q uses volume %q", name, mount.Name)
+			}
+			if mount.Name == rootfsBackingVolumeName(name) {
+				if mount.MountPath != RootfsBackingWorkspaceMountPath ||
+					mount.SubPath != "" ||
+					mount.SubPathExpr != "" ||
+					mount.ReadOnly {
+					return fmt.Errorf("rootfs backing mount on container %q must be writable and use no subPath or subPathExpr", name)
+				}
+				if hasBackingMount {
+					return fmt.Errorf("rootfs backing volume on container %q is mounted more than once", name)
+				}
+				hasBackingMount = true
+			}
 			if mount.Name == SnapshotControlVolumeName && mount.MountPath == SnapshotControlMountPath {
 				hasControlMount = true
 				if mount.SubPath != name {
 					return fmt.Errorf("expected SubPath %q for %s at %s on container %q, got %q", name, SnapshotControlVolumeName, SnapshotControlMountPath, name, mount.SubPath)
 				}
-				break
 			}
 		}
 		if !hasControlMount {
 			return fmt.Errorf("missing %s mount at %s on container %q", SnapshotControlVolumeName, SnapshotControlMountPath, name)
+		}
+		if !hasBackingMount {
+			return fmt.Errorf("missing rootfs backing mount at %s on container %q", RootfsBackingWorkspaceMountPath, name)
 		}
 		hasControlEnv := false
 		for _, env := range container.Env {
