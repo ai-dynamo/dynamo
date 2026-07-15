@@ -21,7 +21,7 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 | **Parallelism**          | 8x TP1 replicas                    | 8x TP1 replicas                    | 2x TP1 prefill + 6x TP1 decode³    | 4x TP1 prefill + 4x TP1 decode³    |
 | **MoE backend**          | flashinfer_trtllm (MXFP4xFP8)      | flashinfer_cutlass                 | flashinfer_trtllm                  | flashinfer_cutlass                 |
 | **Attention backend**    | FlashInfer                         | FlashInfer                         | FlashInfer                         | FlashInfer                         |
-| **Routing**              | KV-aware                           | KV-aware                           | KV-aware                           | KV-aware (NIXL P→D, cuda_ipc/NVLink)|
+| **Routing**              | KV-aware                           | KV-aware                           | KV-aware (NIXL P→D, cuda_ipc/NVLink)| KV-aware (NIXL P→D, cuda_ipc/NVLink)|
 | **Speculative decoding** | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON               | EAGLE3-v3 (DL=3), ON (both)¹       | EAGLE3-v3 (DL=3), ON (both)        |
 | **KV cache offloading**  | none (SimpleCPUOffload opt-in)     | **SimpleCPUOffload ON**            | none (NIXL-incompatible)           | none (NIXL-incompatible)           |
 
