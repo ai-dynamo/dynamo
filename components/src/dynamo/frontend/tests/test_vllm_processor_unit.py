@@ -237,6 +237,48 @@ class TestChatTemplateArgsPassthrough:
         assert chat_params.chat_template_kwargs["documents"] is None
 
 
+class TestServerDefaultChatTemplateKwargs:
+    """The server-wide --default-chat-template-kwargs must reach the template."""
+
+    def test_server_default_applied_when_request_omits_kwargs(self, tokenizer):
+        """A server default reaches the template when the request carries no kwargs."""
+        _, _, _, _, chat_params = _prepare_request(
+            {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}]},
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_chat_template_kwargs={"enable_thinking": False},
+        )
+        assert chat_params.chat_template_kwargs.get("enable_thinking") is False
+
+    def test_request_kwargs_override_server_default(self, tokenizer):
+        """A per-request kwarg takes precedence over the server default."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": True},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_chat_template_kwargs={"enable_thinking": False},
+        )
+        assert chat_params.chat_template_kwargs.get("enable_thinking") is True
+
+    def test_unset_request_value_keeps_server_default(self, tokenizer):
+        """A None/unset request value must not erase the server default (vLLM parity)."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": None},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_chat_template_kwargs={"enable_thinking": False},
+        )
+        assert chat_params.chat_template_kwargs.get("enable_thinking") is False
+
+
 class TestMultimodalFeatureMetadata:
     def _feature(
         self, modality, mm_hash, offset, length, data=_DEFAULT_MM_DATA, is_embed=None
