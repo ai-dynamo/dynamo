@@ -26,7 +26,7 @@ pub enum EndpointType {
     AnthropicMessages,
     /// Generate API (token-in/token-out)
     Generate,
-    /// OpenAI Batch API
+    /// Batch API
     Batch,
 }
 
