@@ -101,6 +101,13 @@ impl NixlAgent {
                 self.available_backends.insert(backend_upper);
                 Ok(())
             }
+            // UCX backend failures are frequently caused by UCX binding the wrong
+            // RDMA NICs; append an actionable hint pointing at UCX_NET_DEVICES.
+            Err(e) if backend_upper == "UCX" => anyhow::bail!(
+                "Failed to create nixl backend: {}{}",
+                e,
+                crate::nixl::ucx_backend_failure_hint()
+            ),
             Err(e) => anyhow::bail!("Failed to create nixl backend: {}", e),
         }
     }

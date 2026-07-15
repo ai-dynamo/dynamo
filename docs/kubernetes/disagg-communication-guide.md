@@ -261,6 +261,9 @@ env:
   - name: UCX_TLS
     value: "rc_x,rc,cuda_copy,cuda_ipc"
   - name: UCX_NET_DEVICES
+    # Scope UCX to the per-GPU NICs. On multi-NIC nodes, list every GPU NIC,
+    # e.g. "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1". Do NOT leave this unset or
+    # set to "all" — see "Known Issue — UCX binds the wrong NICs" below.
     value: "<ib-device>:1"       # e.g. "mlx5_0:1" — run `ibv_devinfo` to find your device
   - name: UCX_IB_ADDR_TYPE
     value: "eth"                 # required for cross-pod IB on Kubernetes
@@ -277,7 +280,7 @@ env:
 | Variable | Description |
 |----------|-------------|
 | `UCX_TLS` | `rc_x` (accelerated RC) listed first for optimal RDMA performance |
-| `UCX_NET_DEVICES` | Bind to a specific IB device. Run `ibv_devinfo` inside a pod to list available devices. Use a non-bonded device with a valid LID. |
+| `UCX_NET_DEVICES` | Pin UCX to the per-GPU RDMA NICs (e.g. `mlx5_0:1,mlx5_1:1,...`). Run `ibv_devinfo` inside a pod to list devices and `nvidia-smi topo -m` to map NICs to GPUs. Use non-bonded devices with valid LIDs. Leaving this unset or `all` lets UCX bind management/BlueField NICs and can break init (see below). |
 | `UCX_IB_ADDR_TYPE` | Must be `eth` for cross-pod communication on Kubernetes. Without this, UCX uses LID-based addressing which does not route between pods. |
 | `UCX_RNDV_SCHEME` | `get_zcopy` enables zero-copy RDMA GET, optimal for large KV cache transfers |
 
@@ -292,6 +295,33 @@ Some clusters expose bonded InfiniBand devices (e.g., `mlx5_bond_0`) with LID=0.
 ibv_devinfo | grep -E "hca_id|lid"
 # Use a device with a non-zero LID in UCX_NET_DEVICES
 ```
+
+**Known Issue — UCX binds the wrong NICs (`all` / unset):**
+
+When `UCX_NET_DEVICES` is unset or set to `all`, UCX binds *every* RDMA device it
+sees. On nodes that also expose management or BlueField NICs (some cloud and bare-metal
+clusters do), UCX may try to use NICs that are not wired to the GPUs. NIXL backend init
+then fails — often as a bare `NIXL_ERR_BACKEND` with no UCX-level cause in the pod logs.
+
+**Fix:** scope `UCX_NET_DEVICES` to the exact per-GPU NICs:
+
+```yaml
+- name: UCX_NET_DEVICES
+  value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1"
+```
+
+**Deriving the list:**
+
+```bash
+# Inside a worker pod:
+ibv_devinfo -l          # list the RDMA HCAs visible to the container
+nvidia-smi topo -m      # map each NIC to its GPU (look for PIX/PXB affinity)
+# Keep only the NICs paired with a GPU; drop management/BlueField NICs.
+```
+
+When a Dynamo (KVBM/block-manager) UCX backend fails to initialize, the error log now
+includes the active RDMA ports it found and a ready-to-paste `UCX_NET_DEVICES`
+recommendation derived from PCIe topology — copy that value into the deployment.
 
 ### AWS EFA Configuration
 
@@ -734,17 +764,22 @@ select.c: no active messages transport: Unsupported operation
 
 **Root Causes**:
 
-1. **Bonded IB device with LID=0**: UCX selects `mlx5_bond_0` by default, but bonded devices may have LID=0 (invalid for UD transport). Fix: set `UCX_NET_DEVICES` to a non-bonded device with a valid LID.
+1. **UCX binds the wrong NICs (`all` / unset `UCX_NET_DEVICES`)**: On multi-NIC nodes, UCX picks up management/BlueField NICs that are not wired to the GPUs, breaking multi-GPU/multi-NIC `rc` init. This is the most common cause on B200/B300 and similar multi-NIC nodes, and usually surfaces with no UCX-level cause in the logs. Fix: scope `UCX_NET_DEVICES` to the exact per-GPU NICs (see "Known Issue — UCX binds the wrong NICs" above).
 
-2. **UCX/OFED version mismatch**: The container's UCX mlx5 library may be compiled against a different devx ABI than the host kernel driver. Any transport using IB (rc, cuda_ipc with IB) triggers the devx crash.
+2. **Bonded IB device with LID=0**: UCX selects `mlx5_bond_0` by default, but bonded devices may have LID=0 (invalid for UD transport). Fix: set `UCX_NET_DEVICES` to a non-bonded device with a valid LID.
 
-3. **Missing RDMA device injection**: If `rdma/ib` is not requested in the pod spec, no IB devices are injected into the container.
+3. **UCX/OFED version mismatch**: The container's UCX mlx5 library may be compiled against a different devx ABI than the host kernel driver. Any transport using IB (rc, cuda_ipc with IB) triggers the devx crash.
+
+4. **Missing RDMA device injection**: If `rdma/ib` is not requested in the pod spec, no IB devices are injected into the container.
 
 **Diagnosis**:
 
 ```bash
 # Check which IB devices are visible and their LIDs
 ibv_devinfo | grep -E "hca_id|lid"
+
+# Map each NIC to its GPU (keep only GPU-paired NICs in UCX_NET_DEVICES)
+nvidia-smi topo -m
 
 # Verify rdma/ib was requested
 kubectl get pod <pod> -o jsonpath='{.spec.containers[0].resources}'
@@ -753,10 +788,13 @@ kubectl get pod <pod> -o jsonpath='{.spec.containers[0].resources}'
 ls -la /dev/infiniband/
 ```
 
+> **Tip**: When a Dynamo (KVBM/block-manager) UCX backend fails, the error log now prints the active RDMA ports it found and a ready-to-paste `UCX_NET_DEVICES` recommendation derived from PCIe topology. Use that value directly.
+
 **Solutions**:
-1. Request `rdma/ib` resources (1 per GPU) in the pod spec
-2. Set `UCX_NET_DEVICES` to a non-bonded device if `mlx5_bond_0` has LID=0
-3. Ensure the container image's UCX build matches the host OFED version
+1. Scope `UCX_NET_DEVICES` to the per-GPU NICs (e.g. `mlx5_0:1,mlx5_1:1,...`) — do not leave it unset or `all`
+2. Request `rdma/ib` resources (1 per GPU) in the pod spec
+3. Set `UCX_NET_DEVICES` to a non-bonded device if `mlx5_bond_0` has LID=0
+4. Ensure the container image's UCX build matches the host OFED version
 
 ### Problem: Intermittent transfer failures
 
