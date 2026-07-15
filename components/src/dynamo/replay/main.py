@@ -108,6 +108,20 @@ def _aic_quant_mode(raw: dict, name: str) -> str | None:
 
 
 def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
+    attention_dp = raw.get("aic_attention_dp_size")
+    dp = attention_dp or 1
+    configured_dp = raw.get("dp_size") or 1
+    has_aic_config = raw.get("aic_backend") is not None or attention_dp is not None
+    if has_aic_config and configured_dp > 1 and configured_dp != dp:
+        raise ValueError(
+            "dp_size must match aic_attention_dp_size for AIC-backed replay "
+            f"(got dp_size={configured_dp}, aic_attention_dp_size={dp})"
+        )
+    if attention_dp is not None and dp > 1:
+        # AIC attention-DP describes the silicon scheduler topology, independent
+        # of whether KV capacity is explicit or estimated.
+        raw["dp_size"] = dp
+
     if raw.get("num_gpu_blocks") is not None:
         return
 
@@ -163,14 +177,11 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
         comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
     )
-    # AIC returns a per-rank (per-GPU) block count. Offline replay models a single KV
-    # pool per engine, so under DP-attention -- where each of the `dp` ranks holds a full
-    # KV replica for its slice of the batch -- the engine-wide pool is per_rank * dp. The
-    # live mocker instead replicates one scheduler per dp rank (lib/llm/src/mocker.rs), so
-    # it keeps the per-rank count; this scaling lives on the offline-replay path, not in
-    # estimate_num_gpu_blocks itself.
-    dp = raw.get("aic_attention_dp_size") or 1
-    raw["num_gpu_blocks"] = per_rank_blocks * dp
+    # AIC returns a per-rank (per-GPU) block count. Under attention-DP the offline runtime
+    # mirrors the live path (lib/llm/src/mocker.rs): each mocker worker owns `dp`
+    # independent per-rank schedulers and KV pools. Keep the per-rank count; engine-wide
+    # capacity stays per_rank * dp, partitioned by rank as on real hardware.
+    raw["num_gpu_blocks"] = per_rank_blocks
 
 
 def _resolve_kv_bytes_per_token(raw: dict) -> None:
@@ -290,9 +301,10 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     """Derive EngineCapabilities from MockEngineArgs."""
     from dynamo.planner.core.types import EngineCapabilities
 
-    max_kv_tokens = args.num_gpu_blocks * args.block_size
+    dp_size = max(args.dp_size, 1)
+    max_kv_tokens = args.num_gpu_blocks * args.block_size * dp_size
     return EngineCapabilities(
-        num_gpu=1,
+        num_gpu=(args.aic_tp_size or 1) * dp_size,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         context_length=args.max_model_len,

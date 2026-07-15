@@ -19,7 +19,7 @@ import pytest
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import (
     EngineConfig,
     EngineLogError,
@@ -302,7 +302,7 @@ def _prepare_deployment(
     # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
     disagg_bootstrap_port: int | None = None
     if config.script_name and "disagg" in config.script_name:
-        disagg_bootstrap_port = allocate_port(12000)
+        disagg_bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
         merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
     return _PreparedDeployment(
