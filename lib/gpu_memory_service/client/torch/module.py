@@ -56,8 +56,6 @@ class _DiscoveredTensor:
 class _DiscoveredStorage:
     storage: torch.UntypedStorage
     objects: list[_DiscoveredTensor]
-    allocation_id: str | None = None
-    storage_base_offset: int | None = None
 
     @property
     def has_parameter(self) -> bool:
@@ -150,11 +148,14 @@ def _iter_module_tensor_bindings(
     """Yield each supported tensor and its direct module binding."""
     for module_path, module in model.named_modules(remove_duplicate=False):
         _get_displaced_source_tensors(module)
+        prefix = f"{module_path}." if module_path else ""
         for name, parameter in module.named_parameters(
             recurse=False, remove_duplicate=False
         ):
-            path = f"{module_path}.{name}" if module_path else name
-            yield parameter, ModuleTensorBinding(path, ModuleTensorKind.PARAMETER)
+            yield (
+                parameter,
+                ModuleTensorBinding(f"{prefix}{name}", ModuleTensorKind.PARAMETER),
+            )
 
         for name, buffer in module.named_buffers(recurse=False, remove_duplicate=False):
             kind = (
@@ -162,8 +163,7 @@ def _iter_module_tensor_bindings(
                 if name in module._non_persistent_buffers_set
                 else ModuleTensorKind.PERSISTENT_BUFFER
             )
-            path = f"{module_path}.{name}" if module_path else name
-            yield buffer, ModuleTensorBinding(path, kind)
+            yield buffer, ModuleTensorBinding(f"{prefix}{name}", kind)
 
         registered = (
             set(module._parameters) | set(module._buffers) | set(module._modules)
@@ -176,20 +176,19 @@ def _iter_module_tensor_bindings(
             ):
                 continue
             if torch.is_tensor(value):
-                path = f"{module_path}.{name}" if module_path else name
-                yield value, ModuleTensorBinding(path, ModuleTensorKind.ATTRIBUTE)
+                yield (
+                    value,
+                    ModuleTensorBinding(f"{prefix}{name}", ModuleTensorKind.ATTRIBUTE),
+                )
             elif type(value) in (list, tuple):
                 for index, element in enumerate(value):
                     if torch.is_tensor(element):
-                        name_with_index = f"{name}.{index}"
-                        path = (
-                            f"{module_path}.{name_with_index}"
-                            if module_path
-                            else name_with_index
-                        )
                         yield (
                             element,
-                            ModuleTensorBinding(path, ModuleTensorKind.ATTRIBUTE),
+                            ModuleTensorBinding(
+                                f"{prefix}{name}.{index}",
+                                ModuleTensorKind.ATTRIBUTE,
+                            ),
                         )
 
 
@@ -275,28 +274,34 @@ def _match_storages_to_gms_mappings(
     mappings: dict[int, object],
     *,
     require_parameters: bool,
-) -> list[_DiscoveredStorage]:
+) -> list[tuple[_DiscoveredStorage, str, int]]:
     """Match complete StorageImpl envelopes to their containing GMS mappings."""
-    located: list[_DiscoveredStorage] = []
+    located: list[tuple[_DiscoveredStorage, str, int]] = []
     for ordinal, discovered_storage in enumerate(storages):
         storage_ptr = int(discovered_storage.storage.data_ptr())
         storage_nbytes = int(discovered_storage.storage.nbytes())
         storage_end = storage_ptr + storage_nbytes
-        containing: list[tuple[int, object]] = []
+        containing: tuple[int, object] | None = None
         for va, mapping in mappings.items():
-            mapping_end = int(va) + int(mapping.aligned_size)
-            overlaps = max(int(va), storage_ptr) < min(mapping_end, storage_end)
-            if overlaps and not (int(va) <= storage_ptr and storage_end <= mapping_end):
+            mapping_start = int(va)
+            mapping_end = mapping_start + int(mapping.aligned_size)
+            contains = mapping_start <= storage_ptr and storage_end <= mapping_end
+            if (
+                max(mapping_start, storage_ptr) < min(mapping_end, storage_end)
+                and not contains
+            ):
                 raise RuntimeError(
                     f"Storage {ordinal} exceeds GMS allocation "
                     f"{mapping.allocation_id!r}"
                 )
-            if int(va) <= storage_ptr and storage_end <= mapping_end:
-                containing.append((int(va), mapping))
+            if contains:
+                if containing is not None:
+                    raise RuntimeError(
+                        f"Storage {ordinal} belongs to multiple GMS allocations"
+                    )
+                containing = (mapping_start, mapping)
 
-        if len(containing) > 1:
-            raise RuntimeError(f"Storage {ordinal} belongs to multiple GMS allocations")
-        if not containing:
+        if containing is None:
             if require_parameters and discovered_storage.has_parameter:
                 raise RuntimeError(
                     f"Parameter {discovered_storage.objects[0].bindings[0].path!r} "
@@ -308,17 +313,14 @@ def _match_storages_to_gms_mappings(
             )
             continue
 
-        va, mapping = containing[0]
-        discovered_storage.allocation_id = str(mapping.allocation_id)
-        discovered_storage.storage_base_offset = storage_ptr - va
-        located.append(discovered_storage)
+        va, mapping = containing
+        located.append(
+            (discovered_storage, str(mapping.allocation_id), storage_ptr - va)
+        )
 
     intervals: dict[str, list[tuple[int, int]]] = {}
-    for discovered_storage in located:
-        start = discovered_storage.storage_base_offset
-        if start is None or discovered_storage.allocation_id is None:
-            raise RuntimeError("Located GMS storage is missing its allocation envelope")
-        intervals.setdefault(discovered_storage.allocation_id, []).append(
+    for discovered_storage, allocation_id, start in located:
+        intervals.setdefault(allocation_id, []).append(
             (start, start + discovered_storage.storage.nbytes())
         )
     for allocation_id, allocation_intervals in intervals.items():
@@ -430,29 +432,21 @@ def register_module_tensors(
     )
     entries: list[tuple[str, str, int, bytes]] = []
     referenced_allocation_ids: set[str] = set()
-    for ordinal, discovered_storage in enumerate(storages):
-        if (
-            discovered_storage.allocation_id is None
-            or discovered_storage.storage_base_offset is None
-        ):
-            raise RuntimeError("Located GMS storage is missing its allocation envelope")
+    for ordinal, (
+        discovered_storage,
+        allocation_id,
+        storage_base_offset,
+    ) in enumerate(storages):
         key = f"{STORAGE_MANIFEST_PREFIX}{ordinal}"
         manifest = _build_storage_manifest(discovered_storage)
         _validate_storage_manifest(
             manifest,
             key=key,
-            storage_base_offset=discovered_storage.storage_base_offset,
+            storage_base_offset=storage_base_offset,
         )
         encoded = msgspec.msgpack.encode(manifest)
-        entries.append(
-            (
-                key,
-                discovered_storage.allocation_id,
-                discovered_storage.storage_base_offset,
-                encoded,
-            )
-        )
-        referenced_allocation_ids.add(discovered_storage.allocation_id)
+        entries.append((key, allocation_id, storage_base_offset, encoded))
+        referenced_allocation_ids.add(allocation_id)
 
     for key, allocation_id, storage_base_offset, encoded in entries:
         if not gms_client_memory_manager.metadata_put(
@@ -544,16 +538,14 @@ def _resolve_submodule_path(
     return module
 
 
-def _has_data_descriptor(module: torch.nn.Module, attr: str) -> bool:
-    descriptor = next(
+_MISSING = object()
+
+
+def _static_module_attribute(module: torch.nn.Module, attr: str) -> object:
+    return next(
         (cls.__dict__[attr] for cls in type(module).__mro__ if attr in cls.__dict__),
-        None,
+        _MISSING,
     )
-    return hasattr(descriptor, "__set__")
-
-
-def _class_defines_attribute(module: torch.nn.Module, attr: str) -> bool:
-    return any(attr in cls.__dict__ for cls in type(module).__mro__)
 
 
 def _resolve_tensor_destination(
@@ -572,7 +564,7 @@ def _resolve_tensor_destination(
             attr in module._buffers
             or attr in module._modules
             or attr in module.__dict__
-            or _class_defines_attribute(module, attr)
+            or _static_module_attribute(module, attr) is not _MISSING
         ):
             raise RuntimeError(
                 f"GMS parameter destination {binding.path!r} collides with "
@@ -595,7 +587,7 @@ def _resolve_tensor_destination(
             attr in module._parameters
             or attr in module._modules
             or attr in module.__dict__
-            or _class_defines_attribute(module, attr)
+            or _static_module_attribute(module, attr) is not _MISSING
         ):
             raise RuntimeError(
                 f"GMS buffer destination {binding.path!r} collides with "
@@ -632,41 +624,13 @@ def _resolve_tensor_destination(
         raise RuntimeError(
             f"GMS attribute destination {binding.path!r} is not a direct tensor"
         )
-    if attr not in module.__dict__ and _has_data_descriptor(module, attr):
+    if attr not in module.__dict__ and hasattr(
+        _static_module_attribute(module, attr), "__set__"
+    ):
         raise RuntimeError(
             f"GMS attribute destination {binding.path!r} is not representable"
         )
     return _ResolvedTensorDestination(binding, module, attr, existing)
-
-
-def _find_parameter_template(
-    destinations: tuple[_ResolvedTensorDestination, ...],
-) -> torch.nn.Parameter | None:
-    return next(
-        (
-            destination.existing
-            for destination in destinations
-            if destination.binding.kind is ModuleTensorKind.PARAMETER
-            and isinstance(destination.existing, torch.nn.Parameter)
-        ),
-        None,
-    )
-
-
-def _parameter_slot_names(parameter_type: type[torch.nn.Parameter]) -> tuple[str, ...]:
-    names: list[str] = []
-    for cls in parameter_type.__mro__:
-        declared = cls.__dict__.get("__slots__", ())
-        if isinstance(declared, str):
-            declared = (declared,)
-        for name in declared:
-            if name in ("__dict__", "__weakref__"):
-                continue
-            if name.startswith("__") and not name.endswith("__"):
-                name = f"_{cls.__name__.lstrip('_')}{name}"
-            if name not in names:
-                names.append(name)
-    return tuple(names)
 
 
 def _make_parameter_from_template(
@@ -681,7 +645,7 @@ def _make_parameter_from_template(
     try:
         parameter = torch.Tensor._make_subclass(type(template), tensor, requires_grad)
         parameter.__dict__ = template.__dict__.copy()
-        for name in _parameter_slot_names(type(template)):
+        for name in dict.fromkeys(copyreg._slotnames(type(template))):
             if hasattr(template, name):
                 setattr(parameter, name, getattr(template, name))
     except Exception as exc:
@@ -690,19 +654,6 @@ def _make_parameter_from_template(
             f"{type(template).__name__}: {exc}"
         ) from exc
     return parameter
-
-
-def _clone_storage_with_source_owner(
-    storage: torch.UntypedStorage,
-) -> tuple[torch.UntypedStorage, torch.Tensor]:
-    """Clone a storage while retaining a tensor that owns the displaced source."""
-    source_owner = torch.empty(0, dtype=torch.uint8, device=storage.device).set_(
-        storage,
-        0,
-        (storage.nbytes(),),
-        (1,),
-    )
-    return source_owner.clone().untyped_storage(), source_owner
 
 
 def _free_imported_mappings(
@@ -814,7 +765,7 @@ def materialize_module_from_gms(
                 target_storage = source_storage
             else:
                 clone_started = True
-                target_storage, _ = _clone_storage_with_source_owner(source_storage)
+                target_storage = source_storage.clone()
 
             for tensor_object, object_destinations in manifest_destinations:
                 dtype = _dtype_from_name(tensor_object.dtype)
@@ -831,8 +782,17 @@ def materialize_module_from_gms(
                     if destination.binding.kind is ModuleTensorKind.PARAMETER
                 )
                 if parameter_destinations:
+                    template = next(
+                        (
+                            destination.existing
+                            for destination in object_destinations
+                            if destination.binding.kind is ModuleTensorKind.PARAMETER
+                            and isinstance(destination.existing, torch.nn.Parameter)
+                        ),
+                        None,
+                    )
                     tensor = _make_parameter_from_template(
-                        _find_parameter_template(object_destinations),
+                        template,
                         tensor,
                         path=parameter_destinations[0].binding.path,
                         requires_grad=tensor_object.requires_grad,
@@ -860,20 +820,6 @@ def materialize_module_from_gms(
         )
 
 
-def _swap_tensor_contents(
-    existing: torch.Tensor,
-    replacement: torch.Tensor,
-    *,
-    path: str,
-) -> None:
-    if not hasattr(torch.utils, "swap_tensors"):
-        raise RuntimeError("GMS publisher rebinding requires torch.utils.swap_tensors")
-    try:
-        torch.utils.swap_tensors(existing, replacement)
-    except RuntimeError as exc:
-        raise RuntimeError(f"Cannot rebind GMS tensor {path!r}: {exc}") from exc
-
-
 def _swap_discovered_tensors(
     objects: list[_DiscoveredTensor],
     replacements: dict[int, torch.Tensor],
@@ -898,25 +844,6 @@ def _swap_discovered_tensors(
         return depth
 
     ordered = sorted(objects, key=base_depth, reverse=True)
-    for tensor_object in ordered:
-        existing = tensor_object.tensor
-        replacement = replacements[id(existing)]
-        path = tensor_object.bindings[0].path
-        for tensor, name in ((existing, "t1"), (replacement, "t2")):
-            if weakref.getweakrefs(tensor):
-                raise RuntimeError(
-                    f"Cannot rebind GMS tensor {path!r}: "
-                    f"{name} has weakref associated with it"
-                )
-
-        existing_slots = set(copyreg._slotnames(existing.__class__))
-        replacement_slots = set(copyreg._slotnames(replacement.__class__))
-        if existing_slots != replacement_slots:
-            raise RuntimeError(
-                f"Cannot rebind GMS tensor {path!r}: "
-                "replacement has different Python slots"
-            )
-
     accumulate_grad_checks: list[tuple[torch.Tensor, int, str]] = []
     for tensor_object in ordered:
         existing = tensor_object.tensor
@@ -926,6 +853,11 @@ def _swap_discovered_tensors(
             (existing, "t1", group_base_uses.get(id(existing), 0)),
             (replacement, "t2", 0),
         ):
+            if weakref.getweakrefs(tensor):
+                raise RuntimeError(
+                    f"Cannot rebind GMS tensor {path!r}: "
+                    f"{name} has weakref associated with it"
+                )
             use_count = tensor._use_count() - released_uses
             ownership_error = (
                 f"Cannot rebind GMS tensor {path!r}: expected use_count of "
@@ -937,6 +869,14 @@ def _swap_discovered_tensors(
                     raise RuntimeError(ownership_error)
                 accumulate_grad_checks.append((tensor, released_uses, ownership_error))
 
+        existing_slots = set(copyreg._slotnames(existing.__class__))
+        replacement_slots = set(copyreg._slotnames(replacement.__class__))
+        if existing_slots != replacement_slots:
+            raise RuntimeError(
+                f"Cannot rebind GMS tensor {path!r}: "
+                "replacement has different Python slots"
+            )
+
     for tensor, released_uses, ownership_error in accumulate_grad_checks:
         torch.autograd.graph.get_gradient_edge(tensor)
         if tensor._use_count() - released_uses != 2:
@@ -944,11 +884,11 @@ def _swap_discovered_tensors(
 
     for tensor_object in ordered:
         replacement = replacements.pop(id(tensor_object.tensor))
-        _swap_tensor_contents(
-            tensor_object.tensor,
-            replacement,
-            path=tensor_object.bindings[0].path,
-        )
+        path = tensor_object.bindings[0].path
+        try:
+            torch.utils.swap_tensors(tensor_object.tensor, replacement)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Cannot rebind GMS tensor {path!r}: {exc}") from exc
         del replacement
 
 
@@ -965,7 +905,7 @@ def rebind_nonparameter_tensors(
     )
     candidates = [
         discovered_storage
-        for discovered_storage in storages
+        for discovered_storage, _, _ in storages
         if not discovered_storage.has_parameter
     ]
     if not candidates:
@@ -975,9 +915,16 @@ def rebind_nonparameter_tensors(
     source_owners: list[torch.Tensor] = []
     objects: list[_DiscoveredTensor] = []
     for discovered_storage in candidates:
-        target_storage, source_owner = _clone_storage_with_source_owner(
-            discovered_storage.storage
+        source_storage = discovered_storage.storage
+        source_owner = torch.empty(
+            0, dtype=torch.uint8, device=source_storage.device
+        ).set_(
+            source_storage,
+            0,
+            (source_storage.nbytes(),),
+            (1,),
         )
+        target_storage = source_storage.clone()
         source_owners.append(source_owner)
         for tensor_object in discovered_storage.objects:
             tensor = tensor_object.tensor

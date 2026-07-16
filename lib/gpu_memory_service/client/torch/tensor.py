@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Tuple
 
 import msgspec
 import torch
@@ -28,16 +27,16 @@ class ModuleTensorBinding(msgspec.Struct, frozen=True, forbid_unknown_fields=Tru
 
 class TensorObject(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     dtype: str
-    shape: Tuple[int, ...]
-    stride: Tuple[int, ...]
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
     storage_offset_bytes: int
     requires_grad: bool
-    bindings: Tuple[ModuleTensorBinding, ...]
+    bindings: tuple[ModuleTensorBinding, ...]
 
 
 class StorageManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     nbytes: int
-    objects: Tuple[TensorObject, ...]
+    objects: tuple[TensorObject, ...]
 
 
 def _dtype_from_name(name: str) -> torch.dtype:
@@ -64,8 +63,8 @@ def _storage_from_pointer(
 
 def _tensor_from_storage(
     storage: torch.UntypedStorage,
-    shape: List[int],
-    stride: List[int],
+    shape: list[int],
+    stride: list[int],
     dtype: torch.dtype,
     storage_offset: int = 0,
 ) -> torch.Tensor:
@@ -81,8 +80,8 @@ def _tensor_from_storage(
 
 def _tensor_from_pointer(
     data_ptr: int,
-    shape: List[int],
-    stride: List[int],
+    shape: list[int],
+    stride: list[int],
     dtype: torch.dtype,
     device_index: int,
 ) -> torch.Tensor:
@@ -93,8 +92,8 @@ def _tensor_from_pointer(
 
 
 def _layout_end_bytes(
-    shape: List[int] | Tuple[int, ...],
-    stride: List[int] | Tuple[int, ...],
+    shape: list[int] | tuple[int, ...],
+    stride: list[int] | tuple[int, ...],
     dtype: torch.dtype,
     storage_offset: int,
 ) -> int:
@@ -118,8 +117,8 @@ def _layout_end_bytes(
 
 
 def _validate_layout(
-    shape: List[int] | Tuple[int, ...],
-    stride: List[int] | Tuple[int, ...],
+    shape: list[int] | tuple[int, ...],
+    stride: list[int] | tuple[int, ...],
     dtype: torch.dtype,
     storage_offset: int,
     storage_nbytes: int,
