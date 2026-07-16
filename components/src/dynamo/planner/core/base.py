@@ -1225,13 +1225,14 @@ class NativePlannerBase:
         d_gpu = self.config.decode_engine_num_gpu or 0
         if isinstance(self.connector, KubernetesConnector):
             try:
-                p_gpu, d_gpu = (
-                    self.connector.get_replica_gpu_counts_for_power_projection(
-                        require_prefill=self.require_prefill,
-                        require_decode=self.require_decode,
-                        prefill_component_name=self._prefill_k8s_name,
-                        decode_component_name=self._decode_k8s_name,
-                    )
+                (
+                    p_gpu,
+                    d_gpu,
+                ) = self.connector.get_replica_gpu_counts_for_power_projection(
+                    require_prefill=self.require_prefill,
+                    require_decode=self.require_decode,
+                    prefill_component_name=self._prefill_k8s_name,
+                    decode_component_name=self._decode_k8s_name,
                 )
             except (ApiException, PlannerError) as e:
                 # Operational failures only (apiserver blip, missing/ambiguous

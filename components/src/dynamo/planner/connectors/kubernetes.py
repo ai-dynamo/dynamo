@@ -583,9 +583,9 @@ class KubernetesConnector(PlannerConnector):
         if active_prefill_tokens_threshold is not None:
             body["active_prefill_tokens_threshold"] = active_prefill_tokens_threshold
         if active_prefill_tokens_threshold_frac is not None:
-            body["active_prefill_tokens_threshold_frac"] = (
-                active_prefill_tokens_threshold_frac
-            )
+            body[
+                "active_prefill_tokens_threshold_frac"
+            ] = active_prefill_tokens_threshold_frac
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.post(url, json=body)

@@ -1147,9 +1147,10 @@ def test_replica_gpu_counts_for_power_projection_multinode(
     )
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
-    prefill_gpu, decode_gpu = (
-        kubernetes_connector.get_replica_gpu_counts_for_power_projection()
-    )
+    (
+        prefill_gpu,
+        decode_gpu,
+    ) = kubernetes_connector.get_replica_gpu_counts_for_power_projection()
 
     assert prefill_gpu == 2
     assert decode_gpu == 32
