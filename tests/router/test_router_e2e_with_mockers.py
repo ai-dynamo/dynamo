@@ -170,14 +170,13 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 
 def _require_router_aic() -> dict[str, Any]:
     pytest.importorskip(
-        "aiconfigurator", reason="router AIC test requires aiconfigurator"
+        "aiconfigurator_core",
+        reason="router AIC test requires aiconfigurator-core",
     )
-    # Rust AIC callback imports aiconfigurator.sdk.engine.compile_engine
-    # (Phase 1.5 API from ai-dynamo/aiconfigurator#1200). PyPI releases
-    # predating it don't ship engine.py.
+    # Rust AIC callback imports aiconfigurator_core.sdk.engine.compile_engine.
     pytest.importorskip(
-        "aiconfigurator.sdk.engine",
-        reason="router AIC test requires aiconfigurator.sdk.engine (Phase 1.5)",
+        "aiconfigurator_core.sdk.engine",
+        reason="router AIC test requires aiconfigurator_core.sdk.engine",
     )
     return ROUTER_AIC_CONFIG.copy()
 

@@ -40,13 +40,13 @@ nvtx = ["dynamo-runtime/nvtx"]
 mm-routing = ["dynamo-llm/mm-routing"]
 
 [dependencies]
-# AIC perf model: pure-Rust hot-path latency engine. Pinned to aiconfigurator
-# main ToT (PRs #1200 Rust core + #1201 KV-cache API). `extension-module` is
+# AIC perf model: pure-Rust hot-path latency engine. Pinned to the matching
+# aiconfigurator-core 0.10 source revision. `extension-module` is
 # NOT enabled on aiconfigurator-core (its `default = []`), so this extension's
 # own interpreter is used; build_aic_engine() crosses into Python once at
 # startup while AicEngine::{prefill,decode}_latency_ms() are pure Rust (no GIL)
 # on the predict hot path.
-aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "989dd6e9cbedcbd26d353da984af451b6b64fd3f", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "5.0.0" }

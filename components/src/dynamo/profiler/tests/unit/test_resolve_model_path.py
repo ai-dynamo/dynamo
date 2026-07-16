@@ -171,23 +171,23 @@ class TestRapidResolvesModelPath:
 
     @staticmethod
     def _execute_return(chosen="disagg"):
-        """A fake _execute_task_configs return value (chosen, configs, _, _, latencies)."""
+        """A fake _execute_tasks return value (chosen, configs, _, _, latencies)."""
         best_df = pd.DataFrame([{"tp(p)": 1}])
         latencies = {"ttft": 100.0, "tpot": 10.0, "request_latency": 0.0}
         return chosen, {chosen: best_df}, None, None, {chosen: latencies}
 
     def test_default_sim_uses_local_path_when_pvc_mounted(self, tmp_path):
-        """_run_default_sim -> build_default_task_configs gets the local PVC path."""
+        """_run_default_sim -> build_default_tasks gets the local PVC path."""
         local_dir = tmp_path / "model"
         _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
 
         with (
             patch(
-                "dynamo.profiler.rapid.build_default_task_configs", return_value={}
+                "dynamo.profiler.rapid.build_default_tasks", return_value={}
             ) as mock_build,
             patch(
-                "dynamo.profiler.rapid._execute_task_configs",
+                "dynamo.profiler.rapid._execute_tasks",
                 return_value=self._execute_return(),
             ),
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
@@ -209,15 +209,15 @@ class TestRapidResolvesModelPath:
         assert mock_build.call_args.kwargs["model_path"] == str(local_dir)
 
     def test_default_sim_uses_hf_id_when_no_pvc(self):
-        """_run_default_sim -> build_default_task_configs gets the HF id when no PVC."""
+        """_run_default_sim -> build_default_tasks gets the HF id when no PVC."""
         dgdr = _make_dgdr()
 
         with (
             patch(
-                "dynamo.profiler.rapid.build_default_task_configs", return_value={}
+                "dynamo.profiler.rapid.build_default_tasks", return_value={}
             ) as mock_build,
             patch(
-                "dynamo.profiler.rapid._execute_task_configs",
+                "dynamo.profiler.rapid._execute_tasks",
                 return_value=self._execute_return(),
             ),
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
@@ -239,40 +239,38 @@ class TestRapidResolvesModelPath:
         assert mock_build.call_args.kwargs["model_path"] == _HF_ID
 
     def test_autoscale_sim_uses_local_path_when_pvc_mounted(self, tmp_path):
-        """_run_autoscale_sim -> TaskConfig gets the local PVC path."""
+        """_run_autoscale_sim -> Task gets the local PVC path."""
         local_dir = tmp_path / "model"
         _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
 
-        runner = MagicMock()
-        runner.run.return_value = {"pareto_df": pd.DataFrame()}
         with (
-            patch("dynamo.profiler.rapid.TaskConfig") as mock_task_config,
-            patch("dynamo.profiler.rapid.TaskRunner", return_value=runner),
+            patch("dynamo.profiler.rapid.Task") as mock_task,
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
         ):
+            mock_task.return_value.run.return_value = pd.DataFrame()
             _run_autoscale_sim(
                 dgdr, _HF_ID, "h200_sxm", "trtllm", 8, 4000, 1000, 2000.0, 50.0, None
             )
 
-        assert mock_task_config.call_args.kwargs["model_path"] == str(local_dir)
+        assert mock_task.call_args.kwargs["prefill_model_path"] == str(local_dir)
+        assert mock_task.call_args.kwargs["decode_model_path"] == str(local_dir)
 
     def test_autoscale_sim_uses_hf_id_when_no_pvc(self):
-        """_run_autoscale_sim -> TaskConfig gets the HF id when no PVC."""
+        """_run_autoscale_sim -> Task gets the HF id when no PVC."""
         dgdr = _make_dgdr()
 
-        runner = MagicMock()
-        runner.run.return_value = {"pareto_df": pd.DataFrame()}
         with (
-            patch("dynamo.profiler.rapid.TaskConfig") as mock_task_config,
-            patch("dynamo.profiler.rapid.TaskRunner", return_value=runner),
+            patch("dynamo.profiler.rapid.Task") as mock_task,
             patch("dynamo.profiler.rapid._generate_dgd_from_pick", return_value=None),
         ):
+            mock_task.return_value.run.return_value = pd.DataFrame()
             _run_autoscale_sim(
                 dgdr, _HF_ID, "h200_sxm", "trtllm", 8, 4000, 1000, 2000.0, 50.0, None
             )
 
-        assert mock_task_config.call_args.kwargs["model_path"] == _HF_ID
+        assert mock_task.call_args.kwargs["prefill_model_path"] == _HF_ID
+        assert mock_task.call_args.kwargs["decode_model_path"] == _HF_ID
 
 
 # ---------------------------------------------------------------------------
@@ -644,7 +642,7 @@ class TestThoroughResolvesModelPath:
                 "dynamo.profiler.thorough._pick_thorough_best_config",
                 return_value={"best_config_df": pd.DataFrame()},
             ),
-            patch("dynamo.profiler.thorough.TaskConfig") as mock_task_config,
+            patch("dynamo.profiler.thorough.Task") as mock_task,
             patch(
                 "dynamo.profiler.thorough._generate_dgd_from_pick",
                 return_value=None,
@@ -665,23 +663,25 @@ class TestThoroughResolvesModelPath:
                 None,
                 [],
             )
-        return mock_task_config
+        return mock_task
 
-    async def test_taskconfig_uses_local_path_when_pvc_mounted(self, tmp_path):
-        """run_thorough -> TaskConfig gets the local PVC path."""
+    async def test_task_uses_local_path_when_pvc_mounted(self, tmp_path):
+        """run_thorough -> Task gets the local PVC path."""
         pvc_root = tmp_path / "pvc"
         local_dir = pvc_root / "model"
         _make_model_dir(local_dir)
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(pvc_root), "model"))
 
-        mock_task_config = await self._capture_task_config(dgdr, tmp_path)
+        mock_task = await self._capture_task_config(dgdr, tmp_path)
 
-        assert mock_task_config.call_args.kwargs["model_path"] == str(local_dir)
+        assert mock_task.call_args.kwargs["prefill_model_path"] == str(local_dir)
+        assert mock_task.call_args.kwargs["decode_model_path"] == str(local_dir)
 
-    async def test_taskconfig_uses_hf_id_when_no_pvc(self, tmp_path):
-        """run_thorough -> TaskConfig gets the HF id when no PVC."""
+    async def test_task_uses_hf_id_when_no_pvc(self, tmp_path):
+        """run_thorough -> Task gets the HF id when no PVC."""
         dgdr = _make_dgdr()
 
-        mock_task_config = await self._capture_task_config(dgdr, tmp_path)
+        mock_task = await self._capture_task_config(dgdr, tmp_path)
 
-        assert mock_task_config.call_args.kwargs["model_path"] == _HF_ID
+        assert mock_task.call_args.kwargs["prefill_model_path"] == _HF_ID
+        assert mock_task.call_args.kwargs["decode_model_path"] == _HF_ID

@@ -81,7 +81,7 @@ async def fetch_pre_deployment_metrics(
                 return fpms
         except ImportError as e:
             logger.error(
-                "aic_interpolation is set but aiconfigurator is not installed "
+                "aic_interpolation is set but aiconfigurator-core is not installed "
                 "in the planner image: %s",
                 e,
             )
@@ -181,7 +181,8 @@ async def _wait_for_endpoint_instances(
 
     try:
         instance_ids = await asyncio.wait_for(
-            client.wait_for_instances(), timeout=timeout_s  # type: ignore[attr-defined]
+            client.wait_for_instances(),
+            timeout=timeout_s,  # type: ignore[attr-defined]
         )
     except asyncio.TimeoutError:
         logger.info(

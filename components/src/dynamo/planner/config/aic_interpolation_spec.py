@@ -6,7 +6,7 @@
 When the profiler runs in rapid mode, it picks parallelism configs with
 AIConfigurator but does NOT run interpolation itself. Instead it serialises
 this ``AICInterpolationSpec`` onto the planner's ConfigMap. At bootstrap the
-planner lazy-imports ``aiconfigurator`` and runs the interpolation in-process.
+planner lazy-imports ``aiconfigurator_core`` and runs the interpolation in-process.
 """
 
 from typing import Literal

@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 from aiconfigurator.generator.enumerate import check_model_hardware_support
-from aiconfigurator.sdk.utils import get_model_config_from_model_path
+from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
 
 from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation

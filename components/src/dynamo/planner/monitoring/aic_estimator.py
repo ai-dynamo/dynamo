@@ -3,7 +3,7 @@
 
 """AIConfigurator performance estimator used by the planner (and the profiler).
 
-This thin wrapper around the ``aiconfigurator`` SDK lets callers estimate
+This thin wrapper around the standalone ``aiconfigurator_core`` SDK lets callers estimate
 prefill / decode latency and KV-cache capacity for a given model + system +
 backend + parallelism config without spinning up a real engine. The planner
 uses it to bootstrap regression models from an AIC spec in rapid mode.
@@ -23,15 +23,14 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def _try_import_aiconfigurator():
-    # Lazy-import aiconfigurator because it's an optional dependency.
-    import aiconfigurator.sdk.backends.factory
-    import aiconfigurator.sdk.config
-    import aiconfigurator.sdk.inference_session
-    import aiconfigurator.sdk.models
-    import aiconfigurator.sdk.perf_database
+def _try_import_aiconfigurator_core():
+    # Lazy-import aiconfigurator-core because it is an optional dependency.
+    import aiconfigurator_core.sdk.backends.factory
+    import aiconfigurator_core.sdk.config
+    import aiconfigurator_core.sdk.models
+    import aiconfigurator_core.sdk.perf_database
 
-    return aiconfigurator
+    return aiconfigurator_core
 
 
 class AIConfiguratorPerfEstimator:
@@ -48,14 +47,16 @@ class AIConfiguratorPerfEstimator:
         system: str,  # e.g. "h200_sxm"
         backend: str,  # e.g. "trtllm"
     ):
-        aiconfigurator = _try_import_aiconfigurator()
+        aiconfigurator_core = _try_import_aiconfigurator_core()
 
-        logger.info("Loading aiconfigurator database. This might take a few seconds...")
-        version = aiconfigurator.sdk.perf_database.get_latest_database_version(
+        logger.info(
+            "Loading aiconfigurator-core database. This might take a few seconds..."
+        )
+        version = aiconfigurator_core.sdk.perf_database.get_latest_database_version(
             system,
             backend,
         )
-        self.database = aiconfigurator.sdk.perf_database.get_database(
+        self.database = aiconfigurator_core.sdk.perf_database.get_database(
             system=system,
             backend=backend,
             version=version,
@@ -64,17 +65,17 @@ class AIConfiguratorPerfEstimator:
             raise ValueError(
                 f"Database not found for system: {system}, backend: {backend}, version: {version}"
             )
-        logger.info("aiconfigurator database loaded.")
+        logger.info("aiconfigurator-core database loaded.")
 
-        self.backend = aiconfigurator.sdk.backends.factory.get_backend(backend)
+        self.backend = aiconfigurator_core.sdk.backends.factory.get_backend(backend)
         self.hf_id = hf_id
 
     def _get_model(self, **model_config_kwargs):
-        aiconfigurator = _try_import_aiconfigurator()
+        aiconfigurator_core = _try_import_aiconfigurator_core()
 
         # NOTE: MOE models error out unless moe_tp_size and moe_ep_size are provided.
-        model_config = aiconfigurator.sdk.config.ModelConfig(**model_config_kwargs)
-        model = aiconfigurator.sdk.models.get_model(
+        model_config = aiconfigurator_core.sdk.config.ModelConfig(**model_config_kwargs)
+        model = aiconfigurator_core.sdk.models.get_model(
             self.hf_id, model_config, self.backend
         )
         return model
@@ -105,7 +106,7 @@ class AIConfiguratorPerfEstimator:
         Returns:
             dict: Perf metrics returned by aiconfigurator
         """
-        aiconfigurator = _try_import_aiconfigurator()
+        aiconfigurator_core = _try_import_aiconfigurator_core()
 
         mode_to_aic_mode = {
             "full": "static",
@@ -117,7 +118,7 @@ class AIConfiguratorPerfEstimator:
                 f"Invalid mode: {mode}. Must be one of {list(mode_to_aic_mode.keys())}."
             )
 
-        self.runtime_config = aiconfigurator.sdk.config.RuntimeConfig(
+        self.runtime_config = aiconfigurator_core.sdk.config.RuntimeConfig(
             batch_size=batch_size,
             beam_width=1,
             isl=isl,
@@ -125,12 +126,12 @@ class AIConfiguratorPerfEstimator:
         )
 
         model = self._get_model(**model_config_kwargs)
-        session = aiconfigurator.sdk.inference_session.InferenceSession(
-            model, self.database, self.backend
-        )
-
-        summary = session.run_static(
-            mode=mode_to_aic_mode[mode], runtime_config=self.runtime_config, stride=32
+        summary = self.backend.run_static(
+            model,
+            self.database,
+            self.runtime_config,
+            mode_to_aic_mode[mode],
+            stride=32,
         )
         summary_df = summary.get_summary_df()
 

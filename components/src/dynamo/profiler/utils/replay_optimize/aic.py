@@ -9,9 +9,9 @@ from typing import Any
 
 def _load_aiconfigurator_modules() -> tuple[Any, Any, Any]:
     try:
-        common = importlib.import_module("aiconfigurator.sdk.common")
-        task = importlib.import_module("aiconfigurator.sdk.task")
-        utils = importlib.import_module("aiconfigurator.sdk.utils")
+        common = importlib.import_module("aiconfigurator_core.sdk.common")
+        task = importlib.import_module("aiconfigurator.sdk.task_v2")
+        utils = importlib.import_module("aiconfigurator_core.sdk.utils")
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "aiconfigurator is required to enumerate dense TP candidates for replay optimization"
@@ -29,6 +29,9 @@ def _enumerate_dense_tp_candidates(
         prefill_system=system,
         decode_system=system,
         is_moe=False,
+        prefill_enable_wideep=False,
+        decode_enable_wideep=False,
+        moe_backend=None,
         should_enable_pp=False,
     )
 
@@ -57,8 +60,8 @@ def _enumerate_dense_tp_candidates(
         return sorted(
             {
                 tp
-                for tp, pp, dp, moe_tp, moe_ep in parallel_configs
-                if pp == 1 and dp == 1 and moe_tp == 1 and moe_ep == 1
+                for tp, pp, dp, moe_tp, moe_ep, cp in parallel_configs
+                if pp == 1 and dp == 1 and moe_tp == 1 and moe_ep == 1 and cp == 1
             }
         )
 
