@@ -38,6 +38,9 @@ from dynamo.profiler.utils.aiperf import (
     get_prefill_ttft,
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
+from dynamo.profiler.utils.config_modifiers.trtllm import (
+    enable_trtllm_chunked_prefill,
+)
 from dynamo.profiler.utils.dgd_materialization import (
     DGDMaterializationPurpose,
     materialize_dgd,
@@ -58,6 +61,14 @@ from dynamo.profiler.utils.profile_decode import get_num_request_range
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_chunked_prefill_for_trtllm_candidates(
+    prefill_candidates, decode_candidates
+) -> None:
+    """Enable chunked prefill on every TRT-LLM profiling candidate."""
+    for candidate in [*prefill_candidates, *decode_candidates]:
+        candidate.dgd_config = enable_trtllm_chunked_prefill(candidate.dgd_config)
 
 
 def _normalize_candidate_model_identity(
@@ -428,6 +439,11 @@ async def run_thorough(
             tolerations=job_tolerations,
             runtime_backend=backend,
             model_name_or_path=local_or_hf_model,
+        )
+
+    if backend == "trtllm":
+        _enable_chunked_prefill_for_trtllm_candidates(
+            prefill_candidates, decode_candidates
         )
 
     # Overrides may carry stale model arguments, so reassert the DGDR model

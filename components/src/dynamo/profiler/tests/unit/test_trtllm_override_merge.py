@@ -7,7 +7,10 @@ import json
 
 import pytest
 
-from dynamo.profiler.utils.config_modifiers.trtllm import _merge_overrides_into_args
+from dynamo.profiler.utils.config_modifiers.trtllm import (
+    _merge_overrides_into_args,
+    enable_trtllm_chunked_prefill,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -56,3 +59,69 @@ def test_merge_overrides_into_existing_override_engine_args():
     assert merged["cache_transceiver_config"] is None
     assert merged["kv_cache_config"]["enable_block_reuse"] is False
     assert merged["kv_cache_config"]["tokens_per_block"] == 32
+
+
+def test_enable_chunked_prefill_updates_generated_trtllm_workers():
+    prefill_override = json.dumps(
+        {
+            "enable_chunked_prefill": False,
+            "kv_cache_config": {"tokens_per_block": 32},
+        }
+    )
+    config = {
+        "spec": {
+            "services": {
+                "Frontend": {"componentType": "frontend"},
+                "prefill": {
+                    "componentType": "worker",
+                    "subComponentType": "prefill",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": ["--override-engine-args", prefill_override]
+                        }
+                    },
+                },
+                "decode": {
+                    "componentType": "worker",
+                    "subComponentType": "decode",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": [
+                                "--trtllm.enable_chunked_prefill",
+                                "false",
+                            ]
+                        }
+                    },
+                },
+                "encode": {
+                    "componentType": "worker",
+                    "subComponentType": "encode",
+                    "extraPodSpec": {"mainContainer": {"args": []}},
+                },
+            }
+        }
+    }
+
+    result = enable_trtllm_chunked_prefill(config)
+    result = enable_trtllm_chunked_prefill(result)
+
+    prefill_args = result["spec"]["services"]["prefill"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert not any(arg.startswith("--trtllm.") for arg in prefill_args)
+    override_idx = prefill_args.index("--override-engine-args")
+    override = json.loads(prefill_args[override_idx + 1])
+    assert override["enable_chunked_prefill"] is True
+    assert override["kv_cache_config"]["tokens_per_block"] == 32
+
+    decode_args = result["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
+    assert decode_args.count("--trtllm.enable_chunked_prefill") == 1
+    flag_idx = decode_args.index("--trtllm.enable_chunked_prefill")
+    assert decode_args[flag_idx + 1] == "true"
+
+    encode_args = result["spec"]["services"]["encode"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
+    assert encode_args == []

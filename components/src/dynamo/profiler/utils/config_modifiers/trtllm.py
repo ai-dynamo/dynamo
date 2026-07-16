@@ -109,6 +109,38 @@ def _merge_overrides_into_args(args: list[str], overrides: dict) -> list[str]:
     return args
 
 
+def enable_trtllm_chunked_prefill(config: dict) -> dict:
+    """Enable chunked prefill on every generated TRT-LLM LLM worker.
+
+    Generated configs may express engine options either as ``--trtllm.*``
+    dynamic flags or in an ``--override-engine-args`` JSON object.  Normalize
+    both forms through :func:`_merge_overrides_into_args`, replacing an
+    existing dynamic flag so the result is idempotent and unambiguous.
+    """
+    services = config.get("spec", {}).get("services", {})
+    if not isinstance(services, dict):
+        return config
+
+    for service in services.values():
+        if not isinstance(service, dict) or service.get("componentType") != "worker":
+            continue
+        if service.get("subComponentType") == "encode":
+            continue
+
+        main_container = service.get("extraPodSpec", {}).get("mainContainer")
+        if not isinstance(main_container, dict):
+            continue
+
+        args = break_arguments(main_container.get("args", []))
+        while "--trtllm.enable_chunked_prefill" in args:
+            args = remove_valued_arguments(args, "--trtllm.enable_chunked_prefill")
+        main_container["args"] = _merge_overrides_into_args(
+            args, {"enable_chunked_prefill": True}
+        )
+
+    return config
+
+
 class TrtllmConfigModifier(BaseConfigModifier):
     BACKEND = "trtllm"
 
