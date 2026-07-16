@@ -32,3 +32,17 @@ def routes():
     from dynamo.llm import FrontendRoute
 
     return [FrontendRoute("GET", HELLO_PATH, _hello)]
+
+
+def duplicate_routes():
+    """Provider that returns two routes for the same method+path.
+
+    Used to check the loader rejects the collision with a clean error instead
+    of letting the merged axum Router panic at startup.
+    """
+    from dynamo.llm import FrontendRoute
+
+    return [
+        FrontendRoute("GET", HELLO_PATH, _hello),
+        FrontendRoute("GET", HELLO_PATH, _hello),
+    ]

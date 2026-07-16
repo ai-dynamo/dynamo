@@ -119,9 +119,21 @@ pub(crate) fn frontend_route_extensions_from_py(
     let bound = routes.bind(py);
     let iter = PyIterator::from_object(bound)?;
     let mut route_specs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for item in iter {
         let item = item?;
         let route = item.extract::<PyRef<'_, PyFrontendRoute>>()?;
+        // All Python providers fold into a single axum Router, and
+        // Router::route panics on an overlapping method+path. Reject
+        // duplicates here with a clean error — mirroring the built-in
+        // append_route_docs duplicate-route guard — rather than letting the
+        // frontend abort on a Rust panic while the router is built.
+        if !seen.insert((route.method.clone(), route.path.clone())) {
+            return Err(PyValueError::new_err(format!(
+                "duplicate frontend route registered: {} {}",
+                route.method, route.path
+            )));
+        }
         route_specs.push(route.clone());
     }
 
