@@ -50,6 +50,114 @@ included launcher disables both in native mode.
 Qwen backends must use the native route. A mixed `EmbedsPrompt` has no place for
 `image_grid_thw`, so vLLM would assign ordinary text positions to the image rows.
 
+## How `BoundCustomEncoderAdapter` Fits
+
+`BoundCustomEncoderAdapter` is the compatibility boundary between an
+author-provided backend and the loaded vLLM model. "Bound" means it validates one
+backend's setup-time contract against one resolved model configuration. It then
+translates that backend's canonical request results into a closed engine prompt
+plan. It does not fetch images, schedule batches, execute the vision model, or
+calculate M-RoPE.
+
+At startup:
+
+```
+ +---------------------------+       +---------------------------+
+ | VisionEncoderBackend      |       | resolved vLLM config      |
+ | - encoding_spec           |       | - architecture            |
+ | - producer fingerprint    |       | - hidden size / dtype     |
+ | - output geometry         |       | - merge size / token IDs  |
+ +-------------+-------------+       | - flags and TP/PP/DP      |
+               |                     +-------------+-------------+
+               |                                   |
+               +------------------+----------------+
+                                  |
+                                  v
+                   +-------------------------------+
+                   | BoundCustomEncoderAdapter     |
+                   | - validate ABI/model match    |
+                   | - validate vLLM version       |
+                   | - validate flags/topology     |
+                   | - select prompt route         |
+                   | - remember Qwen token IDs     |
+                   +---------------+---------------+
+                                   |
+                          mismatch | match
+                            +------+------+
+                            |             |
+                            v             v
+                      fail startup   load encoder
+```
+
+For each request:
+
+```
+ token IDs + image inputs
+           |
+           v
+ +---------------------------+
+ | AsyncVisionEncoder        |
+ | preprocess all-or-nothing |
+ +-------------+-------------+
+               |
+               v
+ +---------------------------+
+ | ThreadedMicroBatcher      |
+ | cross-request actor       |
+ +-------------+-------------+
+               |
+               v
+ +---------------------------+
+ | VisionEncoderBackend      |
+ | forward_batch             |
+ +-------------+-------------+
+               |
+               | tagged encoded-media results
+               v
+ +---------------------------+
+ | reconcile_and_canonicalize|
+ | validate, reorder, clone  |
+ +-------------+-------------+
+               |
+               v
+ +---------------------------+
+ | BoundCustomEncoderAdapter |
+ | prepare_prompt_plan       |
+ +-------------+-------------+
+               |
+       +-------+-------+
+       |               |
+       v               v
+ MixedEmbedsPlan   NativeMMPlan
+       |               |
+       v               v
+ EmbedsPrompt      TokensPrompt
+                       |
+                       v
+              vLLM computes Qwen M-RoPE
+```
+
+The adapter selects the route from `encoding_spec.adapter_abi`:
+
+```
+ linear-rows-v1
+     |
+     +--> splice visual rows into the text embedding sequence
+     +--> MixedEmbedsPlan --> EmbedsPrompt
+
+ vllm-qwen2-vl-external-v1
+     |
+     +--> concatenate projected image rows in request order
+     +--> stack image_grid_thw in the same order
+     +--> NativeMMPlan --> TokensPrompt
+     +--> vLLM expands placeholders and constructs grid-driven M-RoPE
+```
+
+Actor-side correlation and tensor-ownership checks are implemented by the
+separate `reconcile_and_canonicalize()` helper in the same adapter module. This
+keeps `ThreadedMicroBatcher` generic and torch-free while ensuring a backend
+cannot accidentally associate one image's rows with another image's grid.
+
 ## Run the Included Path
 
 From the repository root, launch the aggregated worker:
