@@ -584,6 +584,7 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
 
 
 def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
+    """Use the language-model config when Transformers exposes a multimodal wrapper."""
     from dynamo.mocker.utils import kv_cache
 
     text_config = SimpleNamespace(

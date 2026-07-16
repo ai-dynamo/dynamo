@@ -271,7 +271,7 @@ python -m dynamo.mocker \
     --aic-system h200_sxm
 ```
 
-The AIC model automatically uses `--model-path` and `--engine-type` to select the appropriate performance data. Available systems include `h200_sxm`, `h100_sxm`, etc. (see AIC SDK documentation for the full list).
+The AIC model automatically uses `--model-path` and `--engine-type` to select the appropriate performance data. Available systems include `h200_sxm`, `h100_sxm`, etc. (see the [`aiconfigurator-core` documentation](https://github.com/ai-dynamo/aiconfigurator/tree/main/aic-core) for the full list).
 
 Important notes:
 
