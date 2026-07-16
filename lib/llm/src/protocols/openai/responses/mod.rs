@@ -1960,7 +1960,9 @@ mod tests {
         // Regression: Codex / Agents SDK round-trip Item::Reasoning mid-turn.
         // The converter must route the reasoning summary into the coalesced
         // assistant message's `reasoning_content`, not silently drop it.
-        use dynamo_protocols::types::responses::{ReasoningItem, SummaryPart, SummaryTextContent};
+        use dynamo_protocols::types::responses::{
+            InputReasoningItem, SummaryPart, SummaryTextContent,
+        };
 
         let req = NvCreateResponse {
             inner: CreateResponse {
@@ -1972,8 +1974,8 @@ mod tests {
                         role: InputRole::User,
                         status: None,
                     }))),
-                    InputItem::Item(Item::Reasoning(ReasoningItem {
-                        id: "rs_1".into(),
+                    InputItem::Item(Item::Reasoning(InputReasoningItem {
+                        id: Some("rs_1".into()),
                         summary: vec![SummaryPart::SummaryText(SummaryTextContent {
                             text: "thinking step 1".into(),
                         })],

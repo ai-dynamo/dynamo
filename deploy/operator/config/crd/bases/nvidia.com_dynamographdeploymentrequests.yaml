@@ -6,7 +6,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.4
+    controller-gen.kubebuilder.io/version: v0.17.3
     helm.sh/resource-policy: keep
   name: dynamographdeploymentrequests.nvidia.com
 spec:
@@ -724,18 +724,26 @@ spec:
                   properties:
                     dgd:
                       description: |-
-                        DGD allows providing a full or partial nvidia.com/v1alpha1 DynamoGraphDeployment
-                        to use as the base for the generated deployment. Fields from profiling results
-                        are merged on top. Use this to override backend worker images.
+                        DGD provides a partial, versioned DynamoGraphDeployment override for the
+                        profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or
+                        nvidia.com/v1beta1 and kind to DynamoGraphDeployment.
 
-                        The field is stored as a raw embedded resource rather than a typed
-                        *v1alpha1.DynamoGraphDeployment to avoid a circular import: v1alpha1 already
-                        imports v1beta1 as the conversion hub and Go does not allow import cycles.
+                        The profiler merges the override using the schema for its declared version.
+                        If the generated DGD uses another supported version, the complete DGD is
+                        converted before the merge and converted back afterward. The final DGD
+                        selected or created by a DGDR is nvidia.com/v1beta1.
 
-                        The EmbeddedResource marker tells the API server to validate that the value is a
-                        well-formed Kubernetes object (has apiVersion/kind), but does not enforce that it
-                        is specifically a DynamoGraphDeployment. Full type validation (correct apiVersion,
-                        kind, and field schema) is performed by the controller during reconciliation.
+                        The override can update DGD fields, but topology entries are limited to
+                        services or components already present in the generated DGD. Metadata labels
+                        and annotations are merged, metadata.name selects the final DGD name, and
+                        other identity or runtime metadata is ignored.
+                        V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows
+                        structural schema merge behavior, including map-list merging and atomic-list
+                        replacement.
+
+                        The raw embedded resource preserves either supported schema. The API server
+                        validates that it has apiVersion and kind; override processing validates the
+                        DGD kind, supported version, and field schema.
                       type: object
                       x-kubernetes-embedded-resource: true
                       x-kubernetes-preserve-unknown-fields: true
@@ -9396,17 +9404,18 @@ spec:
                   type: string
                 profilingResults:
                   description: |-
-                    ProfilingResults contains the output of the profiling process including
-                    Pareto-optimal configurations and the selected deployment configuration.
+                    ProfilingResults contains the selected deployment configuration produced by profiling.
+                    Deprecated compatibility fields may remain on objects created by older releases.
                   properties:
                     pareto:
                       description: |-
-                        Pareto is the list of Pareto-optimal deployment configurations discovered during profiling.
-                        Each entry represents a different cost/performance trade-off.
+                        Pareto is retained for compatibility with existing status objects.
+                        Deprecated: The controller no longer populates this field.
                       items:
                         description: |-
-                          ParetoConfig represents a single Pareto-optimal deployment configuration
-                          discovered during profiling.
+                          ParetoConfig is retained for compatibility with status objects produced by
+                          older profiler releases.
+                          Deprecated: The profiler no longer generates Pareto configurations.
                         properties:
                           config:
                             description: Config is the full deployment configuration for this Pareto point.

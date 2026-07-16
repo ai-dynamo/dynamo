@@ -53,7 +53,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -78,7 +78,7 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /validate-nvidia-com-v1alpha1-dynamographdeployment
+      path: /validate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamographdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
@@ -87,13 +87,13 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
     apiVersions:
-    - v1alpha1
+    - v1beta1
     operations:
     - CREATE
     - UPDATE
@@ -121,7 +121,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -155,7 +155,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -189,7 +189,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -234,7 +234,7 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /mutate-nvidia-com-v1alpha1-dynamographdeployment
+      path: /mutate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: mdynamographdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
@@ -243,15 +243,16 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
     - nvidia.com
     apiVersions:
-    - v1alpha1
+    - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamographdeployments
   sideEffects: None
@@ -277,7 +278,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -286,6 +287,7 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamocomponentdeployments
   sideEffects: None
@@ -310,7 +312,7 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
@@ -319,6 +321,7 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamographdeploymentrequests
   sideEffects: None
@@ -343,13 +346,15 @@ webhooks:
   {{- else if .Values.namespaceRestriction.enabled }}
   namespaceSelector:
     matchLabels:
-      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      kubernetes.io/metadata.name: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace | quote }}
   {{- end }}
   rules:
   - apiGroups:
     - ""
     apiVersions:
     - v1
+    # Pod checkpoint restore injects pod spec fields before creation. It is
+    # intentionally CREATE-only because pod UPDATE cannot apply that mutation.
     operations:
     - CREATE
     resources:

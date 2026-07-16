@@ -19,8 +19,10 @@ import typing
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from prometheus_api_client import PrometheusConnect
+from prometheus_api_client import PrometheusApiClientException, PrometheusConnect
 from pydantic import BaseModel, ValidationError
+from requests import ConnectionError as RequestsConnectionError
+from requests import Timeout as RequestsTimeout
 
 from dynamo import prometheus_names
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -60,6 +62,19 @@ class Metrics:
     d_load: Optional[float] = None
     kv_hit_rate: Optional[float] = None
     accept_length: Optional[float] = None
+
+    def normalize_idle_nans(self) -> list[str]:
+        """Replace undefined averages only for a confirmed idle window."""
+        if self.num_req != 0:
+            return []
+
+        normalized: list[str] = []
+        for field_name in ("ttft", "itl", "isl", "osl", "request_duration"):
+            value = getattr(self, field_name)
+            if value is not None and math.isnan(value):
+                setattr(self, field_name, 0.0)
+                normalized.append(field_name)
+        return normalized
 
     def is_valid(self) -> bool:
         """Check if all required metrics are valid (not None and not NaN)."""
@@ -268,23 +283,79 @@ class PrometheusAPIClient:
 
     def get_avg_request_count(self, interval: str, model_name: str):
         if self.metrics_source == "router":
+            ns = self.dynamo_namespace.replace("-", "_")
+            ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
+            router_requests_started = (
+                f"{prometheus_names.name_prefix.COMPONENT}_"
+                f"{prometheus_names.router.REQUESTS_STARTED_TOTAL}"
+            )
+            router_requests_total = (
+                f"{prometheus_names.name_prefix.COMPONENT}_"
+                f"{prometheus_names.router.REQUESTS_TOTAL}"
+            )
+            admitted_or_completed_query = (
+                "sum("
+                f"increase({router_requests_started}{{{ns_filter}}}[{interval}]) "
+                "or ignoring(__name__) "
+                f"increase({router_requests_total}{{{ns_filter}}}[{interval}])"
+                ")"
+            )
             try:
-                router_req_total = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUESTS_TOTAL}"
-                ns = self.dynamo_namespace.replace("-", "_")
-                ns_filter = f'{prometheus_names.labels.NAMESPACE}="{ns}"'
-                query = f"sum(increase({router_req_total}{{{ns_filter}}}[{interval}]))"
-                result = self.prom.custom_query(query=query)
-                if not result:
+                request_result = self.prom.custom_query(
+                    query=admitted_or_completed_query
+                )
+                if request_result:
+                    router_request_count = float(request_result[0]["value"][1])
+                    if not math.isnan(router_request_count):
+                        return router_request_count
+            except (
+                PrometheusApiClientException,
+                RequestsConnectionError,
+                RequestsTimeout,
+            ) as e:
+                logger.warning(
+                    "Error querying admitted router requests from %s; falling back to "
+                    "completed request count from %s, which may underestimate demand: %s",
+                    router_requests_started,
+                    router_requests_total,
+                    e,
+                )
+            except Exception:
+                logger.exception("Unexpected error querying admitted router requests")
+                raise
+            else:
+                logger.warning(
+                    "No usable Prometheus metric data available for %s; falling back to "
+                    "completed request count from %s, which may underestimate demand",
+                    router_requests_started,
+                    router_requests_total,
+                )
+
+            try:
+                completed_query = (
+                    f"sum(increase({router_requests_total}{{{ns_filter}}}[{interval}]))"
+                )
+                completed_result = self.prom.custom_query(query=completed_query)
+                if not completed_result:
                     logger.warning(
-                        f"No prometheus metric data available for "
-                        f"{router_req_total}, use 0 instead"
+                        "No Prometheus metric data available for %s; using 0",
+                        router_requests_total,
                     )
                     return 0
-                value = float(result[0]["value"][1])
-                return 0 if math.isnan(value) else value
-            except Exception as e:
-                logger.error(f"Error getting avg request count: {e}")
+                router_completed_count = float(completed_result[0]["value"][1])
+                return (
+                    0 if math.isnan(router_completed_count) else router_completed_count
+                )
+            except (
+                PrometheusApiClientException,
+                RequestsConnectionError,
+                RequestsTimeout,
+            ) as e:
+                logger.error("Error getting completed router request count: %s", e)
                 return 0
+            except Exception:
+                logger.exception("Unexpected error parsing completed router requests")
+                raise
         # This function follows a different query pattern than the other metrics:
         # use frontend-started requests so throughput planning sees offered load,
         # not only completed responses.
@@ -348,11 +419,11 @@ class PrometheusAPIClient:
     def get_avg_kv_hit_rate(self, interval: str, model_name: str) -> Optional[float]:
         """Average predicted KV cache hit rate (0.0-1.0) from the router.
 
-        Only available when metrics_source == "router" (the histogram lives on
-        the LocalRouter component). In disagg deployments the scrape is
-        namespace-filtered, so if the planner's ``dynamo_namespace`` matches
-        the prefill pool, the returned value pools only prefill-router
-        observations.
+        The histogram lives on the router component, but it can be exposed on
+        the frontend scrape endpoint when the frontend runs in KV router mode.
+        Query the router component metric regardless of the traffic metrics
+        source so deployments can keep frontend-sourced request/ISL/OSL metrics
+        while still using router-sourced KV hit rate.
 
         Returns ``None`` (not ``0.0``) on missing data — Prometheus scrape
         gaps must not be confused with a real "no reuse" signal: the state
@@ -361,8 +432,6 @@ class PrometheusAPIClient:
         every scrape failure. The caller's ``_clamp_kv_hit_rate(None)``
         falls back to no-discount behavior, which is the safe choice.
         """
-        if self.metrics_source != "router":
-            return None
         full_metric_name = (
             f"{prometheus_names.name_prefix.COMPONENT}_"
             f"{prometheus_names.router.KV_HIT_RATE}"

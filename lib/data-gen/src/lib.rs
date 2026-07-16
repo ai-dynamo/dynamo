@@ -3,19 +3,18 @@
 
 //! Shared schemas and primitives for Dynamo data generation.
 //!
-//! Today the crate hosts the Mooncake replay JSONL row schema, the rolling
-//! block-hash-to-id mapper, and the JSONL writer used by trace producers
-//! (e.g. the Claude exporter in `dynamo-bench`) and trace consumers
-//! (e.g. `dynamo-mocker`). A single `MooncakeRow` type with both `Serialize`
-//! and `Deserialize` derives keeps the producer and consumer in lockstep and
-//! eliminates the schema drift that previously existed between two private
-//! copies of the schema.
+//! The crate hosts the Mooncake replay JSONL schema and helpers, plus the
+//! Dynamo request-trace loader and transient lowering used to build mocker
+//! replay models in memory. Direct Dynamo request-trace replay does not write
+//! an intermediate Mooncake file. Shared row types keep trace producers and
+//! consumers in lockstep.
 
 pub mod mooncake;
 pub mod request_trace;
+pub mod satf;
 
 pub use mooncake::{
     AgenticMooncakeRow, AgenticToolEvent, MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper,
     WriterStats, hash_token_blocks, ids_for_sequence_hashes, require_positive,
-    try_hash_token_blocks, write_empty_files,
+    sequence_hashes_for_tokens, try_hash_token_blocks, write_empty_files,
 };

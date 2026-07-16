@@ -29,7 +29,7 @@ use dynamo_runtime::{
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{StreamExt, stream};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
@@ -38,6 +38,8 @@ use super::{
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
+        process_chat_response_and_observe_metrics,
+        process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
@@ -204,26 +206,18 @@ impl ErrorMessage {
         )
     }
 
-    /// Model exists but is temporarily unable to serve (e.g., prefill not activated,
-    /// no available workers). Returns 503 so clients can retry.
-    pub fn model_unavailable() -> ErrorResponse {
-        let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code);
-        (
-            code,
-            Json(ErrorMessage {
-                message: "Model temporarily unavailable".to_string(),
-                error_type,
-                code: code.as_u16(),
-                details: None,
-            }),
-        )
-    }
-
     /// Convert a ModelManagerError to the appropriate HTTP response.
+    ///
+    /// `ModelUnavailable` is the dispatch-time backstop for the same condition
+    /// the readiness gate ([`check_model_serving_ready`]) catches up front — a
+    /// registered model with no servable worker set (whichever role is missing).
+    /// It returns the identical canonical 503 body so both code paths speak with
+    /// one voice to the client.
     pub fn from_model_error(e: &crate::discovery::ModelManagerError) -> ErrorResponse {
         match e {
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => Self::model_unavailable(),
+            crate::discovery::ModelManagerError::ModelUnavailable(model) => {
+                Self::service_unavailable_with_body(model_not_ready_message(model))
+            }
             _ => Self::model_not_found(),
         }
     }
@@ -545,7 +539,7 @@ pub(super) fn get_or_create_request_id(headers: &HeaderMap) -> String {
     validated_header.unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
-fn context_from_headers<T: Send + Sync + 'static>(
+pub(super) fn context_from_headers<T: Send + Sync + 'static>(
     request: T,
     request_id: String,
     headers: &HeaderMap,
@@ -616,7 +610,7 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
     if nvext_present || header_present {
         tracing::warn!(
             endpoint,
-            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
         );
     }
 }
@@ -632,8 +626,11 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateCompletionRequest>,
+    body: Bytes,
 ) -> Result<Response, ErrorResponse> {
+    ensure_json_content_type(&headers)?;
+    let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
@@ -648,10 +645,12 @@ async fn handler_completions(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(&request.inner.model);
     let cancellation_labels = CancellationLabels {
         model: state
             .manager()
-            .metric_model_for(&request.inner.model)
+            .metric_model_for(&canonical_model)
             .to_string(),
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
@@ -718,7 +717,7 @@ async fn completions(
 #[tracing::instrument(skip_all)]
 async fn completions_single(
     state: Arc<service_v2::State>,
-    request: Context<NvCreateCompletionRequest>,
+    mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
@@ -728,6 +727,15 @@ async fn completions_single(
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the OpenAI response.model all use the
+    // canonical primary (matching vLLM/SGLang, where an alias request still
+    // responds with the primary served name). Non-aliases pass through, so
+    // metric_model_for still applies its unknown-model cardinality guard.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -869,7 +877,7 @@ async fn completions_single(
 #[tracing::instrument(skip_all)]
 async fn completions_batch(
     state: Arc<service_v2::State>,
-    request: Context<NvCreateCompletionRequest>,
+    mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
     batch_size: usize,
     n: u8,
@@ -879,6 +887,11 @@ async fn completions_batch(
 
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
+    // Resolve alias → primary served name (see completions_single).
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -1074,6 +1087,13 @@ async fn embeddings(
         request.nvext = None;
     }
 
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (see completions_single). `request` is still owned + mutable here.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -1227,8 +1247,11 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateChatCompletionRequest>,
+    body: Bytes,
 ) -> Result<Response, ErrorResponse> {
+    ensure_json_content_type(&headers)?;
+    let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+
     // return a 503 if the service is not ready (process-level + per-model
     // serving readiness). An aggregated request to a decode-only namespace
     // would otherwise hang/crash on the decode worker. Resolve the templated
@@ -1250,12 +1273,23 @@ async fn handler_chat_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
+    if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
+        request.insert(
+            crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+            captured,
+        );
+    }
     let context = request.context();
 
     // create the connection handles
@@ -1283,6 +1317,142 @@ async fn handler_chat_completions(
     response
 }
 
+fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_slice(body) {
+        Ok(request) => Ok(request),
+        Err(original_error) => {
+            if let Some(escaped_body) = escape_json_string_control_chars(body) {
+                match serde_json::from_slice(&escaped_body) {
+                    Ok(request) => {
+                        tracing::warn!(
+                            endpoint,
+                            "Accepted request after escaping unescaped control characters in JSON strings"
+                        );
+                        Ok(request)
+                    }
+                    Err(_) => parse_json_request_lossy(endpoint, body)
+                        .map_err(|_| json_deserialize_error(original_error)),
+                }
+            } else {
+                parse_json_request_lossy(endpoint, body)
+                    .map_err(|_| json_deserialize_error(original_error))
+            }
+        }
+    }
+}
+
+fn parse_json_request_lossy<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    let lossy_body = String::from_utf8_lossy(body);
+    if lossy_body.as_bytes() == body {
+        return serde_json::from_slice(body);
+    }
+
+    let escaped_body = escape_json_string_control_chars(lossy_body.as_bytes())
+        .unwrap_or_else(|| lossy_body.into_owned().into_bytes());
+    let request = serde_json::from_slice(&escaped_body)?;
+    tracing::warn!(
+        endpoint,
+        "Accepted request after replacing invalid UTF-8 and escaping unescaped control characters in JSON strings"
+    );
+    Ok(request)
+}
+
+fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message: format!("Failed to deserialize the JSON body into the target type: {error}"),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+        }),
+    )
+}
+
+fn ensure_json_content_type(headers: &HeaderMap) -> Result<(), ErrorResponse> {
+    let Some(content_type) = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err(unsupported_media_type_error());
+    };
+
+    if is_json_content_type(content_type) {
+        Ok(())
+    } else {
+        Err(unsupported_media_type_error())
+    }
+}
+
+fn unsupported_media_type_error() -> ErrorResponse {
+    let code = StatusCode::UNSUPPORTED_MEDIA_TYPE;
+    (
+        code,
+        Json(ErrorMessage {
+            message: "Expected request with Content-Type application/json".to_string(),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+        }),
+    )
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    let media_type = content_type.split(';').next().unwrap_or_default().trim();
+    let Some((media_type, subtype)) = media_type.split_once('/') else {
+        return false;
+    };
+
+    media_type.eq_ignore_ascii_case("application")
+        && (subtype.eq_ignore_ascii_case("json")
+            || subtype
+                .to_ascii_lowercase()
+                .rsplit_once('+')
+                .is_some_and(|(_, suffix)| suffix == "json"))
+}
+
+fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for &byte in body {
+        if in_string && byte <= 0x1f {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            if escaped {
+                out.extend_from_slice(b"\\\\u00");
+                escaped = false;
+            } else {
+                out.extend_from_slice(b"\\u00");
+            }
+            out.push(HEX[(byte >> 4) as usize]);
+            out.push(HEX[(byte & 0x0f) as usize]);
+            changed = true;
+            continue;
+        }
+
+        out.push(byte);
+
+        if escaped {
+            escaped = false;
+        } else if in_string && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            in_string = !in_string;
+        }
+    }
+
+    changed.then_some(out)
+}
+
 /// Checks if an Annotated event represents a backend error and extracts error information.
 /// Returns Some((message, status_code)) if it's an error, None otherwise.
 fn extract_backend_error_if_present<T: serde::Serialize>(
@@ -1298,6 +1468,17 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
     if let Some(event_type) = &event.event
         && event_type == "error"
     {
+        use dynamo_runtime::error::{BackendError, ErrorType};
+
+        // Classify only this event's error, not its causes. An inner invalid
+        // argument must not override an outer unavailable or internal error.
+        let invalid_argument = event.error.as_ref().filter(|error| {
+            matches!(
+                error.error_type(),
+                ErrorType::InvalidArgument | ErrorType::Backend(BackendError::InvalidArgument)
+            )
+        });
+
         // Extract error string: prefer DynamoError field, fallback to legacy comment.
         // Use message() instead of to_string() for DynamoError to avoid prefixing
         // the ErrorType (e.g., "Unknown: {...}"), which would break JSON parsing.
@@ -1321,14 +1502,34 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 .unwrap_or_else(|| "Unknown error".to_string())
         };
 
-        // Try to parse as error JSON to extract status code
-        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(&error_str) {
-            let code = error_payload
-                .code
-                .and_then(|c| StatusCode::from_u16(c).ok())
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let message = error_payload.message.unwrap_or(error_str);
+        // Parse the status-bearing node's own message. The diagnostic string
+        // above includes its causes and therefore is not necessarily JSON.
+        let status_message = event
+            .error
+            .as_ref()
+            .map(|error| error.message())
+            .unwrap_or(&error_str);
+        if let Ok(error_payload) = serde_json::from_str::<ErrorPayload>(status_message) {
+            // Preserve explicit HTTP-like statuses (for example 415); Python
+            // 4xx exceptions share the Backend(InvalidArgument) category.
+            let code = match error_payload.code {
+                Some(code) => {
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+                }
+                None if invalid_argument.is_some() => StatusCode::BAD_REQUEST,
+                None => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            let message = error_payload
+                .message
+                .unwrap_or_else(|| status_message.to_string());
             return Some((message, code));
+        }
+
+        if let Some(invalid_argument) = invalid_argument {
+            return Some((
+                invalid_argument.message().to_string(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
 
         return Some((error_str, StatusCode::INTERNAL_SERVER_ERROR));
@@ -1639,6 +1840,14 @@ async fn chat_completions(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the OpenAI response.model all use the
+    // canonical primary (matching vLLM/SGLang). Non-aliases pass through so
+    // metric_model_for still applies its unknown-model cardinality guard.
+    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+    if canonical != request.inner.model {
+        request.inner.model = canonical;
+    }
     let model = request.inner.model.clone();
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -1702,6 +1911,14 @@ async fn chat_completions(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
 
     let mut response_collector = state
         .metrics_clone()
@@ -1788,7 +2005,7 @@ async fn chat_completions(
 
                 // Convert to SSE event (this consumes the response).
                 // EventConverter will detect `event: "error"` and convert to SSE error events.
-                let sse_result = process_response_using_event_converter_and_observe_metrics(
+                let sse_result = process_chat_response_using_event_converter_and_observe_metrics(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -1830,7 +2047,7 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2011,12 +2228,23 @@ async fn handler_responses(
     let streaming = request.inner.stream.unwrap_or(false);
     let raw_model = request.inner.model.as_deref().unwrap_or("");
     let resolved_model = resolve_request_model(raw_model, template.as_ref());
+    // Canonicalize alias → primary for the metric label.
+    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
     let cancellation_labels = CancellationLabels {
-        model: state.manager().metric_model_for(resolved_model).to_string(),
+        model: state
+            .manager()
+            .metric_model_for(&canonical_model)
+            .to_string(),
         endpoint: Endpoint::Responses.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request = context_from_headers(request, request_id, &headers)?;
+    let mut request = context_from_headers(request, request_id, &headers)?;
+    if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
+        request.insert(
+            crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
+            captured,
+        );
+    }
     let context = request.context();
 
     // create the connection handles
@@ -2071,7 +2299,16 @@ async fn responses(
     }
     tracing::trace!("Received responses request: {:?}", request.inner);
 
-    let model = request.inner.model.clone().unwrap_or_default();
+    // Resolve an alias to its primary served name and rewrite the request so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary. The Responses API wraps model in Option<String>, so re-wrap
+    // after resolution. Non-aliases pass through metric_model_for's guard.
+    let original_model = request.inner.model.clone().unwrap_or_default();
+    let canonical = state.manager().resolve_canonical_name(&original_model);
+    if canonical != original_model {
+        request.inner.model = Some(canonical.clone());
+    }
+    let model = canonical;
     let streaming = request.inner.stream.unwrap_or(false);
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
@@ -2174,6 +2411,14 @@ async fn responses(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2225,7 +2470,7 @@ async fn responses(
             let mut saw_error = false;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
-                process_response_and_observe_metrics(
+                process_chat_response_and_observe_metrics(
                     &annotated_chunk,
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -2281,7 +2526,7 @@ async fn responses(
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2332,6 +2577,21 @@ pub fn validate_response_unsupported_fields(
 ) -> Option<impl IntoResponse> {
     let inner = &request.inner;
 
+    if let Some(field) = request
+        .nvext
+        .as_ref()
+        .and_then(|nvext| nvext.extra_fields.as_ref())
+        .and_then(|fields| {
+            fields
+                .iter()
+                .find(|field| matches!(field.as_str(), "completion_token_ids" | "prompt_logprobs"))
+        })
+    {
+        return Some(ErrorMessage::not_implemented_error(format!(
+            "{VALIDATION_PREFIX}`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
+        )));
+    }
+
     if inner.background == Some(true) {
         return Some(ErrorMessage::not_implemented_error(
             VALIDATION_PREFIX.to_string() + "`background: true` is not supported.",
@@ -2376,6 +2636,22 @@ pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorRes
     Ok(())
 }
 
+/// Canonical, customer-facing message for "model is registered but not yet
+/// ready to serve requests" (deployment still initializing or incomplete).
+///
+/// One message for every not-ready cause — whichever worker role is missing,
+/// the client sees the same text. Deliberately free of internal taxonomy
+/// (worker types, namespaces, "worker set"): it stays clear and actionable for
+/// end users without leaking deployment internals. Operators get the detailed,
+/// per-role breakdown from `GET /v1/models/{model}/ready` instead.
+pub(crate) fn model_not_ready_message(model_name: &str) -> String {
+    format!(
+        "Model `{model_name}` is not ready to serve requests yet. \
+         The deployment may still be starting up or is not fully provisioned. \
+         Please retry shortly."
+    )
+}
+
 /// Per-model serving readiness gate.
 ///
 /// Composes AND-wise with [`check_ready`]: a request is admitted only when
@@ -2400,11 +2676,9 @@ pub(crate) fn check_model_serving_ready(
     if model.has_ready_workers() {
         return Ok(());
     }
-    Err(ErrorMessage::service_unavailable_with_body(format!(
-        "Model `{model_name}` is registered but no namespace has a complete worker set. \
-         At least one prefill/decode/encode worker type required by a registered worker is missing. \
-         Check worker startup logs for the affected namespace."
-    )))
+    Err(ErrorMessage::service_unavailable_with_body(
+        model_not_ready_message(model_name),
+    ))
 }
 
 /// openai compatible format
@@ -2452,7 +2726,14 @@ async fn list_models_openai(
     // is hidden until a peer joins.
     let models: HashSet<String> = state.manager().serving_ready_display_names();
     for model_name in models {
-        let context_window = cw_override.or_else(|| card_map.get(&model_name).map(|&cl| cl as u64));
+        // Alias entries have no card of their own (keyed by the primary's
+        // display_name); fall back to the primary's context length.
+        let context_window = cw_override.or_else(|| {
+            card_map
+                .get(&model_name)
+                .or_else(|| card_map.get(&state.manager().resolve_canonical_name(&model_name)))
+                .map(|&cl| cl as u64)
+        });
         data.push(ModelListing {
             id: model_name.clone(),
             object: "model",
@@ -2619,10 +2900,14 @@ fn get_model_retrieve(
         .unwrap()
         .as_secs();
 
+    // Alias entries have no card of their own (cards are keyed by the primary's
+    // display_name); fall back to the primary so an alias reports the same
+    // context_window that `GET /v1/models` lists for it.
+    let canonical_model = state.manager().resolve_canonical_name(model_id);
     let cards = state.manager().get_model_cards();
     let context_length = cards
         .iter()
-        .find(|c| c.display_name == model_id)
+        .find(|c| c.display_name == model_id || c.display_name == canonical_model)
         .map(|c| c.effective_context_length() as u64);
     let context_window: Option<u64> = std::env::var("DYN_CONTEXT_WINDOW")
         .ok()
@@ -3236,10 +3521,147 @@ mod tests {
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
-        CreateCompletionRequest,
+        CreateCompletionRequest, Prompt,
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn test_is_json_content_type() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("Application/JSON"));
+        assert!(is_json_content_type("application/vnd.dynamo+json"));
+        assert!(!is_json_content_type("text/plain"));
+        assert!(!is_json_content_type("application/json-patch"));
+        assert!(!is_json_content_type("application"));
+    }
+
+    #[test]
+    fn test_ensure_json_content_type_rejects_missing_or_non_json() {
+        let headers = HeaderMap::new();
+        let err = ensure_json_content_type(&headers).expect_err("missing content type should fail");
+        assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain".parse().unwrap(),
+        );
+        let err =
+            ensure_json_content_type(&headers).expect_err("non-json content type should fail");
+        assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_escapes_control_chars_in_strings() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"log \x1b[33mPK\x03\x04\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_replaces_invalid_utf8_in_strings() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"raw \xff data\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "raw \u{fffd} data");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_escapes_control_char_after_backslash() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"slash \\\nnext\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "slash \\\nnext");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_schema_errors() {
+        let body = br#"{"model":"test-model","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"working"}]}]}"#;
+
+        let err =
+            match parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body) {
+                Ok(_) => panic!("schema should still fail"),
+                Err(err) => err,
+            };
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1
+                .message
+                .contains("ChatCompletionRequestAssistantMessageContent"),
+            "unexpected error: {}",
+            err.1.message
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_request_escapes_control_chars_in_prompt() {
+        let body =
+            b"{\"model\":\"test-model\",\"prompt\":\"log \x1b[33mPK\x03\x04\",\"max_tokens\":1}";
+
+        let request: NvCreateCompletionRequest =
+            parse_json_request("completions", body).expect("request should parse");
+
+        let Prompt::String(prompt) = &request.inner.prompt else {
+            panic!("expected string prompt");
+        };
+        assert_eq!(prompt, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_completion_request_replaces_invalid_utf8_in_prompt() {
+        let body = b"{\"model\":\"test-model\",\"prompt\":\"raw \xff data\",\"max_tokens\":1}";
+
+        let request: NvCreateCompletionRequest =
+            parse_json_request("completions", body).expect("request should parse");
+
+        let Prompt::String(prompt) = &request.inner.prompt else {
+            panic!("expected string prompt");
+        };
+        assert_eq!(prompt, "raw \u{fffd} data");
+    }
 
     fn http_error_from_engine(code: u16) -> Result<(), anyhow::Error> {
         Err(HttpError {
@@ -3575,6 +3997,67 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_validate_unsupported_fields_rejects_rl_nvext_fields() {
+        for field in ["completion_token_ids", "prompt_logprobs"] {
+            for stream in [false, true] {
+                let mut request = make_base_request();
+                request.inner.stream = Some(stream);
+                request.nvext = Some(
+                    NvExt::builder()
+                        .extra_fields(vec![field.to_string()])
+                        .build()
+                        .unwrap(),
+                );
+
+                let response = validate_response_unsupported_fields(&request)
+                    .expect("RL nvext response field should be rejected")
+                    .into_response();
+                assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+                let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+                    .await
+                    .unwrap();
+                let error: ErrorMessage = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    error.message,
+                    format!(
+                        "{VALIDATION_PREFIX}`nvext.extra_fields=[\"{field}\"]` is not supported by the Responses API."
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_rejects_mixed_nvext_fields() {
+        let mut request = make_base_request();
+        request.nvext = Some(
+            NvExt::builder()
+                .extra_fields(vec![
+                    "timing".to_string(),
+                    "completion_token_ids".to_string(),
+                ])
+                .build()
+                .unwrap(),
+        );
+
+        assert!(validate_response_unsupported_fields(&request).is_some());
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_accepts_supported_nvext_fields() {
+        let mut request = make_base_request();
+        request.nvext = Some(
+            NvExt::builder()
+                .extra_fields(vec!["timing".to_string(), "worker_id".to_string()])
+                .build()
+                .unwrap(),
+        );
+
+        assert!(validate_response_unsupported_fields(&request).is_none());
+    }
+
     #[test]
     fn test_validate_unsupported_fields_detects_flags() {
         #[allow(clippy::type_complexity)]
@@ -3712,7 +4195,9 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}`thinking.type` must be `enabled` or `disabled`")
+                format!(
+                    "{VALIDATION_PREFIX}`thinking.type` must be `enabled`, `disabled`, or `adaptive`"
+                )
             );
         }
     }
@@ -4207,6 +4692,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_check_for_backend_error_with_typed_invalid_argument() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+        use futures::stream;
+
+        for error_type in [
+            ErrorType::InvalidArgument,
+            ErrorType::Backend(BackendError::InvalidArgument),
+        ] {
+            let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: None,
+                error: Some(
+                    DynamoError::builder()
+                        .error_type(error_type)
+                        .message("unsupported JSON schema keyword")
+                        .build(),
+                ),
+            };
+
+            let result = check_for_backend_error(stream::iter(vec![error_event])).await;
+
+            let error_response = match result {
+                Err(error_response) => error_response,
+                Ok(_) => panic!("typed invalid argument must fail"),
+            };
+            assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(error_response.1.code, StatusCode::BAD_REQUEST.as_u16());
+            assert_eq!(error_response.1.error_type, "Bad Request");
+            assert_eq!(error_response.1.message, "unsupported JSON schema keyword");
+        }
+    }
+
+    #[tokio::test]
     async fn test_check_for_backend_error_with_json_error_and_code() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use futures::stream;
@@ -4391,6 +4912,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4430,6 +4952,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4574,7 +5097,8 @@ mod tests {
 
     #[test]
     fn test_extract_error_type_from_response_unavailable() {
-        let response = ErrorMessage::model_unavailable();
+        let response =
+            ErrorMessage::from_model_error(&ModelManagerError::ModelUnavailable("x".to_string()));
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::Unavailable
@@ -4594,6 +5118,49 @@ mod tests {
             ErrorMessage::from_model_error(&unavailable).0,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    /// The not-ready 503 must be customer-facing: clear and actionable, but free
+    /// of internal worker-role / topology taxonomy. Whichever role is missing
+    /// (prefill or decode), the client sees the same text — so the message must
+    /// never name a specific role, namespace, or "worker set".
+    #[test]
+    fn test_model_not_ready_message_hides_internals() {
+        let msg = model_not_ready_message("my-model").to_lowercase();
+        for leak in [
+            "prefill",
+            "decode",
+            "encode",
+            "worker",
+            "namespace",
+            "needs",
+        ] {
+            assert!(
+                !msg.contains(leak),
+                "not-ready message leaks internal term `{leak}`: {msg}"
+            );
+        }
+        // Still names the model and signals retryability.
+        assert!(model_not_ready_message("my-model").contains("my-model"));
+        assert!(msg.contains("retry"));
+    }
+
+    /// The dispatch-time backstop (`from_model_error` on `ModelUnavailable`) and
+    /// the up-front readiness gate must speak with one voice: identical 503 body
+    /// for the same "registered but not servable" condition, regardless of which
+    /// role (prefill vs decode) is the missing one.
+    #[test]
+    fn test_unavailable_paths_share_one_message() {
+        let backstop = ErrorMessage::from_model_error(&ModelManagerError::ModelUnavailable(
+            "my-model".to_string(),
+        ));
+        assert_eq!(backstop.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(backstop.1.message, model_not_ready_message("my-model"));
+
+        // The gate constructs its body from the same canonical helper, so the
+        // two paths cannot drift apart.
+        let gate = ErrorMessage::service_unavailable_with_body(model_not_ready_message("my-model"));
+        assert_eq!(gate.1.message, backstop.1.message);
     }
 
     #[test]
@@ -4733,6 +5300,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
         Annotated {
             id: Some("test-id".to_string()),
@@ -5366,6 +5934,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 

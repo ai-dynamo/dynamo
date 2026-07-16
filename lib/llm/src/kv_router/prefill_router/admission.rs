@@ -20,7 +20,7 @@ use crate::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::RequestTracker,
     },
-    session_affinity::SessionAffinityPushRouter,
+    session_affinity::{AffinityTarget, SessionAffinityPushRouter},
 };
 
 pub(super) enum InnerPrefillRouter {
@@ -35,7 +35,7 @@ impl InnerPrefillRouter {
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>)>
     where
-        F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M>,
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M>,
     {
         match self {
             InnerPrefillRouter::KvRouter(router) => {
@@ -77,21 +77,37 @@ impl PrefillRouter {
             .and_then(|output| output.completion_usage.as_ref())
             .and_then(|usage| usage.prompt_tokens_details.clone());
 
-        while let Some(next) = prefill_response.next().await {
-            if let Some(error) = next.err() {
-                return Err(PrefillError::PrefillError(
-                    "Prefill router returned error in output stream".to_string(),
-                    Some(Box::new(error)),
-                ));
+        // For SGLang, check if the first output is a bootstrap message.
+        let is_bootstrap = first_output
+            .data
+            .as_ref()
+            .and_then(|o| o.disaggregated_params.as_ref())
+            .and_then(|p| p.as_object())
+            .is_some_and(|obj| {
+                obj.contains_key("bootstrap_host")
+                    && obj.contains_key("bootstrap_port")
+                    && obj.contains_key("bootstrap_room")
+            });
+
+        if !is_bootstrap {
+            while let Some(next) = prefill_response.next().await {
+                if let Some(error) = next.err() {
+                    return Err(PrefillError::PrefillError(
+                        "Prefill router returned error in output stream".to_string(),
+                        Some(Box::new(error)),
+                    ));
+                }
+                if let Some(output) = next.data.as_ref()
+                    && prompt_tokens_details.is_none()
+                {
+                    prompt_tokens_details = output
+                        .completion_usage
+                        .as_ref()
+                        .and_then(|usage| usage.prompt_tokens_details.clone());
+                }
             }
-            if let Some(output) = next.data.as_ref()
-                && prompt_tokens_details.is_none()
-            {
-                prompt_tokens_details = output
-                    .completion_usage
-                    .as_ref()
-                    .and_then(|usage| usage.prompt_tokens_details.clone());
-            }
+        } else {
+            tokio::spawn(async move { while prefill_response.next().await.is_some() {} });
         }
 
         let Some(output) = &first_output.data else {

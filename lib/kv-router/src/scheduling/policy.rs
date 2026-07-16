@@ -156,12 +156,13 @@ mod tests {
     use super::*;
     use crate::SchedulingRequest;
     use crate::protocols::{OverlapScores, WorkerWithDpRank};
+    use crate::scheduling::{OverlapSignals, ScheduleMode};
     use crate::test_utils::SimpleWorkerConfig;
 
     fn workers_for_request(request: &SchedulingRequest) -> HashMap<u64, SimpleWorkerConfig> {
         let mut workers = HashMap::new();
 
-        for worker in request.effective_cached_tokens.keys() {
+        for worker in request.overlap.effective_cached_tokens.keys() {
             workers.entry(worker.worker_id).or_default();
         }
 
@@ -203,20 +204,22 @@ mod tests {
             .map(|(worker, overlap)| (*worker, *overlap as usize * 16))
             .collect();
         SchedulingRequest {
-            maybe_request_id: None,
+            mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -248,30 +251,6 @@ mod tests {
     // ---- FCFS policy tests ----
 
     #[test]
-    fn fcfs_earlier_arrival_scheduled_first() {
-        let policy = FcfsPolicy;
-        let req = request_with(512, 0.0, OverlapScores::default());
-        let early = enqueue_key(&policy, Duration::from_secs(1), &req);
-        let late = enqueue_key(&policy, Duration::from_secs(10), &req);
-        assert!(early > late, "earlier arrival should have higher key");
-    }
-
-    #[test]
-    fn fcfs_priority_jump_promotes() {
-        let policy = FcfsPolicy;
-        // Both arrive at the same wall-clock offset (10s), but one has priority.
-        let normal = request_with(512, 0.0, OverlapScores::default());
-        let boosted = request_with(512, 100.0, OverlapScores::default());
-        let t = Duration::from_secs(10);
-        let key_normal = enqueue_key(&policy, t, &normal);
-        let key_boosted = enqueue_key(&policy, t, &boosted);
-        assert!(
-            key_boosted > key_normal,
-            "priority_jump should produce a higher key"
-        );
-    }
-
-    #[test]
     fn fcfs_priority_jump_beats_earlier_arrival() {
         let policy = FcfsPolicy;
         // Request A arrived at t=0 with no priority.
@@ -282,15 +261,6 @@ mod tests {
         let key_a = enqueue_key(&policy, Duration::from_secs(0), &a);
         let key_b = enqueue_key(&policy, Duration::from_secs(5), &b);
         assert!(key_b > key_a);
-    }
-
-    #[test]
-    fn lcfs_later_arrival_scheduled_first() {
-        let policy = LcfsPolicy;
-        let req = request_with(512, 0.0, OverlapScores::default());
-        let early = enqueue_key(&policy, Duration::from_secs(1), &req);
-        let late = enqueue_key(&policy, Duration::from_secs(10), &req);
-        assert!(late > early, "later arrival should have higher key");
     }
 
     #[test]

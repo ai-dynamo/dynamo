@@ -26,16 +26,21 @@ standalone-selection = ["standalone-indexer"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true, optional = true }
+dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-truthy = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+arc-swap = "1.9.1"
 async-trait = { workspace = true }
 dashmap = { workspace = true }
+indexmap = { workspace = true }
 ordered-float = { workspace = true }
 derive_builder = { workspace = true }
 prometheus = { workspace = true, optional = true }
 rand = { workspace = true }
+seqlock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, optional = true }
 serde_yaml = "0.9.34"
@@ -49,11 +54,13 @@ validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # dependencies
+crossbeam-queue = "0.3"
 flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 
 rustc-hash = "2.1.1"
+slotmap = "1"
 
 # standalone-indexer (optional)
 axum = { workspace = true, optional = true }
@@ -62,6 +69,7 @@ reqwest = { workspace = true, optional = true }
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
+criterion = "0.5"
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
 serde_json = { workspace = true }
@@ -69,3 +77,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+
+[[bench]]
+name = "policy_queue"
+harness = false

@@ -5,10 +5,6 @@ title: Tool Call Parsing (Dynamo)
 subtitle: Connect Dynamo to external tools and services using Dynamo's built-in tool call parsers
 ---
 
-<p align="left">
-  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 You can connect Dynamo to external tools and services using tool calling. By
 providing a list of available functions, Dynamo can choose to output function
 arguments for the relevant function(s) which you can execute to augment the
@@ -54,7 +50,8 @@ parser exists for this format.
 | Parser Name | Models | Upstream name | Notes |
 |---|---|---|---|
 | `kimi_k2` | Kimi K2 Instruct/Thinking, Kimi K2.5 | | Pair with `--dyn-reasoning-parser kimi` or `kimi_k25` |
-| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax` | XML `<minimax:tool_call>` |
+| `minimax_m2` | MiniMax M2 / M2.1 | vLLM: `minimax_m2` | XML `<minimax:tool_call>` |
+| `minimax_m3` | MiniMax M3 | vLLM: `minimax_m3` | MiniMax namespace-token XML |
 | `deepseek_v4` | DeepSeek V4 Pro / Flash | vLLM: `deepseek_v4`; SGLang: `deepseekv4` | DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4` |
 | `deepseek_v3` | DeepSeek V3, DeepSeek R1-0528+ | SGLang: `deepseekv3` | Special Unicode markers |
 | `deepseek_v3_1` | DeepSeek V3.1 | Dynamo-only | JSON separators |
@@ -84,7 +81,7 @@ parser exists for this format.
 
 ```bash
 # launch backend worker (or dynamo.vllm)
-python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --dyn-reasoning-parser qwen3
+python -m dynamo.sglang --model Qwen/Qwen3.5-4B --dyn-tool-call-parser qwen3_coder --reasoning-parser qwen3 --dyn-reasoning-parser qwen3
 
 # launch frontend worker
 python -m dynamo.frontend

@@ -49,13 +49,14 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "2.1.2" }
-dynamo-protocols = { version = "=2.0.0" }
+dynamo-parsers = { version = "5.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
+dynamo-sglang-sidecar = { path = "../../sglang-sidecar" }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
+bytes = { version = "1" }
 dashmap = { version = "6.1" }
 futures = { version = "0.3" }
 rmp = { version = "0.8" }
@@ -63,6 +64,7 @@ once_cell = { version = "1.20.3" }
 parking_lot = { version = "0.12.4" }
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
+serde-transcode = "1.1"
 thiserror = { version = "2.0" }
 tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
@@ -109,15 +111,10 @@ dynamo-llm = { path = "../../llm" }
 dynamo-llm = { path = "../../llm", default-features = false }
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
+tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [profile.profiling]
 inherits = "release"
 debug = true
 strip = false
-
-# Mirror of root Cargo.toml's patch: sub-workspaces don't inherit
-# [patch.crates-io] from the root, so re-declare here. Remove once
-# llm-multimodal >=1.6.0 is published on crates.io.
-[patch.crates-io]
-llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
-llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }

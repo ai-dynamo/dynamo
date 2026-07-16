@@ -18,7 +18,7 @@ Under the hood, the Tiltfile:
 1. **Compiles** the Go manager binary locally (`CGO_ENABLED=0`).
 2. **Builds** a minimal Docker image containing only the binary.
 3. **Renders** the production Helm chart (`deploy/helm/charts/platform`) with
-   `helm template`, applies CRDs via `kubectl`, and deploys all rendered
+   `helm template`, applies generated CRDs with `crd-apply`, and deploys all rendered
    resources.
 4. **Live-updates** the binary inside the running container on every code
    change — no full image rebuild required.
@@ -155,7 +155,7 @@ MPI SSH key provisioning at runtime — no external setup needed.
 compile the operator binary. Re-runs on changes to `api/`, `cmd/`, `internal/`,
 `go.mod`, or `go.sum`.
 
-**crds** — Applies CRDs from the Helm chart via `kubectl apply --server-side`.
+**crds** — Applies generated CRDs from `deploy/operator/config/crd/bases` using server-side apply.
 When `skip_codegen` is `false`, runs `make generate && make manifests` first.
 
 **operator** — The operator Deployment itself. Tilt watches the compiled binary

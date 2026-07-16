@@ -5,10 +5,6 @@ title: Router
 subtitle: KV cache-aware router that picks workers by combined prefill and decode cost to maximize throughput and minimize latency.
 ---
 
-<p align="left">
-  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
 The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks), using KV cache overlap to minimize redundant computation. Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
 ## Quick Start
@@ -19,18 +15,28 @@ To launch the Dynamo frontend with the KV Router:
 python -m dynamo.frontend --router-mode kv --http-port 8000
 ```
 
-For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service. For event-driven KV state, configure backend workers to publish KV cache events using the backend-specific flags described in [Router Operations](router-operations.md#additional-notes). Use `--no-router-kv-events` only when you want approximate cache-state prediction.
-
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--router-mode kv` | `round-robin` | Enable KV cache-aware routing |
 | `--load-aware` | disabled | Use KV active-load routing without cache-reuse signals; implies `--router-mode kv` on the frontend |
 | `--router-kv-overlap-score-credit` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
-| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Consume worker KV events, or fall back to approximate routing without events |
-| `--router-queue-threshold` | `16.0` | Backpressure queue threshold; priority hints only reorder requests while this queue is non-empty |
+| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Consume worker KV events, or explicitly disable them to use approximate routing |
+| `--router-queue-threshold` | disabled | Backpressure queue threshold; setting a numeric value enables queueing, where priority hints reorder waiting requests |
 | `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
+
+> [!IMPORTANT]
+> `--router-mode kv` (or `DYN_ROUTER_MODE=kv`) enables KV routing on the
+> frontend, but it does not enable KV event publishing on backend workers. With
+> the default `--router-kv-events` setting, missing publishers leave the router
+> in event-driven mode without real cache state; the router does not
+> automatically switch to approximate prediction. Configure the backend-specific
+> publishing flags in [Router Operations](router-operations.md#additional-notes).
+> If workers will not publish events, use `--no-router-kv-events` for approximate
+> cache prediction or `--load-aware` for load-only routing.
+
+For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service.
 
 ### Standalone Router
 

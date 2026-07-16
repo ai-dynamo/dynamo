@@ -284,10 +284,31 @@ impl PerfModel {
 
 #[cfg(test)]
 mod tests {
-    use super::PerfModel;
+    use super::{AicCallback, PerfModel};
+    use std::sync::Arc;
+
+    struct EchoBatchCallback;
+
+    impl AicCallback for EchoBatchCallback {
+        fn predict_prefill(&self, batch_size: usize, _effective_isl: usize, _prefix: usize) -> f64 {
+            batch_size as f64
+        }
+
+        fn predict_decode(&self, batch_size: usize, _isl: usize, _osl: usize) -> f64 {
+            batch_size as f64
+        }
+    }
 
     #[test]
     fn fully_cached_prompt_skips_prefill() {
         assert_eq!(PerfModel::default().predict_prefill_time(1, 128, 128), 0.0);
+    }
+
+    #[test]
+    fn aic_forwards_scheduler_local_batch() {
+        let model = PerfModel::from_aic_callback(Arc::new(EchoBatchCallback));
+
+        assert_eq!(model.predict_prefill_time(7, 128, 0), 7.0);
+        assert_eq!(model.predict_decode_time(9, 0, 128, 0), 9.0);
     }
 }

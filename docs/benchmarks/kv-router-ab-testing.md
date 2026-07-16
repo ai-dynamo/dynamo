@@ -87,7 +87,9 @@ kubectl create secret generic hf-token-secret \
 
 Follow the [Dynamo Kubernetes Installation Guide](../kubernetes/installation-guide.md) to install the platform in `dynamo-bench`.
 
-> **Note:** Namespace-restricted mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode for new deployments.
+> [!WARNING]
+> Namespace-restricted mode (`namespaceRestriction.enabled=true`) is only for development and
+> testing. It is not supported for production.
 
 **Key Configuration Notes:**
 - Adjust version tags to match your cluster's available Dynamo versions
@@ -450,7 +452,7 @@ spec:
           - -lc
           - |
             apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
-            pip install -q aiperf==0.8.0
+            pip install -q aiperf==0.10.0
             echo "Benchmark pod ready (tmux + aiperf installed)."
             sleep infinity
         imagePullPolicy: IfNotPresent

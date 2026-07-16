@@ -20,15 +20,16 @@ The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It 
 
 ## Getting Started: Optimization Targets
 
-The planner offers three `optimization_target` settings that control how scaling decisions are made:
+The planner offers four `optimization_target` settings that control how scaling decisions are made:
 
 | Target | Description | Requires SLA? | Requires Profiling? |
 |--------|-------------|:-------------:|:-------------------:|
 | **`throughput`** (default) | Maximizes throughput by scaling based on queue depth and KV cache utilization. Scales up when engines are saturated, scales down when utilization drops. | No | No |
 | **`latency`** | Minimizes latency by scaling aggressively to keep queues short. Scales up at lower utilization thresholds. | No | No |
+| **`load`** | Uses user-defined prefill queue token and decode KV cache utilization thresholds. | No | No |
 | **`sla`** | Targets specific TTFT/ITL SLA values using the Rust engine perf shim: native AIC estimates when available, online FPM tuning, and FPM regression fallback. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
 
-**We recommend starting with the default `throughput` target** — it works out of the box with zero configuration. Switch to `latency` if your workload is latency-sensitive, or to `sla` when you need precise SLA targeting with native AIC or FPM-based performance modeling.
+**We recommend starting with the default `throughput` target** because it requires no configuration. Switch to `latency` for latency-sensitive workloads, `load` for explicit prefill queue token and decode KV cache utilization thresholds, or `sla` for precise SLA targeting with native AIC or FPM-based performance modeling.
 
 > **New to the Planner?** Start with the [Planner Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
@@ -129,7 +130,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 - **vLLM** — supported. Automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set.
 - **TensorRT-LLM** — supported for non-attention-DP workers (`attention_dp_size == 1`); gated off when `attention_dp_size > 1` pending per-rank FPM emission.
-- **SGLang** — pipeline wired in Dynamo, but the upstream SGLang FPM module is not included in the current 1.2.1 SGLang runtime image. See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) for the runtime-image prerequisite.
+- **SGLang** — supported. Enabled when `DYN_FORWARDPASS_METRIC_PORT` is set; requires the upstream FPM module, which ships in the SGLang runtime as of `sglang==0.5.13.post1` (SGLang >= v0.5.13). See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm).
 
 ### General
 
@@ -159,7 +160,7 @@ DGDR planner features and generated ConfigMaps are materialized into these
 | `namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
 | `backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
 | `mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
-| `optimization_target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `sla` (Rust engine perf model SLA targeting) |
+| `optimization_target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `load` (user-defined prefill queue and decode KV utilization thresholds), `sla` (Rust engine perf model SLA targeting) |
 | `environment` | `kubernetes` | Deployment environment |
 | `ttft_ms` | `500.0` | Target Time To First Token (ms) |
 | `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
@@ -225,15 +226,17 @@ Planner can read these traffic signals from either the public `Frontend` or a po
 
 | Planner input | Frontend source | Router source |
 |---|---|---|
-| Request count | `dynamo_frontend_requests_total` | `dynamo_component_router_requests_total` |
+| Request count | `dynamo_frontend_requests_started_total` | `dynamo_component_router_requests_started_total` |
 | TTFT | `dynamo_frontend_time_to_first_token_seconds` | `dynamo_component_router_time_to_first_token_seconds` |
 | ITL | `dynamo_frontend_inter_token_latency_seconds` | `dynamo_component_router_inter_token_latency_seconds` |
 | Request duration | `dynamo_frontend_request_duration_seconds` | `dynamo_component_request_duration_seconds` until router-specific duration metrics are available |
 | Input sequence length / ISL | `dynamo_frontend_input_sequence_tokens` | `dynamo_component_router_input_sequence_tokens` |
 | Output sequence length / OSL | `dynamo_frontend_output_sequence_tokens` | `dynamo_component_router_output_sequence_tokens` |
-| KV hit rate | Not available from frontend source | `dynamo_component_router_kv_hit_rate` |
+| KV hit rate | `dynamo_component_router_kv_hit_rate` | `dynamo_component_router_kv_hit_rate` |
 
-The throughput planner uses request count, ISL, OSL, and optional KV hit rate as the core traffic forecast inputs. TTFT, ITL, and request duration are also scraped and exported as observed diagnostics.
+The throughput planner uses request count, ISL, OSL, and optional KV hit rate as the core traffic forecast inputs. The router component metric supplies KV hit rate for both traffic metric sources. TTFT, ITL, and request duration are also scraped and exported as observed diagnostics.
+
+The request-count metrics increase when the Frontend accepts a request or the router scheduler admits it, before the response completes. Planner falls back to the corresponding completed-request counter when an older Frontend or router does not expose the started counter. This compatibility fallback can underestimate demand during backpressure.
 
 **Load-based scaling** uses ForwardPassMetrics (FPM) from the Dynamo event plane:
 - Per-iteration wall time, scheduled prefill/decode tokens, and queued request status

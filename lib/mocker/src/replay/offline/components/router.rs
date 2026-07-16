@@ -13,7 +13,10 @@ use dynamo_kv_router::protocols::{
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::scheduling::{PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot};
+use dynamo_kv_router::scheduling::{
+    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
+    WorkerPlacement,
+};
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
@@ -132,6 +135,7 @@ struct PendingRequest {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
+    session_id: Option<String>,
 }
 
 impl PendingRequest {
@@ -157,20 +161,24 @@ impl PendingRequest {
             .map(|(worker, overlap)| (*worker, *overlap as usize * block_size))
             .collect();
         SchedulingRequest {
-            maybe_request_id: Some(self.request_id()),
+            mode: ScheduleMode::Tracked {
+                request_id: self.request_id(),
+            },
             token_seq: self.token_seq.clone(),
             isl_tokens: self.isl_tokens,
-            tier_overlap_blocks: TierOverlapBlocks::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks: TierOverlapBlocks::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
             worker_loads,
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
-            update_states: true,
             lora_name: None,
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
             policy_class: self.policy_class.clone(),
+            session_id: self.session_id.clone(),
             expected_output_tokens: self.expected_output_tokens,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -184,6 +192,7 @@ impl PendingRequest {
 pub(crate) struct OfflineReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
+    dp_size: u32,
     profile: PolicyProfile,
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
@@ -214,6 +223,7 @@ impl OfflineReplayRouter {
         Ok(Self {
             config,
             block_size: args.block_size as u32,
+            dp_size: args.dp_size.max(1),
             profile: profile.clone(),
             worker_config_template,
             workers_with_configs,
@@ -229,13 +239,24 @@ impl OfflineReplayRouter {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn on_request_arrival(
         &mut self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
-        let pending = self.build_pending_request(request, replay_hashes)?;
+        self.on_request_arrival_for_session(request, replay_hashes, None, now_ms)
+    }
+
+    pub(crate) fn on_request_arrival_for_session(
+        &mut self,
+        request: &DirectRequest,
+        replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
+        now_ms: f64,
+    ) -> Result<RouterEffects> {
+        let pending = self.build_pending_request(request, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
         let (class_index, snapshot) = match self
             .profile
@@ -264,11 +285,14 @@ impl OfflineReplayRouter {
             self.pending
                 .enqueue(
                     class_index,
-                    self.workers_with_configs.len(),
+                    self.workers_with_configs
+                        .len()
+                        .saturating_mul(self.dp_size as usize),
                     snapshot,
                     now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
+                    WorkerPlacement::Any,
                     pending,
                 )
                 .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
@@ -354,7 +378,10 @@ impl OfflineReplayRouter {
         {
             return Err(anyhow!("router worker {worker_id} already exists"));
         }
-        if let Err(error) = self.slots.upsert_worker(WorkerDpRange::new(wid, 0, 1)) {
+        if let Err(error) = self
+            .slots
+            .upsert_worker(WorkerDpRange::new(wid, 0, self.dp_size))
+        {
             self.workers_with_configs.remove(&wid);
             return Err(error.into());
         }
@@ -459,6 +486,7 @@ impl OfflineReplayRouter {
         &self,
         request: &DirectRequest,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
     ) -> Result<PendingRequest> {
         let uuid = request
             .uuid
@@ -510,6 +538,7 @@ impl OfflineReplayRouter {
             priority_jump,
             strict_priority,
             policy_class: request.policy_class.clone(),
+            session_id,
         })
     }
 
@@ -529,8 +558,14 @@ impl OfflineReplayRouter {
             eligibility,
             self.block_size,
         )?;
-        let worker_idx = usize::try_from(selection.worker.worker_id)
+        let worker_id = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
+        let dp_rank = usize::try_from(selection.worker.dp_rank)
+            .map_err(|_| anyhow!("selected dp rank does not fit into usize"))?;
+        let worker_idx = worker_id
+            .checked_mul(self.dp_size as usize)
+            .and_then(|base| base.checked_add(dp_rank))
+            .ok_or_else(|| anyhow!("selected worker/rank index overflow"))?;
         let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
@@ -599,12 +634,16 @@ impl OfflineReplayRouter {
         class: &PolicyClassConfig,
     ) -> bool {
         workers_with_configs.iter().all(|(&worker_id, config)| {
-            let worker = WorkerWithDpRank::new(worker_id, config.data_parallel_start_rank());
-            let max_batched = config
-                .max_num_batched_tokens()
-                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-            class.worker_is_busy(tokens, max_batched)
+            let start = config.data_parallel_start_rank();
+            let end = start.saturating_add(config.data_parallel_size());
+            (start..end).all(|dp_rank| {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                let max_batched = config
+                    .max_num_batched_tokens()
+                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+                class.worker_is_busy(tokens, max_batched)
+            })
         })
     }
 
@@ -670,6 +709,7 @@ mod tests {
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
     };
+    use rustc_hash::FxHashMap;
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
@@ -745,6 +785,7 @@ mod tests {
         DirectRequest {
             tokens: vec![token; input_tokens],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
@@ -756,6 +797,16 @@ mod tests {
 
     fn store_event(
         worker_id: WorkerId,
+        event_id: u64,
+        tokens_hash: u64,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
+        store_event_for_rank(worker_id, 0, event_id, tokens_hash, storage_tier)
+    }
+
+    fn store_event_for_rank(
+        worker_id: WorkerId,
+        dp_rank: u32,
         event_id: u64,
         tokens_hash: u64,
         storage_tier: StorageTier,
@@ -773,10 +824,21 @@ mod tests {
                         mm_extra_info: None,
                     }],
                 }),
-                dp_rank: 0,
+                dp_rank,
             },
             storage_tier,
         )
+    }
+
+    #[test]
+    fn session_identity_reaches_scheduling_request() {
+        let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let pending = router
+            .build_pending_request(&request(1, 7), None, Some("session-a".to_string()))
+            .unwrap();
+        let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
+
+        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
     }
 
     #[test]
@@ -846,6 +908,63 @@ mod tests {
                 .map(|request| request.uuid)
                 .collect::<Vec<_>>(),
             vec![Uuid::from_u128(2)]
+        );
+    }
+
+    #[test]
+    fn attention_dp_routes_one_mocker_worker_across_rank_targets() {
+        let mut args = queueing_args();
+        args.dp_size = 2;
+        let mut router =
+            OfflineReplayRouter::new(&args, Some(queueing_router_config()), None, 1).unwrap();
+
+        let first = router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        let second = router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        let mut targets = first
+            .admissions
+            .into_iter()
+            .chain(second.admissions)
+            .map(|admission| admission.worker_idx)
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+
+        assert_eq!(targets, vec![0, 1]);
+        assert_eq!(router.pending_count(), 0);
+    }
+
+    #[test]
+    fn attention_dp_kv_router_routes_cached_prefix_to_matching_rank() {
+        let mut args = replay_args();
+        args.dp_size = 2;
+        let mut router = OfflineReplayRouter::new(&args, Some(router_config()), None, 1).unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+
+        router
+            .on_kv_events(vec![store_event_for_rank(
+                0,
+                1,
+                1,
+                hashes.local_block_hashes[0].0,
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        let effects = router
+            .on_request_arrival(&target, Some(hashes), 0.0)
+            .unwrap();
+        assert_eq!(
+            effects.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(1),
+                worker_idx: 1,
+                overlap_blocks: 1,
+                isl_blocks: 1,
+            }]
         );
     }
 

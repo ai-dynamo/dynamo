@@ -10,12 +10,15 @@ use serde::{Deserialize, Serialize};
 
 use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
+use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
+    WorkerWithDpRank,
 };
 use crate::scheduling::policy_queue::QueueRejection;
+use crate::scheduling::queue_admission::RequestProgressUpdater;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
@@ -72,6 +75,100 @@ pub struct SchedulingResponse {
     pub best_worker: WorkerWithDpRank,
     pub effective_overlap_blocks: f64,
     pub cached_tokens: usize,
+    pub selected_worker_tiers: SelectedWorkerTierSnapshot,
+    pub request_progress: Option<RequestProgressUpdater>,
+    pub admission_lease: Option<super::queue::AdmissionLease>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestOutcome {
+    Completed { context_tokens: usize },
+    Aborted,
+}
+
+#[derive(Debug, Clone)]
+pub enum ScheduleMode {
+    QueryOnly {
+        request_id: Option<String>,
+    },
+    /// Tracks worker state; the caller releases it with `free`.
+    Tracked {
+        request_id: String,
+    },
+    /// Tracks worker and admission state; the caller reports dispatch and a terminal outcome.
+    TrackedWithAdmission {
+        request_id: String,
+    },
+}
+
+impl ScheduleMode {
+    pub fn from_legacy(
+        request_id: Option<String>,
+        update_states: bool,
+    ) -> Result<Self, KvSchedulerError> {
+        if !update_states {
+            return Ok(Self::QueryOnly { request_id });
+        }
+
+        let Some(request_id) = request_id else {
+            return Err(KvSchedulerError::BookingFailed(
+                "tracked scheduling request requires a request_id".to_string(),
+            ));
+        };
+        Ok(Self::Tracked { request_id })
+    }
+
+    pub fn request_id(&self) -> Option<&str> {
+        match self {
+            Self::QueryOnly { request_id } => request_id.as_deref(),
+            Self::Tracked { request_id } | Self::TrackedWithAdmission { request_id } => {
+                Some(request_id)
+            }
+        }
+    }
+
+    pub fn is_tracked(&self) -> bool {
+        matches!(
+            self,
+            Self::Tracked { .. } | Self::TrackedWithAdmission { .. }
+        )
+    }
+
+    pub(crate) fn admission_request_id(&self) -> Option<&str> {
+        match self {
+            Self::TrackedWithAdmission { request_id } => Some(request_id),
+            Self::QueryOnly { .. } | Self::Tracked { .. } => None,
+        }
+    }
+
+    pub fn tracked_request_id(&self) -> Option<&str> {
+        match self {
+            Self::QueryOnly { .. } => None,
+            Self::Tracked { request_id } | Self::TrackedWithAdmission { request_id } => {
+                Some(request_id)
+            }
+        }
+    }
+}
+
+/// Validated request accepted by [`LocalScheduler`](super::LocalScheduler).
+pub struct ScheduleRequest {
+    pub mode: ScheduleMode,
+    pub token_seq: Option<Vec<SequenceHash>>,
+    pub block_hashes: Option<Vec<LocalBlockHash>>,
+    pub isl_tokens: usize,
+    pub lora_name: Option<String>,
+    pub expected_output_tokens: Option<u32>,
+    pub pinned_worker: Option<WorkerWithDpRank>,
+    pub allowed_worker_ids: Option<HashSet<WorkerId>>,
+    pub routing_constraints: RoutingConstraints,
+    pub router_config_override: Option<RouterConfigOverride>,
+    pub priority_jump: f64,
+    pub strict_priority: u32,
+    pub policy_class: Option<String>,
+    pub session_id: Option<String>,
+    pub overlap: OverlapSignals,
+    pub shared_cache_hits: Option<SharedCacheHits>,
 }
 
 /// Actor-owned admission request.
@@ -81,7 +178,7 @@ pub struct SchedulingResponse {
 /// future closes that receiver, but cannot retract the request from the actor.
 pub struct SchedulingRequest {
     // Request identity and payload.
-    pub maybe_request_id: Option<String>,
+    pub mode: ScheduleMode,
     pub token_seq: Option<Vec<SequenceHash>>,
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
@@ -96,18 +193,15 @@ pub struct SchedulingRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
+    pub session_id: Option<String>,
 
     // Overlap and cache signals.
-    pub tier_overlap_blocks: TierOverlapBlocks,
-    pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-    pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+    pub overlap: OverlapSignals,
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.
     pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
 
-    // Scheduling side effects and lifecycle controls.
-    pub update_states: bool,
     /// Sender half of the admission ownership handoff. For tracked requests,
     /// the actor must book before sending and undo the booking if delivery fails.
     pub resp_tx: Option<tokio::sync::oneshot::Sender<Result<SchedulingResponse, KvSchedulerError>>>,
@@ -142,6 +236,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
             Some(worker) => self.request.effective_cached_tokens_for(worker),
             None => self
                 .request
+                .overlap
                 .effective_cached_tokens
                 .iter()
                 .filter(|(worker, _)| {
@@ -176,14 +271,16 @@ impl SchedulingRequest {
     }
 
     pub(crate) fn effective_cached_tokens_for(&self, worker: WorkerWithDpRank) -> usize {
-        self.effective_cached_tokens
+        self.overlap
+            .effective_cached_tokens
             .get(&worker)
             .copied()
             .unwrap_or(0)
     }
 
     pub(crate) fn effective_overlap_blocks_for(&self, worker: WorkerWithDpRank) -> f64 {
-        self.effective_overlap_blocks
+        self.overlap
+            .effective_overlap_blocks
             .get(&worker)
             .copied()
             .unwrap_or(0.0)

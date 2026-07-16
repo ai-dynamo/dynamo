@@ -11,13 +11,14 @@ use crate::protocols::{
 };
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::config::RouterConfigOverride;
+pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 use crate::services::indexer::registry::IndexerKey;
 use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::PromptRequest;
 
 const DEFAULT_MODEL_NAME: &str = "default";
-const DEFAULT_TENANT_ID: &str = "default";
+const DEFAULT_ROUTING_GROUP: &str = "default";
 pub(super) const WORKER_TYPE: &str = "select";
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -25,35 +26,39 @@ fn default_model_name() -> String {
     DEFAULT_MODEL_NAME.to_string()
 }
 
-fn default_tenant_id() -> String {
-    DEFAULT_TENANT_ID.to_string()
+fn default_routing_group() -> String {
+    DEFAULT_ROUTING_GROUP.to_string()
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
 pub struct SelectionKey {
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
 }
 
 impl SelectionKey {
-    pub(super) fn new(model_name: impl Into<String>, tenant_id: impl Into<String>) -> Self {
+    pub(super) fn new(model_name: impl Into<String>, routing_group: impl Into<String>) -> Self {
         Self {
             model_name: model_name.into(),
-            tenant_id: tenant_id.into(),
+            routing_group: routing_group.into(),
         }
     }
 
     pub(super) fn indexer_key(&self) -> IndexerKey {
         IndexerKey {
             model_name: self.model_name.clone(),
-            tenant_id: self.tenant_id.clone(),
+            routing_group: self.routing_group.clone(),
         }
     }
 }
 
 impl fmt::Display for SelectionKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "model={} tenant={}", self.model_name, self.tenant_id)
+        write!(
+            f,
+            "model={} routing_group={}",
+            self.model_name, self.routing_group
+        )
     }
 }
 
@@ -130,7 +135,7 @@ impl WorkerConfigLike for SelectionWorkerConfig {
 pub struct WorkerCatalogRecord {
     pub worker_id: WorkerId,
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub lifecycle: WorkerLifecycle,
     pub endpoint: Option<String>,
     pub kv_events_endpoint: Option<String>,
@@ -160,7 +165,7 @@ impl WorkerCatalogRecord {
         Self {
             worker_id: req.worker_id,
             model_name: req.model_name,
-            tenant_id: req.tenant_id,
+            routing_group: req.routing_group,
             lifecycle: WorkerLifecycle::Incomplete,
             endpoint: req.endpoint,
             kv_events_endpoint: req.kv_events_endpoint,
@@ -183,7 +188,7 @@ impl WorkerCatalogRecord {
     }
 
     pub(super) fn key(&self) -> SelectionKey {
-        SelectionKey::new(self.model_name.clone(), self.tenant_id.clone())
+        SelectionKey::new(self.model_name.clone(), self.routing_group.clone())
     }
 
     pub(super) fn dp_start(&self) -> u32 {
@@ -269,8 +274,8 @@ pub struct WorkerRequest {
     pub worker_id: WorkerId,
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(default)]
     pub endpoint: Option<String>,
     #[serde(default)]
@@ -398,8 +403,8 @@ impl WorkerCatalogRecord {
 pub struct SelectRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(default)]
     pub selection_id: Option<String>,
     #[serde(flatten)]
@@ -412,6 +417,8 @@ pub struct SelectRequest {
     pub priority_jump: Option<f64>,
     #[serde(default)]
     pub strict_priority: Option<u32>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
     #[serde(default)]
@@ -424,12 +431,10 @@ pub struct SelectRequest {
 pub struct SelectAndReserveRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(default)]
     pub selection_id: Option<String>,
-    #[serde(default)]
-    pub reservation_id: Option<String>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
     #[serde(default)]
@@ -441,6 +446,8 @@ pub struct SelectAndReserveRequest {
     #[serde(default)]
     pub strict_priority: Option<u32>,
     #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
     #[serde(default)]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -448,14 +455,22 @@ pub struct SelectAndReserveRequest {
     pub routing_constraints: RoutingConstraints,
 }
 
+/// Booking request: replay the selection cached under `selection_id`, or book
+/// self-contained with `worker_id`. The replay books exactly what `select` captured;
+/// request fields other than the ids and model/routing-group are ignored.
 #[derive(Debug, Deserialize)]
 pub struct ReservationRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
-    pub reservation_id: String,
-    pub worker_id: WorkerId,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
+    /// The single booking id: the cache key to replay and the scheduler request
+    /// id the booking lands under (the `selection_id` from the matching `select`).
+    pub selection_id: String,
+    /// Explicit, self-contained form: books under `selection_id` on this worker
+    /// without a cached select. Omit to replay the cached `selection_id`.
+    #[serde(default)]
+    pub worker_id: Option<WorkerId>,
     #[serde(default)]
     pub dp_rank: Option<DpRank>,
     #[serde(flatten)]
@@ -478,8 +493,8 @@ pub struct OutputBlockRequest {
 pub struct PotentialLoadsRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
     #[serde(default)]
@@ -490,8 +505,8 @@ pub struct PotentialLoadsRequest {
 pub struct OverlapScoresRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default = "default_routing_group")]
+    pub routing_group: String,
     #[serde(flatten)]
     pub prompt: PromptRequest,
     #[serde(default)]
@@ -502,10 +517,8 @@ pub struct OverlapScoresRequest {
 pub struct SelectResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reservation_id: Option<String>,
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub endpoint: String,
@@ -516,9 +529,9 @@ pub struct SelectResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ReservationResponse {
-    pub reservation_id: String,
+    pub selection_id: String,
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
     pub endpoint: String,
@@ -534,37 +547,8 @@ pub struct ReadyResponse {
 #[derive(Debug, Serialize)]
 pub struct ModelLoadResponse {
     pub model_name: String,
-    pub tenant_id: String,
+    pub routing_group: String,
     pub loads: Vec<PotentialLoad>,
     pub pending_count: usize,
     pub pending_isl_tokens: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct WorkerOverlapScore {
-    pub worker_id: WorkerId,
-    pub dp_rank: DpRank,
-    pub device_blocks: usize,
-    pub host_pinned_blocks: usize,
-    pub disk_blocks: usize,
-    pub host_pinned_extension_blocks: usize,
-    pub disk_extension_blocks: usize,
-    pub shared_beyond_device_blocks: Option<u32>,
-    pub router_credit_blocks: f64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SharedCacheOverlapScore {
-    pub enabled: bool,
-    pub total_hit_blocks: u32,
-    pub ranges: Vec<(u32, u32)>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct OverlapScoresResponse {
-    pub block_size: u32,
-    pub num_blocks: usize,
-    pub workers: Vec<WorkerOverlapScore>,
-    pub shared_cache: SharedCacheOverlapScore,
 }

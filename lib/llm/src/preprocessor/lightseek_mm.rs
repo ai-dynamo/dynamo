@@ -9,9 +9,8 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
-use llm_multimodal::{
-    ImagePreProcessor, ImageProcessorRegistry, ModelMetadata, ModelRegistry, PreProcessorConfig,
-};
+use llm_multimodal::vision::{PreProcessorConfig, VisionPreProcessor, VisionProcessorRegistry};
+use llm_multimodal::{ModelMetadata, ModelRegistry};
 use llm_tokenizer::traits::Tokenizer;
 use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTokens};
 
@@ -68,14 +67,14 @@ impl Tokenizer for NullTokenizer {
 
 // Both registries borrow processor refs that callers hold across requests,
 // so they must outlive every consumer — `LazyLock` gives them `'static`.
-static REGISTRY: LazyLock<ImageProcessorRegistry> =
-    LazyLock::new(ImageProcessorRegistry::with_defaults);
+static REGISTRY: LazyLock<VisionProcessorRegistry> =
+    LazyLock::new(VisionProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
 /// Maps `(width, height) → num_image_tokens` for a single model using the
 /// model's HF `preprocessor_config.json`.
 pub struct LightseekMmCounter {
-    processor: &'static dyn ImagePreProcessor,
+    processor: &'static dyn VisionPreProcessor,
     config: PreProcessorConfig,
     model_id: String,
 }
@@ -385,6 +384,9 @@ mod tests {
             ("LLaVA-1.5", "llava-hf/llava-1.5-7b-hf", "llava"),
             ("Llama-4", "meta-llama/Llama-4-Scout-17B-16E", "llama4"),
             ("Kimi-K2.5", "moonshotai/Kimi-K2.5-Instruct", "kimi_k2_5"),
+            ("Kimi-K2.6", "moonshotai/Kimi-K2.6-Instruct", "kimi_k2_6"),
+            ("Qwen3.5", "Qwen/Qwen3.5-0.8B", "qwen3_5"),
+            ("Qwen3.6", "Qwen/Qwen3.6-35B-A3B", "qwen3_6"),
         ];
 
         let mut missing: Vec<&str> = Vec::new();

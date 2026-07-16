@@ -12,12 +12,15 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use futures::StreamExt;
 use rand::Rng;
 use tokio::sync::{Mutex, Semaphore};
+use tokio_util::sync::CancellationToken;
 
 use super::worker_query_directory::{DiscoveredQueryEndpoint, WorkerQueryEndpointDirectory};
 #[cfg(test)]
 use super::worker_query_endpoint::WorkerKvQueryEngine;
+use super::worker_query_health::spawn_kv_event_source_health_monitor;
 use super::worker_query_state::{LiveEventAction, PendingDrainAction, RecoveryKey, WorkerState};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
+use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::Indexer;
 use dynamo_kv_router::{
     indexer::WorkerKvQueryResponse,
@@ -62,11 +65,12 @@ pub struct WorkerQueryClient {
     /// Indexer for applying recovered events and worker removals.
     indexer: Indexer,
     worker_states: DashMap<WorkerId, Arc<Mutex<WorkerState>>>,
-    query_endpoints: WorkerQueryEndpointDirectory,
+    query_endpoints: Arc<WorkerQueryEndpointDirectory>,
     recovery_semaphore: Arc<Semaphore>,
+    cancellation_token: CancellationToken,
     /// Per-rank cancellation for in-flight recovery tasks; cancelled on rank
     /// removal so retry backoff stops polling workers that no longer exist.
-    recovery_cancels: DashMap<RecoveryKey, tokio_util::sync::CancellationToken>,
+    recovery_cancels: DashMap<RecoveryKey, CancellationToken>,
 }
 
 impl WorkerQueryClient {
@@ -74,33 +78,69 @@ impl WorkerQueryClient {
         component: Component,
         indexer: Indexer,
         transport: Arc<dyn WorkerQueryTransport>,
+        cancellation_token: CancellationToken,
     ) -> Arc<Self> {
         Arc::new(Self {
             component,
             transport,
             indexer,
             worker_states: DashMap::new(),
-            query_endpoints: WorkerQueryEndpointDirectory::default(),
+            query_endpoints: Arc::new(WorkerQueryEndpointDirectory::default()),
             recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
+            cancellation_token,
             recovery_cancels: DashMap::new(),
         })
     }
 
-    /// Create a new WorkerQueryClient and spawn its background discovery loop.
+    /// Create a new WorkerQueryClient and spawn its background discovery and KV event
+    /// source health-monitor loops.
     ///
     /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
-    pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
+    /// The health monitor compares those endpoints with runtime worker configuration
+    /// and reports workers whose expected KV event sources are missing.
+    pub async fn spawn(
+        component: Component,
+        indexer: Indexer,
+        workers_with_configs: RuntimeConfigWatch,
+        model: String,
+        worker_type: &'static str,
+        cancellation_token: CancellationToken,
+    ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
-        let client = Self::new(component.clone(), indexer, transport);
+        let client = Self::new(
+            component.clone(),
+            indexer,
+            transport,
+            cancellation_token.clone(),
+        );
+
+        let discovery_cancel = cancellation_token.child_token();
+        let health_cancel = cancellation_token.child_token();
+        spawn_kv_event_source_health_monitor(
+            component.clone(),
+            workers_with_configs,
+            client.query_endpoints.clone(),
+            model,
+            worker_type,
+            health_cancel.clone(),
+        );
 
         let client_bg = client.clone();
-        let cancel_token = component.drt().primary_token();
         tokio::spawn(async move {
-            if let Err(e) = client_bg.run_discovery_loop(cancel_token).await {
-                tracing::error!("WorkerQueryClient discovery loop failed: {e}");
+            match client_bg.run_discovery_loop(discovery_cancel.clone()).await {
+                Err(error) => {
+                    tracing::error!(%error, "WorkerQueryClient discovery loop failed");
+                }
+                Ok(()) if !discovery_cancel.is_cancelled() => {
+                    tracing::error!(
+                        "WorkerQueryClient discovery stream ended unexpectedly; stopping the KV event source health monitor because endpoint state may be stale"
+                    );
+                }
+                Ok(()) => {}
             }
+            health_cancel.cancel();
         });
 
         Ok(client)
@@ -396,7 +436,13 @@ impl WorkerQueryClient {
                         // the recovery identity, or use a generation that survives
                         // removal.
                         (worker_state.epoch == epoch && worker_state.ranks.contains_key(&key.1))
-                            .then(|| client.recovery_cancels.entry(key).or_default().clone())
+                            .then(|| {
+                                client
+                                    .recovery_cancels
+                                    .entry(key)
+                                    .or_insert_with(|| client.cancellation_token.child_token())
+                                    .clone()
+                            })
                     }
                     None => None,
                 };
@@ -824,7 +870,12 @@ mod tests {
         let component = make_test_component(name).await;
         let (kv_indexer, indexer) = make_test_indexer();
         let transport = Arc::new(MockWorkerQueryTransport::default());
-        let client = WorkerQueryClient::new(component, indexer, transport.clone());
+        let client = WorkerQueryClient::new(
+            component,
+            indexer,
+            transport.clone(),
+            CancellationToken::new(),
+        );
         (client, transport, kv_indexer)
     }
 

@@ -42,7 +42,7 @@ Backend workers register themselves using the `register_model` API. For accurate
 | `--router-prefill-load-scale <float>` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
 | `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model; see [Routing Concepts](router-concepts.md#active-load-modeling) and [Configuration and Tuning](router-configuration.md#aic-prefill-load-model) |
-| `--router-queue-threshold <float>` | `16.0` | Queue threshold fraction; priority hints only reorder requests while this queue is non-empty |
+| `--router-queue-threshold <float>` | disabled | Queue threshold fraction; setting a numeric value enables queueing, where priority hints reorder waiting requests |
 | `--router-queue-policy <str>` | `fcfs` | Scheduling policy for the queue: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
 | `--serve-indexer` | `false` | Serve the Dynamo-native remote indexer from this frontend/router on the worker component |
 | `--use-remote-indexer` | `false` | Query the worker component's served remote indexer instead of maintaining a local overlap indexer |
@@ -155,9 +155,9 @@ When using KV routing, the router needs to know what each worker has cached. The
 
 | Event Mode | How to Enable | Description |
 |------------|---------------|-------------|
-| **NATS Core (local indexer)** | Router default (no router flag) | Workers maintain a local indexer; configure backend-side KV event publishing so the router can recover state and receive events via NATS Core |
-| **JetStream (durable)** | `--router-durable-kv-events` | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
-| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; the standalone `dynamo.indexer` service aggregates events |
+| **ZMQ (local indexer)** | Router default (no router flag) | Workers maintain a local indexer and publish KV events via ZMQ PUB sockets; the router recovers state by querying live workers. This is the default event plane for all backends |
+| **NATS Core (local indexer)** | `--event-plane nats` (or `DYN_EVENT_PLANE=nats`) | Same local-indexer model, but events flow over NATS Core instead of ZMQ. |
+| **JetStream (durable)** | `--router-durable-kv-events` (requires `--event-plane nats`) | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
 | **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
 
 ### Aggregated vs. Disaggregated Topology

@@ -63,7 +63,7 @@ neither the bind expression nor process identity is a configuration parameter.
 Peer connections are directional. For bidirectional synchronization, configure each
 replica with the other replica's reachable ZMQ endpoint. All replicas must independently
 receive the same worker registrations before lifecycle traffic begins. A replica event
-for an unknown `(model_name, tenant_id)`, block size, worker ID, or DP rank is dropped.
+for an unknown `(model_name, routing_group)`, block size, worker ID, or DP rank is dropped.
 Replica traffic never creates workers.
 
 The transport is bounded and best-effort. A full queue drops new events rather than
@@ -72,6 +72,12 @@ after peer registration. There is no acknowledgement, replay, snapshot, or gap r
 `/add`, `/prefill_complete`, and `/free` should normally remain sticky to the replica
 that accepted `/add`; replica synchronization provides advisory peer state rather than
 cross-replica lifecycle ownership.
+
+> [!WARNING]
+> The replica envelope uses `routing_group` on the existing v1 topic and is not compatible
+> with binaries that send `tenant_id`. Drain lifecycle traffic, stop all connected replicas,
+> upgrade them together, re-register worker catalogs, and then resume traffic. Active advisory
+> state is not migrated.
 
 Peers may also be managed dynamically:
 
@@ -103,7 +109,7 @@ methods, return:
 {"error": "concise description"}
 ```
 
-`tenant_id` defaults to `"default"` when omitted. Request bodies use Axum's default
+`routing_group` defaults to `"default"` when omitted. Request bodies use Axum's default
 bounded JSON handling.
 
 ## Topology API
@@ -116,7 +122,7 @@ Register one contiguous data-parallel range:
 {
   "worker_id": 7,
   "model_name": "llama-3-8b",
-  "tenant_id": "default",
+  "routing_group": "default",
   "block_size": 16,
   "dp_start": 0,
   "dp_size": 2
@@ -124,8 +130,8 @@ Register one contiguous data-parallel range:
 ```
 
 Returns `201`. `block_size` and `dp_size` must be positive, and the DP range must not
-overflow. Workers in the same `(model_name, tenant_id)` tracker must use the same block
-size. Worker IDs are scoped by `(model_name, tenant_id)`.
+overflow. Workers in the same `(model_name, routing_group)` tracker must use the same block
+size. Worker IDs are scoped by `(model_name, routing_group)`.
 
 ### `POST /unregister`
 
@@ -135,7 +141,7 @@ Remove a worker's full DP range and active requests immediately:
 {
   "worker_id": 7,
   "model_name": "llama-3-8b",
-  "tenant_id": "default"
+  "routing_group": "default"
 }
 ```
 
@@ -143,14 +149,14 @@ Returns `200`, or `404` if the registration does not exist.
 
 ### `GET /workers`
 
-List workers with independent optional `model_name` and `tenant_id` filters:
+List workers with independent optional `model_name` and `routing_group` filters:
 
 ```json
 [
   {
     "worker_id": 7,
     "model_name": "llama-3-8b",
-    "tenant_id": "default",
+    "routing_group": "default",
     "block_size": 16,
     "dp_start": 0,
     "dp_size": 2
@@ -169,7 +175,7 @@ Record prompt blocks on a registered worker rank:
 ```json
 {
   "model_name": "llama-3-8b",
-  "tenant_id": "default",
+  "routing_group": "default",
   "request_id": "req-123",
   "worker_id": 7,
   "dp_rank": 0,
@@ -189,7 +195,7 @@ Mark prompt processing complete:
 ```json
 {
   "model_name": "llama-3-8b",
-  "tenant_id": "default",
+  "routing_group": "default",
   "request_id": "req-123"
 }
 ```
@@ -204,12 +210,12 @@ Release prompt blocks and any remaining prefill state:
 ```json
 {
   "model_name": "llama-3-8b",
-  "tenant_id": "default",
+  "routing_group": "default",
   "request_id": "req-123"
 }
 ```
 
-Returns `200`. Free is idempotent while the model/tenant tracker exists, including for
+Returns `200`. Free is idempotent while the model/routing-group tracker exists, including for
 an unknown request. Unknown trackers return `404`.
 
 Lifecycle writes preserve the core slot tracker's arrival ordering. Consumers should
@@ -222,14 +228,14 @@ older than 300 seconds may be removed by inherited stale-request cleanup.
 
 ### `GET /loads`
 
-Read current load snapshots with independent optional `model_name` and `tenant_id`
+Read current load snapshots with independent optional `model_name` and `routing_group`
 filters:
 
 ```json
 [
   {
     "model_name": "llama-3-8b",
-    "tenant_id": "default",
+    "routing_group": "default",
     "worker_id": 7,
     "dp_rank": 0,
     "active_prefill_tokens": 48,
@@ -247,7 +253,7 @@ Project the loads for a new request:
 ```json
 {
   "model_name": "llama-3-8b",
-  "tenant_id": "default",
+  "routing_group": "default",
   "sequence_hashes": [101, -22, 303, 404],
   "new_isl_tokens": 48
 }

@@ -1,0 +1,1074 @@
+meta:
+  catch_all: '@ai-dynamo/dynamo-runtime-codeowners'
+areas:
+- label: frontend
+  github_team: '@ai-dynamo/dynamo-frontend-codeowners'
+  path_globs:
+  - components/src/dynamo/common/http/
+  - components/src/dynamo/common/protocols/
+  - components/src/dynamo/frontend/
+  - components/src/dynamo/frontend/tests/
+  - examples/chat_templates/
+  - lib/bindings/python/rust/parsers.rs
+  - lib/bindings/python/tests/test_parsers.py
+  - lib/llm/src/entrypoint.rs
+  - lib/llm/src/entrypoint/
+  - lib/llm/src/entrypoint/input.rs
+  - lib/llm/src/entrypoint/input/
+  - lib/llm/src/grpc.rs
+  - lib/llm/src/grpc/
+  - lib/llm/src/grpc/protos/
+  - lib/llm/src/grpc/service.rs
+  - lib/llm/src/grpc/service/
+  - lib/llm/src/http.rs
+  - lib/llm/src/http/
+  - lib/llm/src/http/service.rs
+  - lib/llm/src/http/service/
+  - lib/llm/src/lora.rs
+  - lib/llm/src/lora/
+  - lib/llm/src/preprocessor.rs
+  - lib/llm/src/preprocessor/
+  - lib/llm/src/preprocessor/tools/
+  - lib/llm/src/protocols.rs
+  - lib/llm/src/protocols/
+  - lib/llm/src/protocols/anthropic/
+  - lib/llm/src/protocols/common.rs
+  - lib/llm/src/protocols/common/
+  - lib/llm/src/protocols/openai.rs
+  - lib/llm/src/protocols/openai/
+  - lib/llm/tests/test_reasoning_parser.rs
+  - lib/llm/tests/test_streaming_tool_parsers.rs
+  - tests/frontend/
+  - tests/frontend/grpc/
+- label: agents
+  github_team: '@ai-dynamo/dynamo-agents-codeowners'
+  path_globs: []
+- label: router
+  github_team: '@ai-dynamo/dynamo-router-codeowners'
+  path_globs:
+  - components/src/dynamo/global_router/
+  - components/src/dynamo/global_router/tests/
+  - components/src/dynamo/router/
+  - components/src/dynamo/thunderagent_router/
+  - lib/kv-router/
+  - lib/kv-router/src/indexer/
+  - lib/kv-router/src/recovery/
+  - lib/kv-router/src/scheduling/
+  - lib/kv-router/src/sequences/
+  - lib/kv-router/src/zmq_wire/
+  - lib/kv-router/tests/
+  - lib/llm/src/kv_router.rs
+  - lib/llm/src/kv_router/
+  - lib/llm/src/kv_router/indexer/
+  - lib/llm/src/kv_router/prefill_router/
+  - lib/llm/src/kv_router/publisher/
+  - tests/router/
+  - tests/router/configs/
+  - examples/router/policy-class-queues.yaml
+- label: backend-vllm
+  github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
+  path_globs:
+  - components/src/dynamo/vllm/
+  - components/src/dynamo/vllm/tests/
+  - examples/backends/vllm/
+  - lib/vllm-rs-backend/Cargo.toml
+  - lib/vllm-rs-backend/src/
+- label: backend-trtllm
+  github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
+  path_globs:
+  - components/src/dynamo/trtllm/
+  - components/src/dynamo/trtllm/configs/
+  - components/src/dynamo/trtllm/engines/
+  - components/src/dynamo/trtllm/logits_processing/
+  - components/src/dynamo/trtllm/request_handlers/
+  - components/src/dynamo/trtllm/tests/
+  - components/src/dynamo/trtllm/utils/
+  - components/src/dynamo/trtllm/workers/
+  - examples/backends/trtllm/
+- label: backend-sglang
+  github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
+  path_globs:
+  - components/src/dynamo/sglang/
+  - components/src/dynamo/sglang_sidecar/
+  - components/src/dynamo/sglang/request_handlers/
+  - components/src/dynamo/sglang/tests/
+  - examples/backends/sglang/
+  - lib/sglang-sidecar/
+- label: kv-memory
+  github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
+  path_globs:
+  - deploy/pre-deployment/nixl/
+  - lib/bindings/kvbm/
+  - lib/bindings/python/src/dynamo/nixl_connect/
+  - lib/kv-hashing/
+  - lib/kvbm-common/
+  - lib/kvbm-config/
+  - lib/kvbm-consolidator/
+  - lib/kvbm-engine/
+  - lib/kvbm-engine/bin/
+  - lib/kvbm-engine/docs/
+  - lib/kvbm-engine/scripts/
+  - lib/kvbm-engine/src/collectives/
+  - lib/kvbm-engine/src/leader/
+  - lib/kvbm-engine/src/object/
+  - lib/kvbm-engine/src/offload/
+  - lib/kvbm-engine/src/pubsub/
+  - lib/kvbm-engine/src/runtime/
+  - lib/kvbm-engine/src/testing/
+  - lib/kvbm-engine/src/worker/
+  - lib/kvbm-kernels/
+  - lib/kvbm-kernels/cuda/
+  - lib/kvbm-kernels/examples/
+  - lib/kvbm-kernels/tests/
+  - lib/kvbm-logical/
+  - lib/kvbm-logical/docs/
+  - lib/kvbm-logical/src/blocks/
+  - lib/kvbm-logical/src/events/
+  - lib/kvbm-logical/src/integrations/
+  - lib/kvbm-logical/src/manager/
+  - lib/kvbm-logical/src/metrics/
+  - lib/kvbm-logical/src/pools/
+  - lib/kvbm-logical/src/registry/
+  - lib/kvbm-logical/src/sequence/
+  - lib/kvbm-logical/src/testing/
+  - lib/kvbm-physical/
+  - lib/kvbm-physical/docs/
+  - lib/kvbm-physical/src/layout/
+  - lib/kvbm-physical/src/manager/
+  - lib/kvbm-physical/src/testing/
+  - lib/kvbm-physical/src/transfer/
+  - lib/llm/src/block_manager.md
+  - lib/llm/src/block_manager.rs
+  - lib/llm/src/block_manager/
+  - lib/llm/src/block_manager/block.rs
+  - lib/llm/src/block_manager/block/
+  - lib/llm/src/block_manager/connector.rs
+  - lib/llm/src/block_manager/connector/
+  - lib/llm/src/block_manager/controller.rs
+  - lib/llm/src/block_manager/controller/
+  - lib/llm/src/block_manager/distributed.rs
+  - lib/llm/src/block_manager/distributed/
+  - lib/llm/src/block_manager/kv_consolidator/
+  - lib/llm/src/block_manager/layout.rs
+  - lib/llm/src/block_manager/layout/
+  - lib/llm/src/block_manager/offload.rs
+  - lib/llm/src/block_manager/offload/
+  - lib/llm/src/block_manager/pool.rs
+  - lib/llm/src/block_manager/pool/
+  - lib/llm/src/block_manager/state.rs
+  - lib/llm/src/block_manager/state/
+  - lib/llm/src/block_manager/storage.rs
+  - lib/llm/src/block_manager/storage/
+  - lib/llm/src/block_manager/v2.rs
+  - lib/llm/src/block_manager/v2/
+  - lib/llm/src/block_manager/v2/physical/transfer/nixl_agent/
+  - lib/llm/src/kv.rs
+  - lib/llm/src/kv/
+  - lib/memory/
+  - lib/memory/bin/
+  - lib/memory/src/nixl.rs
+  - lib/memory/src/nixl/
+  - lib/memory/src/numa/
+  - lib/memory/src/pool/
+  - lib/tokens/
+  - lib/tokens/docs/
+  - tests/kvbm_integration/
+  - tests/lmcache/
+- label: multimodal
+  github_team: '@ai-dynamo/dynamo-multimodal-codeowners'
+  path_globs:
+  - benchmarks/multimodal/
+  - benchmarks/omni/
+  - components/src/dynamo/common/multimodal/
+  - examples/custom_encoder/
+  - components/src/dynamo/trtllm/multimodal/
+  - components/src/dynamo/vllm/multimodal_handlers/
+  - components/src/dynamo/vllm/multimodal_utils/
+  - components/src/dynamo/vllm/omni/
+  - lib/llm/src/preprocessor/media.rs
+  - lib/llm/src/preprocessor/media/
+  - lib/renderer/
+  - tests/benchmarks/multimodal/
+  - tests/mm_router/
+- label: diffusion
+  github_team: '@ai-dynamo/dynamo-diffusion-codeowners'
+  path_globs:
+  - components/src/dynamo/sglang/request_handlers/image_diffusion/
+  - components/src/dynamo/trtllm/request_handlers/diffusion/
+  - examples/diffusers/
+- label: planner
+  github_team: '@ai-dynamo/dynamo-planner-codeowners'
+  path_globs:
+  - components/src/dynamo/global_planner/
+  - components/src/dynamo/global_planner/tests/
+  - components/src/dynamo/planner/
+  - components/src/dynamo/planner/config/
+  - components/src/dynamo/planner/connectors/
+  - components/src/dynamo/planner/core/
+  - components/src/dynamo/planner/monitoring/
+  - components/src/dynamo/planner/offline/
+  - components/src/dynamo/planner/tests/
+  - components/src/dynamo/profiler/
+  - components/src/dynamo/profiler/tests/
+  - components/src/dynamo/profiler/utils/
+  - examples/global_planner/
+- label: runtime
+  github_team: '@ai-dynamo/dynamo-runtime-codeowners'
+  path_globs:
+  - components/src/dynamo/common/
+  - components/src/dynamo/common/backend/
+  - components/src/dynamo/common/config_dump/
+  - components/src/dynamo/common/configuration/
+  - components/src/dynamo/common/lora/
+  - components/src/dynamo/common/memory/
+  - components/src/dynamo/common/tests/
+  - components/src/dynamo/common/utils/
+  - examples/backends/sample/
+  - examples/backends/tritonserver/
+  - examples/common/
+  - examples/custom_backend/
+  - lib/backend-common/
+  - lib/backend-common/examples/
+  - lib/bindings/
+  - lib/bindings/c/
+  - lib/bindings/python/
+  - lib/llm/
+  - lib/llm/benches/
+  - lib/llm/bin/
+  - lib/llm/examples/
+  - lib/llm/src/bin/
+  - lib/llm/src/common/
+  - lib/llm/src/discovery/
+  - lib/llm/src/kernels/
+  - lib/llm/src/local_model/
+  - lib/llm/src/lora/routing/
+  - lib/llm/src/model_card.rs
+  - lib/llm/src/perf/
+  - lib/llm/src/utils/
+  - lib/llm/tests/
+  - lib/runtime/
+  - lib/runtime/benches/
+  - lib/runtime/docs/
+  - lib/runtime/examples/
+  - lib/runtime/lib/
+  - lib/runtime/src/component/
+  - lib/runtime/src/compute/
+  - lib/runtime/src/config/
+  - lib/runtime/src/discovery/
+  - lib/runtime/src/pipeline/
+  - lib/runtime/src/protocols/
+  - lib/runtime/src/storage/
+  - lib/runtime/src/transports/
+  - lib/runtime/src/utils/
+  - lib/runtime/tests/
+  - lib/truthy/
+  - tests/
+  - tests/CLAUDE.md
+  - tests/README.md
+  - tests/__init__.py
+  - tests/basic/
+  - tests/conftest.py
+  - tests/dependencies/
+  - tests/hf_cache.py
+  - tests/parity/
+  - tests/report_pytest_markers.py
+  - tests/serve/
+  - tests/serve/fixtures/
+  - tests/serve/launch/
+  - tests/serve/multimodal_profiles/
+  - tests/serve/trtllm/
+  - tests/test_models_dir_flag.py
+  - tests/test_predownload_models.py
+  - tests/utils/
+- label: observability
+  github_team: '@ai-dynamo/dynamo-observability-codeowners'
+  path_globs:
+  - deploy/observability/
+  - deploy/operator/internal/observability/
+  - dev/docker-observability-xpu.yml
+  - dev/docker-observability.yml
+  - dev/observability/
+  - lib/llm/src/telemetry/
+  - lib/runtime/src/metrics.rs
+  - lib/runtime/src/metrics/
+- label: fault-tolerance
+  github_team: '@ai-dynamo/dynamo-fault-tolerance-codeowners'
+  path_globs:
+  - tests/fault_tolerance/
+  - tests/fault_tolerance/cancellation/
+  - tests/fault_tolerance/deploy/
+  - tests/fault_tolerance/etcd_ha/
+  - tests/fault_tolerance/hardware/
+  - tests/fault_tolerance/migration/
+- label: ops
+  github_team: '@ai-dynamo/dynamo-ops-codeowners'
+  path_globs:
+  - .cargo/
+  - .clang-format
+  - .coderabbit.yaml
+  - .coveragerc
+  - .devcontainer/
+  - .dockerignore
+  - .gitattributes
+  - .github/
+  - .gitignore
+  - .lycheeignore
+  - .pre-commit-config.yaml
+  - Cargo.lock
+  - Cargo.toml
+  - codespell.txt
+  - conftest.py
+  - container/Dockerfile.docs
+  - container/Dockerfile.template
+  - container/Dockerfile.test
+  - container/README.md
+  - container/compliance/
+  - container/context.yaml
+  - container/deps/
+  - container/dev/
+  - container/launch_message/
+  - container/render.py
+  - container/run.sh
+  - container/templates/
+  - container/use-sccache.sh
+  - deny.toml
+  - dev/docker-compose.yml
+  - dev/nats-server.conf
+  - dev/sanity_check.py
+  - dynamo.code-workspace
+  - hatch_build.py
+  - pyproject.toml
+  - rust-toolchain.toml
+  - scripts/
+- label: docs
+  github_team: '@ai-dynamo/dynamo-docs-codeowners'
+  path_globs:
+  - README.md
+  - README.zh-CN.md
+  - components/README.md
+  - docs/
+  - examples/README.md
+  - examples/__init__.py
+  - fern/
+  - fern/components/
+- label: process
+  github_team: '@ai-dynamo/dynamo-process-codeowners'
+  path_globs:
+  - .agents/
+  - .ai/
+  - .claude/
+  - AGENTS.md
+  - ATTRIBUTIONS-Go.md
+  - ATTRIBUTIONS-Python.md
+  - ATTRIBUTIONS-Rust.md
+  - ATTRIBUTIONS-container-frontend.md
+  - ATTRIBUTIONS.md
+  - CLAUDE.md
+  - CODEOWNERS
+  - CODE_OF_CONDUCT.md
+  - CONTRIBUTING.md
+  - CONTRIBUTORS.md
+  - DCO.md
+  - LICENSE
+  - SECURITY.md
+  - skills
+- label: operator
+  github_team: '@ai-dynamo/dynamo-operator-codeowners'
+  path_globs:
+  - deploy/CONTRIBUTING.md
+  - deploy/__init__.py
+  - deploy/helm/
+  - deploy/helm/charts/
+  - deploy/helm/charts/platform/
+  - deploy/operator/
+  - deploy/operator/api/
+  - deploy/operator/api/config/
+  - deploy/operator/api/scripts/
+  - deploy/operator/api/v1alpha1/
+  - deploy/operator/api/v1beta1/
+  - deploy/operator/cmd/
+  - deploy/operator/cmd/crd-apply/
+  - deploy/operator/config/
+  - deploy/operator/config/crd/
+  - deploy/operator/config/default/
+  - deploy/operator/config/manager/
+  - deploy/operator/config/prometheus/
+  - deploy/operator/config/rbac/
+  - deploy/operator/config/samples/
+  - deploy/operator/docs/
+  - deploy/operator/hack/
+  - deploy/operator/internal/
+  - deploy/operator/internal/cert/
+  - deploy/operator/internal/common/
+  - deploy/operator/internal/consts/
+  - deploy/operator/internal/controller/
+  - deploy/operator/internal/controller_common/
+  - deploy/operator/internal/discovery/
+  - deploy/operator/internal/dra/
+  - deploy/operator/internal/dynamo/
+  - deploy/operator/internal/featuregate/
+  - deploy/operator/internal/gpu/
+  - deploy/operator/internal/modelendpoint/
+  - deploy/operator/internal/namespace_scope/
+  - deploy/operator/internal/rbac/
+  - deploy/operator/internal/secret/
+  - deploy/operator/internal/secrets/
+  - deploy/operator/internal/webhook/
+  - deploy/operator/internal/workerpool/
+  - deploy/operator/samples/
+  - deploy/operator/test/
+  - deploy/operator/test/e2e/
+  - deploy/operator/test/utils/
+  - deploy/pre-deployment/
+  - deploy/utils/
+  - deploy/utils/manifests/
+  - deploy/utils/tests/
+  - examples/deployments/
+  - tests/deploy/
+- label: gms
+  github_team: '@ai-dynamo/dynamo-gms-codeowners'
+  path_globs:
+  - components/src/dynamo/common/snapshot/
+  - deploy/helm/charts/snapshot/
+  - deploy/operator/internal/checkpoint/
+  - deploy/operator/internal/gms/
+  - deploy/snapshot/
+  - deploy/snapshot/cmd/
+  - deploy/snapshot/cmd/agent/
+  - deploy/snapshot/cmd/cuda-checkpoint-helper/
+  - deploy/snapshot/cmd/nsrestore/
+  - deploy/snapshot/cmd/snapshotctl/
+  - deploy/snapshot/internal/
+  - deploy/snapshot/internal/controller/
+  - deploy/snapshot/internal/criu/
+  - deploy/snapshot/internal/cuda/
+  - deploy/snapshot/internal/executor/
+  - deploy/snapshot/internal/logging/
+  - deploy/snapshot/internal/runtime/
+  - deploy/snapshot/internal/types/
+  - deploy/snapshot/protocol/
+  - lib/gpu_memory_service/
+  - lib/gpu_memory_service/cli/
+  - lib/gpu_memory_service/client/
+  - lib/gpu_memory_service/common/
+  - lib/gpu_memory_service/failover_lock/
+  - lib/gpu_memory_service/integrations/
+  - lib/gpu_memory_service/server/
+  - lib/gpu_memory_service/snapshot/
+  - lib/gpu_memory_service/tests/
+  - tests/gpu_memory_service/
+  - tests/gpu_memory_service/common/
+- label: epp
+  github_team: '@ai-dynamo/dynamo-epp-codeowners'
+  path_globs:
+  - deploy/inference-gateway/
+  - deploy/inference-gateway/epp/
+  - deploy/inference-gateway/epp/cmd/
+  - deploy/inference-gateway/epp/pkg/
+  - deploy/inference-gateway/scripts/
+- label: tokenspeed
+  github_team: '@ai-dynamo/dynamo-tokenspeed-codeowners'
+  path_globs:
+  - components/src/dynamo/tokenspeed/
+  - components/src/dynamo/tokenspeed/tests/
+- label: rl
+  github_team: '@ai-dynamo/dynamo-rl-codeowners'
+  path_globs:
+  - components/src/dynamo/common/rl/
+  - lib/rl/
+  - tests/rl/
+- label: performance
+  github_team: '@ai-dynamo/dynamo-performance-codeowners'
+  path_globs:
+  - benchmarks/README.md
+  - benchmarks/__init__.py
+  - benchmarks/burstgpt_loadgen/
+  - benchmarks/frontend/
+  - benchmarks/incluster/
+  - benchmarks/mocker/README.md
+  - benchmarks/mocker/bench_aic_concurrency.py
+  - benchmarks/mocker/bench_aic_rust_callback.py
+  - benchmarks/nat_trace/
+  - benchmarks/prefix_data_generator/
+  - benchmarks/pyproject.toml
+  - benchmarks/request_trace/README.md
+  - benchmarks/request_trace/__init__.py
+  - benchmarks/request_trace/convert_to_perfetto.py
+  - benchmarks/request_trace/validate_convert_to_perfetto.py
+  - benchmarks/router/
+  - benchmarks/sin_load_generator/
+  - components/src/dynamo/mocker/
+  - components/src/dynamo/mocker/tests/
+  - components/src/dynamo/mocker/utils/
+  - components/src/dynamo/replay/
+  - examples/backends/mocker/
+  - lib/backend-common/examples/mocker/
+  - lib/bench/
+  - lib/bench/coding/
+  - lib/bench/kv_router/
+  - lib/bench/src/coding/
+  - lib/bench/testdata/
+  - lib/bench/tests/
+  - lib/data-gen/
+  - lib/mocker/
+  - lib/mocker/src/cache/
+  - lib/mocker/src/common/
+  - lib/mocker/src/kv_manager/
+  - lib/mocker/src/kvbm_offload/
+  - lib/mocker/src/loadgen/
+  - lib/mocker/src/replay/
+  - lib/mocker/src/scheduler/
+  - recipes/
+  - recipes/CONTRIBUTING.md
+  - recipes/README.md
+  - recipes/deepseek-r1/
+  - recipes/deepseek-v32-fp4/
+  - recipes/deepseek-v4/
+  - recipes/gaie_checks.sh
+  - recipes/glm-5-nvfp4/
+  - recipes/gpt-oss-120b/
+  - recipes/hf_hub_secret/
+  - recipes/kimi-k2.5/
+  - recipes/llama-3-70b/
+  - recipes/nemotron-3-nano-omni/
+  - recipes/nemotron-3-super-fp8/
+  - recipes/qwen3-235b-a22b-fp8/
+  - recipes/qwen3-32b-fp8/
+  - recipes/qwen3-32b/
+  - recipes/qwen3-vl-30b/
+  - recipes/qwen3.6-35b/
+  - tests/benchmarks/
+  - tests/vllm_self_benchmark/
+- label: xpu
+  github_team: '@ai-dynamo/dynamo-xpu-codeowners'
+  path_globs:
+  - .github/workflows/pr-xpu.yaml
+  - .github/workflows/xpu-ci.yaml
+  - container/templates/sglang_xpu_framework.Dockerfile
+  - dev/docker-observability-xpu.yml
+  - dev/observability/prometheus-xpu.yml
+  - dev/observability/xpu-alert-rules.yml
+  - dev/observability/xpu_smi_exporter.py
+  - tests/router/test_router_e2e_with_vllm_xpu.py
+  - tests/serve/multimodal_profiles/vllm_xpu.py
+  - tests/serve/test_vllm_xpu.py
+shared:
+- glob: components/src/dynamo/thunderagent_router/
+  owners:
+  - router
+  - agents
+- glob: .agents/
+  owners:
+  - process
+  - agents
+- glob: lib/llm/src/protocols/agents.rs
+  owners:
+  - frontend
+  - agents
+- glob: docs/agents/
+  owners:
+  - docs
+  - agents
+- glob: docs/digest/agentic-inference/
+  owners:
+  - docs
+  - agents
+- glob: docs/backends/sglang/agents.md
+  owners:
+  - docs
+  - agents
+- glob: tests/frontend/agent_smoke_inputs.py
+  owners:
+  - frontend
+  - agents
+- glob: components/src/dynamo/vllm/multimodal_handlers/
+  owners:
+  - backend-vllm
+  - multimodal
+- glob: components/src/dynamo/vllm/multimodal_utils/
+  owners:
+  - backend-vllm
+  - multimodal
+- glob: components/src/dynamo/vllm/omni/
+  owners:
+  - backend-vllm
+  - multimodal
+- glob: components/src/dynamo/vllm/kv_connector_protocols.py
+  owners:
+  - backend-vllm
+  - kv-memory
+- glob: components/src/dynamo/sglang/request_handlers/multimodal/
+  owners:
+  - backend-sglang
+  - multimodal
+- glob: components/src/dynamo/sglang/request_handlers/image_diffusion/
+  owners:
+  - backend-sglang
+  - diffusion
+- glob: components/src/dynamo/sglang/request_handlers/video_generation/
+  owners:
+  - backend-sglang
+  - diffusion
+- glob: components/src/dynamo/trtllm/multimodal/
+  owners:
+  - backend-trtllm
+  - multimodal
+- glob: components/src/dynamo/trtllm/request_handlers/diffusion/
+  owners:
+  - backend-trtllm
+  - diffusion
+- glob: components/src/dynamo/trtllm/workers/image_diffusion_worker.py
+  owners:
+  - backend-trtllm
+  - diffusion
+- glob: components/src/dynamo/trtllm/workers/video_diffusion_worker.py
+  owners:
+  - backend-trtllm
+  - diffusion
+- glob: components/src/dynamo/vllm/health_check.py
+  owners:
+  - backend-vllm
+  - observability
+- glob: components/src/dynamo/vllm/engine_monitor.py
+  owners:
+  - backend-vllm
+  - observability
+- glob: components/src/dynamo/sglang/health_check.py
+  owners:
+  - backend-sglang
+  - observability
+- glob: components/src/dynamo/sglang/request_handlers/embedding/metrics.py
+  owners:
+  - backend-sglang
+  - observability
+- glob: components/src/dynamo/trtllm/health_check.py
+  owners:
+  - backend-trtllm
+  - observability
+- glob: components/src/dynamo/trtllm/engine_monitor.py
+  owners:
+  - backend-trtllm
+  - observability
+- glob: components/src/dynamo/trtllm/metrics.py
+  owners:
+  - backend-trtllm
+  - observability
+- glob: components/src/dynamo/vllm/logits_processing/
+  owners:
+  - backend-vllm
+  - frontend
+- glob: components/src/dynamo/sglang/logits_processing/
+  owners:
+  - backend-sglang
+  - frontend
+- glob: components/src/dynamo/trtllm/logits_processing/
+  owners:
+  - backend-trtllm
+  - frontend
+- glob: components/src/dynamo/common/backend/metrics.py
+  owners:
+  - runtime
+  - observability
+- glob: components/src/dynamo/common/backend/publisher.py
+  owners:
+  - runtime
+  - kv-memory
+- glob: components/src/dynamo/common/backend/telemetry.py
+  owners:
+  - runtime
+  - observability
+- glob: components/src/dynamo/common/forward_pass_metrics.py
+  owners:
+  - runtime
+  - observability
+- glob: components/src/dynamo/common/memory/multimodal_embedding_cache_manager.py
+  owners:
+  - runtime
+  - multimodal
+- glob: components/src/dynamo/common/multimodal/routing_utils.py
+  owners:
+  - multimodal
+  - router
+- glob: components/src/dynamo/common/protocols/
+  owners:
+  - frontend
+  - multimodal
+- glob: components/src/dynamo/common/recv_forward_pass_metrics.py
+  owners:
+  - runtime
+  - observability
+- glob: components/src/dynamo/common/utils/image_utils.py
+  owners:
+  - runtime
+  - diffusion
+- glob: components/src/dynamo/common/utils/label_injecting_collector.py
+  owners:
+  - runtime
+  - observability
+- glob: components/src/dynamo/common/utils/prometheus.py
+  owners:
+  - runtime
+  - observability
+- glob: components/src/dynamo/common/utils/video_utils.py
+  owners:
+  - runtime
+  - diffusion
+- glob: components/src/dynamo/planner/monitoring/planner_metrics.py
+  owners:
+  - planner
+  - observability
+- glob: components/src/dynamo/planner/monitoring/traffic_metrics.py
+  owners:
+  - planner
+  - observability
+- glob: components/src/dynamo/sglang/init_diffusion.py
+  owners:
+  - backend-sglang
+  - diffusion
+- glob: components/src/dynamo/sglang/init_multimodal.py
+  owners:
+  - backend-sglang
+  - multimodal
+- glob: components/src/dynamo/sglang/publisher.py
+  owners:
+  - backend-sglang
+  - kv-memory
+  - observability
+- glob: components/src/dynamo/trtllm/encode_helper.py
+  owners:
+  - backend-trtllm
+  - multimodal
+- glob: components/src/dynamo/trtllm/engines/diffusion_engine.py
+  owners:
+  - backend-trtllm
+  - diffusion
+- glob: components/src/dynamo/trtllm/publisher.py
+  owners:
+  - backend-trtllm
+  - kv-memory
+- glob: components/src/dynamo/vllm/cache_info.py
+  owners:
+  - backend-vllm
+  - kv-memory
+- glob: components/src/dynamo/vllm/instrumented_scheduler.py
+  owners:
+  - backend-vllm
+  - observability
+- glob: components/src/dynamo/vllm/publisher.py
+  owners:
+  - backend-vllm
+  - observability
+- glob: deploy/inference-gateway/epp/pkg/plugins/disagg/
+  owners:
+  - epp
+  - router
+- glob: deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer/
+  owners:
+  - epp
+  - router
+- glob: deploy/operator/config/prometheus/monitor.yaml
+  owners:
+  - operator
+  - observability
+- glob: lib/llm/src/fpm_publisher.rs
+  owners:
+  - runtime
+  - observability
+- glob: lib/llm/src/mocker/
+  owners:
+  - runtime
+  - performance
+- glob: lib/llm/src/protocols/openai/audios/
+  owners:
+  - frontend
+  - multimodal
+- glob: lib/llm/src/protocols/openai/images/
+  owners:
+  - frontend
+  - diffusion
+- glob: lib/llm/src/protocols/openai/videos/
+  owners:
+  - frontend
+  - diffusion
+- glob: lib/llm/src/request_trace/
+  owners:
+  - agents
+  - observability
+- glob: lib/runtime/src/health_check.rs
+  owners:
+  - runtime
+  - observability
+- glob: lib/runtime/src/logging.rs
+  owners:
+  - runtime
+  - observability
+- glob: lib/runtime/src/metrics/frontend_perf.rs
+  owners:
+  - observability
+  - frontend
+- glob: lib/runtime/src/system_health.rs
+  owners:
+  - runtime
+  - observability
+- glob: lib/runtime/src/system_status_server.rs
+  owners:
+  - runtime
+  - observability
+- glob: benchmarks/frontend/dgd/templates/
+  owners:
+  - performance
+  - operator
+- glob: benchmarks/frontend/scripts/sweep_k8s/metrics.py
+  owners:
+  - performance
+  - observability
+- glob: benchmarks/multimodal/image/
+  owners:
+  - multimodal
+  - performance
+- glob: benchmarks/multimodal/sweep/
+  owners:
+  - multimodal
+  - performance
+- glob: benchmarks/router/
+  owners:
+  - performance
+  - router
+- glob: components/src/dynamo/mocker/utils/planner_profiler_perf_data_converter.py
+  owners:
+  - performance
+  - planner
+- glob: components/src/dynamo/planner/connectors/kubernetes.py
+  owners:
+  - planner
+  - operator
+- glob: components/src/dynamo/planner/connectors/kubernetes_api.py
+  owners:
+  - planner
+  - operator
+- glob: components/src/dynamo/profiler/utils/dgd_generation.py
+  owners:
+  - planner
+  - operator
+- glob: components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py
+  owners:
+  - planner
+  - operator
+- glob: components/src/dynamo/profiler/utils/dgdr_validate.py
+  owners:
+  - planner
+  - operator
+- glob: components/src/dynamo/sglang/protocol.py
+  owners:
+  - backend-sglang
+  - diffusion
+- glob: components/src/dynamo/sglang/request_handlers/llm/diffusion_handler.py
+  owners:
+  - backend-sglang
+  - diffusion
+- glob: components/src/dynamo/trtllm/configs/diffusion_config.py
+  owners:
+  - backend-trtllm
+  - diffusion
+- glob: components/src/dynamo/trtllm/multimodal_processor.py
+  owners:
+  - backend-trtllm
+  - multimodal
+- glob: components/src/dynamo/vllm/handlers.py
+  owners:
+  - backend-vllm
+  - rl
+- glob: components/src/dynamo/vllm/main.py
+  owners:
+  - backend-vllm
+  - kv-memory
+  - observability
+- glob: components/src/dynamo/vllm/snapshot.py
+  owners:
+  - backend-vllm
+  - gms
+- glob: components/src/dynamo/sglang/snapshot.py
+  owners:
+  - backend-sglang
+  - gms
+- glob: components/src/dynamo/trtllm/workers/llm_worker.py
+  owners:
+  - backend-trtllm
+  - gms
+- glob: components/src/dynamo/vllm/tests/test_vllm_sleep_wake_handlers.py
+  owners:
+  - backend-vllm
+  - gms
+- glob: components/src/dynamo/sglang/tests/test_sglang_gms_memory_saver.py
+  owners:
+  - backend-sglang
+  - gms
+- glob: components/src/dynamo/trtllm/tests/test_trtllm_sleep_wake_handlers.py
+  owners:
+  - backend-trtllm
+  - gms
+- glob: components/src/dynamo/trtllm/tests/test_trtllm_gms_mpi_bootstrap.py
+  owners:
+  - backend-trtllm
+  - gms
+- glob: components/src/dynamo/trtllm/tests/test_trtllm_gms_delay_commit.py
+  owners:
+  - backend-trtllm
+  - gms
+- glob: deploy/inference-gateway/ext-proc/
+  owners:
+  - epp
+  - router
+- glob: deploy/observability/grafana-operator-dashboard-configmap.yaml
+  owners:
+  - observability
+  - operator
+- glob: deploy/observability/grafana-planner-dashboard-configmap.yaml
+  owners:
+  - observability
+  - planner
+- glob: deploy/power-agent/
+  owners:
+  - operator
+  - planner
+- glob: deploy/operator/internal/gpu/discovery.go
+  owners:
+  - operator
+  - observability
+- glob: dev/docker-compose.yml
+  owners:
+  - ops
+  - runtime
+- glob: dev/docker-observability-xpu.yml
+  owners:
+  - observability
+  - xpu
+- glob: dev/nats-server.conf
+  owners:
+  - ops
+  - runtime
+- glob: dev/observability/grafana_dashboards/kvbm.json
+  owners:
+  - observability
+  - kv-memory
+- glob: lib/backend-common/src/metrics.rs
+  owners:
+  - runtime
+  - observability
+- glob: lib/backend-common/src/telemetry.rs
+  owners:
+  - runtime
+  - observability
+- glob: lib/bench/kv_router/
+  owners:
+  - performance
+  - router
+- glob: lib/kv-router/src/services/shared_cache/
+  owners:
+  - router
+  - kv-memory
+- glob: lib/kv-router/src/zmq_wire/extra_keys.rs
+  owners:
+  - router
+  - multimodal
+- glob: lib/kvbm-config/src/messenger.rs
+  owners:
+  - kv-memory
+  - runtime
+- glob: lib/kvbm-consolidator/src/egress/zmq_publisher.rs
+  owners:
+  - kv-memory
+  - runtime
+- glob: lib/kvbm-consolidator/src/ingress/zmq_subscriber.rs
+  owners:
+  - kv-memory
+  - runtime
+- glob: lib/kvbm-engine/src/pubsub/nats.rs
+  owners:
+  - kv-memory
+  - runtime
+- glob: lib/kvbm-logical/src/metrics/
+  owners:
+  - kv-memory
+  - observability
+- glob: lib/llm/src/block_manager/metrics_kvbm.rs
+  owners:
+  - kv-memory
+  - observability
+- glob: lib/llm/src/http/service/busy_threshold.rs
+  owners:
+  - frontend
+  - kv-memory
+- glob: lib/llm/src/http/service/clear_kv_blocks.rs
+  owners:
+  - frontend
+  - kv-memory
+- glob: lib/llm/src/http/service/metrics.rs
+  owners:
+  - frontend
+  - observability
+- glob: lib/llm/src/kv_router/shared_cache.rs
+  owners:
+  - router
+  - kv-memory
+- glob: lib/llm/src/preprocessor/lightseek_mm.rs
+  owners:
+  - frontend
+  - multimodal
+  - router
+- glob: lib/llm/src/preprocessor/media/rdma.rs
+  owners:
+  - multimodal
+  - router
+- glob: lib/llm/src/protocols/openai/images.rs
+  owners:
+  - frontend
+  - diffusion
+- glob: lib/llm/src/protocols/openai/videos.rs
+  owners:
+  - frontend
+  - diffusion
+- glob: lib/mocker/src/kv_manager/
+  owners:
+  - performance
+  - kv-memory
+- glob: lib/mocker/src/kvbm_offload/
+  owners:
+  - performance
+  - kv-memory
+- glob: lib/mocker/src/replay/planner_handle.rs
+  owners:
+  - performance
+  - planner
+- glob: lib/runtime/src/nvtx.rs
+  owners:
+  - runtime
+  - performance
+- glob: tests/deploy/
+  owners:
+  - ops
+  - operator
+- glob: tests/fault_tolerance/cancellation/utils.py
+  owners:
+  - fault-tolerance
+  - observability
+- glob: tests/fault_tolerance/etcd_ha/utils.py
+  owners:
+  - fault-tolerance
+  - runtime
+- glob: tests/fault_tolerance/hardware/fault_injection_service/api_service/main.py
+  owners:
+  - fault-tolerance
+  - observability
+- glob: tests/fault_tolerance/migration/utils.py
+  owners:
+  - fault-tolerance
+  - observability
+- glob: tests/gpu_memory_service/
+  owners:
+  - gms
+classify:
+  filetype_rules:
+  - pattern: '*Dockerfile*'
+    coowner: ops
+    advisory: false
