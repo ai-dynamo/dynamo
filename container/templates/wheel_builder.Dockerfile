@@ -301,10 +301,17 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # narrow allowlist keeps the shipped libav*.so limited to that set (HW NVDEC can
 # be re-added explicitly if a decode feature ever needs H.264/H.265). The
 # allowlist covers exactly two paths: (1) the encode CLI ingesting rawvideo
-# frames from imageio over a pipe, and (2) the Rust media-ffmpeg VideoDecoder
-# decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4). Image decode
-# does not use ffmpeg (it goes through the Rust `image` crate), so no still-image
-# decoders are enabled here.
+# frames from imageio over a pipe and muxing h264_nvenc output into mp4, and
+# (2) the Rust media-ffmpeg VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test
+# fixtures are VP9-in-mp4). Image decode does not use ffmpeg (it goes through the
+# Rust `image` crate), so no still-image decoders are enabled here.
+#
+# The h264 PARSER (not decoder) is enabled: the ffmpeg CLI attaches an output
+# parser for the encoded stream, and the mov/mp4 muxer needs it to frame
+# h264_nvenc packets and write avcC extradata. Without it the video-generation
+# encode aborts ("Broken pipe" from imageio). This is parse-only for our own
+# encoder output — no H.264 *decoder* is added, so the OPS-7665 decode surface
+# is unchanged.
 #
 # Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
 # this also trims the decoder surface to what we ship.
@@ -367,7 +374,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-demuxers \
         --enable-demuxer=mov,matroska,rawvideo \
         --disable-parsers \
-        --enable-parser=vp8,vp9 \
+        --enable-parser=vp8,vp9,h264 \
         --disable-protocols \
         --enable-protocol=file,pipe && \
     make -j$(nproc) && \
