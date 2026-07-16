@@ -320,5 +320,17 @@ js:
   # so it survives Fern-pipeline changes (see fern/js/dep-pr-comments.js).
   - path: ./js/dep-pr-comments.js
     strategy: afterInteractive
+  # DEP sidebar status pills — build-time slug→status map. MUST load BEFORE
+  # dep-status-pills.js: the pill runtime reads window.__DEP_STATUS on boot.
+  # Regenerated on every Fern build by fern/scripts/sync_deps.py so upstream
+  # DEP lifecycle changes propagate to the sidebar without a manual edit.
+  - path: ./js/dep-status-data.js
+    strategy: afterInteractive
+  # DEP sidebar status pills — injects a right-aligned lifecycle pill into
+  # each /proposals/<slug> sidebar link. Colors mirror the on-page
+  # <DepMetadata> pill (fern/main.css .dep-status-pill--*). See
+  # fern/js/dep-status-pills.js for the SPA re-render + idempotency notes.
+  - path: ./js/dep-status-pills.js
+    strategy: afterInteractive
 css:
   - ./main.css

@@ -350,8 +350,7 @@ def render_mdx(*, entry: dict[str, Any], parsed: ParsedDep) -> str:
     fm_lines.append("---")
 
     # ---------------- generated-marker comment ---------------- #
-    marker = textwrap.dedent(
-        f"""
+    marker = textwrap.dedent(f"""
         {{/*
           GENERATED FILE — DO NOT EDIT.
 
@@ -366,8 +365,7 @@ def render_mdx(*, entry: dict[str, Any], parsed: ParsedDep) -> str:
           Manifest entry: fern/scripts/deps.json
           Slug:           {slug}
         */}}
-        """
-    ).strip()
+        """).strip()
 
     # ---------------- imports ---------------- #
     imports = (
@@ -424,6 +422,160 @@ def render_mdx(*, entry: dict[str, Any], parsed: ParsedDep) -> str:
         "",
     ]
     return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Sidebar status map                                                          #
+# --------------------------------------------------------------------------- #
+#
+# The Proposals sidebar renders a right-aligned lifecycle status pill on each
+# DEP link. The pill is populated at runtime by fern/js/dep-status-pills.js
+# from a `slug → status` map on window.__DEP_STATUS. That map is materialised
+# at Fern-build time by the helpers below and written to
+# fern/js/dep-status-data.js. Two sources feed it:
+#
+#   1. Synced DEPs      — the parsed `**Status**:` field of the source
+#                         markdown, keyed by manifest `output` slug (same
+#                         slug used in docs/index.yml).
+#   2. Hand-authored    — the `status="..."` prop on <DepMetadata /> in
+#      DEPs (proposals/*.mdx) hand-authored proposals under docs/proposals/,
+#                         keyed by filename stem (matches docs/index.yml).
+#
+# When both sources supply the same slug the synced entry wins (upstream is
+# the authoritative source of truth for synced DEPs).
+
+# Regex targeting a `status="..."` attribute on the <DepMetadata /> component.
+# The component is often written across multiple lines, so we allow arbitrary
+# whitespace + other props between `<DepMetadata` and `status="..."`. Anchored
+# to the `<DepMetadata` opening tag so a `status=` on a different component
+# cannot be misattributed to the DEP.
+_DEP_META_STATUS_RE = re.compile(
+    r"<DepMetadata\b[^>]*?\bstatus\s*=\s*\"(?P<status>[^\"]*)\"",
+    re.DOTALL,
+)
+
+
+def _extract_status_from_mdx(text: str) -> str | None:
+    """Extract the `status` prop from a `<DepMetadata />` component.
+
+    Returns the string value of the first matching `status=".."` on a
+    `<DepMetadata` tag, or None when no such prop is present (e.g. README /
+    non-DEP pages, or a DEP-shaped page that predates the metadata card).
+    """
+    match = _DEP_META_STATUS_RE.search(text)
+    if not match:
+        return None
+    return match.group("status")
+
+
+# Hand-authored DEPs live directly under docs/proposals/ as *.mdx files with
+# a `<DepMetadata />` card. Meta pages (Overview + Template) are hard-excluded
+# by filename because they either lack a card (README.mdx) or are a template
+# whose status ("Draft") is not a real DEP state.
+_META_PAGE_STEMS = {"README", "TEMPLATE"}
+
+
+def discover_hand_authored_statuses(root: Path) -> dict[str, str]:
+    """Walk docs/proposals/ for hand-authored DEPs and return {slug: status}.
+
+    Slug = filename stem (the same convention docs/index.yml uses for
+    `slug:` entries). Files under docs/proposals/_generated/ are the
+    synced DEPs — they are handled by the manifest path and MUST NOT
+    appear here (or a stale committed generated file would override the
+    fresh sync).
+    """
+    proposals = root / "docs" / "proposals"
+    if not proposals.is_dir():
+        return {}
+    out: dict[str, str] = {}
+    for path in sorted(proposals.glob("*.mdx")):
+        if path.stem in _META_PAGE_STEMS:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        status = _extract_status_from_mdx(text)
+        if status:
+            out[path.stem] = status
+    return out
+
+
+def entry_status(entry: dict[str, Any], parsed: ParsedDep) -> str:
+    """Return the sidebar status for a synced DEP.
+
+    Uses the parsed `**Status**:` field of the upstream markdown when
+    present (filtered through useful_fields so a `[TBD]` / `N/A`
+    placeholder is treated as missing). Defaults to "Draft" — the DEP-0001
+    default lifecycle state.
+    """
+    del entry  # reserved for future manifest-side overrides
+    fields = useful_fields(parsed.fields)
+    return fields.get("Status", "Draft")
+
+
+def merge_status_maps(
+    hand_authored: dict[str, str], synced: dict[str, str]
+) -> dict[str, str]:
+    """Combine hand-authored + synced status maps; synced entries win on
+    conflict (upstream is authoritative for synced DEPs)."""
+    merged: dict[str, str] = {}
+    merged.update(hand_authored)
+    merged.update(synced)
+    return merged
+
+
+def render_status_data_js(status_map: dict[str, str]) -> str:
+    """Render the JS data file that fern/js/dep-status-pills.js consumes.
+
+    Emits `window.__DEP_STATUS = { "<slug>": "<Status>", ... };` with keys
+    sorted alphabetically for stable git diffs. Runs no template engine —
+    plain JSON dump wrapped in a single `window.__DEP_STATUS = <obj>;`
+    assignment. An empty map is rendered as `window.__DEP_STATUS = {};`
+    (still valid — the runtime silently no-ops when the map is empty).
+    """
+    header = (
+        "/*\n"
+        " * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION "
+        "& AFFILIATES. All rights reserved.\n"
+        " * SPDX-License-Identifier: Apache-2.0\n"
+        " *\n"
+        " * GENERATED FILE — DO NOT EDIT.\n"
+        " *\n"
+        " * Regenerated on every Fern docs build by "
+        "fern/scripts/sync_deps.py.\n"
+        " * Consumed by fern/js/dep-status-pills.js to render the "
+        "right-aligned\n"
+        " * lifecycle status pill on each DEP link in the Proposals "
+        "sidebar.\n"
+        " *\n"
+        " * Sources:\n"
+        " *   - synced DEPs        parsed `**Status**:` from the source "
+        "markdown\n"
+        " *                        listed in fern/scripts/deps.json.\n"
+        ' *   - hand-authored DEPs `status="..."` on <DepMetadata /> in\n'
+        " *                        docs/proposals/*.mdx (excluding "
+        "README + TEMPLATE).\n"
+        " */\n"
+    )
+    if not status_map:
+        return header + "window.__DEP_STATUS = {};\n"
+    # `json.dumps` gives us the correct escapes for embedded quotes /
+    # backslashes / control chars. `sort_keys=True` guarantees stable
+    # diffs; `indent=2` keeps the file readable.
+    body = json.dumps(status_map, sort_keys=True, indent=2, ensure_ascii=False)
+    return header + f"window.__DEP_STATUS = {body};\n"
+
+
+def write_status_data_js(root: Path, status_map: dict[str, str]) -> Path:
+    """Write the rendered status data JS to fern/js/dep-status-data.js.
+
+    Creates parent directories as needed. Returns the output path.
+    """
+    out_path = root / "fern" / "js" / "dep-status-data.js"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(render_status_data_js(status_map), encoding="utf-8")
+    return out_path
 
 
 # --------------------------------------------------------------------------- #
@@ -499,19 +651,25 @@ def sync_entry(
     *,
     root: Path,
     dry_run: bool = False,
-) -> Path:
+) -> tuple[Path, str]:
+    """Sync one DEP entry, returning (output path, resolved status).
+
+    The status is fed back to `main()` so it can build the sidebar status
+    map (fern/js/dep-status-data.js) without re-parsing generated MDX.
+    """
     text = fetch_source(entry)
     parsed = parse_dep_source(text)
+    status = entry_status(entry, parsed)
     mdx = render_mdx(entry=entry, parsed=parsed)
     out_dir = root / "docs" / "proposals" / "_generated"
     out_path = out_dir / f"{entry['output']}.mdx"
     if dry_run:
         print(f"[sync-deps] would write {out_path} ({len(mdx)} bytes)")
-        return out_path
+        return out_path, status
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(mdx, encoding="utf-8")
     print(f"[sync-deps] wrote {out_path} ({len(mdx)} bytes)")
-    return out_path
+    return out_path, status
 
 
 def _resolve_root(cli_root: str | None) -> Path:
@@ -553,8 +711,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[sync-deps] --only={args.only!r} matched no manifest entries")
             return 1
 
+    synced_statuses: dict[str, str] = {}
     for entry in entries:
-        sync_entry(entry, root=root, dry_run=args.dry_run)
+        _, status = sync_entry(entry, root=root, dry_run=args.dry_run)
+        synced_statuses[entry["output"]] = status
+
+    # Always emit the sidebar status data file — even under --dry-run, so a
+    # local `fern check` after a dry-run sync still resolves the docs.yml
+    # `js:` reference. Hand-authored statuses are picked up from the tree
+    # regardless of whether --only filtered the manifest.
+    hand_authored = discover_hand_authored_statuses(root)
+    status_map = merge_status_maps(hand_authored, synced_statuses)
+    data_path = write_status_data_js(root, status_map)
+    print(
+        f"[sync-deps] wrote {data_path} "
+        f"({len(status_map)} DEPs: "
+        f"{len(hand_authored)} hand-authored + "
+        f"{len(synced_statuses)} synced)"
+    )
 
     return 0
 

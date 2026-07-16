@@ -24,6 +24,7 @@ inline so this file stays hermetic — no live GitHub calls.
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -286,19 +287,16 @@ class SlugValidationTests(unittest.TestCase):
         sync_deps.load_manifest(tmp_path)
 
     def test_accepts_plain_slug(self):
-        import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             self._load("dep-nova-synced", Path(td))  # must not raise
 
     def test_accepts_alphanumeric_and_underscore(self):
-        import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             self._load("dep_v1_2_synced", Path(td))  # must not raise
 
     def test_rejects_parent_traversal(self):
-        import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as ctx:
@@ -306,28 +304,24 @@ class SlugValidationTests(unittest.TestCase):
             self.assertIn("output", str(ctx.exception).lower())
 
     def test_rejects_slash_in_slug(self):
-        import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
                 self._load("nova/other", Path(td))
 
     def test_rejects_absolute_path(self):
-        import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
                 self._load("/tmp/pwn", Path(td))
 
     def test_rejects_empty_string(self):
-        import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
                 self._load("", Path(td))
 
     def test_rejects_null_byte(self):
-        import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
@@ -335,7 +329,6 @@ class SlugValidationTests(unittest.TestCase):
 
     def test_rejects_dot_prefix(self):
         # Prevent .hidden / . / .. slugs
-        import tempfile
 
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
@@ -365,6 +358,219 @@ class YamlStringEscapeTests(unittest.TestCase):
         # Regressions on existing escape behavior
         self.assertIn("\\\\", s)
         self.assertIn('\\"', s)
+
+
+class ExtractStatusFromMdxTests(unittest.TestCase):
+    """Sidebar status pill comes from the SAME truth as the on-page card.
+
+    For hand-authored DEPs (docs/proposals/*.mdx) that means the
+    `status="..."` prop on the `<DepMetadata ... />` component. The
+    extractor must survive: multi-line JSX, other props before/after
+    `status`, single-quoted attribute values, and DEPs that do not have
+    a DepMetadata card (rare — Overview / Template — those aren't DEPs).
+    """
+
+    def test_extracts_status_from_multiline_component(self):
+        text = '<DepMetadata\n  dep="0001"\n  status="Draft"\n  category="Process"\n/>'
+        self.assertEqual(sync_deps._extract_status_from_mdx(text), "Draft")
+
+    def test_extracts_status_from_inline_component(self):
+        text = '<DepMetadata dep="0000" status="Under Review" />'
+        self.assertEqual(sync_deps._extract_status_from_mdx(text), "Under Review")
+
+    def test_returns_none_when_no_dep_metadata(self):
+        text = "# Just a regular markdown file with no DepMetadata."
+        self.assertIsNone(sync_deps._extract_status_from_mdx(text))
+
+    def test_returns_none_when_dep_metadata_lacks_status(self):
+        # DepMetadata without a status prop — no meaningful sidebar label.
+        text = '<DepMetadata dep="0000" category="Process" />'
+        self.assertIsNone(sync_deps._extract_status_from_mdx(text))
+
+    def test_ignores_status_prop_on_other_components(self):
+        # A `status=` prop on some other component must not be
+        # misattributed to a DEP.
+        text = '<SomethingElse status="ShouldNotMatch" />'
+        self.assertIsNone(sync_deps._extract_status_from_mdx(text))
+
+
+class DiscoverHandAuthoredStatusesTests(unittest.TestCase):
+    """docs/proposals/*.mdx is scanned for hand-authored DEPs. README + TEMPLATE
+    are meta pages (not DEPs) and MUST be excluded. Files without a
+    `<DepMetadata status="..." />` prop are skipped. Slug = filename stem
+    (matches the slug convention used in docs/index.yml)."""
+
+    def _write(self, root: Path, rel: str, contents: str) -> None:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+    def test_discovers_hand_authored_deps_excludes_readme_and_template(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._write(
+                root,
+                "docs/proposals/0000-example-dep.mdx",
+                '<DepMetadata dep="0000" status="Draft" />',
+            )
+            self._write(
+                root,
+                "docs/proposals/0001-dep-process.mdx",
+                '<DepMetadata dep="0001" status="Under Review" />',
+            )
+            # Meta pages: no DEP status in the sidebar.
+            self._write(
+                root,
+                "docs/proposals/README.mdx",
+                "# Overview",
+            )
+            self._write(
+                root,
+                "docs/proposals/TEMPLATE.mdx",
+                '<DepMetadata dep="TEMPLATE" status="Draft" />',
+            )
+            got = sync_deps.discover_hand_authored_statuses(root)
+        self.assertEqual(
+            got,
+            {"0000-example-dep": "Draft", "0001-dep-process": "Under Review"},
+        )
+
+    def test_skips_generated_dir(self):
+        # docs/proposals/_generated/*.mdx are synced files — they are
+        # covered by the manifest path, NOT by the hand-authored scan.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._write(
+                root,
+                "docs/proposals/_generated/dep-nova-synced.mdx",
+                '<DepMetadata dep="Nova" status="Draft" />',
+            )
+            got = sync_deps.discover_hand_authored_statuses(root)
+        self.assertEqual(got, {})
+
+    def test_skips_files_without_status(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._write(
+                root,
+                "docs/proposals/only-prose.mdx",
+                "# Not a DEP\n\nNo DepMetadata here.",
+            )
+            got = sync_deps.discover_hand_authored_statuses(root)
+        self.assertEqual(got, {})
+
+
+class EntryStatusTests(unittest.TestCase):
+    """Synced DEP status comes from the parsed `**Status**:` field of the
+    upstream markdown; missing / empty falls to 'Draft'."""
+
+    def test_returns_parsed_status(self):
+        parsed = sync_deps.parse_dep_source(NOVA_LIKE)
+        self.assertEqual(sync_deps.entry_status({}, parsed), "Draft")
+
+    def test_defaults_to_draft_when_missing(self):
+        parsed = sync_deps.ParsedDep(title="X", fields={}, body="")
+        self.assertEqual(sync_deps.entry_status({}, parsed), "Draft")
+
+    def test_defaults_to_draft_when_placeholder(self):
+        # `[TBD]` / `N/A` are filtered by useful_fields — treat as unset.
+        parsed = sync_deps.ParsedDep(title="X", fields={"Status": "[TBD]"}, body="")
+        self.assertEqual(sync_deps.entry_status({}, parsed), "Draft")
+
+
+class RenderStatusDataJsTests(unittest.TestCase):
+    """The status data file is a plain JS assignment to `window.__DEP_STATUS`.
+    Keys are DEP slugs (matching docs/index.yml), values are lifecycle labels
+    that fern/js/dep-status-pills.js maps to a colour variant via
+    `variant()` (verbatim copy of DepMetadata.statusVariant())."""
+
+    def test_emits_valid_js_with_spdx_header(self):
+        js = sync_deps.render_status_data_js(
+            {"0000-example-dep": "Draft", "dep-nova-synced": "Under Review"}
+        )
+        self.assertIn("SPDX-License-Identifier: Apache-2.0", js)
+        self.assertIn("GENERATED FILE", js)
+        self.assertIn("window.__DEP_STATUS", js)
+        self.assertIn('"0000-example-dep": "Draft"', js)
+        self.assertIn('"dep-nova-synced": "Under Review"', js)
+
+    def test_keys_are_sorted_for_stable_diffs(self):
+        # Deterministic output: even if we accept dict insertion order in
+        # Python 3.7+, we want git diffs to reflect real changes, not
+        # scanner traversal order.
+        js = sync_deps.render_status_data_js(
+            {"zzz-late": "Draft", "aaa-early": "Draft"}
+        )
+        pos_early = js.index('"aaa-early"')
+        pos_late = js.index('"zzz-late"')
+        self.assertLess(pos_early, pos_late)
+
+    def test_empty_map_emits_empty_object_literal(self):
+        # If sync fails or no DEPs exist we still emit a valid file so
+        # docs.yml's js: reference resolves. The runtime silently no-ops
+        # on an empty map.
+        js = sync_deps.render_status_data_js({})
+        self.assertIn("window.__DEP_STATUS = {};", js)
+
+    def test_escapes_status_double_quotes(self):
+        # Defense-in-depth: status labels shouldn't contain a bare " but
+        # if a manifest ever carries one, the emitted JS must still parse.
+        js = sync_deps.render_status_data_js({"x": 'A"B'})
+        # Must NOT leave a bare " in the JS string literal (would break
+        # syntax); must have a backslash escape sequence.
+        self.assertIn('"A\\"B"', js)
+
+
+class BuildStatusMapTests(unittest.TestCase):
+    """Combine synced-entry statuses with hand-authored statuses. Synced
+    entries win when both sources supply the same slug (upstream is the
+    authoritative source for synced DEPs)."""
+
+    def test_merges_synced_and_hand_authored(self):
+        synced = {"dep-nova-synced": "Draft"}
+        hand = {"0000-example-dep": "Draft", "0001-dep-process": "Draft"}
+        merged = sync_deps.merge_status_maps(hand, synced)
+        self.assertEqual(
+            merged,
+            {
+                "0000-example-dep": "Draft",
+                "0001-dep-process": "Draft",
+                "dep-nova-synced": "Draft",
+            },
+        )
+
+    def test_synced_wins_on_conflict(self):
+        # Should never happen (slug space is disjoint by convention) but
+        # if a manifest slug collides with a hand-authored basename, the
+        # synced (upstream) source of truth wins.
+        synced = {"nova": "Accepted"}
+        hand = {"nova": "Draft"}
+        merged = sync_deps.merge_status_maps(hand, synced)
+        self.assertEqual(merged, {"nova": "Accepted"})
+
+
+class WriteStatusDataJsTests(unittest.TestCase):
+    """End-to-end: writing the JS data file to fern/js/dep-status-data.js."""
+
+    def test_writes_file_under_fern_js(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "fern" / "js").mkdir(parents=True)
+            status_map = {"0000-example-dep": "Draft"}
+            out = sync_deps.write_status_data_js(root, status_map)
+        # Path check
+        self.assertEqual(out.name, "dep-status-data.js")
+        self.assertEqual(out.parent.name, "js")
+        self.assertEqual(out.parent.parent.name, "fern")
+
+    def test_content_matches_render(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "fern" / "js").mkdir(parents=True)
+            status_map = {"a": "Draft", "b": "Under Review"}
+            out = sync_deps.write_status_data_js(root, status_map)
+            got = out.read_text(encoding="utf-8")
+        self.assertEqual(got, sync_deps.render_status_data_js(status_map))
 
 
 if __name__ == "__main__":
