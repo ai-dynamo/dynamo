@@ -137,7 +137,19 @@ def _prepare_request(
         else None
     )
     chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
-    chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    # `chat_template_args` is not a field on the vLLM request, so Rust's folded
+    # thinking keys never reach the template. Recover them from the raw dict.
+    # Only the thinking keys: the dict is splatted into ChatParams below, so a
+    # reserved key like `documents` would collide.
+    if isinstance(request, dict):
+        recovered = request.get("chat_template_args") or {}
+        for key in ("thinking", "enable_thinking", "thinking_mode"):
+            if key in recovered:
+                chat_template_kwargs.setdefault(key, recovered[key])
+    reasoning_effort = request_for_sampling.reasoning_effort
+    if reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = reasoning_effort
+        chat_template_kwargs.setdefault("enable_thinking", reasoning_effort != "none")
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (

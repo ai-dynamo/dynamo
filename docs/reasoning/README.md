@@ -75,6 +75,19 @@ require the opening tag to be present in the model output.
 > parser is configured, but it cannot force the model to disable reasoning.
 > Treat the request flag as best-effort for Kimi K2.7.
 
+## Thinking Control Precedence
+
+A request can carry several controls that toggle reasoning. Dynamo resolves them
+in a fixed order and folds the winner into the template kwargs the model sees.
+Highest precedence first:
+
+1. The top-level `thinking` param (`{"type": "enabled" | "disabled" | "adaptive"}`, or a bare boolean). `enabled` and `disabled` set `thinking`, `enable_thinking`, and `thinking_mode` coherently. `adaptive` means "let the model decide", so it clears any explicit on/off toggle (including a stale client-supplied one) and leaves only the mode. A graded `reasoning_effort` value is still forwarded for models that grade on it, but with `adaptive` it does not derive an on/off toggle.
+2. An explicit client-supplied thinking key inside `chat_template_args` (such as `enable_thinking`). When the top-level `thinking` param is absent, a client value here is preserved and wins over `reasoning_effort`.
+3. `reasoning_effort`. A value of `none` disables reasoning and a positive grade enables it by setting `enable_thinking:true`. This only fills `enable_thinking` when a higher-precedence control has not already decided the toggle and the `thinking` param is not `adaptive`.
+4. The model or parser default, used when the request sets none of the above.
+
+This deliberately deviates from both engines. Dynamo treats `thinking`, `enable_thinking`, and `thinking_mode` all as override keys, whereas vLLM only lets `enable_thinking` override `reasoning_effort`. Dynamo also sets `enable_thinking:true` on a positive grade for every backend, including the SGLang custom processor, where raw SGLang leaves it unset. Both choices honor `reasoning_effort` uniformly across render paths.
+
 ## Common Parser Pairings
 
 Some models need both parsers configured together. Common pairings include:
