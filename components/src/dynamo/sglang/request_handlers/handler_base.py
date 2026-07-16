@@ -422,6 +422,15 @@ class LoraMixin:
                                 base_model_path=self.config.server_args.model_path,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
+                                # The engine is already serving the base model
+                                # when a LoRA loads, and the card only references
+                                # config/tokenizer/chat-template files — never
+                                # weights. Without this, a cache miss on
+                                # model_path re-downloads the full base repo
+                                # (hundreds of GB for large MoEs) on every
+                                # publish, and any network failure aborts the
+                                # publish.
+                                ignore_weights=True,
                                 # Publish the worker's per-worker LoRA slot budget so the frontend
                                 # allocator sizes placement against real capacity instead of the
                                 # hard-coded default.
