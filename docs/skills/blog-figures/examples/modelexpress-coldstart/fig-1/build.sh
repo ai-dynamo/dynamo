@@ -24,7 +24,7 @@ fi
 echo "==> Rendering fig-1 (ModelExpress cold-start sequence)..."
 "$PY" gen_fig_1_coldstart_sequence.py
 
-LINTER=../../../docs/skills/blog-figures/tools/lint_figures.py
+LINTER=../../../tools/lint_figures.py
 if [ -f "$LINTER" ]; then
   echo "==> Linting sources against Dynamo Dark tokens (fails on ERROR)..."
   # Scope to the figure sources — the linter recurses, and .venv/ holds

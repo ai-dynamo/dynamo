@@ -35,7 +35,7 @@ echo "==> Rendering ModelExpress cold-start architecture..."
 "$PY" gen_fig_3_modelexpress.py
 
 echo "==> Linting figure sources against Dynamo Dark tokens (fails on ERROR)..."
-LINTER=../../../docs/skills/blog-figures/tools/lint_figures.py
+LINTER=../../../tools/lint_figures.py
 python3 "$LINTER" gen_fig_3_modelexpress.py plotly_dynamo.py \
   --tokens design_tokens.yaml --score
 

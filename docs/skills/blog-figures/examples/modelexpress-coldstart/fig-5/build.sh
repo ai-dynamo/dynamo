@@ -24,7 +24,7 @@ echo "==> Rendering fig-5 (NIXL registration scoreboard)..."
 "$PY" gen_fig_5_nixl_registration.py
 
 echo "==> Linting sources against Dynamo Dark tokens (fails on ERROR)..."
-LINT="../../../docs/skills/blog-figures/tools/lint_figures.py"
+LINT="../../../tools/lint_figures.py"
 if [ -f "$LINT" ]; then
   "$PY" "$LINT" --score .
 else

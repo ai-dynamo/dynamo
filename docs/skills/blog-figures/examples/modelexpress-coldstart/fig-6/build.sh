@@ -27,7 +27,7 @@ fi
 echo "==> Rendering fig-6-coldstart-anatomy.png..."
 "$VENV/bin/python" gen_fig_6_coldstart_anatomy.py
 
-LINT=../../../docs/skills/blog-figures/tools/lint_figures.py
+LINT=../../../tools/lint_figures.py
 if [ -f "$LINT" ]; then
   echo "==> Linting sources against Dynamo Dark tokens (fails on ERROR)..."
   # Lint the figure sources only (not the local .venv third-party packages).

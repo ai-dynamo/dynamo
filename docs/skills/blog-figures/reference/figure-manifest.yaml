@@ -56,7 +56,7 @@ kinds:
 # Collections group generators by where they live and what role they play.
 collections:
   modelexpress-coldstart:
-    root: drafts/modelexpress-coldstart/
+    root: docs/skills/blog-figures/examples/modelexpress-coldstart/
     note: "ModelExpress cold-start figure set, the newest end-to-end exemplars (all measure 100/100). One figure per fig-N/ directory plus a standalone hero."
   skill-examples:
     root: docs/skills/blog-figures/examples/
@@ -66,17 +66,17 @@ collections:
     note: "Generators behind published digest posts. They predate the 100/100 exemplars but are now token-clean (100/100)."
 
 generators:
-  # ---- ModelExpress cold-start set (drafts/modelexpress-coldstart/) ----------
+  # ---- ModelExpress cold-start set (docs/skills/blog-figures/examples/modelexpress-coldstart/) ----------
   - id: fig-1-coldstart-sequence
     title: "Cold Start: The Data Plane Bypasses the Metadata Server"
     collection: modelexpress-coldstart
     kind: diagram.sequence
     renderer: plotly
     title_treatment: display
-    generator: drafts/modelexpress-coldstart/fig-1/gen_fig_1_coldstart_sequence.py
+    generator: docs/skills/blog-figures/examples/modelexpress-coldstart/fig-1/gen_fig_1_coldstart_sequence.py
     outputs:
-      - drafts/modelexpress-coldstart/fig-1/images/fig-1-modelexpress-coldstart.png
-      - drafts/modelexpress-coldstart/fig-1/images/fig-1-modelexpress-coldstart.svg
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-1/images/fig-1-modelexpress-coldstart.png
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-1/images/fig-1-modelexpress-coldstart.svg
     shows: "Three lifelines (source replica, ModelExpress server, new replica) across register / discover / transfer phases; the single green RDMA weight read crosses the metadata-server spine without terminating on it."
     data: "Illustrative. Protocol and API labels only (PublishMetadata, ListSources, GetMetadata, NIXL, mx_source_id); no measured numbers."
     tags: [cold-start, sequence, lifelines, data-plane, metadata-plane, rdma]
@@ -91,10 +91,10 @@ generators:
     kind: diagram.loop
     renderer: plotly
     title_treatment: display
-    generator: drafts/modelexpress-coldstart/fig-2/gen_fig_2_rl_loop.py
+    generator: docs/skills/blog-figures/examples/modelexpress-coldstart/fig-2/gen_fig_2_rl_loop.py
     outputs:
-      - drafts/modelexpress-coldstart/fig-2/images/fig-2-rl-loop.png
-      - drafts/modelexpress-coldstart/fig-2/images/fig-2-rl-loop.svg
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-2/images/fig-2-rl-loop.png
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-2/images/fig-2-rl-loop.svg
     shows: "A four-stage RL loop (Rollout, Reward, Trainer, Weight refit) on a computed 2x2 grid with orthogonal clockwise connectors; the green weight-refit edge closes the loop back into rollout."
     data: "Illustrative. Stage and backend names only; no numbers."
     tags: [rl-loop, ring, orthogonal, weight-refit]
@@ -109,10 +109,10 @@ generators:
     kind: diagram.architecture
     renderer: plotly
     title_treatment: display
-    generator: drafts/modelexpress-coldstart/fig-3/gen_fig_3_modelexpress.py
+    generator: docs/skills/blog-figures/examples/modelexpress-coldstart/fig-3/gen_fig_3_modelexpress.py
     outputs:
-      - drafts/modelexpress-coldstart/fig-3/images/fig-3-modelexpress-coldstart.png
-      - drafts/modelexpress-coldstart/fig-3/images/fig-3-modelexpress-coldstart.svg
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-3/images/fig-3-modelexpress-coldstart.png
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-3/images/fig-3-modelexpress-coldstart.svg
     shows: "A two-plane architecture: a grey control plane (MX clients, MX server, metadata store) over a data plane where three GPU-direct paths (GPUDirect RDMA, ModelStreamer, GDS) converge on the new engine in green."
     data: "Illustrative. Representative component layout; no measured numbers."
     tags: [architecture, two-plane, control-plane, data-plane, gpudirect]
@@ -127,10 +127,10 @@ generators:
     kind: chart.stacked-bar
     renderer: plotly
     title_treatment: compact
-    generator: drafts/modelexpress-coldstart/fig-4/gen_fig_4_coldstart.py
+    generator: docs/skills/blog-figures/examples/modelexpress-coldstart/fig-4/gen_fig_4_coldstart.py
     outputs:
-      - drafts/modelexpress-coldstart/fig-4/images/fig-4-coldstart-phases.png
-      - drafts/modelexpress-coldstart/fig-4/images/fig-4-coldstart-phases.svg
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-4/images/fig-4-coldstart-phases.png
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-4/images/fig-4-coldstart-phases.svg
     shows: "Three cold-start paths as horizontal stacked phase bars (model loading, warmup cluster, others); the RDMA-plus-cache winner takes the green badge and a 4.6x callout, phase legend at the bottom."
     data: "Real. Measured phase durations from the ModelExpress cold-start blog (seconds); 8m1s baseline down to 1m44s."
     tags: [cold-start, stacked-bar, gantt, phases, speedup, comparison]
@@ -145,10 +145,10 @@ generators:
     kind: chart.bar
     renderer: plotly
     title_treatment: compact
-    generator: drafts/modelexpress-coldstart/fig-5/gen_fig_5_nixl_registration.py
+    generator: docs/skills/blog-figures/examples/modelexpress-coldstart/fig-5/gen_fig_5_nixl_registration.py
     outputs:
-      - drafts/modelexpress-coldstart/fig-5/images/fig-5-nixl-registration.png
-      - drafts/modelexpress-coldstart/fig-5/images/fig-5-nixl-registration.svg
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-5/images/fig-5-nixl-registration.png
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-5/images/fig-5-nixl-registration.svg
     shows: "Three NIXL registration strategies as horizontal bars over a full-scale track, direct-labeled with env flags; VMM arena wins in green, the per-tensor baseline in coral, with a right-edge speedup column."
     data: "Real. Measured registration times (8.16s, 1.14s, 0.79s); speedups computed from the baseline."
     tags: [scoreboard, bar, nixl, registration, speedup, lower-is-better]
@@ -163,10 +163,10 @@ generators:
     kind: chart.timeline-anatomy
     renderer: plotly
     title_treatment: display
-    generator: drafts/modelexpress-coldstart/fig-6/gen_fig_6_coldstart_anatomy.py
+    generator: docs/skills/blog-figures/examples/modelexpress-coldstart/fig-6/gen_fig_6_coldstart_anatomy.py
     outputs:
-      - drafts/modelexpress-coldstart/fig-6/images/fig-6-coldstart-anatomy.png
-      - drafts/modelexpress-coldstart/fig-6/images/fig-6-coldstart-anatomy.svg
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-6/images/fig-6-coldstart-anatomy.png
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/fig-6/images/fig-6-coldstart-anatomy.svg
     shows: "One 420s cold start decomposed into eight sequential phases on a hero-width bar; a 420s KPI, a green MX P2P weight-load callout (11s), the gold JIT-warmup cluster labeled in-bar, and a grey bracket grouping the three leading setup phases."
     data: "Real. Observed DeepSeek-V4-Pro / vLLM cold start; durations in seconds, percentages derived."
     tags: [cold-start, timeline, anatomy, kpi, bracket, phases]
@@ -181,10 +181,10 @@ generators:
     kind: hero.flow
     renderer: plotly
     title_treatment: display
-    generator: drafts/modelexpress-coldstart/hero/tools/gen_hero.py
+    generator: docs/skills/blog-figures/examples/modelexpress-coldstart/hero/tools/gen_hero.py
     outputs:
-      - drafts/modelexpress-coldstart/hero/images/hero-modelexpress-coldstart.png
-      - drafts/modelexpress-coldstart/hero/images/hero-modelexpress-coldstart.svg
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/hero/images/hero-modelexpress-coldstart.png
+      - docs/skills/blog-figures/examples/modelexpress-coldstart/hero/images/hero-modelexpress-coldstart.svg
     shows: "A flow diagram where weights stream peer-to-peer over a bold glowing green RDMA lane from a source GPU to a new GPU, a dim dashed coral baseline detour it bypasses, and the win as art: a giant 6.4x with a 59s-reclaimed subline."
     data: "Real. 70s baseline object-store pull vs 11s RDMA transfer from the cold-start set; 6.4x and 59s derived."
     tags: [hero, flow, editorial-stat, rdma, fast-path, glow]

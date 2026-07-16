@@ -37,7 +37,7 @@ fi
 echo "==> Rendering hero-modelexpress-coldstart.{png,svg}..."
 "$VENV/bin/python" tools/gen_hero.py
 
-LINT=../../../docs/skills/blog-figures/tools/lint_figures.py
+LINT=../../../tools/lint_figures.py
 if [ -f "$LINT" ]; then
   echo "==> Linting the hero folder against Dynamo Dark tokens (fails on ERROR)..."
   # The shared .venv lives outside hero/, so scanning the folder only hits the

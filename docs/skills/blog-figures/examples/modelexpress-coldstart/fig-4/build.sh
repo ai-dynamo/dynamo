@@ -17,7 +17,7 @@ fi
 "$VENV/bin/python" gen_fig_4_coldstart.py
 
 # Lint the figure SOURCES only (never the .venv third-party tree).
-LINT=../../../docs/skills/blog-figures/tools/lint_figures.py
+LINT=../../../tools/lint_figures.py
 if [ -f "$LINT" ]; then
   python3 "$LINT" gen_fig_4_coldstart.py plotly_dynamo.py --score || true
 fi

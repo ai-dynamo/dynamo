@@ -72,7 +72,7 @@ Lint the figure sources (not the whole dir, so the linter does not recurse into
 `.venv`):
 
 ```bash
-python3 ../../../docs/skills/blog-figures/tools/lint_figures.py \
+python3 ../../../tools/lint_figures.py \
   gen_fig_3_modelexpress.py plotly_dynamo.py --tokens design_tokens.yaml --score
 ```
 

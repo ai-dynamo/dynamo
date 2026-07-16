@@ -66,6 +66,6 @@ canonical `docs/skills/blog-figures/examples/` (do not fork the values).
 ## Lint
 
 ```bash
-../../../docs/skills/blog-figures/tools/lint_figures.py --score \
+../../../tools/lint_figures.py --score \
   --tokens ./design_tokens.yaml .
 ```

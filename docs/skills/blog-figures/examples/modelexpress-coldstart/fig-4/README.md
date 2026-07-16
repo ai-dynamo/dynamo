@@ -41,7 +41,7 @@ aesthetic.
 ## Lint
 
 ```bash
-python3 ../../../docs/skills/blog-figures/tools/lint_figures.py \
+python3 ../../../tools/lint_figures.py \
   gen_fig_4_coldstart.py plotly_dynamo.py --score
 ```
 

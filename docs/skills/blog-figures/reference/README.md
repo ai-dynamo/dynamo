@@ -52,7 +52,7 @@ manifest before introducing a new value.
 
 ### ModelExpress Cold-Start Set (newest 100/100 exemplars)
 
-`drafts/modelexpress-coldstart/`
+`docs/skills/blog-figures/examples/modelexpress-coldstart/`
 
 | Kind | Title | Renderer | Generator | Lint |
 |---|---|---|---|---|

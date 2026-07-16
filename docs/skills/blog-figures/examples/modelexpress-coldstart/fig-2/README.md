@@ -15,7 +15,7 @@ loop figure.
 ## Reproduce
 
 ```bash
-cd drafts/modelexpress-coldstart/fig-2
+cd docs/skills/blog-figures/examples/modelexpress-coldstart/fig-2
 ./build.sh                      # uses .venv if present
 ```
 
@@ -41,5 +41,5 @@ Prerequisites (already installed in the local `.venv`): `plotly`, `kaleido`,
 
 ```bash
 python docs/skills/blog-figures/tools/lint_figures.py \
-  drafts/modelexpress-coldstart/fig-2/ --score
+  docs/skills/blog-figures/examples/modelexpress-coldstart/fig-2/ --score
 ```
