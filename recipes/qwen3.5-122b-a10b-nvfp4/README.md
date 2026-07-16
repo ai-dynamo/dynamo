@@ -124,25 +124,15 @@ is system output tok/s per GPU at the best SLA-passing concurrency.
 - **Speculative decoding (MTP) + disaggregation is not shipped on this arch.**
   Disaggregation requires `VLLM_SSM_CONV_STATE_LAYOUT=DS` (for NIXL's 3-read Mamba
   conv-state transfer), but MTP + prefix caching forces `mamba_cache_mode='align'`,
-  whose DS conv-state copy path is unimplemented for `num_accepted_tokens > 1` —
-  so the decode `EngineCore` first crashes (`NotImplementedError` → `EngineDeadError`)
-  on the first concurrent batch of real long-context traffic.
-  **Patching the crash** (vLLM [#45473](https://github.com/vllm-project/vllm/pull/45473)'s
-  `ds_conv_tail_copy` kernel) then exposes a **silent quality regression**: MTP is
-  enabled on the decode worker but not on prefill, so the two workers disagree on
-  spec-decode conv-state metadata. Decode reserves extra conv-window rows and
-  speculative blocks (conv state `(dim, conv_kernel-1 + num_speculative_tokens)`,
-  `num_speculative_blocks > 0`); prefill does not (`(dim, conv_kernel-1)`,
-  `num_speculative_blocks = 0`). The NIXL transfer then misplaces prefill's smaller
-  conv state into decode's larger slot, so decode resumes from corrupted recurrent
-  state and emits prompt-independent garbage. Matching `--speculative-config` on
-  both prefill and decode realigns the geometry and restores correct output, but MTP
-  is not a throughput win on this workload (see below), so the combination is not
-  shipped. Upstream: vLLM [#38898](https://github.com/vllm-project/vllm/issues/38898)
-  and PR [#40454](https://github.com/vllm-project/vllm/pull/40454); tracked in
-  NVBug 6442165 / DYN-864. A synthetic forced-acceptance sweep hits neither failure
-  (it skips the real conv-state copy), which is why the combination looked viable in
-  earlier numbers.
+  whose DS conv-state copy path is unimplemented for `num_accepted_tokens > 1` — the
+  decode `EngineCore` crashes (`NotImplementedError` → `EngineDeadError`) on the
+  first concurrent batch of real long-context traffic. Patching the crash (vLLM
+  [#45473](https://github.com/vllm-project/vllm/pull/45473)) then exposes a silent
+  quality regression: a spec-decode conv-state metadata mismatch between the prefill
+  and decode workers causes the NIXL transfer to misplace the Mamba conv state,
+  producing garbage output. Tracked in NVBug 6442165 / DYN-864 (upstream vLLM
+  [#38898](https://github.com/vllm-project/vllm/issues/38898) /
+  [#40454](https://github.com/vllm-project/vllm/pull/40454)).
 - **MTP on aggregation** is likewise not shipped: it requires DS unset and, on this
   workload, MTP-heavy decode starves prefill on the shared GPU (TTFT regressions)
   for no throughput win.
