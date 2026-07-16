@@ -81,6 +81,13 @@ def test_enable_chunked_prefill_updates_generated_trtllm_workers():
                         }
                     },
                 },
+                "empty_override": {
+                    "componentType": "worker",
+                    "subComponentType": "prefill",
+                    "extraPodSpec": {
+                        "mainContainer": {"args": ["--override-engine-args", "{}"]}
+                    },
+                },
                 "decode": {
                     "componentType": "worker",
                     "subComponentType": "decode",
@@ -118,8 +125,17 @@ def test_enable_chunked_prefill_updates_generated_trtllm_workers():
     assert not any(arg.startswith("--trtllm.") for arg in prefill_args)
     override_idx = prefill_args.index("--override-engine-args")
     override = json.loads(prefill_args[override_idx + 1])
-    assert "enable_chunked_prefill" not in override
+    assert override["enable_chunked_prefill"] is True
     assert override["kv_cache_config"]["tokens_per_block"] == 32
+
+    empty_override_args = result["spec"]["services"]["empty_override"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert not any(arg.startswith("--trtllm.") for arg in empty_override_args)
+    override_idx = empty_override_args.index("--override-engine-args")
+    assert json.loads(empty_override_args[override_idx + 1]) == {
+        "enable_chunked_prefill": True
+    }
 
     decode_args = result["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"][
         "args"

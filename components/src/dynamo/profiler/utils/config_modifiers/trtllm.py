@@ -113,8 +113,8 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
     """Enable chunked prefill on generated TRT-LLM workers using dynamic flags.
 
     Replace an existing dynamic flag so the result is idempotent.  When a
-    worker uses explicit ``--override-engine-args``, remove its chunked-prefill
-    entry instead of mixing that representation with ``--trtllm.*`` flags.
+    worker uses explicit ``--override-engine-args``, enable chunked prefill in
+    that JSON representation instead of mixing it with ``--trtllm.*`` flags.
     """
     services = config.get("spec", {}).get("services", {})
     if not isinstance(services, dict):
@@ -148,7 +148,7 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
                     pass
                 else:
                     if isinstance(override, dict):
-                        override.pop("enable_chunked_prefill", None)
+                        override["enable_chunked_prefill"] = True
                         args[idx + 1] = json.dumps(override)
             main_container["args"] = args
             continue
