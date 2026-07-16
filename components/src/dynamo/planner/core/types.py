@@ -23,11 +23,14 @@ class ScheduledTick:
     """Declares when the core next needs to be called, what data it needs,
     and what decisions to make.
 
-    All times are absolute seconds (wall clock for native adapter,
-    simulated clock for replay).
+    ``at_s`` is an absolute wall-clock time for the native adapter and a
+    simulated time for replay. ``at_monotonic_s`` is the matching scheduler
+    timestamp used to make observation-prefetch and plugin-dispatch cadence
+    decisions against the same clock value.
     """
 
     at_s: float
+    at_monotonic_s: Optional[float] = None
 
     # What decisions the core will make on this tick
     run_load_scaling: bool = False
