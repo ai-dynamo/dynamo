@@ -472,6 +472,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
             image_data: list[str] | list[PILImage] | None
+            video_data: list[str] | list[FrontendDecodedVideo] | None
             if self._enable_frontend_decoding:
                 # Invariant from __init__: _image_loader is non-None iff
                 # _enable_frontend_decoding is True. Assert narrows the

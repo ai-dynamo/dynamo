@@ -46,7 +46,7 @@ pub struct VideoDecoder {
     /// sample N frames per second
     #[serde(default)]
     pub(crate) fps: Option<f64>,
-    /// sample at most N frames (used with fps)
+    /// sample at most N frames
     #[serde(default)]
     pub(crate) max_frames: Option<u64>,
     /// sample N frames in total (linspace)
