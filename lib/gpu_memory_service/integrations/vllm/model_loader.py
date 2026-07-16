@@ -58,10 +58,7 @@ _last_imported_weights_bytes: int = 0
 _last_model_memory_usage_offset_bytes: int = 0
 
 # First writer's GMS client awaiting publication after vLLM memory profiling.
-# The retained tensors keep rebound-away GMS pool allocations alive until
-# commit; see rebind_nonparameter_tensors.
 _pending_gms_client: "GMSClientMemoryManager | None" = None
-_pending_retained_gms_tensors: list[torch.Tensor] = []
 
 
 def get_imported_weights_bytes() -> int:
@@ -83,25 +80,22 @@ def _store_pending_gms_write(
     gms_client: "GMSClientMemoryManager",
     stats: GMSCommittedMemoryStats,
     rebound_bytes: int,
-    retained_gms_tensors: list[torch.Tensor],
 ) -> None:
     global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
-    global _pending_gms_client, _pending_retained_gms_tensors
+    global _pending_gms_client
 
     if _pending_gms_client is not None:
         raise RuntimeError("A GMS write is already awaiting publication")
     _pending_gms_client = gms_client
-    _pending_retained_gms_tensors = retained_gms_tensors
     _last_imported_weights_bytes = stats.committed_bytes
     _last_model_memory_usage_offset_bytes = stats.pruned_bytes + rebound_bytes
 
 
 def _take_pending_gms_write() -> "GMSClientMemoryManager | None":
-    global _pending_gms_client, _pending_retained_gms_tensors
+    global _pending_gms_client
 
     gms_client = _pending_gms_client
     _pending_gms_client = None
-    _pending_retained_gms_tensors = []
     return gms_client
 
 
@@ -136,9 +130,7 @@ def publish_pending_gms_write() -> bool:
 def abort_pending_gms_write() -> bool:
     """Abort and clear the pending vLLM first-writer state, if any.
 
-    Releases the RPC lease best-effort without CUDA cleanup: an abort may
-    run with CUDA in an error state where a normal close synchronizes and
-    calls os._exit.
+    Releases the writer best-effort because CUDA may already be in an error state.
     """
     gms_client = _take_pending_gms_write()
     if gms_client is None:
@@ -255,6 +247,7 @@ def _load_read_mode(
 
     When MX is active, registers materialized tensors with NIXL so this
     node is discoverable as a P2P source (e.g. for shadow engine failover).
+    Meta-model setup remains responsible for hidden non-tensor backend state.
     """
     global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
 
@@ -276,7 +269,10 @@ def _load_read_mode(
         )
         return model.eval()
     except Exception:
-        gms_client.close()
+        try:
+            gms_client.close()
+        except Exception:
+            logger.exception("[GMS] Failed to close read-mode client")
         raise
 
 
@@ -356,13 +352,9 @@ def _load_write_mode_impl(
 
     stats = prepare_gms_write(gms_client, model)
     # The private clones must exist before vLLM profiles memory so the
-    # profiled peak covers them. The retained GMS originals stay alive until
-    # commit, for readers to materialize from.
-    retained_gms_tensors: list[torch.Tensor] = []
-    rebound_bytes = rebind_nonparameter_tensors(
-        gms_client, model, retain_gms_tensors=retained_gms_tensors
-    )
-    _store_pending_gms_write(gms_client, stats, rebound_bytes, retained_gms_tensors)
+    # profiled peak covers them.
+    rebound_bytes = rebind_nonparameter_tensors(gms_client, model)
+    _store_pending_gms_write(gms_client, stats, rebound_bytes)
 
     logger.info(
         "[GMS] Write mode: prepared %.2f GiB for publication after profiling "
@@ -388,9 +380,6 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
         with meta_device:
             model = initialize_model(vllm_config=vllm_config, model_config=model_config)
 
-    try:
-        process_weights_after_loading(model, model_config, meta_device)
-    except Exception as e:
-        logger.debug("[GMS] Post-processing on meta tensors: %s", e)
+    process_weights_after_loading(model, model_config, meta_device)
 
     return model
