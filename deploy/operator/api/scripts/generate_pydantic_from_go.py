@@ -619,6 +619,7 @@ def main():
         type=Path,
         default=repo_root
         / "components"
+        / "profiler"
         / "src"
         / "dynamo"
         / "profiler"
@@ -629,12 +630,13 @@ def main():
 
     args = parser.parse_args()
 
-    # In the operator Docker build the context is deploy/operator/ only — components/src
-    # is not copied in. The generated file is already committed, so skip regeneration.
-    components_src = repo_root / "components" / "src"
-    if not components_src.exists():
+    # In the operator Docker build the context is deploy/operator/ only — the
+    # profiler wheel source is not copied in. The generated file is already
+    # committed, so skip regeneration.
+    profiler_src = repo_root / "components" / "profiler" / "src"
+    if not profiler_src.exists():
         print(
-            f"Note: {components_src} not found (operator-only build context). "
+            f"Note: {profiler_src} not found (operator-only build context). "
             "Skipping Pydantic generation; using committed dgdr_v1beta1_types.py."
         )
         return 0
