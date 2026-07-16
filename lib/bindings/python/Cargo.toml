@@ -51,6 +51,7 @@ dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "5.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
+dynamo-sglang-sidecar = { path = "../../backend/sglang-sidecar" }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }

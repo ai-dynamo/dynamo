@@ -3270,6 +3270,11 @@ class SelectionServiceError(DynamoException):
 # ---------------------------------------------------------------------------
 
 class backend:
+    @staticmethod
+    def _run_sglang_sidecar(argv: Optional[List[str]] = None) -> None:
+        """Run the native SGLang sidecar with CLI-style arguments."""
+        ...
+
     class DisaggregationMode:
         # Mirrors `dynamo_backend_common::DisaggregationMode`. Engines consult
         # this on the WorkerConfig to switch their per-mode protocol behavior;

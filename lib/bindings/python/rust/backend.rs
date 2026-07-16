@@ -51,6 +51,7 @@ use crate::to_pyerr;
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
+    m.add_function(wrap_pyfunction!(_run_sglang_sidecar, &m)?)?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
@@ -65,6 +66,34 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("dynamo._core.backend", &m)?;
     Ok(())
+}
+
+const SGLANG_SIDECAR_PROGRAM_NAME: &str = "dynamo-sglang-sidecar";
+
+fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(SGLANG_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native SGLang sidecar in the current process.
+///
+/// SGLang's sidecar module contract passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || {
+            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))
+        })
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1633,4 +1662,24 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
         .error_type(ErrorType::Backend(backend))
         .message(message)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SGLANG_SIDECAR_PROGRAM_NAME, sglang_sidecar_argv};
+
+    #[test]
+    fn sglang_sidecar_argv_prepends_program_name() {
+        assert_eq!(
+            sglang_sidecar_argv(vec![
+                "--sglang-endpoint".to_string(),
+                "http://127.0.0.1:30001".to_string(),
+            ]),
+            vec![
+                SGLANG_SIDECAR_PROGRAM_NAME.to_string(),
+                "--sglang-endpoint".to_string(),
+                "http://127.0.0.1:30001".to_string(),
+            ]
+        );
+    }
 }
