@@ -127,18 +127,18 @@ def test_worker_config_accepts_parser_runtime_settings():
 def test_worker_config_preserves_legacy_positional_argument_order():
     """New optional fields must be appended after every existing argument."""
     backend.WorkerConfig(
-        "dynamo",
-        "backend",
-        "generate",
-        "",
-        None,
-        core.ModelInput.Tokens,
-        "chat,completions",
-        None,
-        None,
-        None,
-        False,
-        False,
+        "dynamo",  # namespace
+        "backend",  # component
+        "generate",  # endpoint
+        "",  # model_name
+        None,  # served_model_name
+        core.ModelInput.Tokens,  # model_input
+        "chat,completions",  # endpoint_types
+        None,  # custom_jinja_template
+        None,  # tool_call_parser
+        None,  # reasoning_parser
+        False,  # exclude_tools_when_tool_choice_none
+        False,  # enable_local_indexer
     )
 
 
@@ -147,22 +147,22 @@ def test_python_worker_config_preserves_legacy_positional_argument_order():
     from dynamo.common.backend.worker import WorkerConfig
 
     config = WorkerConfig(
-        "dynamo",
-        "backend",
-        "generate",
-        "",
-        None,
-        core.ModelInput.Tokens,
-        "chat,completions",
-        "etcd",
-        "tcp",
-        None,
-        False,
-        None,
-        None,
-        None,
-        False,
-        False,
+        "dynamo",  # namespace
+        "backend",  # component
+        "generate",  # endpoint
+        "",  # model_name
+        None,  # served_model_name
+        core.ModelInput.Tokens,  # model_input
+        "chat,completions",  # endpoint_types
+        "etcd",  # discovery_backend
+        "tcp",  # request_plane
+        None,  # event_plane
+        False,  # use_kv_events
+        None,  # custom_jinja_template
+        None,  # tool_call_parser
+        None,  # reasoning_parser
+        False,  # exclude_tools_when_tool_choice_none
+        False,  # enable_local_indexer
     )
 
     assert config.exclude_tools_when_tool_choice_none is False
