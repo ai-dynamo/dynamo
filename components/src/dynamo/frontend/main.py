@@ -64,7 +64,9 @@ def _raise_fd_limit(target: int = FRONTEND_FD_LIMIT_TARGET) -> None:
     import resource
 
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    new_soft = min(target, hard)
+    new_soft = (
+        target if hard == resource.RLIM_INFINITY else min(target, hard)
+    )
     if new_soft > soft:
         resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
         logger.info(
