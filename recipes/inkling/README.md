@@ -81,13 +81,63 @@ kubectl apply -f sglang/agg-b200/deploy.yaml -n ${NAMESPACE}
 
 ```bash
 kubectl port-forward svc/tml-inkling-sglang-agg-frontend 8000:8000 -n ${NAMESPACE} &
+```
 
+#### Text
+
+```bash
 curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "thinkingmachines/Inkling-NVFP4",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
     "max_tokens": 64
+  }'
+```
+
+#### Audio
+
+Audio rides as an `audio_url` content part — a public HTTP(S) URL (the worker pod
+fetches it, so it needs egress) or a base64 `data:` URI. Inkling expects 16 kHz audio;
+WAV is ideal, and MP3/FLAC/OGG also decode in this image. This sample is 16 kHz mono
+WAV, matching the model card spec:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "audio_url", "audio_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/mlk.wav"}},
+        {"type": "text", "text": "Transcribe the following speech to text."}
+      ]
+    }],
+    "max_tokens": 256
+  }'
+```
+
+For air-gapped clusters, send local files as `data:` URIs instead — e.g.
+`{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,'$(base64 -i sample.wav)'"}}`
+— and mix multiple media parts in one message as the context budget allows.
+
+#### Reasoning effort
+
+Inkling's controllable thinking is exposed per request: pass `reasoning_effort` as a
+named level (`none` / `minimal` / `low` / `medium` / `high` / `max`) or a float in
+`[0.0, 0.99]`; omitted requests default to `0.9` (high). These are the values in this
+checkpoint's chat template — `xhigh` from the launch blog is not in its map and is
+rejected:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{"role": "user", "content": "What is 17 times 24?"}],
+    "chat_template_kwargs": {"reasoning_effort": "low"},
+    "max_tokens": 128
   }'
 ```
 
