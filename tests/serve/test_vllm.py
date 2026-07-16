@@ -418,7 +418,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             # 2 workers on separate GPUs + a 20s startup sleep; generous over ~200s.
             pytest.mark.timeout(700),
-            pytest.mark.nightly,
+            # TEMPORARY: pre_merge to validate the health-check change in PR CI; revert to nightly.
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
