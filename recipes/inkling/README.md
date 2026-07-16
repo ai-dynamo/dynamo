@@ -98,6 +98,3 @@ curl -s http://localhost:8000/v1/chat/completions \
    (auto-enabled by the operator-injected port) crashes the scheduler on speculative
    batches (`batch.seq_lens_cpu` is `None`). Only per-forward-pass telemetry is lost.
    Remove the override once the image carries a fix.
-2. `reasoning_content` is not populated in responses — reasoning text is returned inline
-   in `content`. The `inkling` reasoning parser is registered in SGLang but the split is
-   not engaged on the Dynamo frontend path.
