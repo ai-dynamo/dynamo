@@ -487,6 +487,53 @@ class TestReasoningParserForwarding:
         # start=99 clamped to prompt_len=3
         assert chunks[-1]["engine_data"]["routed_experts"]["start"] == 3
 
+    @pytest.mark.asyncio
+    async def test_generate_tokens_normalizes_engine_side_abort_to_stop(self):
+        """Regression test for the production crash: when vLLM internally
+        aborts an in-flight request (finish_reason="abort", not a client
+        disconnect), generate_tokens must normalize it to "stop" -- a value
+        valid on the OpenAI-wire FinishReason enum -- rather than the old
+        "cancelled" mapping, which has no matching wire-schema variant and
+        crashed Rust-side deserialization with "unknown variant `abort`,
+        expected one of `stop`, `length`, `tool_calls`, `content_filter`,
+        `function_call`", discarding all already-generated output."""
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[42],
+                        routed_experts=None,
+                        finish_reason="abort",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-abort",
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) == 1
+        # Content must survive the abort, not be discarded.
+        assert chunks[0]["token_ids"] == [42]
+        assert chunks[0]["finish_reason"] == "stop"
+        assert chunks[0]["finish_reason"] != "cancelled"
+
 
 # ── Tests ────────────────────────────────────────────────────────────
 
