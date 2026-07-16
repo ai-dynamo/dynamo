@@ -86,6 +86,7 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 #[pyo3(signature = (argv=None))]
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
+    // No Python work is expected, but release the GIL for incidental supervisor threads.
     let (engine, config) = py
         .allow_threads(move || {
             dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))

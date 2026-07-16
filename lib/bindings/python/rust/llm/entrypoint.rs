@@ -1,14 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Display;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use pyo3::{
-    exceptions::{PyException, PyValueError},
+    exceptions::PyValueError,
     prelude::*,
 };
 use pyo3_async_runtimes::TaskLocals;
@@ -41,6 +40,7 @@ use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
 use crate::engine::PythonAsyncEngine;
+use crate::to_pyerr;
 
 fn validate_kv_router_config(config: &RsKvRouterConfig) -> PyResult<()> {
     config.validate_config().map_err(PyValueError::new_err)
@@ -946,11 +946,4 @@ pub fn run_input<'p>(
         .map_err(to_pyerr)?;
         Ok(())
     })
-}
-
-pub fn to_pyerr<E>(err: E) -> PyErr
-where
-    E: Display,
-{
-    PyException::new_err(format!("{}", err))
 }

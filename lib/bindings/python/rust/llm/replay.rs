@@ -25,7 +25,8 @@ use uuid::Uuid;
 use super::aic_callback::{
     create_aic_callback, create_aic_prefill_load_estimator, estimate_aic_num_gpu_blocks,
 };
-use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
+use super::entrypoint::{AicPerfConfig, KvRouterConfig};
+use crate::to_pyerr;
 
 const DEFAULT_GPU_MEMORY_UTILIZATION: f64 = 0.9;
 const DEFAULT_MEM_FRACTION_STATIC: f64 = 0.88;
