@@ -41,7 +41,6 @@ data:
     cp-strategy: interleave
     moe-a2a-backend: megamoe
     fp8-gemm-backend: flashinfer_deepgemm
-    enable-symm-mem: true
     watchdog-timeout: 3600
     enable-metrics: true
     kv-events-config:
