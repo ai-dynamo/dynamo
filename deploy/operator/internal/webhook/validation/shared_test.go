@@ -19,8 +19,10 @@ package validation
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -33,6 +35,7 @@ import (
 	crdvalidation "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/validation"
 	apiextensionsvalidation "k8s.io/apiextensions-apiserver/pkg/apiserver/validation"
 	apitest "k8s.io/apiextensions-apiserver/pkg/test"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -57,7 +60,11 @@ func requestValidatorsFromCRD(t *testing.T, crdFilename string) map[string]*crdR
 		t.Fatalf("convert CRD %s: %v", crdFilename, err)
 	}
 
-	internalCRD.Spec.Conversion.WebhookClientConfig.Service.Port = 443
+	if internalCRD.Spec.Conversion != nil &&
+		internalCRD.Spec.Conversion.WebhookClientConfig != nil &&
+		internalCRD.Spec.Conversion.WebhookClientConfig.Service != nil {
+		internalCRD.Spec.Conversion.WebhookClientConfig.Service.Port = 443
+	}
 	for _, version := range internalCRD.Spec.Versions {
 		if version.Storage {
 			internalCRD.Status.StoredVersions = append(internalCRD.Status.StoredVersions, version.Name)
@@ -113,13 +120,51 @@ func admissionSourceVersion(t *testing.T, object runtime.Object) string {
 		return version
 	}
 	switch object.(type) {
-	case *nvidiacomv1alpha1.DynamoGraphDeployment, *nvidiacomv1alpha1.DynamoComponentDeployment:
+	case *nvidiacomv1alpha1.DynamoGraphDeployment,
+		*nvidiacomv1alpha1.DynamoComponentDeployment,
+		*nvidiacomv1alpha1.DynamoGraphDeploymentRequest,
+		*nvidiacomv1alpha1.DynamoModel,
+		*nvidiacomv1alpha1.DynamoCheckpoint:
 		return nvidiacomv1alpha1.GroupVersion.Version
-	case *nvidiacomv1beta1.DynamoGraphDeployment, *nvidiacomv1beta1.DynamoComponentDeployment:
+	case *nvidiacomv1beta1.DynamoGraphDeployment,
+		*nvidiacomv1beta1.DynamoComponentDeployment,
+		*nvidiacomv1beta1.DynamoGraphDeploymentRequest:
 		return nvidiacomv1beta1.GroupVersion.Version
 	default:
 		t.Fatalf("unsupported admission object type %T", object)
 		return ""
+	}
+}
+
+func assertWebhookErrors(t *testing.T, err error, want []string) {
+	t.Helper()
+	if len(want) == 0 {
+		if err != nil {
+			t.Fatalf("webhook error = %v, want none", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatalf("webhook errors = nil, want %v", want)
+	}
+	statusErr, ok := err.(*k8serrors.StatusError)
+	if !ok || !k8serrors.IsInvalid(err) {
+		t.Fatalf("error = %T %v, want typed Kubernetes invalid error", err, err)
+	}
+	if statusErr.ErrStatus.Details == nil {
+		t.Fatalf("error = %v, want typed field causes", err)
+	}
+
+	causes := statusErr.ErrStatus.Details.Causes
+	got := make([]string, len(causes))
+	for i, cause := range causes {
+		if cause.Field == "" {
+			t.Fatalf("error cause = %#v, want an exact field path", cause)
+		}
+		got[i] = fmt.Sprintf("%s: %s", cause.Field, cause.Message)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("webhook errors = %v, want %v", got, want)
 	}
 }
 

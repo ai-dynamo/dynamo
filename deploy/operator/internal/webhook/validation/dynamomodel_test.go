@@ -18,370 +18,295 @@
 package validation
 
 import (
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	admissionv1 "k8s.io/api/admission/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestDynamoModelValidator_Validate(t *testing.T) {
+	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamomodels.yaml")
+
 	tests := []struct {
-		name    string
-		model   *nvidiacomv1alpha1.DynamoModel
-		wantErr bool
-		errMsg  string
+		name          string
+		model         *nvidiacomv1alpha1.DynamoModel
+		oldModel      *nvidiacomv1alpha1.DynamoModel
+		mutateRequest func(*testing.T, map[string]any)
+		wantSchemaErr string
+		wantCELErr    string
+		wantWebhook   []string
+		wantWarnings  []string
 	}{
+		// Source-version schema and CEL boundaries.
 		{
-			name: "valid base model",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-model",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "base",
-				},
-			},
-			wantErr: false,
+			name:  "valid base model",
+			model: dynamoModelForAdmission(nil),
 		},
 		{
-			name: "valid lora model with s3 source",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "s3://my-bucket/lora-adapter",
-					},
-				},
+			name:  "missing modelName is rejected by source schema",
+			model: dynamoModelForAdmission(nil),
+			mutateRequest: func(t *testing.T, request map[string]any) {
+				t.Helper()
+				delete(request["spec"].(map[string]any), "modelName")
 			},
-			wantErr: false,
+			wantSchemaErr: "spec.modelName: Required value",
 		},
 		{
-			name: "valid lora model with hf source",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "hf://organization/model-name",
-					},
-				},
-			},
-			wantErr: false,
+			name: "unsupported modelType is rejected by source schema",
+			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Spec.ModelType = "unknown"
+			}),
+			wantSchemaErr: `spec.modelType: Unsupported value: "unknown": supported values: "base", "lora", "adapter"`,
+		},
+
+		// Structural create rules and accepted source schemes.
+		{
+			name:  "valid LoRA model with S3 source",
+			model: loraModelForAdmission("s3://my-bucket/lora-adapter"),
 		},
 		{
-			name: "missing modelName",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-model",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "base",
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.modelName is required",
+			name:  "valid LoRA model with Hugging Face source",
+			model: loraModelForAdmission("hf://organization/model-name"),
 		},
 		{
-			name: "missing baseModelName",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-model",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "",
-					ModelType:     "base",
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.baseModelName is required",
+			name:  "valid LoRA model with local source",
+			model: loraModelForAdmission("file:///local/path"),
 		},
 		{
-			name: "lora without source",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source:        nil,
-				},
+			name: "empty required names aggregate in API declaration order",
+			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Spec.ModelName = ""
+				model.Spec.BaseModelName = ""
+			}),
+			wantWebhook: []string{
+				"spec.modelName: Required value: must not be empty",
+				"spec.baseModelName: Required value: must not be empty",
 			},
-			wantErr: true,
-			errMsg:  "spec.source is required when modelType is 'lora'",
 		},
 		{
-			name: "lora with empty URI",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "",
-					},
-				},
-			},
-			wantErr: true,
-			errMsg:  "spec.source.uri must be specified when modelType is 'lora'",
+			name: "LoRA model requires source",
+			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Spec.ModelType = "lora"
+			}),
+			wantWebhook: []string{`spec.source: Required value: is required when spec.modelType is "lora"`},
 		},
 		{
-			name: "lora with invalid URI scheme",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "http://example.com/model",
-					},
-				},
+			name:  "LoRA model requires non-empty source URI",
+			model: loraModelForAdmission(""),
+			wantWebhook: []string{
+				`spec.source.uri: Required value: must be specified when spec.modelType is "lora"`,
 			},
-			wantErr: true,
-			errMsg:  "source URI must start with 's3://', 'hf://', or 'file:///', got: http://example.com/model",
 		},
 		{
-			name: "lora with file:/// URI scheme",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "file:///local/path",
-					},
-				},
+			name:  "LoRA model rejects HTTP source",
+			model: loraModelForAdmission("http://example.com/model"),
+			wantWebhook: []string{
+				`spec.source.uri: Invalid value: "http://example.com/model": must start with "s3://", "hf://", or "file:///"`,
 			},
-			wantErr: false,
 		},
 		{
-			name: "lora with file:// host form is rejected",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "file://host/local/path",
-					},
-				},
+			name:  "LoRA model rejects file URI with host",
+			model: loraModelForAdmission("file://host/local/path"),
+			wantWebhook: []string{
+				`spec.source.uri: Invalid value: "file://host/local/path": must start with "s3://", "hf://", or "file:///"`,
 			},
-			wantErr: true,
-			errMsg:  "source URI must start with 's3://', 'hf://', or 'file:///', got: file://host/local/path",
 		},
 		{
-			name: "lora with bare file:// is rejected",
-			model: &nvidiacomv1alpha1.DynamoModel{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-lora",
-					Namespace: "default",
-				},
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "file://",
-					},
-				},
+			name:  "LoRA model rejects bare file URI",
+			model: loraModelForAdmission("file://"),
+			wantWebhook: []string{
+				`spec.source.uri: Invalid value: "file://": must start with "s3://", "hf://", or "file:///"`,
 			},
-			wantErr: true,
-			errMsg:  "source URI must start with 's3://', 'hf://', or 'file:///', got: file://",
+		},
+		{
+			name: "non-LoRA model ignores source semantics for compatibility",
+			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Spec.Source = &nvidiacomv1alpha1.ModelSource{URI: "http://example.com/model"}
+			}),
+		},
+
+		// Structural update rules and warnings.
+		{
+			name:     "unchanged model is accepted",
+			oldModel: dynamoModelForAdmission(nil),
+			model:    dynamoModelForAdmission(nil),
+		},
+		{
+			name:     "modelName may change",
+			oldModel: dynamoModelForAdmission(nil),
+			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Spec.ModelName = "Qwen/Qwen3-0.6B-renamed"
+			}),
+		},
+		{
+			name:     "baseModelName is immutable and warns",
+			oldModel: dynamoModelForAdmission(nil),
+			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Spec.BaseModelName = "Qwen/Qwen3-8B"
+			}),
+			wantWebhook: []string{
+				`spec.baseModelName: Invalid value: "Qwen/Qwen3-8B": is immutable and cannot be changed after creation`,
+			},
+			wantWarnings: []string{"Changing spec.baseModelName will break endpoint discovery"},
+		},
+		{
+			name:     "modelType is immutable and warns",
+			oldModel: dynamoModelForAdmission(nil),
+			model:    loraModelForAdmission("s3://bucket/adapter"),
+			wantWebhook: []string{
+				`spec.modelType: Invalid value: "lora": is immutable and cannot be changed after creation`,
+			},
+			wantWarnings: []string{"Changing spec.modelType may cause unexpected behavior"},
+		},
+		{
+			name:     "independent immutable fields aggregate and warn in API declaration order",
+			oldModel: dynamoModelForAdmission(nil),
+			model: loraModelForAdmission("s3://bucket/adapter", func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Spec.BaseModelName = "Qwen/Qwen3-8B"
+			}),
+			wantWebhook: []string{
+				`spec.baseModelName: Invalid value: "Qwen/Qwen3-8B": is immutable and cannot be changed after creation`,
+				`spec.modelType: Invalid value: "lora": is immutable and cannot be changed after creation`,
+			},
+			wantWarnings: []string{
+				"Changing spec.baseModelName will break endpoint discovery",
+				"Changing spec.modelType may cause unexpected behavior",
+			},
+		},
+		{
+			name:     "LoRA source URI may change",
+			oldModel: loraModelForAdmission("s3://bucket/adapter-v1"),
+			model:    loraModelForAdmission("s3://bucket/adapter-v2"),
+		},
+		{
+			name:     "create semantics also apply on update",
+			oldModel: loraModelForAdmission("s3://bucket/adapter-v1"),
+			model:    loraModelForAdmission("http://example.com/adapter"),
+			wantWebhook: []string{
+				`spec.source.uri: Invalid value: "http://example.com/adapter": must start with "s3://", "hf://", or "file:///"`,
+			},
+		},
+		{
+			name:     "deleting model skips update validation",
+			oldModel: dynamoModelForAdmission(nil),
+			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Spec.ModelType = "lora"
+				model.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
+			}),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoModelValidator(tt.model)
-			_, err := validator.Validate()
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DynamoModelValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			current := admissionUnstructured(t, tt.model)
+			if tt.mutateRequest != nil {
+				tt.mutateRequest(t, current)
+			}
+			var old map[string]any
+			if tt.oldModel != nil {
+				old = admissionUnstructured(t, tt.oldModel)
 			}
 
-			if tt.wantErr && err.Error() != tt.errMsg {
-				t.Errorf("DynamoModelValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+			version := admissionSourceVersion(t, tt.model)
+			requestValidator, ok := requestValidators[version]
+			if !ok {
+				t.Fatalf("no request validator for source version %q", version)
+			}
+			schemaErrs := requestValidator.validateSchema(current, old)
+			if tt.wantSchemaErr != "" {
+				if tt.wantCELErr != "" || len(tt.wantWebhook) != 0 || len(tt.wantWarnings) != 0 {
+					t.Fatal("schema rejection cannot have downstream expectations")
+				}
+				assertRequestValidationError(t, schemaErrs, tt.wantSchemaErr)
+				return
+			}
+			if len(schemaErrs) != 0 {
+				t.Fatalf("schema errors = %v, want none", schemaErrs)
+			}
+
+			celErrs := requestValidator.celValidator(current, old)
+			if tt.wantCELErr != "" {
+				if len(tt.wantWebhook) != 0 || len(tt.wantWarnings) != 0 {
+					t.Fatal("CEL rejection cannot have webhook expectations")
+				}
+				assertRequestValidationError(t, celErrs, tt.wantCELErr)
+				return
+			}
+			if len(celErrs) != 0 {
+				t.Fatalf("CEL errors = %v, want none", celErrs)
+			}
+
+			handler := NewDynamoModelHandler()
+			ctx := dgdAdmissionContext(dynamoModelAdmissionOperation(tt.oldModel), nvidiacomv1alpha1.GroupVersion.WithKind("DynamoModel"))
+			var warnings []string
+			var err error
+			if tt.oldModel == nil {
+				warnings, err = handler.ValidateCreate(ctx, tt.model.DeepCopy())
+			} else {
+				warnings, err = handler.ValidateUpdate(ctx, tt.oldModel.DeepCopy(), tt.model.DeepCopy())
+			}
+			assertWebhookErrors(t, err, tt.wantWebhook)
+			if !slices.Equal(warnings, tt.wantWarnings) {
+				t.Fatalf("webhook warnings = %v, want %v", warnings, tt.wantWarnings)
 			}
 		})
 	}
 }
 
-func TestDynamoModelValidator_ValidateUpdate(t *testing.T) {
-	tests := []struct {
-		name            string
-		oldModel        *nvidiacomv1alpha1.DynamoModel
-		newModel        *nvidiacomv1alpha1.DynamoModel
-		wantErr         bool
-		wantWarnings    bool
-		errMsg          string
-		expectedWarnMsg string
-	}{
-		{
-			name: "no changes",
-			oldModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "base",
-				},
-			},
-			newModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "base",
-				},
-			},
-			wantErr: false,
+func TestDynamoModelHandlerBoundaryErrorsRemainRegular(t *testing.T) {
+	handler := NewDynamoModelHandler()
+	_, err := handler.ValidateCreate(t.Context(), &runtime.Unknown{})
+	if err == nil || !strings.Contains(err.Error(), "expected DynamoModel") {
+		t.Fatalf("ValidateCreate() error = %v, want cast error", err)
+	}
+	if k8serrors.IsInvalid(err) {
+		t.Fatalf("ValidateCreate() error = %v, want regular boundary error", err)
+	}
+}
+
+func dynamoModelForAdmission(
+	mutate func(*nvidiacomv1alpha1.DynamoModel),
+) *nvidiacomv1alpha1.DynamoModel {
+	model := &nvidiacomv1alpha1.DynamoModel{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+			Kind:       "DynamoModel",
 		},
-		{
-			name: "changing modelType",
-			oldModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "base",
-				},
-			},
-			newModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "s3://bucket/adapter",
-					},
-				},
-			},
-			wantErr:         true,
-			wantWarnings:    true,
-			errMsg:          "spec.modelType is immutable and cannot be changed after creation",
-			expectedWarnMsg: "Changing spec.modelType may cause unexpected behavior",
-		},
-		{
-			name: "changing baseModelName",
-			oldModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "base",
-				},
-			},
-			newModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "llama-3-70b",
-					ModelType:     "base",
-				},
-			},
-			wantErr:         true,
-			wantWarnings:    true,
-			errMsg:          "spec.baseModelName is immutable and cannot be changed after creation",
-			expectedWarnMsg: "Changing spec.baseModelName will break endpoint discovery",
-		},
-		{
-			name: "changing modelName is allowed",
-			oldModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "base",
-				},
-			},
-			newModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-renamed",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "base",
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "updating source URI for lora is allowed",
-			oldModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "s3://bucket/adapter-v1",
-					},
-				},
-			},
-			newModel: &nvidiacomv1alpha1.DynamoModel{
-				Spec: nvidiacomv1alpha1.DynamoModelSpec{
-					ModelName:     "llama-3-8b-custom",
-					BaseModelName: "llama-3-8b",
-					ModelType:     "lora",
-					Source: &nvidiacomv1alpha1.ModelSource{
-						URI: "s3://bucket/adapter-v2",
-					},
-				},
-			},
-			wantErr: false,
+		ObjectMeta: metav1.ObjectMeta{Name: "test-model", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoModelSpec{
+			ModelName:     "Qwen/Qwen3-0.6B",
+			BaseModelName: "Qwen/Qwen3-0.6B",
+			ModelType:     "base",
 		},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			validator := NewDynamoModelValidator(tt.newModel)
-			warnings, err := validator.ValidateUpdate(tt.oldModel)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("DynamoModelValidator.ValidateUpdate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-
-			if tt.wantErr && err.Error() != tt.errMsg {
-				t.Errorf("DynamoModelValidator.ValidateUpdate() error message = %v, want %v", err.Error(), tt.errMsg)
-			}
-
-			if tt.wantWarnings && len(warnings) == 0 {
-				t.Errorf("DynamoModelValidator.ValidateUpdate() expected warnings but got none")
-			}
-
-			if tt.wantWarnings && len(warnings) > 0 && warnings[0] != tt.expectedWarnMsg {
-				t.Errorf("DynamoModelValidator.ValidateUpdate() warning = %v, want %v", warnings[0], tt.expectedWarnMsg)
-			}
-		})
+	if mutate != nil {
+		mutate(model)
 	}
+	return model
+}
+
+func loraModelForAdmission(
+	uri string,
+	mutations ...func(*nvidiacomv1alpha1.DynamoModel),
+) *nvidiacomv1alpha1.DynamoModel {
+	return dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+		model.Spec.ModelType = "lora"
+		model.Spec.Source = &nvidiacomv1alpha1.ModelSource{URI: uri}
+		for _, mutate := range mutations {
+			mutate(model)
+		}
+	})
+}
+
+func dynamoModelAdmissionOperation(oldModel *nvidiacomv1alpha1.DynamoModel) admissionv1.Operation {
+	if oldModel == nil {
+		return admissionv1.Create
+	}
+	return admissionv1.Update
 }

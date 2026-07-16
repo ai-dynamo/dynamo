@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -51,7 +50,8 @@ func (h *DynamoCheckpointHandler) ValidateCreate(ctx context.Context, obj runtim
 		return nil, err
 	}
 	logger.Info("validate create", "name", ckpt.Name, "namespace", ckpt.Namespace)
-	return nil, validateDynamoCheckpointGMSSnapshot(ctx, ckpt)
+	validator := NewDynamoCheckpointValidator()
+	return validator.Validate(ctx, ckpt)
 }
 
 func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
@@ -64,7 +64,12 @@ func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, ne
 	if !ckpt.DeletionTimestamp.IsZero() {
 		return nil, nil
 	}
-	return nil, validateDynamoCheckpointGMSSnapshot(ctx, ckpt)
+	oldCheckpoint, err := castToDynamoCheckpoint(oldObj)
+	if err != nil {
+		return nil, err
+	}
+	validator := NewDynamoCheckpointValidator()
+	return validator.ValidateUpdate(ctx, oldCheckpoint, ckpt)
 }
 
 func (h *DynamoCheckpointHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
@@ -83,21 +88,6 @@ func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager, gate 
 		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoCheckpoint{}, observedValidator).
 		WithRecoverPanic(true), gate)
 	mgr.GetWebhookServer().Register(dynamoCheckpointWebhookPath, webhook)
-	return nil
-}
-
-func validateDynamoCheckpointGMSSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
-	// A DynamoCheckpoint is itself a Snapshot resource; service specs pass checkpoint.enabled instead.
-	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, features.MustGateFrom(ctx)); err != nil {
-		return err
-	}
-	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
-		return fmt.Errorf(
-			"spec.gpuMemoryService: gpuMemoryService is metadata-only; prepare the pod template "+
-				"(GMS server, client wiring, DRA claim) before creating this object; "+
-				"auto-checkpoints are prepared by DynamoGraphDeployment: %w",
-			err)
-	}
 	return nil
 }
 
