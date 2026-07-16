@@ -35,7 +35,6 @@ use dynamo_runtime::{
 };
 use futures::stream;
 use tracing::Instrument;
-use validator::Validate;
 
 // Re-export from dynamo-kv-router crate
 pub use dynamo_kv_router::approx;
@@ -257,7 +256,7 @@ where
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
-        kv_router_config.validate()?;
+        kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let component = endpoint.component();
         // Router-owned tasks derive from this token so a rebuild cannot cancel the runtime.
         let cancellation_token = component.drt().child_token();
