@@ -108,6 +108,8 @@ Each complete recipe follows this standard structure:
 
 The recipes require the Dynamo Kubernetes Platform to be installed. Follow the installation guide:
 
+> **Local development on a single GPU machine?** Use the [minikube_setup](minikube_setup/) recipe to provision a local minikube cluster with NVIDIA GPU support before running the platform installer.
+
 - **[Kubernetes Deployment Guide](../docs/kubernetes/README.md)** - Quickstart (~10 minutes)
 - **[Detailed Installation Guide](../docs/kubernetes/installation-guide.md)** - Advanced options
 

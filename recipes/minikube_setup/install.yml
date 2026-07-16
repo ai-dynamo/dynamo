@@ -1,0 +1,52 @@
+---
+- name: Install Minikube
+  hosts: all
+  become: yes
+  gather_facts: yes
+  vars:
+    minikube_download_url: "https://github.com/kubernetes/minikube/releases/latest/download/minikube-linux-amd64"
+    system_bin_dir: "/usr/local/bin"
+    temp_dir: "/tmp"
+  tasks:
+    - name: Check if Minikube is already installed
+      command: minikube version
+      register: minikube_version_check
+      failed_when: false
+      changed_when: false
+      become: no
+
+    - name: Download Minikube binary
+      get_url:
+        url: "{{ minikube_download_url }}"
+        dest: "{{ temp_dir }}/minikube-linux-amd64"
+        mode: '0755'
+      when: minikube_version_check.rc != 0
+      become: no
+
+    - name: Install Minikube to system location
+      copy:
+        src: "{{ temp_dir }}/minikube-linux-amd64"
+        dest: "{{ system_bin_dir }}/minikube"
+        mode: '0755'
+        owner: root
+        group: root
+        remote_src: yes
+      when: minikube_version_check.rc != 0
+
+    - name: Remove temporary Minikube binary
+      file:
+        path: "{{ temp_dir }}/minikube-linux-amd64"
+        state: absent
+      when: minikube_version_check.rc != 0
+      become: no
+
+    - name: Verify Minikube installation
+      command: minikube version
+      register: minikube_verify
+      changed_when: false
+      become: no
+
+    - name: Display Minikube version
+      debug:
+        msg: "Minikube installed successfully: {{ minikube_verify.stdout }}"
+      become: no
