@@ -571,7 +571,11 @@ class OrchestratorEngineAdapter:
         # 3. Build PipelineContext + baseline and drive the orchestrator.
         ctx = self._tick_input_to_context(tick_input)
         baseline = self._baseline_from_worker_counts(tick_input.worker_counts)
-        outcome = await self._orchestrator.tick(ctx, baseline)
+        outcome = await self._orchestrator.tick(
+            ctx,
+            baseline,
+            tick_now=scheduled_tick.at_monotonic_s,
+        )
 
         # 4. Project PipelineOutcome onto PlannerEffects.
         scale_to = self._project_scale_to(
@@ -866,6 +870,7 @@ class OrchestratorEngineAdapter:
         # described by the separate need_* fields below.
         return ScheduledTick(
             at_s=at_s,
+            at_monotonic_s=at_monotonic,
             run_load_scaling=load_loop_due,
             run_throughput_scaling=throughput_loop_due,
             need_worker_states=True,
