@@ -622,6 +622,9 @@ navigation:
       - page: Browse All Recipes
         path: ../pages-dev/recipes/README.mdx
         slug: browse
+      - page: Inkling NVFP4
+        path: ../pages-dev/recipes/inkling.mdx
+        slug: inkling
       - page: Kimi-K2.6
         path: ../pages-dev/recipes/kimi-k2-6.mdx
         slug: kimi-k2-6
