@@ -152,7 +152,6 @@ impl WorkerEligibilitySnapshot {
 pub struct AdmissionRequest<'a> {
     id: AdmissionId,
     session_id: Option<&'a str>,
-    context_tokens: usize,
     progress: RequestProgress,
     worker_eligibility: WorkerEligibility,
 }
@@ -168,20 +167,9 @@ impl<'a> AdmissionRequest<'a> {
         worker_eligibility: WorkerEligibility,
     ) -> Self {
         let (progress, _) = RequestProgress::new(context_tokens);
-        Self::with_progress(id, session_id, context_tokens, progress, worker_eligibility)
-    }
-
-    pub(crate) fn with_progress(
-        id: AdmissionId,
-        session_id: Option<&'a str>,
-        context_tokens: usize,
-        progress: RequestProgress,
-        worker_eligibility: WorkerEligibility,
-    ) -> Self {
         Self {
             id,
             session_id,
-            context_tokens,
             progress,
             worker_eligibility,
         }
@@ -197,7 +185,7 @@ impl<'a> AdmissionRequest<'a> {
 
     /// Full tokenized request context, not uncached prefill work.
     pub fn context_tokens(&self) -> usize {
-        self.context_tokens
+        self.progress.context_tokens()
     }
 
     /// Live logical context for this request.

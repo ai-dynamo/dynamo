@@ -56,7 +56,6 @@ fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error
 fn monitor_response_stream(
     mut response_stream: ManyOut<Annotated<LLMEngineOutput>>,
     context: Arc<dyn AsyncEngineContext>,
-    context_id: String,
     mut guard: RequestGuard,
 ) -> impl futures::Stream<Item = Annotated<LLMEngineOutput>> + Send {
     async_stream::stream! {
@@ -71,7 +70,7 @@ fn monitor_response_stream(
                 biased;
 
                 _ = &mut stopped => {
-                    tracing::debug!("Request {context_id} cancelled, ending stream");
+                    tracing::debug!(request_id = context.id(), "Request cancelled, ending stream");
                     break false;
                 }
 
@@ -81,7 +80,11 @@ fn monitor_response_stream(
                     };
                     failed |= response_item_failed(&item);
                     guard.on_item(&item).await;
-                    let completed_terminal = !failed && response_item_completed(&item);
+                    let completed_terminal = !failed
+                        && item
+                            .data
+                            .as_ref()
+                            .is_some_and(|data| data.finish_reason.is_some());
                     if completed_terminal {
                         guard.mark_completed_terminal();
                     }
@@ -170,7 +173,7 @@ impl KvPushRouter {
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
 
-        cancel_on_stop(request_context.as_ref(), &context_id, selection_future).await?
+        cancel_on_stop(request_context.as_ref(), selection_future).await?
     }
 
     async fn select_with_affinity(
@@ -261,7 +264,6 @@ impl KvPushRouter {
                 let record_result = if let Some(hashes) = selection.routing_hashes.take() {
                     cancel_on_stop(
                         request_context.as_ref(),
-                        &context_id,
                         self.chooser.record_routing_decision_hashes(hashes, worker),
                     )
                     .await?
@@ -280,7 +282,6 @@ impl KvPushRouter {
                     }
                     cancel_on_stop(
                         request_context.as_ref(),
-                        &context_id,
                         self.chooser
                             .record_routing_decision(tokens_with_hashes, worker),
                     )
@@ -362,7 +363,6 @@ impl KvPushRouter {
         };
         let dispatch_result = cancel_on_stop(
             request_context.as_ref(),
-            &context_id,
             dispatch.instrument(tracing::info_span!(
                 "kv_router.route_request",
                 request_id = %context_id,
@@ -384,11 +384,9 @@ impl KvPushRouter {
 
         guard.mark_dispatched().await;
         let stream_context = response_stream.context();
-        let context_for_monitoring = stream_context.clone();
         let wrapped_stream = Box::pin(monitor_response_stream(
             response_stream,
-            context_for_monitoring,
-            context_id,
+            stream_context.clone(),
             guard,
         ));
         Ok(ResponseStream::new(wrapped_stream, stream_context))
@@ -640,14 +638,6 @@ fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
             })
 }
 
-fn response_item_completed(item: &Annotated<LLMEngineOutput>) -> bool {
-    !response_item_failed(item)
-        && item
-            .data
-            .as_ref()
-            .is_some_and(|data| data.finish_reason.is_some())
-}
-
 #[async_trait]
 impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for DirectRoutingRouter
@@ -752,23 +742,6 @@ mod tests {
         assert!(!response_item_failed(&Annotated::from_data(output)));
     }
 
-    #[test]
-    fn response_item_completed_requires_successful_terminal_reason() {
-        for reason in [FinishReason::Stop, FinishReason::EoS, FinishReason::Length] {
-            let output = LLMEngineOutput {
-                finish_reason: Some(reason),
-                ..Default::default()
-            };
-            assert!(response_item_completed(&Annotated::from_data(output)));
-        }
-
-        let output = LLMEngineOutput {
-            finish_reason: Some(FinishReason::Error("decode failed".to_string())),
-            ..Default::default()
-        };
-        assert!(!response_item_completed(&Annotated::from_data(output)));
-    }
-
     #[tokio::test]
     #[serial_test::serial]
     async fn dropping_stream_after_terminal_item_reports_admission_completed() {
@@ -857,7 +830,7 @@ mod tests {
                 Arc::clone(&context),
             );
             {
-                let monitored = monitor_response_stream(source, context, request_id.clone(), guard);
+                let monitored = monitor_response_stream(source, context, guard);
                 tokio::pin!(monitored);
                 let item = monitored.next().await.unwrap();
                 assert_eq!(

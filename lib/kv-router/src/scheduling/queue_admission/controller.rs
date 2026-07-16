@@ -106,13 +106,12 @@ impl PolicyClassAdmissionController {
         self.next_id = self.next_id.wrapping_add(1);
         let ticket = AdmissionTicket { class_index, id };
         let (progress, updater) = RequestProgress::new(context_tokens);
-        let decision = strategy.admit(AdmissionRequest::with_progress(
+        let decision = strategy.admit(AdmissionRequest {
             id,
             session_id,
-            context_tokens,
             progress,
             worker_eligibility,
-        ));
+        });
         Some((ticket, updater, decision))
     }
 

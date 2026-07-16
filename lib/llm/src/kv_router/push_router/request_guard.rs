@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::scheduling::{AdmissionLease, RequestOutcome, RequestProgressUpdater};
+use dynamo_kv_router::scheduling::{AdmissionLease, RequestProgressUpdater};
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
@@ -53,24 +53,14 @@ impl RequestCleanup {
         }
     }
 
-    async fn finish(&mut self, outcome: RequestOutcome) {
-        let result = if let Some(mut lease) = self.admission_lease.take() {
-            match outcome {
-                RequestOutcome::Completed { context_tokens } => {
-                    lease.mark_completed(context_tokens)
-                }
-                RequestOutcome::Aborted => lease.mark_aborted(),
-            }
+    async fn finish(&mut self) {
+        if let Some(lease) = self.admission_lease.take() {
             // AdmissionLease reports the terminal outcome to the scheduler actor.
             // The scheduler actor remains the sole owner of booking and queue cleanup.
             drop(lease);
-            Ok(())
-        } else if !self.scheduler_tracked {
-            Ok(())
-        } else {
-            self.chooser.free(&self.context_id).await
-        };
-        if let Err(error) = result {
+        } else if self.scheduler_tracked
+            && let Err(error) = self.chooser.free(&self.context_id).await
+        {
             tracing::warn!(
                 request_id = %self.context_id,
                 %error,
@@ -79,32 +69,11 @@ impl RequestCleanup {
         }
         self.freed = true;
     }
-
-    fn mark_completed(&mut self, context_tokens: usize) {
-        if let Some(progress) = &self.request_progress {
-            progress.update_context_tokens(context_tokens);
-        }
-        if let Some(lease) = self.admission_lease.as_mut() {
-            lease.mark_completed(context_tokens);
-        }
-    }
-
-    fn mark_dispatched(&mut self) {
-        if let Some(lease) = self.admission_lease.as_mut() {
-            lease.mark_dispatched();
-        }
-    }
 }
 
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
-        let needs_free = !self.freed && self.scheduler_tracked;
-        if !needs_free {
-            return;
-        }
-
-        // AdmissionLease drops after this method and performs actor-owned cleanup.
-        if self.admission_lease.is_some() {
+        if self.freed || !self.scheduler_tracked || self.admission_lease.is_some() {
             return;
         }
 
@@ -260,7 +229,6 @@ impl RequestObservability {
 
 struct OutputBlockUpdate {
     decay_fraction: Option<f64>,
-    update_scheduler: bool,
 }
 
 /// Tracks when streamed output grows into a new scheduler accounting block.
@@ -306,10 +274,7 @@ impl OutputBlockTracker {
         let decay_fraction = self
             .expected_output_tokens
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
-        Some(OutputBlockUpdate {
-            decay_fraction,
-            update_scheduler: self.track_output_blocks,
-        })
+        Some(OutputBlockUpdate { decay_fraction })
     }
 }
 
@@ -321,7 +286,6 @@ pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
-    initial_context_tokens: usize,
     prefill_marked: bool,
 }
 
@@ -366,7 +330,6 @@ impl RequestGuard {
                 block_size,
                 expected_output_tokens,
             ),
-            initial_context_tokens: isl_tokens,
             prefill_marked: false,
         }
     }
@@ -384,15 +347,11 @@ impl RequestGuard {
     }
 
     pub(super) async fn mark_dispatched(&mut self) {
-        if self.cleanup.request_progress.is_some() {
+        if let Some(lease) = self.cleanup.admission_lease.as_mut() {
             // Backend dispatch already succeeded. Record that fact synchronously so
             // lease cleanup still reports Dispatched before the terminal event if it
             // overtakes the actor command.
-            self.cleanup.mark_dispatched();
-            self.cleanup
-                .chooser
-                .mark_dispatched(&self.cleanup.context_id)
-                .await;
+            lease.report_dispatched().await;
         }
         self.observability.mark_dispatched();
     }
@@ -440,10 +399,11 @@ impl RequestGuard {
         };
 
         if let Some(progress) = &self.cleanup.request_progress {
-            progress
-                .update_context_tokens(self.initial_context_tokens.saturating_add(cumulative_osl));
+            progress.update_context_tokens(
+                self.output_blocks.isl_tokens.saturating_add(cumulative_osl),
+            );
         }
-        if !update.update_scheduler {
+        if !self.output_blocks.track_output_blocks {
             return;
         }
 
@@ -466,23 +426,26 @@ impl RequestGuard {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
         self.mark_completed_terminal();
-        let context_tokens = self
-            .observability
-            .context_tokens(self.initial_context_tokens);
-        self.cleanup
-            .finish(RequestOutcome::Completed { context_tokens })
-            .await;
+        self.cleanup.finish().await;
     }
 
     pub(super) fn mark_completed_terminal(&mut self) {
         let context_tokens = self
             .observability
-            .context_tokens(self.initial_context_tokens);
-        self.cleanup.mark_completed(context_tokens);
+            .context_tokens(self.output_blocks.isl_tokens);
+        if let Some(progress) = &self.cleanup.request_progress {
+            progress.update_context_tokens(context_tokens);
+        }
+        if let Some(lease) = self.cleanup.admission_lease.as_mut() {
+            lease.mark_completed(context_tokens);
+        }
     }
 
     pub(super) async fn abort(&mut self) {
-        self.cleanup.finish(RequestOutcome::Aborted).await;
+        if let Some(lease) = self.cleanup.admission_lease.as_mut() {
+            lease.mark_aborted();
+        }
+        self.cleanup.finish().await;
     }
 }
 

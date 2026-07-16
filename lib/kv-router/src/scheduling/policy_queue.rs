@@ -516,7 +516,9 @@ impl<T> PolicyQueue<T> {
     /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
     /// accounting while preserving each retained entry's scheduling key.
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
-        drop(self.take_if(|payload| !keep(payload)));
+        for class_index in 0..self.classes.len() {
+            drop(self.take_if_in_class(class_index, |payload| !keep(payload)));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -684,17 +686,6 @@ impl<T> PolicyQueue<T> {
             class.deficit = 0;
         }
         Some(entry)
-    }
-
-    pub(crate) fn take_if(
-        &mut self,
-        mut predicate: impl FnMut(&T) -> bool,
-    ) -> Vec<PolicyQueueEntry<T>> {
-        let mut removed = Vec::new();
-        for class_index in 0..self.classes.len() {
-            removed.extend(self.take_if_in_class(class_index, &mut predicate).0);
-        }
-        removed
     }
 
     pub(crate) fn take_if_in_class(

@@ -281,9 +281,9 @@ where
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let cancellation_guard = self
+        let admission_lease = self
             .queue
-            .cancellation_guard(request.mode.admission_request_id());
+            .new_admission_lease(request.mode.admission_request_id());
         let track_prefill_tokens = request
             .router_config_override
             .as_ref()
@@ -328,9 +328,9 @@ where
             resp_tx: Some(resp_tx),
         };
 
-        let mut cancellation_guard = self
+        let mut admission_lease = self
             .queue
-            .enqueue_with_block_hashes_and_lease(request, block_hashes, cancellation_guard)
+            .enqueue_with_block_hashes_and_lease(request, block_hashes, admission_lease)
             .await;
 
         let mut response = resp_rx
@@ -338,11 +338,11 @@ where
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
         match &mut response {
             Ok(response) if response.request_progress.is_some() => {
-                response.admission_lease = cancellation_guard.take().map(|lease| *lease);
+                response.admission_lease = admission_lease.take().map(|lease| *lease);
             }
             Ok(_) | Err(_) => {
-                if let Some(guard) = cancellation_guard.as_mut() {
-                    guard.disarm();
+                if let Some(lease) = admission_lease.as_mut() {
+                    lease.disarm();
                 }
             }
         }
