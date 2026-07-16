@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # TML Inkling Recipes
 
 Recipes for **thinkingmachines/Inkling-NVFP4**.
@@ -22,7 +27,7 @@ Dynamo + SGLang deployment profile:
 
 ## Supported features
 
-- Modalities: Text + Image + Audio input
+- Modalities: Text, image, and audio input
 - Reasoning (`inkling` reasoning parser)
 - Tool calling (`inkling` tool-call parser)
 
@@ -47,7 +52,7 @@ Dynamo + SGLang deployment profile:
 
 ## Quick Start
 
-### 1. Create namespace
+### 1. Create Namespace
 
 ```bash
 export NAMESPACE=your-namespace
@@ -62,7 +67,7 @@ kubectl create namespace ${NAMESPACE}
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 ```
 
-### 3. Download the model
+### 3. Download the Model
 
 The checkpoint is ~592 GB.
 
@@ -77,7 +82,7 @@ kubectl wait --for=condition=Complete job/inkling-model-download -n ${NAMESPACE}
 kubectl apply -f sglang/agg-b200/deploy.yaml -n ${NAMESPACE}
 ```
 
-### 5. Smoke test
+### 5. Smoke Test
 
 ```bash
 kubectl port-forward svc/tml-inkling-sglang-agg-frontend 8000:8000 -n ${NAMESPACE} &
@@ -91,16 +96,59 @@ curl -s http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "thinkingmachines/Inkling-NVFP4",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
-    "max_tokens": 64
+    "max_tokens": 128
+  }'
+```
+
+#### Image
+
+Images are sent as `image_url` content parts. Use a public HTTP(S) URL that the
+worker pod can fetch, or use a base64 `data:` URI for local files.
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png"}},
+        {"type": "text", "text": "Describe what is in this image."}
+      ]
+    }],
+    "max_tokens": 512
+  }'
+```
+
+#### Multiple Images
+
+Send multiple `image_url` content parts in the same user message to test
+multi-image input:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/cats.jpg"}},
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/corgi.jpg"}},
+        {"type": "text", "text": "Describe each image separately. Label them Image 1 and Image 2."}
+      ]
+    }],
+    "max_tokens": 512
   }'
 ```
 
 #### Audio
 
-Audio rides as an `audio_url` content part — a public HTTP(S) URL (the worker pod
-fetches it, so it needs egress) or a base64 `data:` URI. Inkling expects 16 kHz audio;
-WAV is ideal, and MP3/FLAC/OGG also decode in this image. This sample is 16 kHz mono
-WAV, matching the model card spec:
+Audio is sent as an `audio_url` content part. Use a public HTTP(S) URL that the
+worker pod can fetch, or use a base64 `data:` URI for local files. Inkling expects
+16 kHz audio. Use WAV when possible; MP3, FLAC, and OGG also decode in this
+container image. This sample is 16 kHz mono WAV, matching the model card spec.
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
@@ -118,11 +166,37 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-For air-gapped clusters, send local files as `data:` URIs instead — e.g.
-`{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,'$(base64 -i sample.wav)'"}}`
-— and mix multiple media parts in one message as the context budget allows.
+#### Multiple Audio Clips
 
-#### Reasoning effort
+Send multiple `audio_url` content parts in the same user message to test
+multi-audio input:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "audio_url", "audio_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/mlk.wav"}},
+        {"type": "audio_url", "audio_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/librispeech_asr_demo_validation_0.wav"}},
+        {"type": "text", "text": "Transcribe each audio clip separately. Label them Audio 1 and Audio 2."}
+      ]
+    }],
+    "max_tokens": 512
+  }'
+```
+
+For air-gapped clusters, send local media files as `data:` URIs instead:
+
+```json
+{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,<BASE64_WAV>"}}
+```
+
+Mix multiple media parts in one message as the context budget allows.
+
+#### Reasoning Effort
 
 Inkling's controllable thinking is exposed per request: pass `reasoning_effort` as a
 named level (`none` / `minimal` / `low` / `medium` / `high` / `max`) or a float in
@@ -141,10 +215,10 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-## Known issues
+## Known Issues
 
-1. `deploy.yaml` overrides `DYN_FORWARDPASS_METRIC_PORT` to an empty value — required to
-   make MTP/EAGLE speculative decoding work with SGLang: the forward-pass metrics reporter
-   (auto-enabled by the operator-injected port) crashes the scheduler on speculative
-   batches (`batch.seq_lens_cpu` is `None`). Only per-forward-pass telemetry is lost.
-   Remove the override once the image carries a fix.
+1. `deploy.yaml` overrides `DYN_FORWARDPASS_METRIC_PORT` to an empty value. This override is
+   required for MTP/EAGLE speculative decoding with SGLang because the forward-pass metrics reporter
+   (auto-enabled by the operator-injected port) crashes the scheduler on speculative batches
+   (`batch.seq_lens_cpu` is `None`). Only per-forward-pass telemetry is lost. Remove the override
+   once the container image carries a fix.
