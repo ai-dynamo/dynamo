@@ -53,6 +53,10 @@ class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
         video = np.ascontiguousarray(video_frames).view(cls)
         duration = float(video_metadata.get("duration") or 0)
         source_fps = float(video_metadata.get("fps") or 0)
+        # TODO: SGLang does not yet provide a model-independent contract for
+        # pre-sampled video inputs with source frame indices and timestamps. Use the
+        # effective FPS as a best-effort workaround until SGLang video processors can
+        # preserve the supplied sampling metadata and skip redundant temporal sampling.
         effective_fps = len(video_frames) / duration if duration > 0 else source_fps
         frame_indices = video_metadata.get("frames_indices")
         if (
