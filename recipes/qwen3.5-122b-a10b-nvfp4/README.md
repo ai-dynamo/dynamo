@@ -131,8 +131,7 @@ is system output tok/s per GPU at the best SLA-passing concurrency.
   [#45473](https://github.com/vllm-project/vllm/pull/45473)) then exposes a silent
   quality regression: a spec-decode conv-state metadata mismatch between the prefill
   and decode workers causes the NIXL transfer to misplace the Mamba conv state,
-  producing garbage output. See vLLM
-  [#45769](https://github.com/vllm-project/vllm/issues/45769).
+  producing garbage output.
 - **MTP on aggregation** is likewise not shipped: it requires DS unset and, on this
   workload, MTP-heavy decode starves prefill on the shared GPU (TTFT regressions)
   for no throughput win.
