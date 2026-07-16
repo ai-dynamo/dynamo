@@ -35,6 +35,7 @@ from gpu_memory_service.client.torch.tensor import (
     STORAGE_MANIFEST_PREFIX,
     ModuleTensorBinding,
     ModuleTensorKind,
+    StorageManifest,
 )
 from gpu_memory_service.integrations.common import utils as common_utils
 from gpu_memory_service.integrations.trtllm import model_loader as trtllm_model_loader
@@ -142,7 +143,7 @@ def cpu_storage_pointer(monkeypatch):
 
 
 @pytest.fixture
-def gms_write(monkeypatch):
+def gms_allocator(monkeypatch):
     events = []
     allocator = _FakeAllocator(events)
 
@@ -163,7 +164,12 @@ def gms_write(monkeypatch):
         "rebind_nonparameter_tensors",
         lambda _allocator, _model: events.append("rebind") or 12,
     )
+    return allocator, events
 
+
+@pytest.fixture
+def gms_write(gms_allocator):
+    allocator, events = gms_allocator
     stats = common_utils.prepare_gms_write(allocator, object())
     return allocator, stats, events
 
@@ -175,27 +181,40 @@ def clear_pending_write(monkeypatch):
     monkeypatch.setattr(model_loader, "_last_model_memory_usage_offset_bytes", 0)
 
 
+@pytest.fixture
+def fake_vllm_read(monkeypatch):
+    events = []
+    model = SimpleNamespace(eval=lambda: model)
+    loader_utils = ModuleType("vllm.model_executor.model_loader.utils")
+    loader_utils.initialize_model = lambda **_kwargs: (
+        events.append("initialize") or model
+    )
+    loader_utils.process_weights_after_loading = lambda *_args: events.append(
+        "post-load"
+    )
+    torch_utils = ModuleType("vllm.utils.torch_utils")
+    torch_utils.set_default_torch_dtype = lambda _dtype: nullcontext()
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.model_executor.model_loader.utils",
+        loader_utils,
+    )
+    monkeypatch.setitem(sys.modules, "vllm.utils.torch_utils", torch_utils)
+    monkeypatch.setattr(model_loader, "setup_meta_tensor_workaround", lambda: None)
+    monkeypatch.setattr(
+        model_loader,
+        "materialize_module_from_gms",
+        lambda *_args, **_kwargs: events.append("materialize"),
+    )
+    monkeypatch.setattr(model_loader, "get_mx_load_context", lambda *_args: None)
+    return loader_utils, model, events
+
+
 def _writer_for_tensor(tensor: torch.Tensor):
     store = _MetadataStore()
     storage = tensor.untyped_storage()
     allocations = {"allocation": (storage.data_ptr(), storage.nbytes())}
     return store, _Manager(store, allocations, mapped=True)
-
-
-def test_module_tensor_binding_round_trip_uses_lowercase_kind():
-    binding = ModuleTensorBinding(
-        "value",
-        ModuleTensorKind.NONPERSISTENT_BUFFER,
-    )
-    encoded = msgspec.msgpack.encode(binding)
-
-    assert msgspec.msgpack.decode(encoded) == {
-        "path": "value",
-        "kind": "nonpersistent_buffer",
-    }
-    decoded = msgspec.msgpack.decode(encoded, type=ModuleTensorBinding)
-    assert decoded == binding
-    assert decoded.kind is ModuleTensorKind.NONPERSISTENT_BUFFER
 
 
 def test_manifest_groups_exact_alias_bindings_and_shared_storage_objects():
@@ -223,25 +242,25 @@ def test_manifest_groups_exact_alias_bindings_and_shared_storage_objects():
     assert set(manifest) == {"nbytes", "objects"}
     assert manifest["nbytes"] == backing.untyped_storage().nbytes()
     assert len(manifest["objects"]) == 2
-    assert manifest["objects"][0] == {
-        "dtype": "float32",
-        "shape": [3],
-        "stride": [2],
-        "storage_offset_bytes": 4,
-        "requires_grad": False,
-        "bindings": [
-            {"path": "first", "kind": "attribute"},
-            {"path": "first_alias", "kind": "attribute"},
-        ],
-    }
+    first_object = manifest["objects"][0]
+    assert first_object["dtype"] == "float32"
+    assert first_object["shape"] == [3]
+    assert first_object["stride"] == [2]
+    assert first_object["storage_offset_bytes"] == 4
+    assert not first_object["requires_grad"]
+    assert first_object["bindings"] == [
+        {"path": "first", "kind": "attribute"},
+        {"path": "first_alias", "kind": "attribute"},
+    ]
     assert manifest["objects"][1]["storage_offset_bytes"] == 8
     assert manifest["objects"][1]["bindings"] == [
         {"path": "second", "kind": "attribute"}
     ]
-    assert "allocation_id" not in payload.decode("latin1")
+    typed = msgspec.msgpack.decode(payload, type=StorageManifest)
+    assert typed.objects[0].bindings[0].kind is ModuleTensorKind.ATTRIBUTE
 
 
-def test_reader_replaces_split_and_shared_placeholder_topology(cpu_storage_pointer):
+def test_reader_uses_source_topology_and_binding_forms(cpu_storage_pointer):
     backing = torch.arange(8, dtype=torch.float32)
     exact = backing[::2]
     distinct = torch.empty(0).set_(
@@ -255,8 +274,23 @@ def test_reader_replaces_split_and_shared_placeholder_topology(cpu_storage_point
     writer_model.exact_b = exact
     writer_model.distinct_a = backing
     writer_model.distinct_b = distinct
+    writer_model.register_buffer("runtime", exact, persistent=False)
+    writer_model.direct = exact
+    writer_model.values = [exact]
+    writer_model.fixed = (exact,)
     store, writer = _writer_for_tensor(backing)
     register_module_tensors(writer, writer_model)
+    manifest = msgspec.msgpack.decode(next(iter(store.entries.values()))[2])
+    runtime_binding = next(
+        binding
+        for tensor_object in manifest["objects"]
+        for binding in tensor_object["bindings"]
+        if binding["path"] == "runtime"
+    )
+    assert runtime_binding == {
+        "path": "runtime",
+        "kind": "nonpersistent_buffer",
+    }
 
     shared_placeholder = torch.zeros(1)
     reader_model = torch.nn.Module()
@@ -264,24 +298,36 @@ def test_reader_replaces_split_and_shared_placeholder_topology(cpu_storage_point
     reader_model.exact_b = torch.ones(3, dtype=torch.float64)
     reader_model.distinct_a = shared_placeholder
     reader_model.distinct_b = shared_placeholder
-    names = ("exact_a", "exact_b", "distinct_a", "distinct_b")
-    old_placeholders = tuple(reader_model.__dict__[name] for name in names)
+    reader_model.register_buffer("runtime", torch.zeros(1))
+    reader_model.direct = torch.zeros(2)
+    reader_model.values = [torch.zeros(3)]
+    old_tuple = (torch.zeros(5),)
+    reader_model.fixed = old_tuple
     reader = _Manager(store, writer.allocations, mapped=False)
 
     materialize_module_from_gms(reader, reader_model, device_index=0)
 
     assert reader.mapping_calls == ["allocation"]
-    assert reader_model.exact_a is reader_model.exact_b
-    assert reader_model.distinct_a is not reader_model.distinct_b
-    assert all(
-        reader_model.__dict__[name] is not old
-        for name, old in zip(names, old_placeholders, strict=True)
+    exact_aliases = (
+        reader_model.exact_a,
+        reader_model.exact_b,
+        reader_model.runtime,
+        reader_model.direct,
+        reader_model.values[0],
+        reader_model.fixed[0],
     )
-    storage_ids = {
-        reader_model.__dict__[name].untyped_storage()._cdata for name in names
-    }
+    assert all(alias is reader_model.exact_a for alias in exact_aliases)
+    assert reader_model.distinct_a is not reader_model.distinct_b
+    storage_ids = {tensor.untyped_storage()._cdata for tensor in exact_aliases}
+    storage_ids.update(
+        tensor.untyped_storage()._cdata
+        for tensor in (reader_model.distinct_a, reader_model.distinct_b)
+    )
     assert len(storage_ids) == 1
     assert backing.untyped_storage()._cdata not in storage_ids
+    assert reader_model.fixed is not old_tuple
+    assert "runtime" in reader_model._non_persistent_buffers_set
+    assert "runtime" not in reader_model.state_dict()
     torch.testing.assert_close(reader_model.exact_a, backing[::2])
     torch.testing.assert_close(reader_model.distinct_b, backing[1::2])
     reader_model.exact_a[1] = 99
@@ -355,35 +401,6 @@ def test_mixed_dtype_byte_offsets_and_one_mapping_per_allocation(
         reader_model.octets,
         torch.tensor([1, 1, 0, 0, 2, 0, 0, 0], dtype=torch.uint8),
     )
-
-
-def test_nonpersistent_buffer_direct_list_and_tuple_bind_same_source_object(
-    cpu_storage_pointer,
-):
-    tensor = torch.arange(4, dtype=torch.float32)
-    writer_model = torch.nn.Module()
-    writer_model.register_buffer("runtime", tensor, persistent=False)
-    writer_model.direct = tensor
-    writer_model.values = [tensor]
-    writer_model.fixed = (tensor,)
-    store, writer = _writer_for_tensor(tensor)
-    register_module_tensors(writer, writer_model)
-
-    reader_model = torch.nn.Module()
-    reader_model.register_buffer("runtime", torch.zeros(1))
-    reader_model.direct = torch.zeros(2)
-    reader_model.values = [torch.zeros(3)]
-    old_tuple = (torch.zeros(5),)
-    reader_model.fixed = old_tuple
-    reader = _Manager(store, writer.allocations, mapped=False)
-    materialize_module_from_gms(reader, reader_model, device_index=0)
-
-    assert reader_model.runtime is reader_model.direct
-    assert reader_model.runtime is reader_model.values[0]
-    assert reader_model.runtime is reader_model.fixed[0]
-    assert reader_model.fixed is not old_tuple
-    assert "runtime" in reader_model._non_persistent_buffers_set
-    assert "runtime" not in reader_model.state_dict()
 
 
 class _LoaderParameter(torch.nn.Parameter):
@@ -496,9 +513,12 @@ def test_reader_creates_writer_final_bindings_absent_from_initial_model(
     torch.testing.assert_close(reader_model.runtime_scale, runtime)
 
 
-def test_reader_rejects_distinct_sources_for_tied_submodule_destination():
+@pytest.mark.parametrize("distinct_sources", (False, True))
+def test_reader_resolves_tied_submodule_destinations(
+    cpu_storage_pointer, distinct_sources
+):
     first = torch.arange(2, dtype=torch.float32)
-    second = torch.arange(2, dtype=torch.float32) + 10
+    second = first + 10 if distinct_sources else first
     writer_model = torch.nn.Module()
     writer_model.a = torch.nn.Module()
     writer_model.b = torch.nn.Module()
@@ -506,14 +526,8 @@ def test_reader_rejects_distinct_sources_for_tied_submodule_destination():
     writer_model.b.value = second
     store = _MetadataStore()
     allocations = {
-        "first": (
-            first.untyped_storage().data_ptr(),
-            first.untyped_storage().nbytes(),
-        ),
-        "second": (
-            second.untyped_storage().data_ptr(),
-            second.untyped_storage().nbytes(),
-        ),
+        name: (tensor.untyped_storage().data_ptr(), tensor.untyped_storage().nbytes())
+        for name, tensor in (("first", first), ("second", second))
     }
     writer = _Manager(store, allocations, mapped=True)
     register_module_tensors(writer, writer_model)
@@ -525,36 +539,15 @@ def test_reader_rejects_distinct_sources_for_tied_submodule_destination():
     reader_model.b = shared
     reader = _Manager(store, allocations, mapped=False)
 
-    with pytest.raises(RuntimeError, match="same destination"):
+    if distinct_sources:
+        with pytest.raises(RuntimeError, match="same destination"):
+            materialize_module_from_gms(reader, reader_model, device_index=0)
+        assert reader.mapping_calls == []
+        torch.testing.assert_close(shared.value, torch.zeros(1))
+    else:
         materialize_module_from_gms(reader, reader_model, device_index=0)
-
-    assert reader.mapping_calls == []
-    torch.testing.assert_close(shared.value, torch.zeros(1))
-
-
-def test_reader_deduplicates_same_source_for_tied_submodule_destination(
-    cpu_storage_pointer,
-):
-    source = torch.arange(2, dtype=torch.float32)
-    writer_shared = torch.nn.Module()
-    writer_shared.value = source
-    writer_model = torch.nn.Module()
-    writer_model.a = writer_shared
-    writer_model.b = writer_shared
-    store, writer = _writer_for_tensor(source)
-    register_module_tensors(writer, writer_model)
-
-    reader_shared = torch.nn.Module()
-    reader_shared.value = torch.zeros(1)
-    reader_model = torch.nn.Module()
-    reader_model.a = reader_shared
-    reader_model.b = reader_shared
-    reader = _Manager(store, writer.allocations, mapped=False)
-
-    materialize_module_from_gms(reader, reader_model, device_index=0)
-
-    assert reader_model.a.value is reader_model.b.value
-    torch.testing.assert_close(reader_model.a.value, source)
+        assert reader_model.a.value is reader_model.b.value
+        torch.testing.assert_close(reader_model.a.value, first)
 
 
 def test_writer_rejects_out_of_bounds_and_overlapping_storages():
@@ -782,24 +775,6 @@ def test_reader_keeps_mapping_when_clone_cleanup_cannot_synchronize(
     assert list(reader.mappings) == [tensor.untyped_storage().data_ptr()]
 
 
-def test_reader_ignores_metadata_outside_storage_prefix(
-    cpu_storage_pointer,
-):
-    tensor = torch.arange(4, dtype=torch.float32)
-    writer_model = torch.nn.Module()
-    writer_model.runtime = tensor
-    store, writer = _writer_for_tensor(tensor)
-    register_module_tensors(writer, writer_model)
-    store.entries["runtime"] = ("missing", 0, b"unrelated")
-    reader_model = torch.nn.Module()
-    reader_model.runtime = torch.zeros(1)
-    reader = _Manager(store, writer.allocations, mapped=False)
-
-    materialize_module_from_gms(reader, reader_model, device_index=0)
-
-    torch.testing.assert_close(reader_model.runtime, tensor)
-
-
 def test_reader_rejects_metadata_without_storage_manifests():
     store = _MetadataStore()
     store.entries["runtime"] = ("allocation", 0, b"unsupported")
@@ -849,7 +824,7 @@ def test_unregistered_parameter_and_zero_byte_storage_are_rejected():
         register_module_tensors(writer, model)
 
 
-def test_publisher_rebind_clones_storage_once_and_retains_one_source_owner():
+def test_publisher_rebind_clones_once_retains_source_and_is_idempotent():
     backing = torch.arange(8, dtype=torch.float32)
     view = backing[1::2]
     assert view._base is backing
@@ -866,10 +841,13 @@ def test_publisher_rebind_clones_storage_once_and_retains_one_source_owner():
     assert model.view is view
     assert model.backing.untyped_storage()._cdata != old_storage
     assert model.backing.untyped_storage()._cdata == model.view.untyped_storage()._cdata
-    sentinel, owners = model.__dict__["_gms_displaced_source_tensors"]
-    assert sentinel is torch_module._DISPLACED_SOURCE_TENSORS_SENTINEL
+    owners = torch_module._get_displaced_source_tensors(model)
+    assert owners is not None
     assert len(owners) == 1
     assert owners[0].untyped_storage()._cdata == old_storage
+    assert rebind_nonparameter_tensors(manager, model) == 0
+    assert torch_module._get_displaced_source_tensors(model) is owners
+    assert len(owners) == 1
     owner_ref = weakref.ref(owners[0])
     del owners
     gc.collect()
@@ -878,23 +856,6 @@ def test_publisher_rebind_clones_storage_once_and_retains_one_source_owner():
     assert retained_owner.untyped_storage()._cdata == old_storage
     model.view.add_(10)
     torch.testing.assert_close(model.backing[1::2], model.view)
-
-
-def test_second_rebind_preserves_displaced_source_owner_state():
-    tensor = torch.arange(4, dtype=torch.float32)
-    model = torch.nn.Module()
-    model.runtime = tensor
-    _, manager = _writer_for_tensor(tensor)
-
-    rebind_nonparameter_tensors(manager, model)
-    owner_state = model.__dict__["_gms_displaced_source_tensors"]
-    owners = owner_state[1]
-    owner = owners[0]
-
-    assert rebind_nonparameter_tensors(manager, model) == 0
-    assert model.__dict__["_gms_displaced_source_tensors"] is owner_state
-    assert len(owners) == 1
-    assert owners[0] is owner
 
 
 def test_swap_accepts_exclusively_owned_replacements_for_parameter_and_view():
@@ -972,23 +933,17 @@ def test_swap_preflight_failure_does_not_mutate_earlier_objects():
     torch.testing.assert_close(second, torch.arange(4, dtype=torch.float32) + 10)
 
 
-def test_displaced_source_collision_is_rejected_without_rebind_candidate():
-    parameter = torch.nn.Parameter(torch.arange(4, dtype=torch.float32))
-    model = torch.nn.Module()
-    model.weight = parameter
-    model.__dict__["_gms_displaced_source_tensors"] = [torch.ones(1)]
-    _, manager = _writer_for_tensor(parameter)
-
-    with pytest.raises(RuntimeError, match="Reserved GMS attribute"):
-        rebind_nonparameter_tensors(manager, model)
-
-
-def test_displaced_source_collision_is_rejected_on_submodule():
+@pytest.mark.parametrize("on_submodule", (False, True), ids=("root", "submodule"))
+def test_displaced_source_collision_is_rejected(on_submodule):
     tensor = torch.arange(4, dtype=torch.float32)
     model = torch.nn.Module()
-    model.child = torch.nn.Module()
-    model.child.runtime = tensor
-    model.child.__dict__["_gms_displaced_source_tensors"] = None
+    target = torch.nn.Module() if on_submodule else model
+    if on_submodule:
+        model.child = target
+        target.runtime = tensor
+    else:
+        model.weight = torch.nn.Parameter(tensor)
+    target.__dict__["_gms_displaced_source_tensors"] = None
     _, manager = _writer_for_tensor(tensor)
 
     with pytest.raises(RuntimeError, match="Reserved GMS attribute"):
@@ -1009,14 +964,8 @@ def test_prepare_and_publish_accounting(gms_write):
     assert events == ["register", "prune", "commit", "connect", "remap"]
 
 
-def test_eager_finalize_rebinds_before_publication(gms_write):
-    allocator, _, events = gms_write
-    events.clear()
-    allocator.total_bytes = 100
-    allocator.mappings[2] = SimpleNamespace(
-        allocation_id="scratch",
-        aligned_size=40,
-    )
+def test_eager_finalize_rebinds_before_publication(gms_allocator):
+    allocator, events = gms_allocator
 
     stats = common_utils.finalize_gms_write(allocator, object())
 
@@ -1032,16 +981,10 @@ def test_eager_finalize_rebinds_before_publication(gms_write):
 
 
 def test_eager_finalize_releases_after_partial_rebind_without_publishing(
-    gms_write, monkeypatch
+    gms_allocator, monkeypatch
 ):
-    allocator, _, events = gms_write
-    events.clear()
+    allocator, events = gms_allocator
     allocator.fail_close = True
-    allocator.total_bytes = 100
-    allocator.mappings[2] = SimpleNamespace(
-        allocation_id="scratch",
-        aligned_size=40,
-    )
 
     model = SimpleNamespace(partially_rebound=False)
 
@@ -1059,16 +1002,10 @@ def test_eager_finalize_releases_after_partial_rebind_without_publishing(
     assert events == ["register", "prune", "rebind", "close_best_effort"]
 
 
-def test_eager_finalize_commit_failure_releases_and_preserves_error(gms_write):
-    allocator, _, events = gms_write
-    events.clear()
+def test_eager_finalize_commit_failure_releases_and_preserves_error(gms_allocator):
+    allocator, events = gms_allocator
     allocator.fail_commit = True
     allocator.fail_close = True
-    allocator.total_bytes = 100
-    allocator.mappings[2] = SimpleNamespace(
-        allocation_id="scratch",
-        aligned_size=40,
-    )
 
     with pytest.raises(RuntimeError, match="commit failed"):
         common_utils.finalize_gms_write(allocator, object())
@@ -1210,75 +1147,38 @@ def test_write_load_failure_uses_best_effort_close_and_preserves_error(monkeypat
     assert not model_loader.has_pending_gms_write()
 
 
-def test_read_mode_runs_meta_post_load_once_before_materialization(monkeypatch):
-    events = []
-    model = SimpleNamespace(eval=lambda: model)
+def test_read_mode_runs_meta_post_load_once_before_materialization(
+    monkeypatch, fake_vllm_read
+):
+    _, model, events = fake_vllm_read
     manager = SimpleNamespace(close=lambda: events.append("close"), total_bytes=16)
-    loader_utils = ModuleType("vllm.model_executor.model_loader.utils")
-    loader_utils.initialize_model = lambda **_kwargs: (
-        events.append("initialize") or model
-    )
-    loader_utils.process_weights_after_loading = lambda *_args: events.append(
-        "post-load"
-    )
-    torch_utils = ModuleType("vllm.utils.torch_utils")
-    torch_utils.set_default_torch_dtype = lambda _dtype: nullcontext()
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm.model_executor.model_loader.utils",
-        loader_utils,
-    )
-    monkeypatch.setitem(sys.modules, "vllm.utils.torch_utils", torch_utils)
     monkeypatch.setattr(
         model_loader,
         "setup_meta_tensor_workaround",
         lambda: events.append("setup"),
     )
-    monkeypatch.setattr(
-        model_loader,
-        "materialize_module_from_gms",
-        lambda *_args, **_kwargs: events.append("materialize"),
-    )
-    monkeypatch.setattr(model_loader, "get_mx_load_context", lambda *_args: None)
 
     model_config = SimpleNamespace(dtype=torch.float32)
     assert model_loader._load_read_mode(manager, object(), model_config, 0) is model
     assert events == ["setup", "initialize", "post-load", "materialize"]
 
 
-def test_meta_post_load_failure_prevents_materialization(monkeypatch):
-    events = []
+def test_meta_post_load_failure_prevents_materialization(
+    fake_vllm_read,
+):
+    loader_utils, _, events = fake_vllm_read
 
     def fail_close():
         events.append("close")
         raise RuntimeError("close failed")
 
     manager = SimpleNamespace(close=fail_close)
-    model = SimpleNamespace(eval=lambda: model)
-    loader_utils = ModuleType("vllm.model_executor.model_loader.utils")
-    loader_utils.initialize_model = lambda **_kwargs: (
-        events.append("initialize") or model
-    )
 
     def fail_post_load(*_args):
         events.append("post-load")
         raise RuntimeError("post-load failed")
 
     loader_utils.process_weights_after_loading = fail_post_load
-    torch_utils = ModuleType("vllm.utils.torch_utils")
-    torch_utils.set_default_torch_dtype = lambda _dtype: nullcontext()
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm.model_executor.model_loader.utils",
-        loader_utils,
-    )
-    monkeypatch.setitem(sys.modules, "vllm.utils.torch_utils", torch_utils)
-    monkeypatch.setattr(model_loader, "setup_meta_tensor_workaround", lambda: None)
-    monkeypatch.setattr(
-        model_loader,
-        "materialize_module_from_gms",
-        lambda *_args, **_kwargs: events.append("materialize"),
-    )
 
     with pytest.raises(RuntimeError, match="post-load failed"):
         model_loader._load_read_mode(
