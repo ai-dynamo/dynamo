@@ -176,7 +176,7 @@ def test_convert_output_to_chunk_normalizes_abort_finish_reason():
         }
     )
 
-    assert chunk["finish_reason"] == "cancelled"
+    assert chunk["finish_reason"] == "stop"
 
 
 def test_validate_single_choice_sampling_rejects_n_greater_than_one():
