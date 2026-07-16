@@ -38,6 +38,7 @@ These arguments are added by Dynamo on top of SGLang's native arguments.
 | `--use-sglang-tokenizer` | `DYN_SGL_USE_TOKENIZER` | `false` | **[Deprecated]** Use `--dyn-chat-processor sglang` on the frontend instead. See [SGLang Chat Processor](sglang-chat-processor.md). |
 | `--dyn-tool-call-parser` | `DYN_TOOL_CALL_PARSER` | `None` | [Tool call](../../tool-calling/README.md#supported-tool-call-parsers) parser (overrides SGLang's `--tool-call-parser`) |
 | `--dyn-reasoning-parser` | `DYN_REASONING_PARSER` | `None` | [Reasoning](../../reasoning/README.md#supported-reasoning-parsers) parser for chain-of-thought models |
+| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `None` | Deployment-level `enabled` or `disabled` [thinking default](../../reasoning/README.md#deployment-level-thinking-default); explicit request controls take precedence |
 | `--custom-jinja-template` | `DYN_CUSTOM_JINJA_TEMPLATE` | `None` | Custom chat template path (incompatible with `--use-sglang-tokenizer`) |
 | `--embedding-worker` | `DYN_SGL_EMBEDDING_WORKER` | `false` | Run as embedding worker (also sets SGLang's `--is-embedding`) |
 | `--enable-multimodal` | `DYN_SGL_ENABLE_MULTIMODAL` | `false` | Allow [multimodal](../../features/multimodal/multimodal-sglang.md) inputs on this worker |

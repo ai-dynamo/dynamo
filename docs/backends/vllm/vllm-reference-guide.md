@@ -29,6 +29,12 @@ The `--help` output is organized into the following groups:
 
 Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
 
+To set the thinking mode used when a request omits an explicit control, pass
+`--dyn-default-thinking-mode enabled|disabled` or set
+`DYN_DEFAULT_THINKING_MODE`. Request-level thinking controls, including
+adaptive thinking, take precedence. See
+[Deployment-Level Thinking Default](../../reasoning/README.md#deployment-level-thinking-default).
+
 For reasoning models with structured output (`response_format`, JSON schema,
 or required/named tool choice), configure both reasoning parsers on the worker:
 

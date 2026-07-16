@@ -33,6 +33,66 @@ python -m dynamo.<backend> --help
 > [!TIP]
 > Some models need both a reasoning parser and a tool call parser. For supported tool call parser names, see [Tool Call Parsing (Dynamo)](../tool-calling/README.md).
 
+## Deployment-Level Thinking Default
+
+Set `--dyn-default-thinking-mode` on a backend worker to choose the thinking
+mode used when a request does not provide one. The worker publishes the value
+through model runtime metadata, and the frontend applies it while rendering the
+chat template. The option works with vLLM, SGLang, and TensorRT-LLM workers.
+
+| CLI argument | Environment variable | Values | Default |
+|---|---|---|---|
+| `--dyn-default-thinking-mode` | `DYN_DEFAULT_THINKING_MODE` | `enabled`, `disabled` | Unset |
+
+For example, make thinking disabled by default for a Qwen3 deployment:
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --dyn-default-thinking-mode disabled
+```
+
+You can configure the same value through the environment:
+
+```bash
+DYN_DEFAULT_THINKING_MODE=disabled \
+  python -m dynamo.vllm --model Qwen/Qwen3-0.6B
+```
+
+Use the same setting on every worker that serves the model. When the option is
+unset, Dynamo preserves the model or chat template's native default.
+
+Thinking controls use this precedence order:
+
+1. An explicit request control
+2. `--dyn-default-thinking-mode` or `DYN_DEFAULT_THINKING_MODE`
+3. The model or chat template's native default
+
+Explicit request controls include root-level `thinking`, top-level
+`reasoning_effort`, and the `thinking`, `enable_thinking`, `thinking_mode`, or
+`reasoning_effort` fields in `chat_template_args` or
+`chat_template_kwargs`.
+
+The deployment option intentionally accepts only `enabled` and `disabled`.
+Models that support adaptive thinking can still select it per request:
+
+```json
+{
+  "model": "MiniMaxAI/MiniMax-M3",
+  "messages": [{"role": "user", "content": "Explain this result."}],
+  "thinking": {"type": "adaptive"}
+}
+```
+
+Dynamo normalizes this request to `thinking_mode=adaptive`. Because adaptive is
+an explicit request control, it takes precedence over an `enabled` or
+`disabled` deployment default.
+
+> [!NOTE]
+> This option controls chat-template rendering. It does not force the inference
+> engine or model to follow the requested mode. Models that ignore their
+> template's thinking control may still emit reasoning.
+
 ## Supported Reasoning Parsers
 
 The table below lists the currently supported reasoning parsers in Dynamo's registry. The
