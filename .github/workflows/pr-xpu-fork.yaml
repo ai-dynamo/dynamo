@@ -1,0 +1,283 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: PR-XPU Fork
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_selection:
+        description: 'Heterogeneous P/D test(s) to run'
+        required: true
+        type: choice
+        options:
+          - both
+          - px-dn
+          - pn-dx
+        default: both
+      CHECKOUT_COMMIT:
+        description: 'Commit SHA to checkout (optional, defaults to workflow trigger commit)'
+        required: false
+        type: string
+        default: ''
+      xpu_image_source:
+        description: 'Use provided XPU image or build one from CHECKOUT_COMMIT'
+        required: true
+        type: choice
+        options:
+          - provided
+          - build
+        default: provided
+      docker_image_xpu:
+        description: 'Docker image for XPU'
+        required: false
+        type: string
+        default: ''
+      docker_image_gpu:
+        description: 'Docker image for NVIDIA GPU'
+        required: true
+        type: string
+      xpu_resource_template:
+        description: 'XPU ResourceClaimTemplate name'
+        required: false
+        type: string
+        default: 'onexpu-rdma-kueue'
+      nvidia_resource_template:
+        description: 'NVIDIA ResourceClaimTemplate name'
+        required: false
+        type: string
+        default: 'onenvidia-rdma-kueue'
+
+concurrency:
+  group: pr-xpu-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================================
+  # OPTIONAL XPU IMAGE BUILD
+  # ============================================================================
+
+  build-xpu:
+    if: inputs.xpu_image_source == 'build'
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    outputs:
+      image: ${{ steps.push.outputs.registry_image_tag }}
+    env:
+      FRAMEWORK: vllm
+      TARGET: runtime
+      DEVICE: xpu
+      PLATFORM: linux/amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ inputs.CHECKOUT_COMMIT || github.sha }}
+
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "::group::Generating XPU Dockerfile"
+          python3 ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --device=${{ env.DEVICE }} \
+              --platform=${{ env.PLATFORM }} \
+              --show-result \
+              --output-short-filename
+          echo "::endgroup::"
+
+      - name: Build XPU image
+        id: build
+        shell: bash
+        run: |
+          set -x
+
+          IMAGE_NAME="dynamo-${{ env.FRAMEWORK }}-${{ env.TARGET }}-${{ env.DEVICE }}"
+          SHORT_SHA="$(git rev-parse HEAD | cut -c1-7)"
+          IMAGE_TAG="${IMAGE_NAME}:${{ github.run_id }}-${SHORT_SHA}"
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          docker build \
+            --progress=plain \
+            --tag "${IMAGE_TAG}" \
+            -f ./container/rendered.Dockerfile \
+            . 2>&1 | tee build-xpu.log
+
+          echo "### XPU Image Built" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Framework | ${{ env.FRAMEWORK }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Device | ${{ env.DEVICE }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build XPU test image
+        shell: bash
+        run: |
+          set -x
+
+          TEST_IMAGE_TAG="${{ steps.build.outputs.image_tag }}-test"
+
+          docker build \
+            --progress=plain \
+            --tag "${TEST_IMAGE_TAG}" \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.build.outputs.image_tag }} \
+            . 2>&1 | tee build-xpu-test.log
+
+      - name: Push XPU image to registry
+        id: push
+        shell: bash
+        run: |
+          set -x
+
+          REGISTRY="sc09super01-srv.intel.com/dynamo"
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${REGISTRY}/${IMAGE_TAG}"
+
+          docker tag "${IMAGE_TAG}" "${REGISTRY_IMAGE_TAG}"
+          docker push "${REGISTRY_IMAGE_TAG}"
+
+          echo "registry_image_tag=${REGISTRY_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "### XPU Image Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry Image | \`${REGISTRY_IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xpu-build-log
+          path: |
+            build-xpu.log
+            build-xpu-test.log
+          retention-days: 7
+
+  resolve-inputs:
+    runs-on: ubuntu-latest
+    needs: [build-xpu]
+    if: always()
+    outputs:
+      checkout_commit: ${{ steps.resolve.outputs.checkout_commit }}
+      docker_image_xpu: ${{ steps.resolve.outputs.docker_image_xpu }}
+      docker_image_gpu: ${{ steps.resolve.outputs.docker_image_gpu }}
+      xpu_resource_template: ${{ steps.resolve.outputs.xpu_resource_template }}
+      nvidia_resource_template: ${{ steps.resolve.outputs.nvidia_resource_template }}
+    steps:
+      - name: Resolve workflow inputs
+        id: resolve
+        shell: bash
+        env:
+          XPU_IMAGE_SOURCE: ${{ inputs.xpu_image_source }}
+          INPUT_DOCKER_IMAGE_XPU: ${{ inputs.docker_image_xpu }}
+          INPUT_DOCKER_IMAGE_GPU: ${{ inputs.docker_image_gpu }}
+          BUILT_DOCKER_IMAGE_XPU: ${{ needs.build-xpu.outputs.image }}
+          BUILD_XPU_RESULT: ${{ needs.build-xpu.result }}
+          INPUT_CHECKOUT_COMMIT: ${{ inputs.CHECKOUT_COMMIT }}
+          DEFAULT_CHECKOUT_COMMIT: ${{ github.sha }}
+          XPU_RESOURCE_TEMPLATE: ${{ inputs.xpu_resource_template }}
+          NVIDIA_RESOURCE_TEMPLATE: ${{ inputs.nvidia_resource_template }}
+        run: |
+          set -euo pipefail
+
+          checkout_commit="${INPUT_CHECKOUT_COMMIT:-$DEFAULT_CHECKOUT_COMMIT}"
+
+          if [[ -z "$INPUT_DOCKER_IMAGE_GPU" ]]; then
+            echo "docker_image_gpu is required" >&2
+            exit 1
+          fi
+
+          if [[ "$XPU_IMAGE_SOURCE" == "build" ]]; then
+            if [[ "$BUILD_XPU_RESULT" != "success" ]]; then
+              echo "build-xpu did not succeed; result was '$BUILD_XPU_RESULT'" >&2
+              exit 1
+            fi
+            if [[ -z "$BUILT_DOCKER_IMAGE_XPU" ]]; then
+              echo "build-xpu succeeded but did not produce an image output" >&2
+              exit 1
+            fi
+            docker_image_xpu="$BUILT_DOCKER_IMAGE_XPU"
+          else
+            if [[ -z "$INPUT_DOCKER_IMAGE_XPU" ]]; then
+              echo "docker_image_xpu is required when xpu_image_source is 'provided'" >&2
+              exit 1
+            fi
+            docker_image_xpu="$INPUT_DOCKER_IMAGE_XPU"
+          fi
+
+          echo "checkout_commit=${checkout_commit}" >> "$GITHUB_OUTPUT"
+          echo "docker_image_xpu=${docker_image_xpu}" >> "$GITHUB_OUTPUT"
+          echo "docker_image_gpu=${INPUT_DOCKER_IMAGE_GPU}" >> "$GITHUB_OUTPUT"
+          echo "xpu_resource_template=${XPU_RESOURCE_TEMPLATE}" >> "$GITHUB_OUTPUT"
+          echo "nvidia_resource_template=${NVIDIA_RESOURCE_TEMPLATE}" >> "$GITHUB_OUTPUT"
+
+
+  # ============================================================================
+  # HETEROGENEOUS P/D TESTS
+  # ============================================================================
+
+  heterog-test-px-dn:
+    name: "Heterog: XPU Prefill + NVIDIA Decode"
+    needs: [resolve-inputs]
+    if: >-
+      needs.resolve-inputs.result == 'success' &&
+      (inputs.test_selection == 'both' ||
+      inputs.test_selection == 'px-dn')
+    uses: ./.github/workflows/epd-test-template.yml
+    secrets: inherit
+    with:
+      test_name: "px-dn"
+      test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/px-dn.yaml"
+      runner: "xpu-heterogeneous-ubuntu-latest"
+      CHECKOUT_COMMIT: ${{ needs.resolve-inputs.outputs.checkout_commit }}
+      docker_image_xpu: ${{ needs.resolve-inputs.outputs.docker_image_xpu }}
+      docker_image_gpu: ${{ needs.resolve-inputs.outputs.docker_image_gpu }}
+      xpu_resource_template: ${{ needs.resolve-inputs.outputs.xpu_resource_template }}
+      nvidia_resource_template: ${{ needs.resolve-inputs.outputs.nvidia_resource_template }}
+      xpu_node: "xpu_node"
+      nvidia_node: "nvidia_node"
+      model: 'Qwen/Qwen3-0.6B'
+      tensor_parallel: '1'
+      log_dir_name: "dynamo-heterog-logs-px-dn"
+
+  heterog-test-pn-dx:
+    name: "Heterog: NVIDIA Prefill + XPU Decode"
+    needs: [resolve-inputs, heterog-test-px-dn]
+    if: >-
+      always() &&
+      needs.resolve-inputs.result == 'success' &&
+      needs.heterog-test-px-dn.result != 'cancelled' &&
+      (inputs.test_selection == 'both' ||
+      inputs.test_selection == 'pn-dx')
+    uses: ./.github/workflows/epd-test-template.yml
+    secrets: inherit
+    with:
+      test_name: "pn-dx"
+      test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/pn-dx.yaml"
+      runner: "xpu-heterogeneous-ubuntu-latest"
+      CHECKOUT_COMMIT: ${{ needs.resolve-inputs.outputs.checkout_commit }}
+      docker_image_xpu: ${{ needs.resolve-inputs.outputs.docker_image_xpu }}
+      docker_image_gpu: ${{ needs.resolve-inputs.outputs.docker_image_gpu }}
+      xpu_resource_template: ${{ needs.resolve-inputs.outputs.xpu_resource_template }}
+      nvidia_resource_template: ${{ needs.resolve-inputs.outputs.nvidia_resource_template }}
+      xpu_node: "xpu_node"
+      nvidia_node: "nvidia_node"
+      model: 'Qwen/Qwen3-0.6B'
+      tensor_parallel: '1'
+      log_dir_name: "dynamo-heterog-logs-pn-dx"
+
+  # ============================================================================
+  # STATUS CHECK
+  # ============================================================================
+
+  xpu-status-check:
+    runs-on: ubuntu-latest
+    needs: [build-xpu, resolve-inputs, heterog-test-px-dn, heterog-test-pn-dx]
+    if: always()
+    steps:
+      - name: Check all XPU jobs
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
