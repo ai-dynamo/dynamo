@@ -26,7 +26,7 @@ Dynamo + vLLM deployment profiles for the agentic workload. This set covers
 
 ## Supported features
 
-- Modalities: Text
+- Modalities: Text, Image, Video
 - Reasoning
 - Tool calling
 
