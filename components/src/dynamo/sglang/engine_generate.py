@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 
-SGLANG_INFERENCE_V1_GENERATE_CAPABILITY = "sglang_inference_v1_generate"
+SGLANG_GENERATE_CAPABILITY = "sglang_generate"
 _PAYLOAD_KEY = "sglang_tito"
 _INTERNAL_SAMPLING_FIELDS = frozenset(
     {
@@ -55,7 +56,7 @@ def _sglang_sampling_fields() -> frozenset[str]:
     )
 
 
-def build_sampling_params(request: dict[str, Any]) -> dict[str, Any] | None:
+def build_sampling_params(request: Mapping[str, Any]) -> dict[str, Any] | None:
     """Translate an SGLang Generate payload, or return ``None`` when absent."""
     extra_args = request.get("extra_args")
     if not isinstance(extra_args, dict):
@@ -186,7 +187,7 @@ def _structured_output_params(value: Any) -> dict[str, Any]:
     unsupported.extend(
         name
         for name, default in _IGNORABLE_STRUCTURED_DEFAULTS.items()
-        if value.get(name, default) != default
+        if value.get(name, default) is not default
     )
     if unsupported:
         raise ValueError(

@@ -226,6 +226,31 @@ def test_engine_generate_rejects_ambiguous_or_unsupported_sampling_fields():
         handler._build_sampling_params(_engine_generate_request({"best_of": 2}))
 
 
+def test_engine_generate_requires_singleton_structured_defaults():
+    handler = _new_decode_handler()
+
+    assert (
+        handler._build_sampling_params(
+            _engine_generate_request(
+                {
+                    "structured_outputs": {
+                        "disable_any_whitespace": False,
+                        "disable_additional_properties": False,
+                        "whitespace_pattern": None,
+                    }
+                }
+            )
+        )
+        == {}
+    )
+    with pytest.raises(ValueError, match="disable_any_whitespace"):
+        handler._build_sampling_params(
+            _engine_generate_request(
+                {"structured_outputs": {"disable_any_whitespace": 0}}
+            )
+        )
+
+
 async def _stream(items):
     for item in items:
         yield item

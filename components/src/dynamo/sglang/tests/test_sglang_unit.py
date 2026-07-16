@@ -106,7 +106,7 @@ def test_unified_runtime_data_can_advertise_engine_generate(monkeypatch):
 
     assert sglang_llm_engine._get_runtime_data(
         SimpleNamespace(), enable_generate=True
-    ) == {sglang_llm_engine.SGLANG_INFERENCE_V1_GENERATE_CAPABILITY: True}
+    ) == {sglang_llm_engine.SGLANG_GENERATE_CAPABILITY: True}
 
 
 def _make_sglang_config(**overrides):

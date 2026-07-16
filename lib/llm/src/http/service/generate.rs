@@ -3,11 +3,11 @@
 
 //! HTTP handlers for the token-in/token-out `Generate` APIs:
 //! `POST /inference/v1/generate` for vLLM and
-//! `POST /sglang/inference/v1/generate` for SGLang.
+//! `POST /generate` for SGLang.
 //!
 //! These experimental engine-native endpoints are **disabled by default**;
 //! opt in via the `enable_engine_apis` builder flag or the
-//! backend-specific `DYN_*_ENABLE_INFERENCE_V1_GENERATE` env vars. When enabled,
+//! backend-specific `DYN_*_ENABLE_*` env vars. When enabled,
 //! the frontend preserves the complete request in an opaque
 //! backend envelope. Streaming (`stream=true`) remains unimplemented.
 
@@ -33,7 +33,7 @@ use super::openai::{
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::{
-    SGLANG_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
 };
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -43,6 +43,8 @@ use crate::protocols::openai::generate::{
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
+pub(super) const VLLM_GENERATE_DEFAULT_PATH: &str = "/inference/v1/generate";
+pub(super) const SGLANG_GENERATE_DEFAULT_PATH: &str = "/generate";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GenerateBackend {
@@ -53,15 +55,22 @@ enum GenerateBackend {
 impl GenerateBackend {
     fn default_path(self) -> &'static str {
         match self {
-            Self::Vllm => "/inference/v1/generate",
-            Self::Sglang => "/sglang/inference/v1/generate",
+            Self::Vllm => VLLM_GENERATE_DEFAULT_PATH,
+            Self::Sglang => SGLANG_GENERATE_DEFAULT_PATH,
         }
     }
 
     fn capability(self) -> &'static str {
         match self {
             Self::Vllm => VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-            Self::Sglang => SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+            Self::Sglang => SGLANG_GENERATE_CAPABILITY,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Vllm => "vLLM",
+            Self::Sglang => "SGLang",
         }
     }
 
@@ -114,8 +123,11 @@ pub fn generate_router(
 }
 
 /// Create the SGLang-compatible token-in/token-out `Generate` route.
-pub fn sglang_generate_router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
-    backend_generate_router(state, None, GenerateBackend::Sglang)
+pub fn sglang_generate_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    backend_generate_router(state, path, GenerateBackend::Sglang)
 }
 
 fn backend_generate_router(
@@ -414,8 +426,8 @@ async fn handler_generate(
             StatusCode::NOT_IMPLEMENTED,
             "not_implemented",
             format!(
-                "streaming (stream=true) is not implemented for {} yet",
-                backend.default_path()
+                "streaming (stream=true) is not implemented for the {} Generate API yet",
+                backend.name()
             ),
         );
     }
@@ -651,7 +663,8 @@ mod tests {
     };
 
     use super::service_v2::{
-        HttpService, SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV,
+        HTTP_SVC_SGLANG_GENERATE_PATH_ENV, HTTP_SVC_VLLM_GENERATE_PATH_ENV, HttpService,
+        SGLANG_ENABLE_GENERATE_ENV, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV,
     };
     use super::*;
     use crate::http::service::metrics::{Endpoint, RequestType, Status};
@@ -865,10 +878,7 @@ mod tests {
     async fn sglang_generate_route_no_model_returns_structured_404() {
         let (port, handle) = serve(Some(true)).await;
         let resp = reqwest::Client::new()
-            .post(format!(
-                "http://localhost:{}/sglang/inference/v1/generate",
-                port
-            ))
+            .post(format!("http://localhost:{}/generate", port))
             .header("content-type", "application/json")
             .body(r#"{"token_ids":[1,2,3],"sampling_params":{}}"#)
             .send()
@@ -911,10 +921,7 @@ mod tests {
             });
             body[field] = value;
             let resp = client
-                .post(format!(
-                    "http://localhost:{}/sglang/inference/v1/generate",
-                    port
-                ))
+                .post(format!("http://localhost:{}/generate", port))
                 .json(&body)
                 .send()
                 .await
@@ -998,7 +1005,9 @@ mod tests {
         temp_env::async_with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
-                (SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None::<&str>),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, None::<&str>),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, None::<&str>),
             ],
             async {
                 let (port, handle) = serve(None).await;
@@ -1022,7 +1031,9 @@ mod tests {
         temp_env::async_with_vars(
             [
                 (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),
-                (SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV, None),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, None),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, None),
             ],
             async {
                 let (port, handle) = serve(None).await;

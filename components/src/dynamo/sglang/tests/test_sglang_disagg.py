@@ -71,6 +71,11 @@ def test_prefill_generate_envelope_keeps_bootstrap_internal():
         "extra_args": {
             "sglang_tito": {
                 "sampling_params": {"max_tokens": 8, "seed": 17},
+                "bootstrap_info": {
+                    "bootstrap_host": "untrusted-client-host",
+                    "bootstrap_port": 1234,
+                    "bootstrap_room": 7,
+                },
             }
         },
     }
@@ -80,4 +85,3 @@ def test_prefill_generate_envelope_keeps_bootstrap_internal():
         "sampling_seed": 17,
     }
     assert engine._resolve_prefill_bootstrap(request) == request["bootstrap_info"]
-    assert "bootstrap_info" not in request["extra_args"]["sglang_tito"]

@@ -69,6 +69,7 @@ class GenerateRequest(TypedDict, total=False):
     mm_routing_info: dict[str, Any]
     encoder_result: dict[str, Any]
     extra_args: dict[str, Any]
+    routing: dict[str, Any]
 
 
 class GenerateChunk(TypedDict, total=False):

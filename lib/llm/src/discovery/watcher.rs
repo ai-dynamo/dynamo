@@ -2139,7 +2139,7 @@ fn seed_lora_state_from_card(
 mod tests {
     use super::*;
     use crate::local_model::runtime_config::{
-        SGLANG_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
     };
     use crate::model_card::ModelDeploymentCard;
 
@@ -2156,11 +2156,7 @@ mod tests {
                 vllm_enabled,
                 sglang_enabled,
             ),
-            (
-                SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
-                sglang_enabled,
-                vllm_enabled,
-            ),
+            (SGLANG_GENERATE_CAPABILITY, sglang_enabled, vllm_enabled),
         ] {
             let mut card = ModelDeploymentCard::with_name_only("model");
             card.model_type = ModelType::Chat | ModelType::Completions;

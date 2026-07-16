@@ -33,7 +33,7 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
-from dynamo.sglang.engine_generate import SGLANG_INFERENCE_V1_GENERATE_CAPABILITY
+from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
@@ -143,9 +143,11 @@ async def _register_model_with_runtime_config(
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
 
-    if _supports_engine_generate(input_type, output_type, worker_type):
+    if runtime_config is not None and _supports_engine_generate(
+        input_type, output_type, worker_type
+    ):
         runtime_config.set_engine_specific(
-            SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+            SGLANG_GENERATE_CAPABILITY,
             json.dumps(True),
         )
         logging.info("Published SGLang engine-native generate capability")

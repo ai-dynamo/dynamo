@@ -47,7 +47,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::local_model::runtime_config::{
-    SGLANG_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -68,8 +68,7 @@ impl EnabledGenerateBackends {
     pub(crate) fn capabilities(self) -> impl Iterator<Item = &'static str> {
         [
             self.vllm.then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
-            self.sglang
-                .then_some(SGLANG_INFERENCE_V1_GENERATE_CAPABILITY),
+            self.sglang.then_some(SGLANG_GENERATE_CAPABILITY),
         ]
         .into_iter()
         .flatten()
@@ -567,7 +566,7 @@ pub struct HttpServiceConfig {
 
     /// Experimental engine-native `Generate` APIs. **Disabled by default** — a
     /// deployment opts in via this builder flag or either backend-specific
-    /// `DYN_*_ENABLE_INFERENCE_V1_GENERATE` environment variable. The builder
+    /// `DYN_*_ENABLE_*` environment variable. The builder
     /// flag mounts both routes; a backend-specific variable mounts only that
     /// backend's route. Capability-scoped model selection prevents one backend
     /// from receiving the other backend's opaque request envelope. When
@@ -919,9 +918,52 @@ static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 pub(super) static VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
     "DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE";
 /// Environment variable to enable the experimental SGLang-compatible
-/// `/sglang/inference/v1/generate` endpoint.
-pub(super) static SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV: &str =
-    "DYN_SGLANG_ENABLE_INFERENCE_V1_GENERATE";
+/// `/generate` endpoint.
+pub(super) static SGLANG_ENABLE_GENERATE_ENV: &str = "DYN_SGLANG_ENABLE_GENERATE";
+/// Environment variable to set the vLLM Generate endpoint path
+/// (default: `/inference/v1/generate`).
+pub(super) static HTTP_SVC_VLLM_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_VLLM_GENERATE_PATH";
+/// Environment variable to set the SGLang Generate endpoint path
+/// (default: `/generate`).
+pub(super) static HTTP_SVC_SGLANG_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_SGLANG_GENERATE_PATH";
+
+fn configured_generate_path(
+    enabled: bool,
+    variable: &str,
+    default_path: &str,
+) -> Result<Option<String>> {
+    if !enabled {
+        return Ok(None);
+    }
+
+    let path = match var(variable) {
+        Ok(path) => path,
+        Err(std::env::VarError::NotPresent) => default_path.to_string(),
+        Err(error) => anyhow::bail!("{variable} must be valid Unicode: {error}"),
+    };
+    if !path.starts_with('/') {
+        anyhow::bail!("{variable} must be an absolute route path beginning with '/': {path:?}");
+    }
+    if path.contains(['?', '#']) {
+        anyhow::bail!("{variable} must not contain a query string or fragment: {path:?}");
+    }
+
+    Ok(Some(path))
+}
+
+fn ensure_distinct_generate_paths(
+    vllm_path: Option<&str>,
+    sglang_path: Option<&str>,
+) -> Result<()> {
+    if let (Some(vllm_path), Some(sglang_path)) = (vllm_path, sglang_path)
+        && vllm_path == sglang_path
+    {
+        anyhow::bail!(
+            "vLLM and SGLang Generate APIs cannot use the same route path: {vllm_path:?}"
+        );
+    }
+    Ok(())
+}
 
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
@@ -932,11 +974,25 @@ impl HttpServiceConfigBuilder {
         let vllm_generate_endpoint_enabled =
             config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
         let sglang_generate_endpoint_enabled =
-            config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV);
+            config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_GENERATE_ENV);
         let enabled_generate_backends = EnabledGenerateBackends::new(
             vllm_generate_endpoint_enabled,
             sglang_generate_endpoint_enabled,
         );
+        let vllm_generate_path = configured_generate_path(
+            vllm_generate_endpoint_enabled,
+            HTTP_SVC_VLLM_GENERATE_PATH_ENV,
+            super::generate::VLLM_GENERATE_DEFAULT_PATH,
+        )?;
+        let sglang_generate_path = configured_generate_path(
+            sglang_generate_endpoint_enabled,
+            HTTP_SVC_SGLANG_GENERATE_PATH_ENV,
+            super::generate::SGLANG_GENERATE_DEFAULT_PATH,
+        )?;
+        ensure_distinct_generate_paths(
+            vllm_generate_path.as_deref(),
+            sglang_generate_path.as_deref(),
+        )?;
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -1083,8 +1139,8 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             &config.request_template,
             anthropic_endpoints_enabled,
-            vllm_generate_endpoint_enabled,
-            sglang_generate_endpoint_enabled,
+            vllm_generate_path,
+            sglang_generate_path,
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1203,8 +1259,8 @@ impl HttpServiceConfigBuilder {
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
-        enable_vllm_generate_endpoint: bool,
-        enable_sglang_generate_endpoint: bool,
+        vllm_generate_path: Option<String>,
+        sglang_generate_path: Option<String>,
     ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
@@ -1249,17 +1305,18 @@ impl HttpServiceConfigBuilder {
             );
         }
 
-        if enable_vllm_generate_endpoint || enable_sglang_generate_endpoint {
+        if vllm_generate_path.is_some() || sglang_generate_path.is_some() {
             tracing::warn!("The engine-native Generate APIs are experimental.");
             let mut generate_docs = Vec::new();
             let mut generate_route = axum::Router::new();
-            if enable_vllm_generate_endpoint {
-                let (docs, route) = super::generate::generate_router(state.clone(), None);
+            if let Some(path) = vllm_generate_path {
+                let (docs, route) = super::generate::generate_router(state.clone(), Some(path));
                 generate_docs.extend(docs);
                 generate_route = generate_route.merge(route);
             }
-            if enable_sglang_generate_endpoint {
-                let (docs, route) = super::generate::sglang_generate_router(state.clone());
+            if let Some(path) = sglang_generate_path {
+                let (docs, route) =
+                    super::generate::sglang_generate_router(state.clone(), Some(path));
                 generate_docs.extend(docs);
                 generate_route = generate_route.merge(route);
             }
@@ -1554,8 +1611,14 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn generate_backends_report_resolved_startup_gate() {
-        temp_env::with_var_unset(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
-            temp_env::with_var_unset(SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, None),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, None),
+            ],
+            || {
                 let disabled = HttpService::builder().build().unwrap();
                 assert!(
                     disabled
@@ -1575,7 +1638,7 @@ mod tests {
                     .map(ToString::to_string)
                     .collect();
                 assert!(route_docs.contains(&"POST /inference/v1/generate".to_string()));
-                assert!(route_docs.contains(&"POST /sglang/inference/v1/generate".to_string()));
+                assert!(route_docs.contains(&"POST /generate".to_string()));
                 assert_eq!(
                     enabled
                         .enabled_generate_backends()
@@ -1583,21 +1646,21 @@ mod tests {
                         .collect::<Vec<_>>(),
                     vec![
                         VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-                        SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+                        SGLANG_GENERATE_CAPABILITY,
                     ]
                 );
                 for (variable, expected_path, unexpected_path, expected_capability) in [
                     (
                         VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV,
                         "POST /inference/v1/generate",
-                        "POST /sglang/inference/v1/generate",
+                        "POST /generate",
                         VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
                     ),
                     (
-                        SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV,
-                        "POST /sglang/inference/v1/generate",
+                        SGLANG_ENABLE_GENERATE_ENV,
+                        "POST /generate",
                         "POST /inference/v1/generate",
-                        SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+                        SGLANG_GENERATE_CAPABILITY,
                     ),
                 ] {
                     temp_env::with_var(variable, Some("1"), || {
@@ -1618,7 +1681,77 @@ mod tests {
                         assert!(!route_docs.contains(&unexpected_path.to_string()));
                     });
                 }
-            });
-        });
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_route_paths_follow_backend_env_overrides() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, Some("/native/vllm")),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, Some("/native/sglang")),
+            ],
+            || {
+                let service = HttpService::builder()
+                    .enable_engine_apis(true)
+                    .build()
+                    .unwrap();
+                let route_docs: Vec<_> = service
+                    .route_docs()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+
+                assert!(route_docs.contains(&"POST /native/vllm".to_string()));
+                assert!(route_docs.contains(&"POST /native/sglang".to_string()));
+                assert!(!route_docs.contains(&"POST /inference/v1/generate".to_string()));
+                assert!(!route_docs.contains(&"POST /generate".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_route_path_overrides_fail_cleanly_when_invalid_or_colliding() {
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+                (
+                    HTTP_SVC_VLLM_GENERATE_PATH_ENV,
+                    Some("https://frontend.example/generate"),
+                ),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, None),
+            ],
+            || {
+                let error = HttpService::builder()
+                    .enable_engine_apis(true)
+                    .build()
+                    .err()
+                    .expect("full URL must be rejected");
+                assert!(error.to_string().contains(HTTP_SVC_VLLM_GENERATE_PATH_ENV));
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, Some("/native/generate")),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, Some("/native/generate")),
+            ],
+            || {
+                let error = HttpService::builder()
+                    .enable_engine_apis(true)
+                    .build()
+                    .err()
+                    .expect("route collision must be rejected");
+                assert!(error.to_string().contains("cannot use the same route path"));
+            },
+        );
     }
 }

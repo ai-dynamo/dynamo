@@ -78,8 +78,8 @@ from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     runtime_capacity,
 )
+from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
 from dynamo.sglang.engine_generate import (
-    SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
     build_sampling_params as build_engine_generate_sampling_params,
 )
 from dynamo.sglang.logits_processing import activate_logits_processors
@@ -110,7 +110,7 @@ def _get_runtime_data(
 ) -> dict[str, Any] | None:
     runtime_data: dict[str, Any] = {}
     if enable_generate:
-        runtime_data[SGLANG_INFERENCE_V1_GENERATE_CAPABILITY] = True
+        runtime_data[SGLANG_GENERATE_CAPABILITY] = True
     worker_group_id = get_sglang_worker_group_id(server_args)
     if worker_group_id is not None:
         runtime_data[SGLANG_WORKER_GROUP_ID_KEY] = worker_group_id
@@ -270,12 +270,7 @@ class SglangLLMEngine(LLMEngine):
                 scheduler_info,
                 enable_generate=(
                     not self._use_sglang_tokenizer
-                    and self.serving_mode
-                    in (
-                        DisaggregationMode.AGGREGATED,
-                        DisaggregationMode.PREFILL,
-                        DisaggregationMode.DECODE,
-                    )
+                    and is_generation_stage(self.serving_mode)
                 ),
             ),
             llm=LlmRegistration(
