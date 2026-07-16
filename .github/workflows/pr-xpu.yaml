@@ -206,7 +206,7 @@ jobs:
     with:
       test_name: "px-dn"
       test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/px-dn.yaml"
-      runner: "xpu"
+      runner: "xpu-heterogeneous-ubuntu-latest"
       CHECKOUT_COMMIT: ${{ github.sha }}
       docker_image_xpu: ${{ needs.build-xpu.outputs.image }}
       docker_image_gpu: "${{ needs.changed-files.outputs.docker_image_gpu }}"
@@ -232,7 +232,7 @@ jobs:
     with:
       test_name: "pn-dx"
       test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/pn-dx.yaml"
-      runner: "xpu"
+      runner: "xpu-heterogeneous-ubuntu-latest"
       CHECKOUT_COMMIT: ${{ github.sha }}
       docker_image_xpu: ${{ needs.build-xpu.outputs.image }}
       docker_image_gpu: "${{ needs.changed-files.outputs.docker_image_gpu }}"
