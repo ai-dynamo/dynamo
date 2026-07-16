@@ -32,9 +32,18 @@ Dynamo + vLLM deployment profiles for the agentic workload. This set covers
 
 ## Prerequisites
 
-1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
-2. **Hugging Face token** with access to `nvidia/Qwen3.5-122B-A10B-NVFP4`.
-3. **(disaggregated only)** GPU-local RDMA NICs exposed to pods (e.g. an
+1. **Dynamo Platform installed** on the target cluster with DGD CRDs served —
+   see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
+2. **NGC/nvcr image pull access** — a `docker-registry` secret attached to the
+   namespace's default service account. The deploy manifests pull
+   `nvcr.io/nvstaging/ai-dynamo` and do not reference a pull secret by name, so
+   any secret name works as long as it is attached to the service account.
+3. **Hugging Face token** with access to `nvidia/Qwen3.5-122B-A10B-NVFP4`, stored
+   as `hf-token-secret` — used by both the model-download Job and the serving
+   workers.
+4. **`model-cache` PVC** (ReadWriteMany) populated with the model, or permission
+   to create and populate it via the manifests in `model-cache/`.
+5. **(disaggregated only)** GPU-local RDMA NICs exposed to pods (e.g. an
    `rdma/ib` device plugin) for NIXL KV transfer.
 
 ## Quick Start
