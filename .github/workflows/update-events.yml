@@ -9,24 +9,23 @@ concurrency:
   group: update-community-events
   cancel-in-progress: false
 
-permissions:
-  contents: write
-
 jobs:
   update:
     permissions:
       contents: write
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
         with:
           node-version: '20'
       - run: npm install node-ical@0.20.0
       - run: node .github/scripts/update-events.js
-      - run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add README.md
-          git diff --staged --quiet || git commit -m "Update community events from Google Calendar [skip ci]"
-          git push
+      - uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7
+        with:
+          commit-message: 'chore: update community events from Google Calendar [skip ci]'
+          title: 'chore: update community events'
+          branch: auto/update-community-events
+          delete-branch: true
+          body: Automated community events update from Google Calendar.
