@@ -177,6 +177,7 @@
 # === runtime  (@ai-dynamo/dynamo-runtime-codeowners) ===
 /tests/                                                                      @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/                                                                    @ai-dynamo/dynamo-runtime-codeowners
+/lib/truthy/                                                                 @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/bin/                                                                @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/                                                                @ai-dynamo/dynamo-runtime-codeowners
 /tests/basic/                                                                @ai-dynamo/dynamo-runtime-codeowners
