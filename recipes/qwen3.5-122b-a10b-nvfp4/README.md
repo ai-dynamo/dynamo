@@ -124,15 +124,15 @@ is system output tok/s per GPU at the best SLA-passing concurrency.
 - **Speculative decoding (MTP) + disaggregation is not shipped on this arch.**
   Disaggregation requires `VLLM_SSM_CONV_STATE_LAYOUT=DS` (for NIXL's 3-read Mamba
   conv-state transfer), but MTP + prefix caching forces `mamba_cache_mode='align'`,
-  whose DS conv-state copy path is unimplemented for `num_accepted_tokens > 1` — the
-  decode `EngineCore` crashes (`NotImplementedError` → `EngineDeadError`) on the
-  first concurrent batch of real long-context traffic. Patching the crash (vLLM
+  whose DS conv-state copy path is unimplemented for `num_accepted_tokens > 1` in
+  the shipped vLLM 0.23.0 runtime — the decode `EngineCore` crashes
+  (`NotImplementedError` → `EngineDeadError`) on the first concurrent batch of real
+  long-context traffic. Patching the crash (vLLM
   [#45473](https://github.com/vllm-project/vllm/pull/45473)) then exposes a silent
   quality regression: a spec-decode conv-state metadata mismatch between the prefill
   and decode workers causes the NIXL transfer to misplace the Mamba conv state,
-  producing garbage output. Tracked in NVBug 6442165 / DYN-864 (upstream vLLM
-  [#38898](https://github.com/vllm-project/vllm/issues/38898) /
-  [#40454](https://github.com/vllm-project/vllm/pull/40454)).
+  producing garbage output. See vLLM
+  [#45769](https://github.com/vllm-project/vllm/issues/45769).
 - **MTP on aggregation** is likewise not shipped: it requires DS unset and, on this
   workload, MTP-heavy decode starves prefill on the shared GPU (TTFT regressions)
   for no throughput win.
