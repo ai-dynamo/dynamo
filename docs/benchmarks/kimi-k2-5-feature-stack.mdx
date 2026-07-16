@@ -46,23 +46,23 @@ The full disaggregated stack dominates the throughput-interactivity Pareto front
 <tbody><tr>
 <td><em className="role winner">Winner</em></td>
 <td><strong>Disagg + Eagle3 + KV router + offload</strong><span>3x DEP4 prefill + 3x TEP4 decode, concurrency 32</span></td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml">deploy.yaml</a></td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml">perf.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-gb200-eagle-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/disagg-gb200-eagle-kv-router/perf.yaml">perf.yaml</a></td>
 </tr><tr>
 <td><em className="role treatment">Comparison</em></td>
 <td><strong>Agg + Eagle3 + KV router</strong><span>3x TEP8 aggregated, concurrency 24 — routing plus speculation</span></td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml">deploy.yaml</a></td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml">perf.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-gb200-eagle-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-gb200-eagle-kv-router/perf.yaml">perf.yaml</a></td>
 </tr><tr>
 <td><em className="role treatment">Comparison</em></td>
 <td><strong>Agg + Eagle3 + round-robin</strong><span>3x TEP8 aggregated, concurrency 24 — speculation without KV-aware routing</span></td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/deploy.yaml">deploy.yaml</a></td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/perf.yaml">perf.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-gb200-eagle-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-gb200-eagle-round-robin/perf.yaml">perf.yaml</a></td>
 </tr><tr>
 <td><em className="role baseline">Baseline</em></td>
 <td><strong>Agg + round-robin</strong><span>3x TEP8 aggregated, concurrency 8 — no speculation, no P/D split</span></td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-round-robin/deploy.yaml">deploy.yaml</a></td>
-<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-round-robin/perf.yaml">perf.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-gb200-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-gb200-round-robin/perf.yaml">perf.yaml</a></td>
 </tr></tbody>
 </table>
 </div>

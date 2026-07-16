@@ -14,7 +14,7 @@
 #   - dynamo-platform HelmRelease applied
 #   - Cluster nodes: p6e-gb200.36xlarge (arm64, 4 GB200 + 4 EFA NICs per node)
 #   - Model weights at /models/nvidia-GLM-5-NVFP4 on shared NFS PVC
-#   - Container built from recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa
+#   - Container built from recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/Dockerfile.efa
 #   - HF_TOKEN secret: kubectl create secret generic hf-token-secret \
 #       --from-literal=HF_TOKEN=<your-token> -n <namespace>
 #

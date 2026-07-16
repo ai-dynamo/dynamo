@@ -68,5 +68,5 @@ docker push <your-registry>/sglang-dsv4:<tag>
 
 Set the `image:` field (Frontend + decode worker) in the recipe's SGLang manifest, then follow the recipe's Quick Start:
 
-- Flash → [`../deepseek-v4-flash/sglang/agg/deploy.yaml`](../deepseek-v4-flash/sglang/agg/deploy.yaml) — see [Quick Start](../deepseek-v4-flash/README.md#quick-start).
-- Pro → [`../deepseek-v4-pro/sglang/agg/deploy.yaml`](../deepseek-v4-pro/sglang/agg/deploy.yaml) — see [Quick Start](../deepseek-v4-pro/README.md#quick-start).
+- Flash → [`../deepseek-v4-flash/sglang/agg-b200/deploy.yaml`](../deepseek-v4-flash/sglang/agg-b200/deploy.yaml) — see [Quick Start](../deepseek-v4-flash/README.md#quick-start).
+- Pro → [`../deepseek-v4-pro/sglang/agg-b200/deploy.yaml`](../deepseek-v4-pro/sglang/agg-b200/deploy.yaml) — see [Quick Start](../deepseek-v4-pro/README.md#quick-start).

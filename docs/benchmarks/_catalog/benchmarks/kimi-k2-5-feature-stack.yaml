@@ -22,20 +22,20 @@ traffic: Mooncake-style agentic coding trace (~200k ctx, multi-turn), 1-hour rep
 arms:
 - role: winner
   name: Disagg + Eagle3 + KV router + offload
-  deploy: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml
-  perf: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml
+  deploy: recipes/kimi-k2.5/trtllm/disagg-gb200-eagle-kv-router/deploy.yaml
+  perf: recipes/kimi-k2.5/trtllm/disagg-gb200-eagle-kv-router/perf.yaml
 - role: treatment
   name: Agg + Eagle3 + KV router
-  deploy: recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml
-  perf: recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml
+  deploy: recipes/kimi-k2.5/trtllm/agg-gb200-eagle-kv-router/deploy.yaml
+  perf: recipes/kimi-k2.5/trtllm/agg-gb200-eagle-kv-router/perf.yaml
 - role: treatment
   name: Agg + Eagle3 + round-robin
-  deploy: recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/deploy.yaml
-  perf: recipes/kimi-k2.5/trtllm/agg-eagle-round-robin/perf.yaml
+  deploy: recipes/kimi-k2.5/trtllm/agg-gb200-eagle-round-robin/deploy.yaml
+  perf: recipes/kimi-k2.5/trtllm/agg-gb200-eagle-round-robin/perf.yaml
 - role: baseline
   name: Agg + round-robin (no spec dec)
-  deploy: recipes/kimi-k2.5/trtllm/agg-round-robin/deploy.yaml
-  perf: recipes/kimi-k2.5/trtllm/agg-round-robin/perf.yaml
+  deploy: recipes/kimi-k2.5/trtllm/agg-gb200-round-robin/deploy.yaml
+  perf: recipes/kimi-k2.5/trtllm/agg-gb200-round-robin/perf.yaml
 results:
   available: true
   summary: ~130 tok/s/user / ~5,400 tok/s/GPU (winner) vs ~105 / ~1,700 (baseline); full 4-arm table verified against README

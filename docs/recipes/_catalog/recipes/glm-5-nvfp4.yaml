@@ -30,10 +30,10 @@ targets:
     type: static-synthetic
     traffic: ISL 1000 / OSL 8192, 512 concurrency (32/decode GPU), 1536 requests
   deploy:
-    asset: recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+    asset: recipes/glm-5-nvfp4/sglang/disagg-gb200/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/glm-5-nvfp4/sglang/disagg/perf.yaml
+    asset: recipes/glm-5-nvfp4/sglang/disagg-gb200/perf.yaml
   expected_performance:
     available: true
     summary: 16,824 tok/s output, 2.05 req/s, TTFT p50 15,423 ms, ITL avg 23.31 ms/token, 43.39 tok/user/s, 0 errors over
@@ -45,7 +45,7 @@ targets:
     count: 20
   runtime:
     framework: sglang
-    image: custom build from recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa (patched libfabric, no prebuilt image)
+    image: custom build from recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/Dockerfile.efa (patched libfabric, no prebuilt image)
   topology: disaggregated
   techniques:
   - disagg-pd
@@ -57,10 +57,10 @@ targets:
     type: static-synthetic
     traffic: ISL 1000 / OSL 8192, 512 concurrency, 1536 requests (identical to non-EFA)
   deploy:
-    asset: recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
+    asset: recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml
+    asset: recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/perf.yaml
   expected_performance:
     available: true
     summary: 'parity with non-EFA: 19,131 tok/s output, TTFT p50 621 ms, ITL avg 24.5 ms/token; at ISL 20k/OSL 2k LIBFABRIC

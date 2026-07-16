@@ -40,7 +40,7 @@ For shorter runs (smoke tests, faster iteration), point `TRACE_FILE` at a smalle
 /model-cache/traces/<flavour>_short_15perc.jsonl    # ~15% subset
 ```
 
-The Dynamo Kimi-K2.5 recipe is the closest reference for trace handling — see [its README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/README.md#dataset-agentic-coding-workflow) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/perf.yaml).
+The Dynamo Kimi-K2.5 recipe is the closest reference for trace handling — see [its README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/README.md#dataset-agentic-coding-workflow) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/trtllm/agg-gb200-eagle-kv-router/perf.yaml).
 
 ## Workflow
 
