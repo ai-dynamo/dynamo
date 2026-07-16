@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
+UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 
 
 def _create_nixl_connector() -> Any:
@@ -161,28 +162,44 @@ class VideoLoader:
     async def load_video_batch(
         self,
         video_mm_items: List[Dict[str, Any]],
-    ) -> List[tuple[np.ndarray, Dict[str, Any]]]:
+    ) -> List[tuple[np.ndarray, Dict[str, Any]] | None]:
         video_futures: List[Awaitable[tuple[np.ndarray, Dict[str, Any]]]] = []
+        slot_to_future_idx: list[int | None] = []
 
-        for item in video_mm_items:
+        for idx, item in enumerate(video_mm_items):
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
+                slot_to_future_idx.append(len(video_futures))
                 video_futures.append(self.load_video(url))
                 logger.debug("Preparing to load video from URL: %s...", url[:80])
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]
+                    slot_to_future_idx.append(len(video_futures))
                     video_futures.append(self._load_decoded_video(metadata))
                 else:
                     raise ValueError(
                         "Received decoded video data but enable_frontend_decoding=False. "
                         "Enable frontend decoding to transfer decoded video frames via NIXL."
                     )
+            elif isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
+                slot_to_future_idx.append(None)
+            else:
+                raise ValueError(
+                    f"Invalid video multimodal item at index {idx}. "
+                    "Expected dict with 'Url', 'Decoded', or 'UuidOnly' key."
+                )
 
         results = await asyncio.gather(*video_futures, return_exceptions=True)
-        loaded_videos: list[tuple[np.ndarray, Dict[str, Any]]] = []
+        loaded_videos: list[tuple[np.ndarray, Dict[str, Any]] | None] = []
         collective_exceptions: list[str] = []
-        for media_item, result in zip(video_mm_items, results):
+        for media_item, future_idx in zip(
+            video_mm_items, slot_to_future_idx, strict=True
+        ):
+            if future_idx is None:
+                loaded_videos.append(None)
+                continue
+            result = results[future_idx]
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result

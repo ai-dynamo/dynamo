@@ -60,3 +60,7 @@ dlpark = { version = "0.5", features = ["pyo3", "half"], optional = true }
 cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"], optional = true }
 
 [dev-dependencies]
+
+[patch.crates-io]
+# Temporary until ai-dynamo/frontend-crates#119 is released.
+dynamo-protocols = { git = "https://github.com/furionw/frontend-crates.git", rev = "31cd250192dbca6b3005bec8170e6f95d2bc0abf" }

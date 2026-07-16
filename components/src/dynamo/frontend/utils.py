@@ -99,21 +99,22 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 
 def extract_mm_urls(
     messages: list[dict[str, Any]],
-) -> dict[str, list[dict[str, str]]] | None:
-    """Extract multimodal URLs from OpenAI chat completion messages.
+) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None,]:
+    """Extract aligned multimodal data and cache UUIDs from chat messages.
 
-    Walks user message content arrays and collects ``image_url``, ``audio_url``,
-    and ``video_url`` entries.  Returns them in the format expected by the
-    backend handler's ``_extract_multimodal_data()``::
+    URL-backed parts become ``Url`` variants. Parts with no URL and an opaque
+    top-level ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
+    processor cache. UUID lists preserve modality-local slot order::
 
-        {
-            "image_url": [{"Url": "https://..."}, ...],
-            "audio_url": [{"Url": "data:audio/wav;base64,..."}],
-        }
+        ({"image_url": [{"Url": "https://..."}, {"UuidOnly": "image-1"}]},
+         {"image_url": ["image-1", "image-1"]})
 
-    Returns ``None`` if no multimodal content is found.
+    The UUID map is ``None`` when no user UUID is present. A media content part
+    with neither a URL nor UUID is rejected instead of being silently dropped.
     """
     mm_data: dict[str, list[dict[str, str]]] = {}
+    mm_uuids: dict[str, list[str | None]] = {}
+    any_uuid = False
 
     for msg in messages:
         if not isinstance(msg, dict) or msg.get("role") != "user":
@@ -127,14 +128,28 @@ def extract_mm_urls(
             part_type = part.get("type")
             if part_type not in _MEDIA_CONTENT_TYPES:
                 continue
+
+            uuid_value = part.get("uuid")
+            if uuid_value is not None and (
+                not isinstance(uuid_value, str) or not uuid_value
+            ):
+                raise ValueError(f"{part_type} uuid must be a non-empty string")
+
             media_value = part.get(part_type)
-            if not isinstance(media_value, dict):
-                continue
-            url = media_value.get("url")
+            url = media_value.get("url") if isinstance(media_value, dict) else None
             if isinstance(url, str) and url:
                 mm_data.setdefault(part_type, []).append({"Url": url})
+            elif isinstance(uuid_value, str):
+                mm_data.setdefault(part_type, []).append({"UuidOnly": uuid_value})
+            else:
+                raise ValueError(
+                    f"{part_type} part must contain a non-empty URL or uuid"
+                )
 
-    return mm_data or None
+            mm_uuids.setdefault(part_type, []).append(uuid_value)
+            any_uuid |= uuid_value is not None
+
+    return mm_data or None, mm_uuids if any_uuid else None
 
 
 def make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]:

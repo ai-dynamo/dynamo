@@ -47,7 +47,7 @@ use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
+    MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
@@ -1261,8 +1261,16 @@ impl OpenAIPreprocessor {
         let _ = token_ids;
 
         let mut media_map: MultimodalDataMap = HashMap::new();
-        let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
-            Vec::new();
+        let mut uuid_map: MultimodalUuidMap = HashMap::new();
+        let mut any_user_uuid = false;
+        // Decoded results are written back into these reserved modality slots so
+        // URL-backed and UUID-only inputs retain request order.
+        let mut fetch_tasks: Vec<(
+            String,
+            usize,
+            String,
+            &ChatCompletionRequestUserMessageContentPart,
+        )> = Vec::new();
         // Per-image (mm_hash, width, height) for the MM-routing path.
         // Accumulated in message order so we don't walk messages twice.
         // Cleared and returned to the caller; empty for non-image / text-only requests.
@@ -1302,41 +1310,70 @@ impl OpenAIPreprocessor {
                 _ => continue,
             };
             for content_part in content_parts.iter() {
-                if has_media_loader {
-                    let type_str = match content_part {
-                        ChatCompletionRequestUserMessageContentPart::ImageUrl(_) => "image_url",
-                        ChatCompletionRequestUserMessageContentPart::VideoUrl(_) => "video_url",
-                        ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
-                        _ => continue,
-                    };
-                    #[cfg(feature = "mm-routing")]
-                    if type_str == "image_url" {
-                        total_image_count += 1;
+                let (type_str, url, uuid) = match content_part {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => (
+                        "image_url",
+                        part.image_url.as_ref().and_then(|media| media.url.clone()),
+                        part.uuid.clone(),
+                    ),
+                    ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => (
+                        "video_url",
+                        part.video_url.as_ref().and_then(|media| media.url.clone()),
+                        part.uuid.clone(),
+                    ),
+                    ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => (
+                        "audio_url",
+                        part.audio_url.as_ref().and_then(|media| media.url.clone()),
+                        part.uuid.clone(),
+                    ),
+                    _ => continue,
+                };
+
+                #[cfg(feature = "mm-routing")]
+                if type_str == "image_url" {
+                    total_image_count += 1;
+                }
+
+                if uuid.as_deref().is_some_and(str::is_empty) {
+                    bail!("{type_str} uuid must be a non-empty string");
+                }
+
+                let modality = type_str.to_string();
+                let slot_idx = media_map.entry(modality.clone()).or_default().len();
+                any_user_uuid |= uuid.is_some();
+                uuid_map
+                    .entry(modality.clone())
+                    .or_default()
+                    .push(uuid.clone());
+
+                match (url, uuid) {
+                    (Some(url), _) => {
+                        media_map
+                            .entry(modality.clone())
+                            .or_default()
+                            .push(MultimodalData::Url(url.clone()));
+
+                        if has_media_loader {
+                            fetch_tasks.push((modality, slot_idx, url.to_string(), content_part));
+                        } else {
+                            #[cfg(feature = "mm-routing")]
+                            if type_str == "image_url" {
+                                let mm_hash = Self::hash_image_url(url.as_str());
+                                url_passthrough_images.push((mm_hash, url.to_string()));
+                            }
+                        }
                     }
-                    fetch_tasks.push((type_str.to_string(), content_part));
-                } else {
-                    let (type_str, url) = match content_part {
-                        ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
-                            ("image_url", p.image_url.url.clone())
-                        }
-                        ChatCompletionRequestUserMessageContentPart::VideoUrl(p) => {
-                            ("video_url", p.video_url.url.clone())
-                        }
-                        ChatCompletionRequestUserMessageContentPart::AudioUrl(p) => {
-                            ("audio_url", p.audio_url.url.clone())
-                        }
-                        _ => continue,
-                    };
-                    #[cfg(feature = "mm-routing")]
-                    if type_str == "image_url" {
-                        total_image_count += 1;
-                        let mm_hash = Self::hash_image_url(url.as_str());
-                        url_passthrough_images.push((mm_hash, url.to_string()));
+                    (None, Some(uuid)) => {
+                        media_map
+                            .entry(modality)
+                            .or_default()
+                            .push(MultimodalData::UuidOnly(uuid));
                     }
-                    media_map
-                        .entry(type_str.to_string())
-                        .or_default()
-                        .push(MultimodalData::Url(url));
+                    (None, None) => {
+                        bail!(
+                            "{type_str} part has neither `url` nor `uuid`; at least one is required"
+                        );
+                    }
                 }
             }
         }
@@ -1345,12 +1382,15 @@ impl OpenAIPreprocessor {
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
             let media_io_kwargs = request.media_io_kwargs();
-            let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
-                loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
-            }))
-            .await;
+            let results =
+                futures::future::join_all(fetch_tasks.iter().map(|(_, _, _, content_part)| {
+                    loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
+                }))
+                .await;
 
-            for ((type_str, _content_part), result) in fetch_tasks.into_iter().zip(results) {
+            for ((type_str, slot_idx, _source_url, _content_part), result) in
+                fetch_tasks.into_iter().zip(results)
+            {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
 
@@ -1362,14 +1402,6 @@ impl OpenAIPreprocessor {
                     if shape.len() >= 2 {
                         let h = shape[0] as u32;
                         let w = shape[1] as u32;
-                        let url_str = match _content_part {
-                            ChatCompletionRequestUserMessageContentPart::ImageUrl(p) => {
-                                p.image_url.url.as_str()
-                            }
-                            _ => unreachable!(
-                                "rdma image_url descriptor only originates from ImageUrl content parts"
-                            ),
-                        };
                         // Frontend-decode path: hash the decoded RGB bytes so
                         // the same image reached via different (signed) URLs
                         // collides on the same `mm_hash` and routes to the
@@ -1379,7 +1411,7 @@ impl OpenAIPreprocessor {
                         // shouldn't happen on the frontend.
                         let (mm_hash, hash_source) = match rdma_descriptor.content_hash() {
                             Some(h) => (h, "decoded_bytes"),
-                            None => (Self::hash_image_url(url_str), "url_fallback"),
+                            None => (Self::hash_image_url(&_source_url), "url_fallback"),
                         };
                         if let Some(counter) = self.image_token_counter.as_ref() {
                             let n = counter.count_tokens(w, h);
@@ -1402,10 +1434,10 @@ impl OpenAIPreprocessor {
                     }
                 }
 
-                media_map
-                    .entry(type_str)
-                    .or_default()
-                    .push(MultimodalData::Decoded(rdma_descriptor));
+                let slots = media_map
+                    .get_mut(&type_str)
+                    .expect("modality must exist after reserving a fetch slot");
+                slots[slot_idx] = MultimodalData::Decoded(rdma_descriptor);
             }
         }
 
@@ -1468,6 +1500,17 @@ impl OpenAIPreprocessor {
 
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
+            if any_user_uuid {
+                builder.multi_modal_uuids(Some(uuid_map));
+            }
+
+            // User cache identities are opaque and cannot be converted into the
+            // router's canonical image hashes. Fall back to text-prefix routing
+            // instead of routing and publishing under different cache keys.
+            #[cfg(feature = "mm-routing")]
+            if any_user_uuid {
+                mm_image_entries.clear();
+            }
 
             // Preserve original messages and formatted prompt in extra_args for multimodal
             // workers (e.g., TRT-LLM needs messages and the template-rendered prompt with
@@ -1527,6 +1570,7 @@ impl OpenAIPreprocessor {
             // text-prefix routing.
             #[cfg(feature = "mm-routing")]
             if let Some(find_token_id) = self.routing_image_token_id
+                && !any_user_uuid
                 && !mm_image_entries.is_empty()
                 && mm_image_entries.len() == total_image_count
                 && token_ids.iter().filter(|&&t| t == find_token_id).count()

@@ -15,6 +15,7 @@ from tests.utils.multimodal import (
     make_image_payload,
     make_image_payload_b64,
     make_image_payload_cached_tokens,
+    make_image_payload_uuid_passthrough,
     make_video_payload,
 )
 from tests.utils.payload_builder import chat_payload, chat_payload_default
@@ -415,7 +416,14 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=670,
                 profiled_vram_gib=12.0,
                 requested_vllm_kv_cache_bytes=922_354_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    MmCase(
+                        suffix="uuid_passthrough",
+                        payload=make_image_payload_uuid_passthrough(["green"]),
+                        extra_script_args=["--mm-processor-cache-gb", "4"],
+                    ),
+                ],
             ),
         },
         extra_vllm_args=["--dtype", "bfloat16"],

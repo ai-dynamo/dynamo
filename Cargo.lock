@@ -2759,8 +2759,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d1da866e573424e374c83d64dbf7807547054ebadcd85ddb2f9f67db06bf386"
+source = "git+https://github.com/furionw/frontend-crates.git?rev=31cd250192dbca6b3005bec8170e6f95d2bc0abf#31cd250192dbca6b3005bec8170e6f95d2bc0abf"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2770,7 +2769,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
- "uuid",
 ]
 
 [[package]]

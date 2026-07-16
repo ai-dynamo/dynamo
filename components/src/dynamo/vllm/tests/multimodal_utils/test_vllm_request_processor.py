@@ -115,6 +115,26 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
 
 @pytest.mark.asyncio
+async def test_extracts_uuid_only_media_as_aligned_none_slots():
+    processor = _processor()
+    image = Image.new("RGB", (1, 1))
+    image_items = [
+        {"Url": "https://example.com/image.png"},
+        {"UuidOnly": "cached-image"},
+    ]
+    processor.image_loader.load_image_batch.return_value = [image, None]
+
+    result = await processor.extract_multimodal_data(
+        {"multi_modal_data": {"image_url": image_items}},
+        "request-cached-image",
+        None,
+    )
+
+    assert result == {"image": [image, None]}
+    processor.image_loader.load_image_batch.assert_awaited_once_with(image_items)
+
+
+@pytest.mark.asyncio
 async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
@@ -244,7 +264,7 @@ async def test_audio_in_video_preserves_order_and_merges_standalone_audio():
 @pytest.mark.parametrize(
     ("video_item", "audio_error", "message"),
     [
-        ({"Decoded": {"shape": [2, 4, 4, 3]}}, None, "non-URL video item"),
+        ({"Decoded": {"shape": [2, 4, 4, 3]}}, None, "URL-based"),
         (
             {"Url": "https://example.com/silent.mp4"},
             RuntimeError("no audio stream"),
@@ -267,6 +287,84 @@ async def test_audio_in_video_rejects_unusable_audio(video_item, audio_error, me
         )
 
 
+@pytest.mark.asyncio
+async def test_audio_in_video_rejects_uuid_only_standalone_audio():
+    processor = _processor()
+    processor.video_loader.load_video_batch.return_value = [object()]
+    processor.audio_loader.load_audio_batch.return_value = [None]
+
+    with pytest.raises(ValueError, match="UUID-only standalone audio"):
+        await processor.extract_multimodal_data(
+            {
+                "multi_modal_data": {
+                    "video_url": [{"Url": "https://example.com/video.mp4"}],
+                    "audio_url": [{"UuidOnly": "cached-audio"}],
+                }
+            },
+            "request-video-cached-audio",
+            None,
+            {"use_audio_in_video": True},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_key", "result_key", "loader_name"),
+    [
+        ("video_url", "video", "video_loader"),
+        ("audio_url", "audio", "audio_loader"),
+    ],
+)
+async def test_uuid_only_video_audio_use_modality_level_none(
+    request_key,
+    result_key,
+    loader_name,
+):
+    processor = _processor()
+    loader = getattr(processor, loader_name)
+    getattr(loader, f"load_{result_key}_batch").return_value = [None]
+
+    result = await processor.extract_multimodal_data(
+        {"multi_modal_data": {request_key: [{"UuidOnly": "cached-key"}]}},
+        "request-uuid-only",
+        None,
+    )
+
+    assert result == {result_key: None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_key", "result_key", "loader_name"),
+    [
+        ("video_url", "video", "video_loader"),
+        ("audio_url", "audio", "audio_loader"),
+    ],
+)
+async def test_mixed_media_and_uuid_only_video_audio_are_rejected(
+    request_key,
+    result_key,
+    loader_name,
+):
+    processor = _processor()
+    loader = getattr(processor, loader_name)
+    getattr(loader, f"load_{result_key}_batch").return_value = [object(), None]
+
+    with pytest.raises(ValueError, match=f"Mixed .* UUID-only {result_key}"):
+        await processor.extract_multimodal_data(
+            {
+                "multi_modal_data": {
+                    request_key: [
+                        {"Url": "https://example.com/media"},
+                        {"UuidOnly": "cached-key"},
+                    ]
+                }
+            },
+            "request-mixed-uuid",
+            None,
+        )
+
+
 def test_build_tokens_prompt_forwards_hashes_kwargs_and_vision_chunk():
     processor = _processor(unified_vision_chunk=True)
     mm_data = {"vision_chunk": {"type": "image", "image": object(), "uuid": None}}
@@ -284,6 +382,74 @@ def test_build_tokens_prompt_forwards_hashes_kwargs_and_vision_chunk():
     assert prompt["multi_modal_data"] is mm_data
     assert prompt["multi_modal_uuids"] == {"vision_chunk": ["abcd".ljust(64, "0")]}
     assert prompt["mm_processor_kwargs"] == {"num_crops": 4}
+
+
+def test_build_tokens_prompt_prefers_opaque_user_uuids_without_padding():
+    processor = _processor()
+    mm_data = {"image": [object(), None]}
+
+    prompt = processor.build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {"image_url": ["sku-image-a", "sku-image-b"]},
+            "extra_args": {"mm_hashes": ["routing-a", "routing-b"]},
+        },
+        mm_data,
+        None,
+    )
+
+    assert prompt["multi_modal_data"] is mm_data
+    assert prompt["multi_modal_uuids"] == {"image": ["sku-image-a", "sku-image-b"]}
+
+
+def test_build_tokens_prompt_normalizes_all_user_uuid_modalities():
+    processor = _processor(unified_vision_chunk=True)
+
+    prompt = processor.build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {
+                "image_url": ["image-key"],
+                "video_url": ["video-key"],
+                "audio_url": ["audio-key"],
+            },
+        },
+        {"vision_chunk": [None], "video": [None], "audio": [None]},
+        None,
+    )
+
+    assert prompt["multi_modal_uuids"] == {
+        "vision_chunk": ["image-key"],
+        "video": ["video-key"],
+        "audio": ["audio-key"],
+    }
+
+
+def test_build_tokens_prompt_aligns_video_derived_audio_uuid_slots():
+    processor = _processor()
+    standalone_audio = object()
+    video_audio = object()
+
+    prompt = processor.build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {
+                "video_url": [{"Url": "https://example.com/video.mp4"}],
+                "audio_url": [{"Url": "https://example.com/audio.wav"}],
+            },
+            "multi_modal_uuids": {
+                "video_url": ["video-key"],
+                "audio_url": [None],
+            },
+        },
+        {"video": object(), "audio": [standalone_audio, video_audio]},
+        {"use_audio_in_video": True},
+    )
+
+    assert prompt["multi_modal_uuids"] == {
+        "video": ["video-key"],
+        "audio": [None, None],
+    }
 
 
 def test_build_tokens_prompt_preserves_grouped_forwarded_hashes():
@@ -606,12 +772,42 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
         metadata,
     )
 
-    padded_hash = "hash".ljust(64, "0")
     assert result is not None
     assert result["prompt_token_ids"] == [10, 11, 12]
-    assert result["mm_hashes"] == {"image": [padded_hash]}
+    assert result["mm_hashes"] == {"image": ["hash"]}
     input_processor.inject_into_mm_cache.assert_called_once_with(
-        {"image": [padded_hash]}, {"image": [item]}
+        {"image": ["hash"]}, {"image": [item]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_keeps_vllm_feature_hash(monkeypatch):
+    input_processor = SimpleNamespace(inject_into_mm_cache=MagicMock())
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=input_processor)
+    item = MagicMock(spec=mod.MultiModalKwargsItem)
+    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
+    )
+
+    result = await processor._receive_mm_kwargs(
+        {
+            # vLLM derives this hash from the opaque user UUID together with
+            # mm_processor_kwargs; the raw UUID must not replace it.
+            "mm_hashes": ["derived-feature-hash"],
+            "mm_placeholders": [[1, 2]],
+            "expanded_token_ids": [10, 11, 12],
+        },
+        "shm",
+        receiver,
+        SimpleNamespace(modality="image", mm_hashes=[]),
+    )
+
+    assert result is not None
+    assert result["mm_hashes"] == {"image": ["derived-feature-hash"]}
+    input_processor.inject_into_mm_cache.assert_called_once_with(
+        {"image": ["derived-feature-hash"]}, {"image": [item]}
     )
 
 
@@ -648,13 +844,12 @@ async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk
         metadata,
     )
 
-    padded_hash = "grouped_hash".ljust(64, "0")
     assert result is not None
-    assert result["mm_hashes"] == {"vision_chunk": [padded_hash]}
+    assert result["mm_hashes"] == {"vision_chunk": ["grouped_hash"]}
     placeholder = result["mm_placeholders"]["vision_chunk"][0]
     assert placeholder.get_num_embeds() == 1
     input_processor.inject_into_mm_cache.assert_called_once_with(
-        {"vision_chunk": [padded_hash]}, {"vision_chunk": [item]}
+        {"vision_chunk": ["grouped_hash"]}, {"vision_chunk": [item]}
     )
 
 
@@ -678,7 +873,7 @@ async def test_receive_transferred_kwargs_falls_back_to_metadata_hashes(monkeypa
     )
 
     assert result is not None
-    assert result["mm_hashes"] == {"video": ["metadata_hash".ljust(64, "0")]}
+    assert result["mm_hashes"] == {"video": ["metadata_hash"]}
 
 
 @pytest.mark.asyncio

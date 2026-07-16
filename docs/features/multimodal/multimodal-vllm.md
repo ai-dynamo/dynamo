@@ -102,6 +102,51 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
+### Reuse vLLM Multimodal Processor Cache Entries
+
+vLLM can cache processed image, video, and audio inputs under a client-provided
+opaque UUID. This extension is specific to vLLM; it is not part of the OpenAI
+chat completions schema and is not supported by Dynamo's other backends.
+
+To enable the cache, pass a nonzero `--mm-processor-cache-gb` value to the vLLM
+worker. Populate an entry by adding `uuid` beside the media field:
+
+```json
+{
+  "type": "image_url",
+  "image_url": {
+    "url": "https://example.com/image.png"
+  },
+  "uuid": "catalog-image-42"
+}
+```
+
+Reuse that entry in a later request by setting the media field to `null` and
+sending the same top-level UUID:
+
+```json
+{
+  "type": "image_url",
+  "image_url": null,
+  "uuid": "catalog-image-42"
+}
+```
+
+UUIDs are opaque nonempty strings. Do not nest `uuid` inside `image_url`,
+`video_url`, or `audio_url`. A UUID-only request fails on a cache miss because
+it contains no media payload to process. Dynamo also rejects a media content
+part that has neither a URL nor a UUID.
+
+When KV-aware routing is enabled, requests with client UUIDs use text-prefix
+routing. Dynamo cannot convert an opaque client key into its content-derived
+multimodal routing hash without risking different cache identities at the
+router and worker.
+
+With vLLM, a video or audio modality may be entirely URL/decoded media or
+entirely UUID-only. Do not mix media-backed and UUID-only entries within one
+video or audio modality batch; vLLM does not represent missing media slots in
+those batch parsers. Image batches support aligned mixed slots.
+
 **Video request:**
 
 ```bash

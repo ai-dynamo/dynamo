@@ -152,10 +152,15 @@ pub enum MultimodalData {
     #[serde(rename(serialize = "Url"))]
     RawUrl(String),
     Decoded(RdmaMediaDataDescriptor),
+    /// Payload-free slot resolved by the backend's multimodal processor cache.
+    UuidOnly(String),
 }
 
 // multimodal map containing {mm_part_type: [data...]}
 pub type MultimodalDataMap = std::collections::HashMap<String, Vec<MultimodalData>>;
+
+/// Cache UUIDs aligned positionally with each modality's data slots.
+pub type MultimodalUuidMap = std::collections::HashMap<String, Vec<Option<String>>>;
 
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
@@ -183,6 +188,11 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_modal_data: Option<MultimodalDataMap>,
+
+    /// User-provided multimodal cache identities aligned with `multi_modal_data`.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_modal_uuids: Option<MultimodalUuidMap>,
 
     /// Optional multimodal routing-only fields (separate from execution payload).
     #[builder(default)]

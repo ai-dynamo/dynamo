@@ -3,6 +3,7 @@
 
 import base64
 import os
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Type
@@ -131,6 +132,95 @@ def make_image_payload_cached_tokens(
         min_routing_total_blocks=min_routing_total_blocks,
         min_avg_kv_hit_rate=min_avg_kv_hit_rate,
     )
+
+
+class UuidPassthroughChatPayload(ChatPayload):
+    """Send a URL+UUID cache fill followed by a UUID-only cache hit."""
+
+    def __init__(
+        self,
+        *,
+        expected_response: list[str],
+        image_uuid: str = "dynamo-mm-cache-image-1",
+        max_tokens: int = 100,
+        temperature: float = 0.0,
+        timeout: int = 60,
+    ):
+        object.__setattr__(self, "_uuid_initializing", True)
+        object.__setattr__(self, "_uuid_model", None)
+        object.__setattr__(self, "_uuid_image_uuid", image_uuid)
+        object.__setattr__(self, "_uuid_max_tokens", max_tokens)
+        object.__setattr__(self, "_uuid_temperature", temperature)
+        object.__setattr__(self, "_uuid_request_index", 0)
+        object.__setattr__(self, "_uuid_body_storage", None)
+        super().__init__(
+            body=None,
+            expected_response=expected_response,
+            expected_log=[],
+            repeat_count=2,
+            timeout=timeout,
+        )
+        object.__setattr__(self, "_uuid_initializing", False)
+
+    def with_model(self, model):
+        payload = deepcopy(self)
+        object.__setattr__(payload, "_uuid_model", model)
+        object.__setattr__(payload, "_uuid_request_index", 0)
+        return payload
+
+    @property
+    def body(self) -> dict:  # type: ignore[override]
+        request_index = self._uuid_request_index
+        object.__setattr__(self, "_uuid_request_index", request_index + 1)
+
+        if request_index == 0:
+            image_url = {"url": MULTIMODAL_IMG_URL}
+            text = _MULTIMODAL_COLOR_PROMPT
+        else:
+            image_url = None
+            text = (
+                "What colors are prominent in the same image? "
+                "Respond only with the colors."
+            )
+
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text},
+                        {
+                            "type": "image_url",
+                            "image_url": image_url,
+                            "uuid": self._uuid_image_uuid,
+                        },
+                    ],
+                }
+            ],
+            "max_tokens": self._uuid_max_tokens,
+            "temperature": self._uuid_temperature,
+            "stream": False,
+        }
+        if self._uuid_model is not None:
+            body["model"] = self._uuid_model
+        return body
+
+    @body.setter
+    def body(self, value) -> None:
+        object.__setattr__(self, "_uuid_body_storage", value)
+        if not getattr(self, "_uuid_initializing", True):
+            object.__setattr__(self, "_uuid_request_index", 0)
+
+    def final_validation(self) -> None:
+        assert self._uuid_request_index == self.repeat_count, (
+            "UUID passthrough payload did not send the expected URL+UUID "
+            "and UUID-only request pair"
+        )
+
+
+def make_image_payload_uuid_passthrough(expected_response: list[str]) -> ChatPayload:
+    """Build the maintained vLLM cached multimodal UUID smoke payload."""
+    return UuidPassthroughChatPayload(expected_response=expected_response)
 
 
 class Base64LazyChatPayload(ChatPayload):

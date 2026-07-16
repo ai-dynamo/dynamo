@@ -47,6 +47,7 @@ IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
 URL_VARIANT_KEY = "Url"
+UUID_ONLY_VARIANT_KEY = "UuidOnly"
 
 
 def pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
@@ -99,6 +100,56 @@ def _build_forwarded_mm_uuids(
     return None
 
 
+def _build_user_mm_uuids(
+    raw_uuids: Any,
+    use_unified_vision_chunk: bool,
+) -> Optional[dict[str, list[str | None]]]:
+    """Normalize user cache identities without changing opaque values."""
+    if not isinstance(raw_uuids, dict):
+        return None
+
+    modality_names = {
+        IMAGE_URL_KEY: "image",
+        VIDEO_URL_KEY: "video",
+        AUDIO_URL_KEY: "audio",
+    }
+    normalized: dict[str, list[str | None]] = {}
+    for modality, values in raw_uuids.items():
+        if not isinstance(values, list):
+            continue
+        backend_modality = modality_names.get(str(modality), str(modality))
+        backend_modality = _normalize_forwarded_mm_modality(
+            backend_modality,
+            use_unified_vision_chunk,
+        )
+        normalized[backend_modality] = list(values)
+    return normalized or None
+
+
+def _append_video_audio_uuid_slots(
+    mm_uuids: dict[str, list[str | None]],
+    request: dict[str, Any],
+    mm_processor_kwargs: Optional[dict[str, Any]],
+) -> None:
+    """Align UUIDs for audio tracks that vLLM extracts from video inputs."""
+    if not mm_processor_kwargs or not mm_processor_kwargs.get(
+        "use_audio_in_video", False
+    ):
+        return
+
+    mm_data = request.get("multi_modal_data")
+    if not isinstance(mm_data, dict):
+        return
+    video_items = mm_data.get(VIDEO_URL_KEY)
+    if not isinstance(video_items, list) or not video_items:
+        return
+
+    audio_items = mm_data.get(AUDIO_URL_KEY)
+    standalone_audio_count = len(audio_items) if isinstance(audio_items, list) else 0
+    audio_uuids = mm_uuids.setdefault("audio", [None] * standalone_audio_count)
+    audio_uuids.extend([None] * len(video_items))
+
+
 def _get_modality_extra_values(
     extra_args: dict[str, Any],
     grouped_key: str,
@@ -138,6 +189,22 @@ def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
 
     offset, length = value
     return PlaceholderRange(offset=offset, length=length)
+
+
+def _normalize_optional_media_batch(
+    values: list[Any | None],
+    modality: str,
+) -> Any:
+    """Shape UUID-only video/audio batches for vLLM's modality parsers."""
+    if all(value is None for value in values):
+        return None
+    if any(value is None for value in values):
+        raise ValueError(
+            f"Mixed URL/decoded and UUID-only {modality} inputs are not "
+            "supported by vLLM; provide media for every item or use only "
+            "cached UUIDs for this modality."
+        )
+    return values[0] if len(values) == 1 else values
 
 
 def compute_mm_uuids(
@@ -270,7 +337,9 @@ class VllmMultimodalRequestProcessor:
             for key in ("mm_kwargs_shm", "mm_kwargs_nixl")
         )
         if (
-            request.get("multi_modal_data") is not None or has_transfer
+            request.get("multi_modal_data") is not None
+            or request.get("multi_modal_uuids") is not None
+            or has_transfer
         ) and not self.enable_multimodal:
             raise self._multimodal_disabled_error()
 
@@ -331,7 +400,7 @@ class VllmMultimodalRequestProcessor:
                 for item in mm_map.get(IMAGE_URL_KEY, []):
                     if isinstance(item, dict) and URL_VARIANT_KEY in item:
                         image_urls.append(item[URL_VARIANT_KEY])
-                    elif isinstance(item, dict) and "Decoded" in item:
+                    else:
                         supported = False
                 if supported:
                     vllm_mm_data = (
@@ -359,35 +428,51 @@ class VllmMultimodalRequestProcessor:
                         )
                     else:
                         vllm_mm_data[image_key] = (
-                            images[0] if len(images) == 1 else images
+                            images[0]
+                            if len(images) == 1 and images[0] is not None
+                            else images
                         )
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
             if video_items:
                 videos = await self.video_loader.load_video_batch(video_items)
                 if videos:
-                    vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
+                    vllm_mm_data["video"] = _normalize_optional_media_batch(
+                        videos,
+                        "video",
+                    )
 
             audio_items = mm_map.get(AUDIO_URL_KEY, [])
             if audio_items:
                 audios = await self.audio_loader.load_audio_batch(audio_items)
                 if audios:
-                    vllm_mm_data["audio"] = audios[0] if len(audios) == 1 else audios
+                    vllm_mm_data["audio"] = _normalize_optional_media_batch(
+                        audios,
+                        "audio",
+                    )
 
             if (
                 video_items
                 and mm_processor_kwargs
                 and mm_processor_kwargs.get("use_audio_in_video", False)
             ):
+                if any(
+                    isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item
+                    for item in audio_items
+                ):
+                    raise ValueError(
+                        "use_audio_in_video cannot be combined with UUID-only "
+                        "standalone audio because vLLM cannot represent cached "
+                        "and media-backed audio slots in one batch."
+                    )
                 video_audios = []
                 for item in video_items:
                     url = item.get(URL_VARIANT_KEY) if isinstance(item, dict) else None
                     if not url:
                         raise ValueError(
                             "use_audio_in_video requires all video items to be "
-                            "URL-based. Got a non-URL video item (e.g. frontend-"
-                            "decoded). Audio extraction from decoded video data "
-                            "is not yet supported."
+                            "URL-based. UUID-only and frontend-decoded video "
+                            "items cannot provide an audio stream."
                         )
                     try:
                         video_audios.append(await self.audio_loader.load_audio(url))
@@ -426,7 +511,10 @@ class VllmMultimodalRequestProcessor:
             if shm_meta_raw:
                 shm_metadata = MmKwargsShmTransferMetadata.model_validate(shm_meta_raw)
                 return await self._receive_mm_kwargs(
-                    extra_args, "shm", MmKwargsShmReceiver(), shm_metadata
+                    extra_args,
+                    "shm",
+                    MmKwargsShmReceiver(),
+                    shm_metadata,
                 )
 
             if nixl_meta_raw:
@@ -434,7 +522,10 @@ class VllmMultimodalRequestProcessor:
                 if self._mm_kwargs_receiver is None:
                     self._mm_kwargs_receiver = MmKwargsNixlReceiver()
                 return await self._receive_mm_kwargs(
-                    extra_args, "nixl", self._mm_kwargs_receiver, nixl_metadata
+                    extra_args,
+                    "nixl",
+                    self._mm_kwargs_receiver,
+                    nixl_metadata,
                 )
         except Exception:
             logger.exception(
@@ -509,8 +600,12 @@ class VllmMultimodalRequestProcessor:
                 )
                 return None
 
-            padded_hashes = pad_mm_hashes_to_64(list(mm_hashes))
-            mm_hashes_dict = {backend_modality: padded_hashes}
+            # These are vLLM's final feature hashes. When the request supplies
+            # an opaque UUID, vLLM derives this identity from the UUID together
+            # with mm_processor_kwargs. Any rewriting (including zero-padding)
+            # would create a different worker-cache key.
+            feature_hashes = list(mm_hashes)
+            mm_hashes_dict = {backend_modality: feature_hashes}
             mm_kwargs_dict = {backend_modality: kwargs_items}
             engine_input = {
                 "type": "multimodal",
@@ -549,10 +644,21 @@ class VllmMultimodalRequestProcessor:
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
-        mm_uuids = _build_forwarded_mm_uuids(
-            extra_args,
+        mm_uuids = _build_user_mm_uuids(
+            request.get("multi_modal_uuids"),
             self.use_unified_vision_chunk,
         )
+        if mm_uuids is not None:
+            _append_video_audio_uuid_slots(
+                mm_uuids,
+                request,
+                mm_processor_kwargs,
+            )
+        if mm_uuids is None:
+            mm_uuids = _build_forwarded_mm_uuids(
+                extra_args,
+                self.use_unified_vision_chunk,
+            )
         if mm_uuids is None and self.embedding_loader is None:
             mm_uuids = compute_mm_uuids(multi_modal_data)
             if mm_uuids is not None:

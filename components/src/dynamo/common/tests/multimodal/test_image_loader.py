@@ -260,6 +260,26 @@ async def test_unsupported_format_batch_url_raises_415(loader: ImageLoader) -> N
         assert exc_info.value.status == 415
 
 
+async def test_uuid_only_image_slots_preserve_batch_alignment(
+    loader: ImageLoader,
+) -> None:
+    first = Image.new("RGB", (1, 1), color="red")
+    second = Image.new("RGB", (1, 1), color="blue")
+    loader.load_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[first, second]
+    )
+
+    images = await loader.load_image_batch(
+        [
+            {"Url": "https://example.com/first.png"},
+            {"UuidOnly": "cached-image"},
+            {"Url": "https://example.com/second.png"},
+        ]
+    )
+
+    assert images == [first, None, second]
+
+
 async def test_unsupported_format_batch_data_url_raises_415(
     loader: ImageLoader,
 ) -> None:

@@ -631,6 +631,115 @@ async fn test_media_url_passthrough(#[case] media_chunks: &[(&str, usize)]) {
     }
 }
 
+mod cached_multimodal_uuid {
+    use std::sync::Arc;
+
+    use super::Request;
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::protocols::common::preprocessor::MultimodalData;
+
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+
+    fn make_preprocessor() -> Arc<OpenAIPreprocessor> {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.set_name("test-model");
+        OpenAIPreprocessor::new(mdc).unwrap()
+    }
+
+    #[tokio::test]
+    async fn preserves_url_and_uuid_only_slot_alignment() {
+        let messages = r#"[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "compare"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/first.png"},
+                        "uuid": "image-a"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": null,
+                        "uuid": "image-b"
+                    }
+                ]
+            }
+        ]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+
+        let (preprocessed, _, _) = make_preprocessor()
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        let images = &preprocessed.multi_modal_data.as_ref().unwrap()["image_url"];
+        assert_eq!(images.len(), 2);
+        assert!(matches!(images[0], MultimodalData::Url(_)));
+        assert!(matches!(
+            &images[1],
+            MultimodalData::UuidOnly(value) if value == "image-b"
+        ));
+        assert_eq!(
+            preprocessed.multi_modal_uuids.as_ref().unwrap()["image_url"],
+            vec![Some("image-a".to_string()), Some("image-b".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_media_part_without_url_or_uuid() {
+        let messages = r#"[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": null}
+                ]
+            }
+        ]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+
+        let error = make_preprocessor()
+            .preprocess_request(&request, None)
+            .await
+            .expect_err("media without a URL or UUID must be rejected");
+
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains("neither `url` nor `uuid`"),
+            "unexpected error: {error_chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_media_uuid() {
+        let messages = r#"[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/image.png"},
+                        "uuid": ""
+                    }
+                ]
+            }
+        ]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+
+        let error = make_preprocessor()
+            .preprocess_request(&request, None)
+            .await
+            .expect_err("an empty media UUID must be rejected");
+
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains("uuid must be a non-empty string"),
+            "unexpected error: {error_chain}"
+        );
+    }
+}
+
 mod context_length_validation {
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;

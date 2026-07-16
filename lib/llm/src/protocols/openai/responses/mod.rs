@@ -289,11 +289,11 @@ fn convert_input_content_to_user_content(
                     .map_err(|e| anyhow::anyhow!("Invalid image URL '{}': {}", url_str, e))?;
                 chat_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
-                        image_url: ImageUrl {
-                            url,
+                        image_url: Some(ImageUrl {
+                            url: Some(url),
                             detail: Some(convert_image_detail_str(&img.detail)),
-                            uuid: None,
-                        },
+                        }),
+                        uuid: None,
                     },
                 ));
             }

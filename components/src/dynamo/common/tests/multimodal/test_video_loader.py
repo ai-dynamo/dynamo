@@ -109,3 +109,33 @@ async def test_load_video_batch_reads_decoded_variant_with_metadata(monkeypatch)
         decoded_item,
         return_metadata=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_uuid_only_video_slots_preserve_batch_alignment():
+    loader = VideoLoader()
+    first = (
+        np.zeros((1, 2, 2, 3), dtype=np.uint8),
+        {"fps": 2.0, "frames_indices": [0], "total_num_frames": 1},
+    )
+    second = (
+        np.ones((1, 2, 2, 3), dtype=np.uint8),
+        {"fps": 2.0, "frames_indices": [0], "total_num_frames": 1},
+    )
+    loader.load_video = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[first, second]
+    )
+
+    videos = await loader.load_video_batch(
+        [
+            {"Url": "https://example.com/first.mp4"},
+            {"UuidOnly": "cached-video"},
+            {"Url": "https://example.com/second.mp4"},
+        ]
+    )
+
+    assert videos[0] is not None
+    assert videos[1] is None
+    assert videos[2] is not None
+    np.testing.assert_array_equal(videos[0][0], first[0])
+    np.testing.assert_array_equal(videos[2][0], second[0])
