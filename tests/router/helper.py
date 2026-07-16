@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
+from prometheus_client.parser import text_string_to_metric_families
 
 from dynamo.llm import KvRouter
 from dynamo.runtime import DistributedRuntime
@@ -22,6 +23,25 @@ logger = logging.getLogger(__name__)
 
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
+
+
+def prometheus_metric_value(
+    metrics_text: str,
+    metric_name: str,
+    labels: Optional[Dict[str, str]] = None,
+) -> float:
+    """Return the sum of exact matching Prometheus samples, or zero when absent."""
+    total = 0.0
+    for family in text_string_to_metric_families(metrics_text):
+        for sample in family.samples:
+            if sample.name != metric_name:
+                continue
+            if labels and not all(
+                sample.labels.get(key) == value for key, value in labels.items()
+            ):
+                continue
+            total += sample.value
+    return total
 
 
 def _nats_server() -> str:

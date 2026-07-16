@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 import pytest
 
 from tests.router.common import (
+    _test_bootstrap_prefill_rejection_gates_decode,
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
     _test_disagg_router_overload_529,
@@ -53,6 +54,7 @@ from tests.router.mocker_process import (
     MockerProcess,
     launch_disagg_workers,
 )
+from tests.router.router_process import FrontendRouterProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 
@@ -973,6 +975,97 @@ def test_router_decisions_disagg(
         test_payload=TEST_PAYLOAD,
         test_kwargs={"enable_bootstrap": enable_disagg_bootstrap},
     )
+
+
+@pytest.mark.sglang
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.timeout(120)
+def test_bootstrap_prefill_rejection_gates_decode(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    dynamo_dynamic_ports,
+    monkeypatch,
+):
+    """A rejected bootstrap prefill must fail before decode dispatch.
+
+    This is a scaled regression for the statusless phase-barrier bug. The
+    production defaults admit 10,000 active TCP handlers plus a 40,000-item
+    queue, so a 10,001-request test does not saturate ACK admission. Restricting
+    the prefill process to one active handler and one queued item reproduces the
+    same state with four requests:
+
+    1. one slow prefill is active;
+    2. one request is held by the dispatcher waiting for the active permit;
+    3. one request occupies the bounded queue; and
+    4. the probe receives a request-plane rejection.
+
+    The old detached prefill task swallowed that rejection, released the phase
+    barrier, and routed the probe to decode. The fixed path surfaces the error
+    before opening HTTP 200. The first request also proves that accepted
+    bootstrap traffic still overlaps prefill and decode.
+    """
+    request_timeout_seconds = 2
+    monkeypatch.setenv("DYN_TCP_REQUEST_TIMEOUT", str(request_timeout_seconds))
+    monkeypatch.delenv("DYN_EVENT_PLANE", raising=False)
+
+    namespace_suffix = generate_random_suffix()
+    shared_namespace = f"test-namespace-{namespace_suffix}"
+    prefill_system_port, decode_system_port = dynamo_dynamic_ports.system_ports
+    frontend_port = dynamo_dynamic_ports.frontend_port
+
+    prefill_mocker_args = {
+        "engine_type": "sglang",
+        "speedup_ratio": 0.000001,
+        "block_size": 1,
+        "durable_kv_events": False,
+    }
+    decode_mocker_args = {
+        "engine_type": "sglang",
+        "speedup_ratio": 1000.0,
+        "block_size": 1,
+        "durable_kv_events": False,
+    }
+    prefill_env = {
+        "DYN_SYSTEM_PORT": str(prefill_system_port),
+        # Empty explicit-admission knobs make resolve_sizing() use the legacy
+        # pool/queue knobs below even if the outer test environment set them.
+        "DYN_ENGINE_REQUEST_LIMIT": "",
+        "DYN_DYNAMO_REQUEST_QUEUE_LIMIT": "",
+        "DYN_TCP_WORKER_POOL_SIZE": "1",
+        "DYN_TCP_WORK_QUEUE_SIZE": "1",
+    }
+    decode_env = {"DYN_SYSTEM_PORT": str(decode_system_port)}
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        registration_order="prefill_first",
+        prefill_mocker_args=prefill_mocker_args,
+        decode_mocker_args=decode_mocker_args,
+        num_prefill_mockers=1,
+        num_decode_mockers=1,
+        enable_disagg_bootstrap=True,
+        request_plane=request_plane,
+        prefill_env_overrides=prefill_env,
+        decode_env_overrides=decode_env,
+    ) as (_prefill_workers, _decode_workers):
+        with FrontendRouterProcess(
+            request=request,
+            block_size=1,
+            frontend_port=frontend_port,
+            namespace=shared_namespace,
+            request_plane=request_plane,
+            min_initial_workers=1,
+        ):
+            _test_bootstrap_prefill_rejection_gates_decode(
+                frontend_port=frontend_port,
+                prefill_system_port=prefill_system_port,
+                test_payload=TEST_PAYLOAD,
+                request_timeout_seconds=request_timeout_seconds,
+            )
 
 
 @pytest.mark.parametrize(

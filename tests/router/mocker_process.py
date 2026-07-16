@@ -64,6 +64,8 @@ def _build_mocker_command(
     elif worker_type == "decode":
         command.extend(["--disaggregation-mode", "decode"])
 
+    if "engine_type" in mocker_args:
+        command.extend(["--engine-type", str(mocker_args["engine_type"])])
     if "speedup_ratio" in mocker_args:
         command.extend(["--speedup-ratio", str(mocker_args["speedup_ratio"])])
     if "block_size" in mocker_args:
@@ -687,6 +689,8 @@ def launch_disagg_workers(
     request_plane: str = "nats",
     event_plane: Optional[str] = None,
     raw_kv_events: bool = False,
+    prefill_env_overrides: Optional[Dict[str, str]] = None,
+    decode_env_overrides: Optional[Dict[str, str]] = None,
 ) -> Iterator[tuple[DisaggMockerProcess, DisaggMockerProcess]]:
     if registration_order not in ("prefill_first", "decode_first"):
         raise ValueError(f"Unexpected registration order: {registration_order}")
@@ -704,6 +708,7 @@ def launch_disagg_workers(
             enable_bootstrap=enable_disagg_bootstrap,
             event_plane=event_plane,
             raw_kv_events=raw_kv_events,
+            env_overrides=prefill_env_overrides,
         ) as prefill_workers:
             logger.info("Prefill workers using endpoint: %s", prefill_workers.endpoint)
             _wait_for_disagg_workers(
@@ -722,6 +727,7 @@ def launch_disagg_workers(
                 request_plane=request_plane,
                 event_plane=event_plane,
                 raw_kv_events=raw_kv_events,
+                env_overrides=decode_env_overrides,
             ) as decode_workers:
                 logger.info(
                     "Decode workers using endpoint: %s", decode_workers.endpoint
@@ -743,6 +749,7 @@ def launch_disagg_workers(
         request_plane=request_plane,
         event_plane=event_plane,
         raw_kv_events=raw_kv_events,
+        env_overrides=decode_env_overrides,
     ) as decode_workers:
         logger.info("Decode workers using endpoint: %s", decode_workers.endpoint)
         _wait_for_disagg_workers(
@@ -762,6 +769,7 @@ def launch_disagg_workers(
             enable_bootstrap=enable_disagg_bootstrap,
             event_plane=event_plane,
             raw_kv_events=raw_kv_events,
+            env_overrides=prefill_env_overrides,
         ) as prefill_workers:
             logger.info("Prefill workers using endpoint: %s", prefill_workers.endpoint)
             _wait_for_disagg_workers(
