@@ -1,18 +1,22 @@
 """Unit tests for the shared codeowners matching + resolution module.
 
-These pin down two pieces of the CODEOWNERS pipeline that previously had no
-tests and three subtly-different in-tree copies:
+These pin down the CODEOWNERS pipeline's shared semantics and deterministic
+policy-only emission:
 
   - `match(pattern, path)` -- canonical CODEOWNERS-style matcher used by build
     coverage, emit routing, and who_owns lookups.
   - `minimal_cover(file_team, catch_all)` -- the recursive min-cost cover that
-    turns a per-file owner map into the smallest set of last-match base rules.
+    turns a per-file owner map into the smallest set of last-match base rules
+    for legacy callers (the emitter no longer uses it).
+  - `compute_resolution(spec)` + `_render_codeowners(...)` -- pure policy
+    resolution, explicit precedence, and byte-identical output across trees.
 
 If either drifts, the tests catch it before the generated CODEOWNERS goes wrong.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,14 +25,21 @@ import pytest
 # Allow `import codeowners_match` when pytest runs from the repo root.
 sys.path.insert(0, str(Path(__file__).parent))
 
+from build_codeowners import (  # noqa: E402
+    CoverageGate,
+    is_policy_change,
+    split_coverage,
+)
 from codeowners_match import (  # noqa: E402
     Area,
     ResolvedModel,
     SharedSpec,
     anchor,
+    changed_paths,
     compute_resolution,
     match,
     minimal_cover,
+    parse_codeowners,
     resolve_owners,
 )
 from emit_codeowners import (  # noqa: E402
@@ -290,7 +301,7 @@ class TestComputeResolution:
             ],
             "advisory": [],
             "classify": {
-                "keyword_rules": [{"match": "kvbm", "area": "kvbm"}],
+                "keyword_rules": [],
                 "filetype_rules": [
                     {"pattern": "*.md", "coowner": "docs", "advisory": True},
                 ],
@@ -302,34 +313,56 @@ class TestComputeResolution:
             "lib/llm/a.rs",
             "lib/llm/b.rs",
             "lib/llm/shared/x.rs",
-            "lib/kvbm/foo.rs",  # auto-classify via keyword
+            "lib/kvbm/foo.rs",  # unowned in the new tree-independent resolver
             "docs/intro.md",
             "README.md",  # filetype_rule advisory only, falls to catch-all
         ]
 
     def test_explicit_paths_resolved(self) -> None:
-        model = compute_resolution(self._spec(), self._tree())
+        model = compute_resolution(self._spec())
         assert isinstance(model, ResolvedModel)
         # docs area unchanged
         docs = next(a for a in model.areas if a.label == "docs")
         assert "docs/" in docs.path_globs
 
-    def test_auto_classify_promotes_new_dir(self) -> None:
-        model = compute_resolution(self._spec(), self._tree())
-        kvbm = next(a for a in model.areas if a.label == "kvbm")
-        # lib/kvbm/foo.rs has no explicit area glob, but the kvbm keyword
-        # rule should add a dir-prefix glob to the kvbm area.
-        assert any("kvbm" in g for g in kvbm.path_globs)
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"match": "kvbm", "area": "kvbm"},
+            {"match": "metrics", "coowner": "docs"},
+        ],
+    )
+    def test_legacy_keyword_rules_are_rejected(self, rule: dict) -> None:
+        # Keyword auto-classification/co-ownership required a live tree.
+        # Reject stale configuration instead of silently pretending it still
+        # affects the pure policy resolver.
+        spec = self._spec()
+        spec["classify"]["keyword_rules"] = [rule]
+        with pytest.raises(SystemExit, match="keyword_rules is no longer supported"):
+            compute_resolution(spec)
+
+    def test_resolution_ignores_tree_argument(self) -> None:
+        # Two trees that differ only under an already-owned prefix must
+        # produce byte-identical resolutions, because ``tree`` is deprecated
+        # and ignored.
+        spec = self._spec()
+        tree_a = ["lib/llm/a.rs"]
+        tree_b = ["lib/llm/a.rs", "lib/llm/b.rs", "lib/llm/new/c.rs"]
+        model_a = compute_resolution(spec, tree_a)
+        model_b = compute_resolution(spec, tree_b)
+        assert model_a == model_b
+        # Legacy positional call (no tree) also matches.
+        assert compute_resolution(spec) == model_a
 
     def test_catch_all_only_uncovered(self) -> None:
-        model = compute_resolution(self._spec(), self._tree())
+        model = compute_resolution(self._spec())
         # README.md only gets an advisory rule (non-blocking); should not
         # count as explicitly owned for the coverage gate.
         unmatched = model.unmatched_paths(self._tree())
         assert "README.md" in unmatched
 
     def test_shared_multi_owner_recorded(self) -> None:
-        model = compute_resolution(self._spec(), self._tree())
+        model = compute_resolution(self._spec())
         sh = [s for s in model.shared if s["glob"] == "lib/llm/shared/"]
         assert sh and sh[0]["owners"] == ["runtime", "kvbm"]
 
@@ -339,65 +372,503 @@ class TestComputeResolution:
         spec = self._spec()
         spec["areas"][2]["path_globs"] = ["docs/", "README.md"]
         tree = self._tree() + ["foo/README.md"]
-        model = compute_resolution(spec, tree)
+        model = compute_resolution(spec)
         unmatched = model.unmatched_paths(tree)
         assert "README.md" not in unmatched
         assert "foo/README.md" in unmatched
 
-    def test_filetype_rule_skips_files_outside_any_area(self) -> None:
-        # A blocking filetype rule must not count as coverage for a tree
-        # nobody owns -- the file stays catch-all-only so --strict flags it.
+    def test_filetype_rule_emits_one_stable_coowner_only_row(self) -> None:
+        # A blocking filetype rule becomes ONE stable line matching by
+        # basename at any depth (GitHub CODEOWNERS semantics for a bare
+        # pattern with no leading slash). Coowner-only: the tree-dependent
+        # "enclosing area + coowner" pull-in is gone, because computing it
+        # required walking the live tree and was the second source of the
+        # base-branch race.
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
+        ]
+        model = compute_resolution(spec)
+        assert len(model.filetype_shared) == 1
+        fs = model.filetype_shared[0]
+        assert fs.glob == "Dockerfile"
+        assert fs.owners == ["docs"]
+
+    @pytest.mark.parametrize(
+        "rule",
+        [
+            {"coowner": "docs", "advisory": False},
+            {"pattern": "Dockerfile", "advisory": False},
+        ],
+    )
+    def test_blocking_filetype_rule_requires_pattern_and_coowner(
+        self, rule: dict
+    ) -> None:
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [rule]
+        with pytest.raises(SystemExit, match="missing 'pattern' or 'coowner'"):
+            compute_resolution(spec)
+
+    def test_filetype_rule_covers_files_at_any_depth(self) -> None:
+        # The strict coverage gate relies on ``unmatched_paths`` -- a
+        # blocking filetype pattern must count as coverage for any file
+        # matching it, regardless of directory depth.
         spec = self._spec()
         spec["classify"]["filetype_rules"] = [
             {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
         ]
         tree = self._tree() + ["lib/llm/Dockerfile", "stray/Dockerfile"]
-        model = compute_resolution(spec, tree)
-        globs = {fs.glob for fs in model.filetype_shared}
-        assert "lib/llm/Dockerfile" in globs  # enclosed by runtime: co-owned
-        assert "stray/Dockerfile" not in globs  # no enclosing area: skipped
-        assert "stray/Dockerfile" in model.unmatched_paths(tree)
+        model = compute_resolution(spec)
+        unmatched = set(model.unmatched_paths(tree))
+        assert "lib/llm/Dockerfile" not in unmatched
+        assert "stray/Dockerfile" not in unmatched
 
-    def test_keyword_coowner_rule_emits_shared_dir(self) -> None:
-        # A keyword rule with only `coowner` co-owns matching dirs with the
-        # enclosing area instead of being silently inert.
+    def test_filetype_advisory_rule_not_promoted_to_blocking(self) -> None:
+        # `advisory: true` filetype rules must NOT show up as blocking
+        # filetype_shared rows; they belong in filetype_advisory.
         spec = self._spec()
-        spec["classify"]["keyword_rules"].append(
-            {"match": "metrics", "coowner": "docs"}
-        )
-        tree = self._tree() + ["lib/llm/metrics/gauge.rs"]
-        model = compute_resolution(spec, tree)
-        assert {"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]} in (
-            model.keyword_coowned
-        )
-        assert model.keyword_coowned[-1] in model.shared
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "*.md", "coowner": "docs", "advisory": True},
+        ]
+        model = compute_resolution(spec)
+        assert model.filetype_shared == []
+        assert [r["pattern"] for r in model.filetype_advisory] == ["*.md"]
 
-    def test_keyword_coowner_defers_to_explicit_shared(self) -> None:
-        # A hand-declared shared: entry for the same dir wins -- the keyword
-        # rule must not emit a duplicate (or conflicting) row.
+    def test_explicit_shared_entry_still_wins(self) -> None:
+        # Hand-declared shared: entries are still emitted verbatim; they
+        # were the "explicit beats implicit" path before, and now they are
+        # the ONLY way to express keyword-style co-ownership.
         spec = self._spec()
-        spec["classify"]["keyword_rules"].append(
-            {"match": "metrics", "coowner": "docs"}
-        )
         spec["shared"].append(
             {"glob": "lib/llm/metrics/", "owners": ["runtime", "docs"]}
         )
-        tree = self._tree() + ["lib/llm/metrics/gauge.rs"]
-        model = compute_resolution(spec, tree)
-        assert model.keyword_coowned == []
+        model = compute_resolution(spec)
         rows = [s for s in model.shared if s["glob"] == "lib/llm/metrics/"]
         assert len(rows) == 1
+        assert rows[0]["owners"] == ["runtime", "docs"]
 
-    def test_keyword_coowner_skips_unowned_dirs(self) -> None:
-        # No enclosing area -> no co-ownership row; the gate flags the dir.
-        spec = self._spec()
-        spec["classify"]["keyword_rules"].append(
-            {"match": "metrics", "coowner": "docs"}
-        )
-        tree = self._tree() + ["orphan/metrics/gauge.rs"]
+
+# ------------------------------------------------------------------
+# Byte-identical determinism -- the fix for the base-branch race
+# ------------------------------------------------------------------
+
+
+class TestEmissionIsTreeIndependent:
+    """The whole point of the tree-decoupling: emit is a pure function.
+
+    Adding, deleting, or moving files UNDER an already-owned prefix must not
+    change a single byte of the emitted CODEOWNERS. The old min-cover /
+    auto-classify / filetype-tree-walk pipeline flunked this contract:
+    unrelated churn on ``main`` rewrote rules and broke the ``codeowners``
+    CI check on PRs that had touched none of it.
+    """
+
+    def _spec(self) -> dict:
+        # Realistic-shaped spec: nested area overrides + shared + a
+        # blocking filetype rule + advisory-only filetype rule.
+        return {
+            "meta": {"catch_all": "@root"},
+            "areas": [
+                {
+                    "label": "runtime",
+                    "github_team": "@runtime",
+                    "path_globs": [
+                        "lib/",
+                        "lib/llm/",
+                        "lib/llm/preprocessor.rs",
+                    ],
+                },
+                {
+                    "label": "kvbm",
+                    "github_team": "@kvbm",
+                    "path_globs": ["lib/llm/kv/", "lib/kvbm/"],
+                },
+                {
+                    "label": "docs",
+                    "github_team": "@docs",
+                    "path_globs": ["docs/", "README.md"],
+                },
+                {"label": "ops", "github_team": "@ops", "path_globs": []},
+            ],
+            "shared": [
+                {"glob": "lib/llm/shared/", "owners": ["runtime", "kvbm"]},
+            ],
+            "advisory": [],
+            "classify": {
+                "keyword_rules": [],
+                "filetype_rules": [
+                    {"pattern": "Dockerfile", "coowner": "ops", "advisory": False},
+                    {"pattern": "*.md", "coowner": "docs", "advisory": True},
+                ],
+            },
+        }
+
+    def _render(self, spec: dict, tree: list[str] | None = None) -> str:
         model = compute_resolution(spec, tree)
-        assert not any("orphan" in s["glob"] for s in model.keyword_coowned)
-        assert "orphan/metrics/gauge.rs" in model.unmatched_paths(tree)
+        lines, _ = _render_codeowners(model, group=True, external=[])
+        return "\n".join(lines) + "\n"
+
+    def test_add_file_under_owned_prefix_does_not_change_output(self) -> None:
+        # The OLD emitter took a ``tree`` and walked it. Under the new
+        # signature there is nowhere to inject tree state, but we still
+        # thread two "trees" through the pure resolver via its deprecated
+        # positional argument to prove the argument really is ignored:
+        # even if a legacy caller keeps passing it, the output does not
+        # move.
+        spec = self._spec()
+        base_tree = [
+            "lib/llm/a.rs",
+            "lib/llm/preprocessor.rs",
+            "lib/llm/kv/x.rs",
+            "docs/intro.md",
+            "README.md",
+            "container/Dockerfile",
+        ]
+        mutated_tree = base_tree + [
+            "lib/llm/new_file.rs",  # add under runtime
+            "lib/llm/kv/another.rs",  # add under kvbm
+            "lib/llm/subdir/only_here.rs",  # deeper unknown dir under runtime
+            "docs/new.md",  # add under docs
+            "container/templates/args.Dockerfile",  # add matching filetype
+        ]
+        assert compute_resolution(spec, base_tree) == compute_resolution(
+            spec, mutated_tree
+        )
+        assert self._render(spec, base_tree) == self._render(spec, mutated_tree)
+
+    def test_delete_or_move_under_owned_prefix_does_not_change_output(
+        self,
+    ) -> None:
+        # The delete + move half of the pure-emit contract. Prove that
+        # (a) removing tracked files from under an owned prefix and
+        # (b) reshuffling their paths do not change the resolved model or
+        # the rendered body -- both are pure functions of the spec.
+        spec = self._spec()
+        base_tree = [
+            "lib/llm/a.rs",
+            "lib/llm/preprocessor.rs",
+            "lib/llm/kv/x.rs",
+            "lib/llm/kv/y.rs",
+            "lib/llm/shared/z.rs",
+            "docs/intro.md",
+            "docs/api/ref.md",
+            "README.md",
+            "container/Dockerfile",
+            "container/templates/args.Dockerfile",
+        ]
+        deleted_tree = [
+            # dropped: lib/llm/a.rs, lib/llm/kv/y.rs, docs/api/ref.md,
+            # container/templates/args.Dockerfile.
+            "lib/llm/preprocessor.rs",
+            "lib/llm/kv/x.rs",
+            "lib/llm/shared/z.rs",
+            "docs/intro.md",
+            "README.md",
+            "container/Dockerfile",
+        ]
+        moved_tree = [
+            "lib/llm/preprocessor.rs",  # unchanged
+            "lib/llm/renamed_a.rs",  # moved from lib/llm/a.rs
+            "lib/llm/kv/renamed_x.rs",  # moved from lib/llm/kv/x.rs
+            "lib/llm/kv/y.rs",
+            "lib/llm/shared/moved_z.rs",  # moved within owned prefix
+            "docs/intro_renamed.md",  # moved within docs
+            "docs/api/ref.md",
+            "README.md",
+            "deploy/Dockerfile",  # moved from container/Dockerfile
+            "deploy/templates/args.Dockerfile",  # moved from container/
+        ]
+        model_base = compute_resolution(spec, base_tree)
+        assert model_base == compute_resolution(spec, deleted_tree)
+        assert model_base == compute_resolution(spec, moved_tree)
+        # And the emitted body is byte-identical: the render path never
+        # reads the tree, so the three "runs" produce the same file even
+        # though the underlying trees differ wildly.
+        rendered = self._render(spec, base_tree)
+        assert rendered == self._render(spec, deleted_tree)
+        assert rendered == self._render(spec, moved_tree)
+
+    def test_emitter_has_no_tree_parameter(self) -> None:
+        # Guard against a future regression re-introducing the tree walk:
+        # the emitter's signature must not name a ``tree`` parameter.
+        import inspect
+
+        sig = inspect.signature(_render_codeowners)
+        assert (
+            "tree" not in sig.parameters
+        ), "emit tree parameter reintroduced -- see TestEmissionIsTreeIndependent"
+        sig_base = inspect.signature(compute_resolution)
+        # tree is still accepted (backward-compat) but must default to None
+        # so callers that omit it get pure behavior for free.
+        tree_param = sig_base.parameters.get("tree")
+        assert tree_param is not None
+        assert tree_param.default is None
+
+    def test_no_ls_files_call_at_emit(self, monkeypatch) -> None:
+        # Belt-and-braces: monkeypatch ``codeowners_match.load_tree`` to
+        # blow up, then run the full emit path. If anything on that path
+        # ever reintroduces a tree walk, this test fails loudly instead of
+        # silently regressing determinism.
+        import codeowners_match
+
+        def _boom(*_a, **_kw):  # pragma: no cover - triggered only on regression
+            raise AssertionError(
+                "emit path called git ls-files -- tree independence broken"
+            )
+
+        monkeypatch.setattr(codeowners_match, "load_tree", _boom)
+        # compute_resolution + _render_codeowners together are the whole
+        # emit path.
+        spec = self._spec()
+        model = compute_resolution(spec)
+        lines, _ = _render_codeowners(model, group=True, external=[])
+        # sanity: we actually rendered something
+        assert any(ln.startswith("/lib/") for ln in lines)
+
+    def test_explicit_path_rules_win_over_filetype_defaults(self) -> None:
+        spec = self._spec()
+        spec["areas"].append(
+            {
+                "label": "xpu",
+                "github_team": "@xpu",
+                "path_globs": ["lib/llm/Dockerfile"],
+            }
+        )
+        spec["shared"].append({"glob": "lib/llm/shared/", "owners": ["runtime", "xpu"]})
+
+        rules = parse_codeowners(self._render(spec))
+        assert resolve_owners(rules, "other/Dockerfile") == ["@ops"]
+        assert resolve_owners(rules, "lib/llm/Dockerfile") == ["@xpu"]
+        assert resolve_owners(rules, "lib/llm/shared/Dockerfile") == [
+            "@runtime",
+            "@xpu",
+        ]
+
+    def test_overlapping_filetype_rules_preserve_declaration_order(self) -> None:
+        spec = self._spec()
+        spec["classify"]["filetype_rules"] = [
+            {"pattern": "*Dockerfile*", "coowner": "ops", "advisory": False},
+            {"pattern": "Dockerfile", "coowner": "docs", "advisory": False},
+        ]
+
+        rules = parse_codeowners(self._render(spec))
+        assert resolve_owners(rules, "nested/Dockerfile") == ["@docs"]
+
+
+# ------------------------------------------------------------------
+# split_coverage() -- diff-aware strict gate partitioning
+# ------------------------------------------------------------------
+
+
+class TestSplitCoverage:
+    def test_full_tree_mode_blocks_every_unowned(self) -> None:
+        # Default (changed is None): whole-tree strict blocks on ANY unowned
+        # path -- the scheduled/maintenance 100%-coverage assertion.
+        gate = split_coverage(["a/x", "b/y"], None)
+        assert isinstance(gate, CoverageGate)
+        assert gate.blocking == ["a/x", "b/y"]
+        assert gate.warnings == []
+
+    def test_diff_aware_ignores_inherited_base_gap(self) -> None:
+        # A catch-all-only path the PR did NOT touch only warns; it never
+        # fails the gate. This is the base-churn race being closed.
+        gate = split_coverage(["base_only/x"], changed=["owned/new.py"])
+        assert gate.blocking == []
+        assert gate.warnings == ["base_only/x"]
+
+    def test_diff_aware_blocks_pr_introduced_gap(self) -> None:
+        # A catch-all-only path the PR introduced/touched still blocks: the
+        # PR's own surface must be 100% owned.
+        gate = split_coverage(["newdir/z"], changed=["newdir/z"])
+        assert gate.blocking == ["newdir/z"]
+        assert gate.warnings == []
+
+    def test_diff_aware_mixed_surface(self) -> None:
+        gate = split_coverage(
+            ["base_only/x", "newdir/z"], changed=["newdir/z", "owned/ok.py"]
+        )
+        assert gate.blocking == ["newdir/z"]
+        assert gate.warnings == ["base_only/x"]
+
+
+# ------------------------------------------------------------------
+# is_policy_change() -- policy edits force full-tree strict
+# ------------------------------------------------------------------
+
+
+class TestIsPolicyChange:
+    _AREAS = ".github/codeowners/areas.yaml"
+
+    def test_areas_file_is_policy(self) -> None:
+        assert is_policy_change([self._AREAS], self._AREAS, ".") is True
+
+    def test_script_in_policy_dir_is_policy(self) -> None:
+        assert (
+            is_policy_change(
+                [".github/codeowners/emit_codeowners.py"], self._AREAS, "."
+            )
+            is True
+        )
+
+    def test_codeowners_output_is_policy(self) -> None:
+        assert is_policy_change(["CODEOWNERS"], self._AREAS, ".") is True
+
+    def test_unrelated_change_is_not_policy(self) -> None:
+        assert (
+            is_policy_change(["src/foo.py", "owned/b.txt"], self._AREAS, ".") is False
+        )
+
+
+# ------------------------------------------------------------------
+# changed_paths() + end-to-end diff-aware --strict demo
+# ------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL)
+
+
+def _init_repo(repo: Path) -> None:
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+
+
+def _head(repo: Path) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+    ).strip()
+
+
+def _run_build(repo: Path, areas: Path, *extra: str):
+    script = Path(__file__).parent / "build_codeowners.py"
+    return subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--areas",
+            str(areas),
+            "--repo",
+            str(repo),
+            "--strict",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+class TestChangedPaths:
+    def test_acmr_includes_add_modify_excludes_delete(self, tmp_path) -> None:
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        (repo / "keep.txt").write_text("1")
+        (repo / "gone.txt").write_text("1")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        base = _head(repo)
+        (repo / "keep.txt").write_text("2")  # modified
+        (repo / "added.txt").write_text("1")  # added
+        (repo / "gone.txt").unlink()  # deleted -> filtered out
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "change")
+
+        got = changed_paths(repo, base)
+        assert "added.txt" in got
+        assert "keep.txt" in got
+        assert "gone.txt" not in got  # deletions are not a coverage concern
+
+
+class TestDiffAwareStrictGateE2E:
+    """Concrete proof the relocated base-churn race is closed.
+
+    (a) a base-inherited unowned path does NOT fail diff-aware strict,
+    (b) a PR-introduced unowned path DOES fail it,
+    (c) default full-tree strict still fails on any unowned path.
+    """
+
+    def _areas(self, tmp_path: Path) -> Path:
+        areas = tmp_path / "areas.yaml"
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
+            '    path_globs: ["owned/"]\n'
+        )
+        return areas
+
+    def _repo_with_base(self, tmp_path: Path) -> tuple[Path, str]:
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        (repo / "owned").mkdir()
+        (repo / "owned" / "a.txt").write_text("x")
+        (repo / "base_unowned").mkdir()
+        (repo / "base_unowned" / "x.txt").write_text("x")  # inherited, unowned
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        return repo, _head(repo)
+
+    def test_base_gap_ignored_but_full_tree_fails(self, tmp_path) -> None:
+        areas = self._areas(tmp_path)
+        repo, base = self._repo_with_base(tmp_path)
+        # PR adds an OWNED path only; it never touches base_unowned/.
+        (repo / "owned" / "b.txt").write_text("y")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "pr adds owned only")
+        # (a) diff-aware strict PASSES despite the inherited base gap.
+        assert _run_build(repo, areas, "--changed-only", "--base", base).returncode == 0
+        # (c) full-tree strict still FAILS on that same inherited gap.
+        assert _run_build(repo, areas).returncode == 1
+
+    def test_pr_introduced_gap_fails(self, tmp_path) -> None:
+        areas = self._areas(tmp_path)
+        repo, base = self._repo_with_base(tmp_path)
+        # PR adds an UNOWNED path -- its own surface is not 100% owned.
+        (repo / "newdir").mkdir()
+        (repo / "newdir" / "z.txt").write_text("z")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "pr adds unowned")
+        # (b) diff-aware strict FAILS on the PR's own unowned path.
+        result = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert result.returncode == 1
+        assert "newdir/z.txt" in result.stdout
+
+
+class TestPolicyChangeFallback:
+    """A PR that edits ownership policy is judged whole-tree: a policy edit can
+    orphan paths the PR never touches, so diff-aware must not let it pass."""
+
+    def test_policy_edit_orphaning_untouched_path_blocks(self, tmp_path) -> None:
+        repo = tmp_path / "r"
+        _init_repo(repo)
+        # areas.yaml lives INSIDE the repo (as in CI) so editing it shows in
+        # the diff and marks the PR a policy change.
+        areas = repo / ".github" / "codeowners" / "areas.yaml"
+        areas.parent.mkdir(parents=True)
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
+            '    path_globs: ["owned/"]\n'
+        )
+        (repo / "owned").mkdir()
+        (repo / "owned" / "a.txt").write_text("x")
+        (repo / "owned" / "b.txt").write_text("x")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "base")
+        base = _head(repo)
+        # Narrow the policy so owned/b.txt is orphaned, WITHOUT touching it.
+        areas.write_text(
+            'meta:\n  catch_all: "@root"\n'
+            'areas:\n  - label: owned\n    github_team: "@org/owned"\n'
+            '    path_globs: ["owned/a.txt"]\n'
+        )
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "narrow policy, orphan b.txt")
+        # Plain diff-aware would miss owned/b.txt (not in the file diff); the
+        # policy-change fallback forces full-tree strict, so it BLOCKS.
+        result = _run_build(repo, areas, "--changed-only", "--base", base)
+        assert result.returncode == 1
+        assert "owned/b.txt" in result.stdout
 
 
 # ------------------------------------------------------------------
@@ -572,7 +1043,7 @@ class TestRenderContributorsMd:
 class TestRenderCodeownersWithExternals:
     """End-to-end: an area-attached contributor rides every line the team owns."""
 
-    def _model_and_tree(self) -> tuple[ResolvedModel, list[str]]:
+    def _model(self) -> ResolvedModel:
         spec = {
             "meta": {"catch_all": "@root"},
             "areas": [
@@ -587,26 +1058,25 @@ class TestRenderCodeownersWithExternals:
             "advisory": [],
             "classify": {"keyword_rules": [], "filetype_rules": []},
         }
-        tree = ["lib/llm/a.rs", "lib/llm/b.rs", "lib/llm/shared/x.rs"]
-        return compute_resolution(spec, tree), tree
+        return compute_resolution(spec)
 
     def test_base_line_gets_handle(self) -> None:
-        model, tree = self._model_and_tree()
+        model = self._model()
         external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
-        lines, _ = _render_codeowners(model, tree, group=True, external=external)
+        lines, _ = _render_codeowners(model, group=True, external=external)
         body = "\n".join(lines)
         assert "@runtime @jane" in body
 
     def test_shared_line_gets_handle(self) -> None:
-        model, tree = self._model_and_tree()
+        model = self._model()
         external = [{"name": "Jane", "github": "jane", "areas": ["runtime"]}]
-        lines, _ = _render_codeowners(model, tree, group=True, external=external)
+        lines, _ = _render_codeowners(model, group=True, external=external)
         shared_line = next(ln for ln in lines if ln.startswith("/lib/llm/shared/"))
         assert "@runtime" in shared_line
         assert "@kvbm" in shared_line
         assert "@jane" in shared_line
 
     def test_no_externals_is_unchanged(self) -> None:
-        model, tree = self._model_and_tree()
-        plain, _ = _render_codeowners(model, tree, group=True, external=[])
+        model = self._model()
+        plain, _ = _render_codeowners(model, group=True, external=[])
         assert not any("@jane" in ln for ln in plain)

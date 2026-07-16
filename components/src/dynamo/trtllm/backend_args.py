@@ -91,6 +91,14 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="Enable attention data parallelism. When enabled, attention_dp_size equals tensor_parallel_size.",
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--conversation-affinity",
+            env_var="DYN_ENGINE_CONV_AFFINITY",
+            default=False,
+            help="Force engine-owned conversation-affinity ADP routing: the engine picks the "
+            "attention-DP rank from the conversation id, even if the router selects a rank.",
+        )
         add_argument(
             g,
             flag_name="--kv-block-size",
@@ -471,6 +479,7 @@ class DynamoTrtllmConfig(ConfigBase):
     pipeline_parallel_size: int
     expert_parallel_size: Optional[int]
     enable_attention_dp: bool
+    conversation_affinity: bool
     kv_block_size: int
     gpus_per_node: Optional[int] = None
     max_batch_size: int

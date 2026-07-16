@@ -1542,11 +1542,13 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "async-trait",
+ "crossbeam-queue",
  "dashmap",
  "derive_builder",
  "dynamo-kv-hashing",
  "dynamo-runtime",
  "dynamo-tokens",
+ "dynamo-truthy",
  "flume",
  "indexmap 2.14.0",
  "ordered-float 4.6.0",
@@ -1664,6 +1666,7 @@ version = "1.3.0"
 dependencies = [
  "anyhow",
  "cudarc",
+ "dynamo-truthy",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
@@ -1686,6 +1689,7 @@ dependencies = [
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "dynamo-truthy",
  "futures",
  "indicatif 0.18.4",
  "kvbm-logical",
@@ -1710,9 +1714,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "4.1.1"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91699e585f751e0ac61db985f794fde10b7983929b41245f34828789297562e1"
+checksum = "c18f8f6a2d325675a65beb0718940124a011e5ea25ee827df19028b965296a6c"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -1732,9 +1736,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.1.17"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a0fa2c447c6cef29cbda22172f2587a5f5ef8eb69af8cae359e277c8b672ec8"
+checksum = "b5a8fca0f27b610454cd33858b5eb01c78c24d3ace7af2728d0723713775a939"
 dependencies = [
  "anyhow",
  "dynamo-parsers",
@@ -1748,9 +1752,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "2.0.1"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "869283188c4868780a16b97e85cd017bbd1c5687ff0410c9aa1767e0c0103482"
+checksum = "3d1da866e573424e374c83d64dbf7807547054ebadcd85ddb2f9f67db06bf386"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1814,6 +1818,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-truthy",
  "educe",
  "either",
  "etcd-client",
@@ -1895,6 +1900,13 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-truthy"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

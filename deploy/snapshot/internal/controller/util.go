@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
-	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -15,12 +14,14 @@ import (
 	ktypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const (
-	checkpointLeaseDuration      = 30 * time.Second
-	checkpointLeaseRenewInterval = 10 * time.Second
-)
+const checkpointLeaseDuration = 30 * time.Second
+
+// checkpointLeaseRenewInterval is a package-level var (not const) so tests can shorten the
+// renewal loop without a fake clock. Only same-package _test.go files should mutate it.
+var checkpointLeaseRenewInterval = 10 * time.Second
 
 func checkpointLeaseExpired(lease *coordinationv1.Lease, now time.Time) bool {
 	if lease == nil || lease.Spec.LeaseDurationSeconds == nil {
@@ -82,164 +83,126 @@ func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.L
 	return err
 }
 
-func getCheckpointJob(ctx context.Context, clientset kubernetes.Interface, pod *corev1.Pod) (*batchv1.Job, error) {
-	jobName := pod.Labels["batch.kubernetes.io/job-name"]
-	if jobName == "" {
-		return nil, fmt.Errorf("pod %s/%s has no batch.kubernetes.io/job-name label", pod.Namespace, pod.Name)
-	}
+// checkpointLeaseName returns the Lease guarding the artifact identified by checkpointID. The
+// checkpoint ID is the cluster-global artifact identity (the artifact path has no namespace
+// segment), so the lease name derives from it, not from the work-order name. Lease names are
+// DNS-1123 subdomains (253 max), so no length cap is needed beyond the label validation upstream.
+func checkpointLeaseName(checkpointID string) string { return "checkpoint-lease-" + checkpointID }
 
-	job, err := clientset.BatchV1().Jobs(pod.Namespace).Get(ctx, jobName, metav1.GetOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get checkpoint job %s/%s: %w", pod.Namespace, jobName, err)
-	}
-	return job, nil
-}
-
-func acquireCheckpointLease(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, job *batchv1.Job, holderIdentity string) (bool, error) {
-	leaseName := job.Name
+// acquireLease acquires or renews a checkpoint lease at an arbitrary namespace/name key,
+// returning false when another live holder owns it.
+func (w *NodeController) acquireLease(ctx context.Context, key client.ObjectKey) (bool, error) {
 	now := metav1.NewMicroTime(time.Now())
 	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
 
-	leaseClient := clientset.CoordinationV1().Leases(job.Namespace)
-	existingLease, err := leaseClient.Get(ctx, leaseName, metav1.GetOptions{})
+	leaseClient := w.clientset.CoordinationV1().Leases(key.Namespace)
+	existing, err := leaseClient.Get(ctx, key.Name, metav1.GetOptions{})
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("failed to get checkpoint lease %s/%s: %w", job.Namespace, leaseName, err)
+			return false, fmt.Errorf("get checkpoint lease %s: %w", key.String(), err)
 		}
-
 		lease := &coordinationv1.Lease{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      leaseName,
-				Namespace: job.Namespace,
-			},
+			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
 			Spec: coordinationv1.LeaseSpec{
-				HolderIdentity:       &holderIdentity,
+				HolderIdentity:       &w.holderID,
 				LeaseDurationSeconds: &leaseDurationSeconds,
 				AcquireTime:          &now,
 				RenewTime:            &now,
 			},
 		}
-
 		if _, err := leaseClient.Create(ctx, lease, metav1.CreateOptions{}); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				return false, nil
 			}
-			return false, fmt.Errorf("failed to create checkpoint lease %s/%s: %w", job.Namespace, leaseName, err)
+			return false, fmt.Errorf("create checkpoint lease %s: %w", key.String(), err)
 		}
 		return true, nil
 	}
 
-	if !checkpointLeaseExpired(existingLease, now.Time) &&
-		existingLease.Spec.HolderIdentity != nil &&
-		*existingLease.Spec.HolderIdentity != holderIdentity {
+	if !checkpointLeaseExpired(existing, now.Time) &&
+		existing.Spec.HolderIdentity != nil &&
+		*existing.Spec.HolderIdentity != w.holderID {
 		return false, nil
 	}
-
-	existingLease.Spec.HolderIdentity = &holderIdentity
-	existingLease.Spec.LeaseDurationSeconds = &leaseDurationSeconds
-	if existingLease.Spec.AcquireTime == nil || checkpointLeaseExpired(existingLease, now.Time) {
-		existingLease.Spec.AcquireTime = &now
+	existing.Spec.HolderIdentity = &w.holderID
+	existing.Spec.LeaseDurationSeconds = &leaseDurationSeconds
+	if existing.Spec.AcquireTime == nil || checkpointLeaseExpired(existing, now.Time) {
+		existing.Spec.AcquireTime = &now
 	}
-	existingLease.Spec.RenewTime = &now
-
-	if _, err := leaseClient.Update(ctx, existingLease, metav1.UpdateOptions{}); err != nil {
+	existing.Spec.RenewTime = &now
+	if _, err := leaseClient.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
 		if apierrors.IsConflict(err) {
-			log.V(1).Info("Checkpoint lease update conflicted", "lease", fmt.Sprintf("%s/%s", job.Namespace, leaseName))
 			return false, nil
 		}
-		return false, fmt.Errorf("failed to update checkpoint lease %s/%s: %w", job.Namespace, leaseName, err)
+		return false, fmt.Errorf("update checkpoint lease %s: %w", key.String(), err)
 	}
-
 	return true, nil
 }
 
-func renewCheckpointLease(ctx context.Context, clientset kubernetes.Interface, job *batchv1.Job, holderIdentity string) error {
-	leaseName := job.Name
-	leaseClient := clientset.CoordinationV1().Leases(job.Namespace)
-	lease, err := leaseClient.Get(ctx, leaseName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get checkpoint lease %s/%s for renewal: %w", job.Namespace, leaseName, err)
-	}
-	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
-		return fmt.Errorf("checkpoint lease %s/%s is no longer held by %q", job.Namespace, leaseName, holderIdentity)
-	}
-
-	now := metav1.NewMicroTime(time.Now())
-	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
-	lease.Spec.LeaseDurationSeconds = &leaseDurationSeconds
-	lease.Spec.RenewTime = &now
-
-	if _, err := leaseClient.Update(ctx, lease, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("failed to renew checkpoint lease %s/%s: %w", job.Namespace, leaseName, err)
-	}
-	return nil
-}
-
-func releaseCheckpointLease(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, job *batchv1.Job, holderIdentity string) error {
-	leaseName := job.Name
-	leaseClient := clientset.CoordinationV1().Leases(job.Namespace)
-	lease, err := leaseClient.Get(ctx, leaseName, metav1.GetOptions{})
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to get checkpoint lease %s/%s for release: %w", job.Namespace, leaseName, err)
-	}
-
-	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != holderIdentity {
-		log.V(1).Info("Skipping checkpoint lease release because another holder owns it",
-			"lease", fmt.Sprintf("%s/%s", job.Namespace, leaseName),
-			"holder", holderIdentity,
-		)
-		return nil
-	}
-
-	if err := leaseClient.Delete(ctx, leaseName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("failed to delete checkpoint lease %s/%s: %w", job.Namespace, leaseName, err)
-	}
-	return nil
-}
-
-func (w *NodeController) renewCheckpointLease(ctx context.Context, log logr.Logger, job *batchv1.Job, stopLease context.CancelCauseFunc) {
+// renewLease periodically renews the lease until ctx is cancelled. A failed renewal cancels the
+// dump via stop so a lease-lost checkpoint cannot keep writing the artifact.
+func (w *NodeController) renewLease(ctx context.Context, key client.ObjectKey, stop context.CancelCauseFunc) {
 	ticker := time.NewTicker(checkpointLeaseRenewInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := renewCheckpointLease(ctx, w.clientset, job, w.holderID); err != nil {
-				log.Error(err, "Failed to renew checkpoint lease")
-				stopLease(fmt.Errorf("checkpoint lease renewal failed: %w", err))
+			if err := w.renewLeaseOnce(ctx, key); err != nil {
+				stop(fmt.Errorf("checkpoint lease renewal failed: %w", err))
 				return
 			}
 		}
 	}
 }
 
-func annotateJob(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, job *batchv1.Job, annotations map[string]string) error {
-	patchBytes, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"annotations": annotations,
-		},
-	})
+// renewLeaseOnce bumps the lease renew time, failing if this holder no longer owns it.
+func (w *NodeController) renewLeaseOnce(ctx context.Context, key client.ObjectKey) error {
+	leaseClient := w.clientset.CoordinationV1().Leases(key.Namespace)
+	lease, err := leaseClient.Get(ctx, key.Name, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to build job annotation patch payload: %w", err)
+		return fmt.Errorf("get checkpoint lease %s for renewal: %w", key.String(), err)
 	}
-
-	_, err = clientset.BatchV1().Jobs(job.Namespace).Patch(
-		ctx, job.Name, ktypes.MergePatchType, patchBytes, metav1.PatchOptions{},
-	)
-	if err != nil {
-		log.Error(err, "Failed to annotate checkpoint job",
-			"job", fmt.Sprintf("%s/%s", job.Namespace, job.Name),
-			"annotations", annotations,
-		)
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != w.holderID {
+		return fmt.Errorf("checkpoint lease %s is no longer held by %q", key.String(), w.holderID)
 	}
-	return err
+	now := metav1.NewMicroTime(time.Now())
+	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
+	lease.Spec.LeaseDurationSeconds = &leaseDurationSeconds
+	lease.Spec.RenewTime = &now
+	if _, err := leaseClient.Update(ctx, lease, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("renew checkpoint lease %s: %w", key.String(), err)
+	}
+	return nil
 }
 
+// releaseLease deletes the lease if this holder owns it.
+func (w *NodeController) releaseLease(ctx context.Context, key client.ObjectKey) error {
+	leaseClient := w.clientset.CoordinationV1().Leases(key.Namespace)
+	lease, err := leaseClient.Get(ctx, key.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get checkpoint lease %s for release: %w", key.String(), err)
+	}
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != w.holderID {
+		return nil
+	}
+	// Preconditions prevent deleting a lease that another holder acquired between our Get and Delete
+	// (e.g. a surviving renewLeaseOnce racing the cancel signal). A Conflict or NotFound here means
+	// the lease changed hands or is already gone — both are benign; the lease expires on its own.
+	uid := lease.UID
+	rv := lease.ResourceVersion
+	err = leaseClient.Delete(ctx, key.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv},
+	})
+	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		return fmt.Errorf("delete checkpoint lease %s: %w", key.String(), err)
+	}
+	return nil
+}
 func emitPodEvent(ctx context.Context, clientset kubernetes.Interface, log logr.Logger, pod *corev1.Pod, component, eventType, reason, message string) {
 	event := &corev1.Event{
 		ObjectMeta: metav1.ObjectMeta{

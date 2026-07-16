@@ -177,8 +177,8 @@ class KvRouterArgGroup(ArgGroup):
             default=1.0,
             help=(
                 "KV Router: Credit multiplier for device-local prefix overlap. "
-                "Range: 0.0 to 1.0; higher values more strongly prefer KV cache reuse. "
-                "Use router-prefill-load-scale above 1.0 to weigh TTFT/prompt-side load more heavily."
+                "Must be finite and non-negative; values above 1.0 give device "
+                "overlap extra credit and can make the adjusted prefill cost negative."
             ),
             arg_type=float,
             dest="overlap_score_credit",
@@ -388,13 +388,14 @@ class KvRouterArgGroup(ArgGroup):
             g,
             flag_name="--router-queue-threshold",
             env_var="DYN_ROUTER_QUEUE_THRESHOLD",
-            default=16.0,
+            default=None,
             help=(
                 "KV Router: Queue threshold fraction for prefill token capacity. "
                 "Requests are queued if all workers exceed this fraction of "
                 "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
-                "queueing sensitivity (queue as soon as any tokens are active). "
-                "Pass 'None' to disable router queueing. "
+                "queueing sensitivity (queue once every eligible worker has active "
+                "prefill load). "
+                "Unset by default; setting a numeric value enables router queueing. "
                 "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
                 "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
                 "cache pool size), not the per-step prefill window, which inflates "
@@ -412,7 +413,8 @@ class KvRouterArgGroup(ArgGroup):
                 "KV Router: Startup-only YAML policy-family and cache-bucket "
                 "queue configuration. "
                 "When omitted, router_queue_threshold and router_queue_policy define "
-                "the existing single default queue."
+                "one synthetic policy class; queueing remains disabled unless "
+                "router_queue_threshold is set."
             ),
             arg_type=str,
         )

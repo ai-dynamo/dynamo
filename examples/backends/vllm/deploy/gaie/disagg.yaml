@@ -109,6 +109,14 @@ spec:
               name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
           imagePullPolicy: IfNotPresent
+          # Make EPP schedule away from disk-starved nodes and mitigate its
+          # eviction under node DiskPressure: the ephemeral-storage request keeps
+          # it out of the kubelet's first-to-evict bucket. CI-stability specific.
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 256Mi
+              ephemeral-storage: 1Gi
   - name: VllmDecodeWorker
     type: decode
     replicas: 1
