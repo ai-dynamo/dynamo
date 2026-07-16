@@ -761,13 +761,18 @@ async def register_vllm_model(
         # loaded here. Only generative decode/aggregated workers serve the LoRA load endpoints
         # (load_lora/unload_lora). Prefill and embedding workers register through this same path
         # but do NOT serve them, so they must not advertise capacity they cannot fulfill — gate on
-        # the model type rather than worker_type (vLLM embedding registers as Aggregated). None
-        # (no capacity) for non-LoRA, prefill, or embedding workers.
+        # the model type rather than worker_type (vLLM embedding/classify register as Aggregated).
+        # None (no capacity) for non-LoRA, prefill, embedding, or classify workers.
         max_gpu_lora_count=(
             config.engine_args.max_loras
             if (
                 getattr(config.engine_args, "enable_lora", False)
-                and model_type not in (ModelType.Prefill, ModelType.Embedding)
+                and model_type
+                not in (
+                    ModelType.Prefill,
+                    ModelType.Embedding,
+                    ModelType.Classify,
+                )
             )
             else None
         ),

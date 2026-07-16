@@ -20,6 +20,7 @@ use crate::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
+            classify::OpenAIClassifyStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
             images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
@@ -41,6 +42,7 @@ pub struct WorkerSet {
     pub(crate) chat_engine: Option<OpenAIChatCompletionsStreamingEngine>,
     pub(crate) completions_engine: Option<OpenAICompletionsStreamingEngine>,
     pub(crate) embeddings_engine: Option<OpenAIEmbeddingsStreamingEngine>,
+    pub(crate) classify_engine: Option<OpenAIClassifyStreamingEngine>,
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
@@ -76,6 +78,7 @@ impl WorkerSet {
             chat_engine: None,
             completions_engine: None,
             embeddings_engine: None,
+            classify_engine: None,
             images_engine: None,
             videos_engine: None,
             audios_engine: None,
@@ -112,6 +115,10 @@ impl WorkerSet {
 
     pub fn has_embeddings_engine(&self) -> bool {
         self.embeddings_engine.is_some()
+    }
+
+    pub fn has_classify_engine(&self) -> bool {
+        self.classify_engine.is_some()
     }
 
     pub fn has_images_engine(&self) -> bool {
@@ -151,6 +158,7 @@ impl WorkerSet {
         self.has_chat_engine()
             || self.has_completions_engine()
             || self.has_embeddings_engine()
+            || self.has_classify_engine()
             || self.has_images_engine()
             || self.has_tensor_engine()
             || self.has_videos_engine()
@@ -226,6 +234,7 @@ mod tests {
     use crate::types::openai::completions::{
         NvCreateCompletionRequest, NvCreateCompletionResponse,
     };
+    use crate::types::openai::classify::{NvCreateClassifyRequest, NvCreateClassifyResponse};
     use crate::types::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
     use crate::types::openai::images::{NvCreateImageRequest, NvImagesResponse};
     use crate::types::openai::videos::{NvCreateVideoRequest, NvVideosResponse};
@@ -279,6 +288,7 @@ mod tests {
         assert!(!ws.has_chat_engine());
         assert!(!ws.has_completions_engine());
         assert!(!ws.has_embeddings_engine());
+        assert!(!ws.has_classify_engine());
         assert!(!ws.has_images_engine());
         assert!(!ws.has_videos_engine());
         assert!(!ws.has_audios_engine());
@@ -326,6 +336,12 @@ mod tests {
             has_embeddings_engine,
             StubEngine::<NvCreateEmbeddingRequest, NvCreateEmbeddingResponse>::new(),
             "embeddings"
+        );
+        check!(
+            classify_engine,
+            has_classify_engine,
+            StubEngine::<NvCreateClassifyRequest, NvCreateClassifyResponse>::new(),
+            "classify"
         );
         check!(
             images_engine,

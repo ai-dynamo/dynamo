@@ -1614,6 +1614,8 @@ class ModelType:
     Audios: ModelType
     Videos: ModelType
     Realtime: ModelType
+    # Sequence-classification / cross-encoder pooling models served on /classify.
+    Classify: ModelType
 
     def __or__(self, other: ModelType) -> ModelType:
         ...

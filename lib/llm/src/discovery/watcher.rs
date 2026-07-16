@@ -50,6 +50,7 @@ use crate::{
             chat_completions::{
                 NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
             },
+            classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
@@ -242,6 +243,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Realtime,
+    ModelType::Classify,
 ];
 
 /// Returns true if no models in the manager support the given model type.
@@ -262,6 +264,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_tensor_models().is_empty()
     } else if model_type == ModelType::Realtime {
         manager.list_realtime_models().is_empty()
+    } else if model_type == ModelType::Classify {
+        manager.list_classify_models().is_empty()
     } else {
         true
     }
@@ -1804,6 +1808,18 @@ impl ModelWatcher {
             )
             .await?;
             worker_set.embeddings_engine = Some(Arc::new(push_router));
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_classify() {
+            // Case: Text + Classify (sequence-classification / cross-encoder pooling).
+            // Like Text + Embeddings, the worker tokenizes in-backend, so no
+            // frontend preprocessor pipeline is needed — just a router.
+            let push_router = PushRouter::<
+                NvCreateClassifyRequest,
+                Annotated<NvCreateClassifyResponse>,
+            >::from_client_with_monitor(
+                client, router_config.router_mode, None
+            )
+            .await?;
+            worker_set.classify_engine = Some(Arc::new(push_router));
         }
         // Case: Text + (Images, Audio, Videos)
         // Must come before the plain Text+Chat / Text+Completions branches because

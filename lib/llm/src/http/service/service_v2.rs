@@ -282,6 +282,7 @@ struct StateFlags {
     chat_endpoints_enabled: AtomicBool,
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
+    classify_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
@@ -297,6 +298,7 @@ impl StateFlags {
             EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Classify => self.classify_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
@@ -319,6 +321,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Embedding => self
                 .embeddings_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Classify => self
+                .classify_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Images => self
                 .images_endpoints_enabled
@@ -362,6 +367,7 @@ impl State {
                 chat_endpoints_enabled: AtomicBool::new(false),
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
+                classify_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
@@ -879,6 +885,8 @@ static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
 static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 /// Environment variable to set the embeddings endpoint path (default: `/v1/embeddings`)
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
+/// Environment variable to set the classify endpoint path (default: `/classify`)
+static HTTP_SVC_CLASSIFY_PATH_ENV: &str = "DYN_HTTP_SVC_CLASSIFY_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
@@ -1174,6 +1182,8 @@ impl HttpServiceConfigBuilder {
             super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
         let (embed_docs, embed_route) =
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (classify_docs, classify_route) =
+            super::openai::classify_router(state.clone(), var(HTTP_SVC_CLASSIFY_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
@@ -1187,6 +1197,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Classify, (classify_docs, classify_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
