@@ -30,7 +30,6 @@ class ScheduledTick:
     """
 
     at_s: float
-    at_monotonic_s: Optional[float] = None
 
     # What decisions the core will make on this tick
     run_load_scaling: bool = False
@@ -45,6 +44,7 @@ class ScheduledTick:
     traffic_metrics_duration_s: float = 0.0
     need_worker_states: bool = False
     need_worker_fpm: bool = False
+    at_monotonic_s: Optional[float] = None
 
 
 @dataclass
