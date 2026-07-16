@@ -22,7 +22,17 @@ from gpu_memory_service.client.torch.allocator import (
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
 )
-from gpu_memory_service.client.torch.module import materialize_module_from_gms
+from gpu_memory_service.client.torch.module import (
+    _discover_module_storage,
+    _locate_storage,
+    _make_parameter,
+    _swap_discovered_objects,
+    materialize_module_from_gms,
+)
+from gpu_memory_service.client.torch.tensor import (
+    _storage_from_pointer,
+    _tensor_from_storage,
+)
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.integrations.common.utils import finalize_gms_write
@@ -157,15 +167,26 @@ def _load_rw(
     global _last_imported_weights_bytes
 
     target_device = torch.device("cuda", device_index)
+    finalization_started = False
+    try:
+        with gms_use_mem_pool("weights", target_device):
+            model, moe_load_balancer = original_load(
+                self, checkpoint_dir, checkpoint_loader
+            )
+            _move_untracked_params(model, gms_client, target_device)
+            torch.cuda.empty_cache()
 
-    with gms_use_mem_pool("weights", target_device):
-        model, moe_load_balancer = original_load(
-            self, checkpoint_dir, checkpoint_loader
-        )
-        _move_untracked_params(model, gms_client, target_device)
-        torch.cuda.empty_cache()
-
-    _last_imported_weights_bytes = finalize_gms_write(gms_client, model).committed_bytes
+        finalization_started = True
+        _last_imported_weights_bytes = finalize_gms_write(
+            gms_client, model
+        ).committed_bytes
+    except BaseException:
+        if not finalization_started:
+            try:
+                gms_client.close(best_effort=True)
+            except BaseException:
+                logger.exception("[GMS] Failed to release failed TRT-LLM write")
+        raise
 
     logger.info(
         "[GMS] TRT-LLM RW: published %.2f GiB",
@@ -226,14 +247,6 @@ def _load_ro(self, checkpoint_dir, checkpoint_loader, gms_client, device_index):
     return model, moe_load_balancer
 
 
-def _ptr_in_gms(gms_client: "GMSClientMemoryManager", ptr: int) -> bool:
-    """Return True if the given CUDA VA is within any active GMS mapping."""
-    for va, mapping in gms_client.mappings.items():
-        if va <= ptr < va + mapping.aligned_size:
-            return True
-    return False
-
-
 def _move_untracked_params(
     model: torch.nn.Module,
     gms_client: "GMSClientMemoryManager",
@@ -244,53 +257,62 @@ def _move_untracked_params(
     TRT-LLM may allocate some parameters outside the pluggable-allocator scope.
     This ensures all weight tensors end up tracked by GMS before we commit.
     """
-    from gpu_memory_service.client.torch.module import _iter_module_tensors
-    from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
-
     device_index = (
         torch.cuda.current_device()
         if target_device.index is None
         else int(target_device.index)
     )
-    seen: set[int] = set()
+    discovered_storages = _discover_module_storage(model)
+    located_storage_ids = {
+        id(discovered_storage)
+        for discovered_storage in _locate_storage(
+            discovered_storages,
+            gms_client.mappings,
+            require_parameters=False,
+        )
+    }
+    storages = [
+        discovered_storage
+        for discovered_storage in discovered_storages
+        if discovered_storage.has_parameter
+        and discovered_storage.storage.device.type == "cuda"
+        and id(discovered_storage) not in located_storage_ids
+    ]
+    replacements: dict[int, torch.Tensor] = {}
+    objects = []
+    source_owners: list[torch.Tensor] = []
 
     with torch.no_grad():
-        for _name, tensor, tensor_type in _iter_module_tensors(model):
-            if tensor_type != "parameter" or tensor is None or not tensor.is_cuda:
-                continue
-            storage_ptr = tensor.storage().data_ptr()
-            if storage_ptr in seen:
-                continue
-            seen.add(storage_ptr)
-
-            if _ptr_in_gms(gms_client, int(tensor.data_ptr())):
-                continue
-
-            # Allocate a new mapping and copy the tensor into it
-            nbytes = _storage_nbytes(tensor)
+        for discovered_storage in storages:
+            storage = discovered_storage.storage
+            nbytes = int(storage.nbytes())
             base_va = gms_client.create_mapping(size=nbytes, tag="weights")
-            replacement = _tensor_from_pointer(
-                int(base_va),
-                list(tensor.shape),
-                list(tensor.stride()),
-                tensor.dtype,
-                device_index,
+            target_storage = _storage_from_pointer(base_va, nbytes, device_index)
+            source_owner = _tensor_from_storage(storage, [nbytes], [1], torch.uint8)
+            target_owner = _tensor_from_storage(
+                target_storage, [nbytes], [1], torch.uint8
             )
-            replacement.copy_(tensor)
-            tensor.data = replacement
+            target_owner.copy_(source_owner)
+            source_owners.append(source_owner)
 
+            for tensor_object in discovered_storage.objects:
+                tensor = tensor_object.tensor
+                replacement = _tensor_from_storage(
+                    target_storage,
+                    list(tensor.shape),
+                    list(tensor.stride()),
+                    tensor.dtype,
+                    int(tensor.storage_offset()),
+                )
+                if isinstance(tensor, torch.nn.Parameter):
+                    replacement = _make_parameter(
+                        tensor,
+                        replacement,
+                        path=tensor_object.slots[0].path,
+                        requires_grad=bool(tensor.requires_grad),
+                    )
+                replacements[id(tensor)] = replacement
+                del replacement
+                objects.append(tensor_object)
 
-def _storage_nbytes(tensor: torch.Tensor) -> int:
-    if tensor.numel() == 0:
-        return 0
-    element_size = int(tensor.element_size())
-    shape = list(tensor.shape)
-    stride = list(tensor.stride())
-    if not shape:
-        return element_size
-    max_offset = sum(
-        abs(int(s)) * (int(d) - 1)
-        for s, d in zip(stride, shape, strict=True)
-        if int(d) > 1
-    )
-    return int((max_offset + 1) * element_size)
+        _swap_discovered_objects(objects, replacements)
