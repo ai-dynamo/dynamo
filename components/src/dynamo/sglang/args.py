@@ -385,6 +385,11 @@ async def parse_args(
 
     parsed_args = sglang_only_parser.parse_args(unknown)
 
+    # --enable-multimodal is a Dynamo option, so it is consumed before the
+    # SGLang-only parser runs. Propagate the capability to SGLang explicitly.
+    if dynamo_config.enable_multimodal:
+        parsed_args.enable_multimodal = True
+
     # Clean up temp file if created
     if temp_config_file and os.path.exists(temp_config_file):
         try:
