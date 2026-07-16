@@ -14,13 +14,13 @@
 #[cfg(feature = "mm-routing")]
 pub mod lightseek_mm;
 pub mod media;
+#[cfg(feature = "mm-routing")]
+mod mm_routing;
 pub mod prompt;
 pub mod speculative_prefill;
 mod structural_tag;
 mod tool_choice;
 pub mod tools;
-#[cfg(feature = "mm-routing")]
-mod video_routing;
 use anyhow::Context;
 use anyhow::{Result, bail};
 
@@ -376,7 +376,7 @@ pub struct OpenAIPreprocessor {
     /// Lightweight model-visible video expansion. Unlike the image counter,
     /// this does not resize or normalize pixels in the frontend.
     #[cfg(feature = "mm-routing")]
-    video_routing_processor: Option<video_routing::VideoRoutingProcessor>,
+    video_routing_processor: Option<mm_routing::VideoRoutingProcessor>,
     /// Image-placeholder token id the routing-side sequence fills per image.
     /// Resolved from `config.json`'s `image_token_id` field when present,
     /// otherwise falls back to the `ModelProcessorSpec` registry value. This
@@ -779,7 +779,7 @@ impl OpenAIPreprocessor {
                 // routing-fill below.
                 let img_tok = routing_tokens.chat_placeholder_token_id;
                 let bos_tok_string = routing_tokens.bos_token_string;
-                let video_processor = match video_routing::VideoRoutingProcessor::try_new(
+                let video_processor = match mm_routing::VideoRoutingProcessor::try_new(
                     &model_id,
                     &model_type,
                     &model_dir,
@@ -1548,7 +1548,7 @@ impl OpenAIPreprocessor {
                             let metadata = rdma_descriptor.video_metadata()?;
                             let mm_hash = rdma_descriptor.video_content_hash()?;
                             let routing =
-                                processor.build_replacement(&video_routing::VideoRoutingInput {
+                                processor.build_replacement(&mm_routing::VideoRoutingInput {
                                     frame_count,
                                     width,
                                     height,
