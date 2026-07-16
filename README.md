@@ -33,6 +33,18 @@ limitations under the License.
 
 # Dynamo
 
+## Community Events
+
+Stay up to date with Dynamo demos, meetups, and release walkthroughs.
+
+<!-- EVENTS:START -->
+| Date | Event |
+|------|-------|
+| – | No upcoming events |
+<!-- EVENTS:END -->
+
+> Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
+
 <!-- TEMPORARY BANNER: remove once Nemotron Ultra 3 recipes mature. -->
 > [!NOTE]
 > **Day-0 Nemotron 3 Ultra recipes available.** Tested and performance optimized Kubernetes deployment paths for [Nemotron 3 Ultra](recipes/nemotron-3-ultra/) are merged to main for **vLLM**, with a prebuilt container image published on NGC.\
@@ -273,18 +285,6 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 - [12/01] [InfoQ: NVIDIA Dynamo simplifies Kubernetes deployment for LLM inference](https://www.infoq.com/news/2025/12/nvidia-dynamo-kubernetes/)
 
 </details>
-
-## Community Events
-
-Stay up to date with Dynamo demos, meetups, and release walkthroughs.
-
-<!-- EVENTS:START -->
-| Date | Event |
-|------|-------|
-| – | No upcoming events |
-<!-- EVENTS:END -->
-
-> Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
 
 ## Reference
 
