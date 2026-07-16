@@ -21,16 +21,16 @@ async function main() {
 
   const selected = [...past, ...future];
 
-  const lines = ['| Date | Event |', '|------|-------|'];
+  const lines = ['| Date | Event | Status |', '|------|-------|--------|'];
 
   if (selected.length === 0) {
-    lines.push('| – | No upcoming events |');
+    lines.push('| – | No events to show | |');
   } else {
     for (const e of selected) {
       const date = e.start.toDateString();
       const isPast = e.start < now;
-      const label = isPast ? `~~${e.summary}~~` : e.summary;
-      lines.push(`| ${date} | ${label} |`);
+      const status = isPast ? '🔵 Past' : '🟢 Upcoming';
+      lines.push(`| ${date} | ${e.summary} | ${status} |`);
     }
   }
 
