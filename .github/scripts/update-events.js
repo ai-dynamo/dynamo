@@ -3,13 +3,23 @@ const fs = require('fs');
 
 const ICS_URL = 'https://calendar.google.com/calendar/ical/c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com/public/full.ics';
 
+const ALLOWED_ONLINE_HOSTS = ['meet.google.com', 'zoom.us', 'teams.microsoft.com', 'webex.com', 'luma.com'];
+
+function escapeMd(str) {
+  return str.replace(/[[\]|`*_~]/g, '\\$&');
+}
+
 function formatLocation(location) {
   if (!location) return '–';
-  if (/lu\.ma|luma\.com/i.test(location)) return `[Luma](${location})`;
-  if (/^https?:\/\//.test(location)) return `[Online](${location})`;
+  try {
+    const url = new URL(location);
+    const host = url.hostname.replace(/^www\./, '');
+    if (/lu\.ma|luma\.com/i.test(host)) return `[Luma](${location})`;
+    if (ALLOWED_ONLINE_HOSTS.some(h => host === h || host.endsWith(`.${h}`))) return `[Online](${location})`;
+  } catch (_) {}
   const parts = location.split(',').map(s => s.trim());
   const city = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
-  return city || '–';
+  return escapeMd(city || '–');
 }
 
 function buildAddToCalendarURL(e) {
@@ -45,17 +55,17 @@ async function main() {
       const isPast = e.start < now;
       const date = e.start.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
       const addUrl = buildAddToCalendarURL(e);
-      const label = isPast ? `~~[${e.summary}](${addUrl})~~` : `**[${e.summary}](${addUrl})**`;
+      const safeTitle = escapeMd(e.summary);
+      const label = isPast ? `~~[${safeTitle}](${addUrl})~~` : `**[${safeTitle}](${addUrl})**`;
       const location = formatLocation(e.location);
       lines.push(`| ${date} | ${label} | ${location} |`);
     }
   }
 
   const md = fs.readFileSync('README.md', 'utf8');
-  const updated = md.replace(
-    /<!-- EVENTS:START -->[\s\S]*?<!-- EVENTS:END -->/,
-    `<!-- EVENTS:START -->\n${lines.join('\n')}\n<!-- EVENTS:END -->`
-  );
+  const marker = /<!-- EVENTS:START -->[\s\S]*?<!-- EVENTS:END -->/;
+  if (!marker.test(md)) throw new Error('EVENTS markers not found in README.md');
+  const updated = md.replace(marker, `<!-- EVENTS:START -->\n${lines.join('\n')}\n<!-- EVENTS:END -->`);
   fs.writeFileSync('README.md', updated);
   console.log(`Updated README with ${selected.length} events (${past.length} past, ${future.length} upcoming).`);
 }
