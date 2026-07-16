@@ -261,6 +261,7 @@ areas:
   - lib/runtime/src/transports/
   - lib/runtime/src/utils/
   - lib/runtime/tests/
+  - lib/truthy/
   - tests/
   - tests/CLAUDE.md
   - tests/README.md

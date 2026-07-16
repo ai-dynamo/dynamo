@@ -196,10 +196,7 @@ impl S3LoRASource {
                 .with_endpoint(endpoint)
                 .with_virtual_hosted_style_request(false);
 
-            if std::env::var("AWS_ALLOW_HTTP")
-                .map(|v| v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false)
-            {
+            if dynamo_runtime::config::env_is_truthy("AWS_ALLOW_HTTP") {
                 builder = builder.with_allow_http(true);
             }
         }

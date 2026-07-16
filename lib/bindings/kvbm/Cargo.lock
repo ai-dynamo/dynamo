@@ -1548,6 +1548,7 @@ dependencies = [
  "dynamo-kv-hashing",
  "dynamo-runtime",
  "dynamo-tokens",
+ "dynamo-truthy",
  "flume",
  "indexmap 2.14.0",
  "ordered-float 4.6.0",
@@ -1665,6 +1666,7 @@ version = "1.3.0"
 dependencies = [
  "anyhow",
  "cudarc",
+ "dynamo-truthy",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
@@ -1687,6 +1689,7 @@ dependencies = [
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "dynamo-truthy",
  "futures",
  "indicatif 0.18.4",
  "kvbm-logical",
@@ -1815,6 +1818,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-truthy",
  "educe",
  "either",
  "etcd-client",
@@ -1896,6 +1900,13 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-truthy"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
