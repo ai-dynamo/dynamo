@@ -16,8 +16,8 @@ ARG PYTHON_VERSION
 ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
-# dependencies in the builder stage. The profiler's aiconfigurator wheel pulls
-# the exact matching aiconfigurator-core wheel, including its performance data.
+# dependencies in the builder stage. The unpublished aiconfigurator-core wheel
+# is built from its pinned AIC source revision in the Rust wheel builder stage.
 # On arm64, gcc + libc6-dev are added so aiperf's `crick` dep can compile
 # from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
 # the prebuilt wheel from PyPI is used and the toolchain is skipped
@@ -75,6 +75,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
     uv pip install \
         --requirement /tmp/requirements.planner.txt \
         --requirement /tmp/requirements.benchmark.txt \
+        /opt/dynamo/wheelhouse/aiconfigurator_core*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl
 

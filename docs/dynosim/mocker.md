@@ -99,7 +99,7 @@ python -m dynamo.mocker \
 | `--sglang-chunked-prefill-size` | 8192 | SGLang chunked-prefill chunk size |
 | `--sglang-clip-max-new-tokens` | 4096 | SGLang admission-budget cap for max new tokens |
 | `--sglang-schedule-conservativeness` | 1.0 | SGLang schedule conservativeness factor |
-| `--aic-perf-model` | False | Use AIC-core for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and DynoSim run paths do not use AIC. Requires `aiconfigurator-core` installed and usable AIC systems/perf data for the requested `system/backend/version` tuple |
+| `--aic-perf-model` | False | Use AIC-core for latency prediction instead of interpolated/polynomial models. Opt-in only: default mocker and DynoSim run paths do not use AIC. Requires `aiconfigurator-core` from the pinned AIC revision and usable AIC systems/perf data for the requested `system/backend/version` tuple |
 | `--aic-system` | `h200_sxm` | AIC system name (e.g., `h200_sxm`). Used with `--aic-perf-model` |
 | `--aic-backend-version` | Auto | AIC backend engine version (e.g., `0.12.0` for vLLM). If not set, uses the default version for the backend |
 | `--aic-tp-size` | 1 | Tensor parallel size for AIC latency prediction. Only affects AIC performance model lookups, not mocker scheduling |
@@ -281,7 +281,7 @@ Important notes:
   - router-side prefill-load AIC through top-level `--aic-*` flags plus `router_prefill_load_model="aic"` in `--router-config`
 - The Python AIC session bridge is now shared with the live KV router path via the internal `dynamo._internal.aic` module. Mocker CLI behavior is unchanged; this just removes duplicate AIC session code.
 - **Pure-Rust callback.** When AIC is enabled, the mocker builds an `aiconfigurator_core::AicEngine` once at startup and answers per-step prefill/decode latency predictions from Rust with no GIL on the hot path (this is what lets predictions scale across threads in the live/concurrent path). It requires a build with the `aic-forward-pass` feature (release wheels enable it). There is no Python fallback: if the Rust engine cannot be built for the requested model/system/backend, mocker fails fast with a clear error rather than silently degrading to the slower GIL-bound Python op-walk. (`aiconfigurator-core`'s `compile_engine` covers every supported config, so a build failure indicates a real problem — missing perf data or an unsupported config.)
-- `aiconfigurator-core` must be able to load the requested performance database for the selected `system/backend/version`. If the wheel is installed but the backing systems data is missing or unreadable, mocker now fails fast at startup with a clear error instead of failing later on first request.
+- `aiconfigurator-core` must be able to load the requested performance database for the selected `system/backend/version`. If the package is installed but the backing systems data is missing or unreadable, mocker now fails fast at startup with a clear error instead of failing later on first request.
 - In development environments, this may require installing `aic-core/` from an AIConfigurator source checkout with real Git LFS payloads materialized under `src/aiconfigurator_core/systems/`.
 
 This mocker AIC path is separate from the router-side prefill-load estimator. Live router,
@@ -448,7 +448,7 @@ The mocker supports three timing prediction modes:
 
 **Interpolated Model:** Loads actual profiling data from an NPZ file containing measured prefill and decode latencies. The mocker interpolates between data points to predict timing for any input size. This enables high-fidelity simulation matching a specific hardware configuration.
 
-**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator core package for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode is opt-in and requires the `aiconfigurator-core` wheel and loadable systems/perf data for the requested tuple.
+**AIC Model (`--aic-perf-model`):** Uses the NVIDIA AI Configurator core package for latency prediction. AIC provides calibrated performance models for specific GPU/model/engine combinations, predicting prefill and decode latency as a function of batch size, sequence length, and prefix cache hits. The model path is automatically derived from `--model-path`, and the engine type from `--engine-type`. This mode is opt-in and requires `aiconfigurator-core` from the pinned AIC revision and loadable systems/perf data for the requested tuple.
 
 ### Bootstrap Rendezvous (Disaggregated Serving)
 

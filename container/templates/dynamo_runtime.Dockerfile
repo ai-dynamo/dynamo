@@ -155,7 +155,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.planner.txt \
-        --requirement /tmp/requirements.frontend.txt
+        --requirement /tmp/requirements.frontend.txt \
+        /opt/dynamo/wheelhouse/aiconfigurator_core*.whl
 
 # TODO: skip /workspace COPY for dev/local-dev (bind-mounted from host, gets shadowed)
 # Copy workspace source code

@@ -3,10 +3,13 @@
 
 # Dependencies required by the planner, profiler, and global_planner services.
 
-# The profiler needs the upper package for CLI, generator, and picking APIs.
-# Pin it to the same core version linked into ai-dynamo-runtime so the Python
-# engine-spec schema and Rust consumer cannot drift independently.
+# The published upper 0.10 wheel provides the profiler APIs but does not declare
+# the split core dependency.
 aiconfigurator==0.10.0
+
+# Runtime/planner modeling uses a local core wheel built from the exact AIC
+# revision linked into ai-dynamo-runtime.
+aiconfigurator-core==0.10.0
 aiofiles<=25.1.0
 aiohttp>=3.9.0,<4.0
 filterpy==1.4.5
