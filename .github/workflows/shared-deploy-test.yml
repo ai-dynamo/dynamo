@@ -63,6 +63,8 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          model_cache_nfs_server: ${{ vars.AZURE_MODEL_CACHE_NFS_SERVER }}
+          model_cache_nfs_path: ${{ vars.AZURE_MODEL_CACHE_NFS_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: ./.github/actions/connect-vcluster
@@ -83,3 +85,6 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.image_suffix }}
           platform_arch: amd64
           extra_pytest_args: -m framework_only
+          # Mount the shared model cache when the repo provides its NFS endpoint;
+          # empty var -> workers download from HuggingFace as before.
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_NFS_SERVER != '' && 'model-cache' || '' }}
