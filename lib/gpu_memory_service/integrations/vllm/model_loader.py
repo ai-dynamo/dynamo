@@ -10,6 +10,7 @@ processes import from GMS metadata (RO).
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 from typing import TYPE_CHECKING
@@ -259,8 +260,24 @@ def _load_read_mode(
     global _last_imported_weights_bytes, _last_model_memory_usage_offset_bytes
 
     try:
-        model = _create_meta_model(vllm_config, model_config)
+        # Construct the RO skeleton on a REAL device (default) rather than on
+        # `meta`. Building on a real device sidesteps the meta-safety hazards
+        # that the meta path is exposed to (.item()/.to(device)/data-dependent
+        # ops during __init__, fake-op signatures, post-load hooks that touch
+        # the device), which is the source of most per-model RO patches. The
+        # meta path is retained behind DYN_GMS_RO_META_CONSTRUCT=1 as a fallback.
+        if os.environ.get("DYN_GMS_RO_META_CONSTRUCT") == "1":
+            model = _create_meta_model(vllm_config, model_config)
+        else:
+            model = _create_device_model(vllm_config, model_config, device_index)
         materialize_module_from_gms(gms_client, model, device_index=device_index)
+        # Params built on the device were replaced by shared GMS views; return
+        # their now-unreferenced garbage backing to the device.
+        _release_construction_memory()
+        # Loud check for the device path's silent-garbage risk: on `meta` an
+        # unmaterialized param stays a meta tensor (caught above + crashes at
+        # forward); on the device path it would hold garbage silently.
+        _warn_on_unbacked_parameters(gms_client, model)
 
         # MX: register materialized tensors (available for P2P transfer)
         mx_ctx = get_mx_load_context(vllm_config, model_config)
@@ -346,8 +363,112 @@ def _load_write_mode(
     return model.eval()
 
 
+def _create_device_model(
+    vllm_config, model_config, device_index: int
+) -> torch.nn.Module:
+    """Create the RO model on a real CUDA device for materialization.
+
+    Building on a real device (instead of `meta`) lets model ``__init__`` and
+    ``process_weights_after_loading`` run on real tensors, so the meta-device
+    hazards the meta path guards against (``.item()``/``.to(device)``/data
+    dependent ops, custom-op fake signatures, post-load hooks that initialize
+    device scratch) simply do not arise. Parameters are allocated with garbage
+    contents and immediately replaced by ``materialize_module_from_gms`` with
+    shared read-only GMS views; ``process_weights_after_loading`` runs so the
+    derived-tensor structure exists for materialize to fill (its garbage output
+    is overwritten). The garbage backing is returned to the device afterward
+    (see ``_release_construction_memory``).
+
+    NOTE: this transiently allocates a full weight-sized garbage copy on the
+    device before materialization frees it. That fits a single RO engine;
+    memory-optimal construction over aliased scratch backing (required for
+    two-engine colocation) is a planned follow-up.
+    """
+    from vllm.model_executor.model_loader.utils import (
+        initialize_model,
+        process_weights_after_loading,
+    )
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    device = torch.device("cuda", device_index)
+    with set_default_torch_dtype(model_config.dtype):
+        with device:
+            model = initialize_model(vllm_config=vllm_config, model_config=model_config)
+        # Runs on real tensors, so post-load hooks that build derived tensors
+        # (e.g. MLA projections, MoE kernels) execute normally rather than being
+        # skipped/swallowed as on the meta path. Values are garbage and are
+        # overwritten by materialize; only the resulting structure matters. A
+        # garbage-value-sensitive hook is unexpected but should not abort
+        # bring-up — materialize + the unbacked-parameter check cover the rest.
+        try:
+            process_weights_after_loading(model, model_config, device)
+        except Exception as e:
+            logger.warning(
+                "[GMS] Read mode: process_weights_after_loading raised during "
+                "device construction (continuing; materialize fills committed "
+                "tensors): %s",
+                e,
+            )
+
+    return model
+
+
+def _release_construction_memory() -> None:
+    """Return device-construction garbage backing to the device after materialize.
+
+    Parameters constructed on the real device were replaced by GMS views, so
+    their original storage is now free-cached in torch's default pool.
+    ``torch.cuda.empty_cache`` is patched to a no-op while GMS mappings are
+    live; the accelerator entrypoint bypasses that patch and is safe here.
+    """
+    try:
+        gc.collect()
+        accelerator = getattr(torch, "accelerator", None)
+        if accelerator is not None:
+            accelerator.empty_cache()
+        else:
+            torch.cuda.empty_cache()
+    except Exception as e:  # pragma: no cover - best effort reclaim
+        logger.debug("[GMS] Could not release construction memory: %s", e)
+
+
+def _warn_on_unbacked_parameters(gms_client, model: torch.nn.Module) -> None:
+    """Warn if any non-empty parameter is not GMS-backed after materialization.
+
+    Preserves the loud-failure property the meta path gets for free: a parameter
+    that was never materialized stays on `meta` there (caught + crashes at
+    forward), but on the device path it would silently retain construction
+    garbage. Flag those instead.
+    """
+    mappings = gms_client.mappings
+
+    def _is_gms_backed(param: torch.Tensor) -> bool:
+        ptr = int(param.data_ptr())
+        return any(
+            va <= ptr < va + mapping.aligned_size for va, mapping in mappings.items()
+        )
+
+    unbacked = [
+        name
+        for name, param in model.named_parameters()
+        if param is not None and param.numel() > 0 and not _is_gms_backed(param)
+    ]
+    if unbacked:
+        logger.warning(
+            "[GMS] Read mode: %d parameter(s) not GMS-backed after materialize "
+            "(possible coverage gap / uninitialized garbage): %s",
+            len(unbacked),
+            unbacked[:10],
+        )
+
+
 def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
-    """Create model on meta device for RO mode materialization."""
+    """Create model on meta device for RO mode materialization (legacy fallback).
+
+    Selected by ``DYN_GMS_RO_META_CONSTRUCT=1``. The default RO path constructs
+    on a real device (see ``_create_device_model``); this is retained as a
+    fallback while the device path is validated.
+    """
     from vllm.model_executor.model_loader.utils import (
         initialize_model,
         process_weights_after_loading,
