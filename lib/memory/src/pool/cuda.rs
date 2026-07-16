@@ -80,7 +80,8 @@ impl CudaMemPoolBuilder {
             props.location.id = self.context.cu_device();
         }
         #[cfg(cuda_mem_location_union)]
-        unsafe {
+        {
+            // Writing to a union field is safe; only reads are `unsafe`.
             props.location.__bindgen_anon_1.id = self.context.cu_device();
         }
 
