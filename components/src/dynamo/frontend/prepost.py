@@ -142,11 +142,14 @@ def _prepare_request(
     raw_template_args = (
         request.get("chat_template_args") if isinstance(request, dict) else None
     )
-    # Reuse vLLM's merge so unset request values (None/"auto") keep the
-    # server default instead of erasing it.
-    chat_template_kwargs = merge_kwargs(
-        default_chat_template_kwargs,
-        request_for_sampling.chat_template_kwargs or raw_template_args or {},
+    # Reuse vLLM's merge so unset request values (None/"auto") keep the server
+    # default; copy the result since the default dict is shared across requests
+    # and we mutate reasoning_effort below.
+    chat_template_kwargs = dict(
+        merge_kwargs(
+            default_chat_template_kwargs,
+            request_for_sampling.chat_template_kwargs or raw_template_args or {},
+        )
     )
     # Don't let an absent top-level field clobber a nested reasoning_effort.
     if request_for_sampling.reasoning_effort is not None:

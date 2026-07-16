@@ -278,6 +278,21 @@ class TestServerDefaultChatTemplateKwargs:
         )
         assert chat_params.chat_template_kwargs.get("enable_thinking") is False
 
+    def test_server_default_is_not_mutated(self, tokenizer):
+        """Processing must not mutate the shared server-default dict."""
+        default = {"enable_thinking": False}
+        _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "high",
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_chat_template_kwargs=default,
+        )
+        assert default == {"enable_thinking": False}
+
 
 class TestMultimodalFeatureMetadata:
     def _feature(
