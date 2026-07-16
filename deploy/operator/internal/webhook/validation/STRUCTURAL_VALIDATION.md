@@ -1,78 +1,5 @@
 # Structural validation
 
-Structural validation is the operator's convention for custom-resource webhook
-validation. It mirrors the Go API type tree and composes typed Kubernetes
-`field.ErrorList` values through exact `field.Path` values. This gives clients all
-independent semantic errors in one response, at stable and actionable field paths.
-
-The term does not mean Kubernetes' _structural OpenAPI schema_, and it is unrelated
-to the conversion payloads described in the
-[conversion contract](../../../api/CONVERSION.md):
-
-- The CRD OpenAPI schema handles types, required fields, enums, and other schema
-  constraints before the webhook runs.
-- CEL handles declarative rules that can be expressed clearly and maintained in
-  the CRD.
-- Structural validation handles remaining semantic, contextual, lookup-dependent,
-  warning-producing, and update rules in the webhook.
-- Structural conversion preserves version-specific fields across API conversion.
-  Conversion fidelity and validation correctness are separate contracts.
-
-## Migration status
-
-Keep this table current whenever a resource validator is migrated.
-
-| Resource | Status | Canonical implementation |
-| --- | --- | --- |
-| `DynamoGraphDeployment` | Structural | `dynamographdeployment.go`, `dynamographdeployment_v1alpha1.go` |
-| `DynamoComponentDeployment` | Structural | `dynamocomponentdeployment.go`, `dynamocomponentdeployment_v1alpha1.go` |
-| `DynamoGraphDeploymentRequest` | Legacy | `dynamographdeploymentrequest.go` |
-| `DynamoModel` | Legacy | `dynamomodel.go` |
-| `DynamoCheckpoint` | Legacy specialized validation | `dynamocheckpoint_handler.go` |
-
-The DGD and DCD validators and their table-driven admission-chain tests in
-`dynamographdeployment_test.go` and `dynamocomponentdeployment_test.go` are the
-primary references for a complete structural validator. They share the CRD-backed
-test harness in `shared_test.go`. Reusable API-type validation lives in
-`shared_v1beta1.go` and `shared_v1alpha1.go`.
-
-## Migration workflow
-
-1. Inventory every existing create, update, warning, and compatibility rule and
-   its regression tests. Do not infer the contract solely from the current helper
-   layout.
-2. Assign each rule explicitly to the CRD OpenAPI schema, CEL, or the structural
-   webhook traversal. Presence rules do not replace value rules; preserve every
-   semantic gap.
-3. Sketch the resource's Go API type tree. Give each API struct with custom
-   semantics one exact-type validator and connect every child validator from its
-   parent.
-4. Establish one request-scoped validation receiver for immutable dependencies and
-   warnings. Keep API nodes, paths, derived traversal state, and errors in explicit
-   arguments and local variables.
-5. Convert create rules to typed `field.ErrorList` entries, then add update
-   validators that compare new and old values at the structural owner of each rule.
-6. Preserve compatibility-version rules in a separate traversal across the
-   conversion boundary. Prove conversion fidelity separately.
-7. Replace resource validation tests with one table-driven admission-chain test
-   that reuses the DGD/DCD harness from `shared_test.go` and exercises the real CRD
-   schema, CEL, production conversion, and public webhook handler in admission order.
-8. Remove the legacy path only after every inventoried rule has equivalent coverage,
-   then update the migration-status table above.
-
-A migration is complete only when:
-
-- the root traversal starts at real top-level paths such as `metadata` and `spec`;
-- every semantic API child is validated by its parent or delegated to its shared
-  exact-type validator;
-- all custom errors are typed and carry exact field paths;
-- independent failures aggregate deterministically;
-- create, update, warnings, schema, CEL, and compatibility behavior are covered by
-  the admission-chain table; and
-- no legacy string-error validation remains for the migrated resource.
-
-## Structural traversal
-
 - Follow the Kubernetes API validation style: typed validators compose
   `field.ErrorList` through `*field.Path` and report all independent errors.
 - Validation must follow the Go API type tree. Every API struct with custom
@@ -208,25 +135,13 @@ A migration is complete only when:
 
 ## Tests
 
-- Reuse the shared DGD/DCD admission-chain harness in `shared_test.go`, including
-  `requestValidatorsFromCRD`, `admissionUnstructured`, and
-  `admissionSourceVersion`. If another resource or served version is unsupported,
-  extend those shared helpers instead of creating a resource-local schema/CEL
-  harness.
-- Keep one table-driven admission-chain test per resource. For every row, load the
-  generated CRD and run the request through the same effective admission order as
-  Kubernetes: source-version OpenAPI schema, source-version CEL, production
-  conversion to the webhook/storage version, and the public handler's
-  `ValidateCreate` or `ValidateUpdate` method.
-- A schema rejection is terminal and must not declare CEL or webhook expectations.
-  A CEL rejection is terminal and must not declare webhook expectations. Convert
-  and invoke the webhook only after both earlier stages accept the request.
-- Do not mock, restate, or hand-construct the CRD schema or CEL rules, and do not
-  call an internal structural validator as a substitute for the public handler.
-  The harness must test the generated CRD artifact and the production conversion
-  and handler boundaries used by real admission.
-- Group related rows inside the single admission-chain table with comments; do not
-  create parallel matrix tests for individual validation areas.
+- Keep one table-driven admission-chain test per resource. Reuse the shared DGD/DCD
+  harness in `shared_test.go`: run the generated source-version schema and CEL
+  validators first, convert only accepted requests through the production path,
+  then invoke the public create or update webhook handler. Extend the shared harness
+  for new resources or versions; do not create a resource-local substitute.
+- Group related rows inside that table with comments; do not create parallel matrix
+  tests for individual validation areas.
 - Add every schema-, CEL-, create-webhook, and update-webhook regression as a
   row in that table. Use a separate focused unit test only for an internal
   contract that the effective admission chain cannot reach, such as a fatal
