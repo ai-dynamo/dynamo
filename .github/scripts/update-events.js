@@ -29,7 +29,7 @@ async function main() {
     for (const e of selected) {
       const date = e.start.toDateString();
       const isPast = e.start < now;
-      const status = isPast ? '🔵 Past' : '🟢 Upcoming';
+      const status = isPast ? '**Past**' : '**Upcoming**';
       lines.push(`| ${date} | ${e.summary} | ${status} |`);
     }
   }
