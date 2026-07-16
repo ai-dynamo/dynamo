@@ -20,7 +20,7 @@ spec:
             - name: nvcr-imagepullsecret
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:inkling-sglang-cu13
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1-rc.0
               command:
                 - python3
               args:
@@ -72,23 +72,26 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:inkling-sglang-cu13
+              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1-rc.0
               workingDir: /workspace/examples/backends/sglang
               command:
                 - python3
                 - -m
                 - dynamo.sglang
               args:
+                - --trust-remote-code
                 - --model-path
                 - /model-cache/thinkingmachines/Inkling-NVFP4
                 - --served-model-name
                 - thinkingmachines/Inkling-NVFP4
-                - --tensor-parallel-size
+                - --tp
                 - "8"
                 - --quantization
                 - modelopt_fp4
                 - --attention-backend
                 - fa4
+                - --page-size
+                - "128"
                 - --fp4-gemm-backend
                 - flashinfer_trtllm
                 - --moe-runner-backend
@@ -97,7 +100,7 @@ spec:
                 - --mamba-radix-cache-strategy
                 - extra_buffer
                 - --mem-fraction-static
-                - "0.85"
+                - "0.75"
                 - --swa-full-tokens-ratio
                 - "0.1"
                 - --mamba-full-memory-ratio
@@ -107,6 +110,16 @@ spec:
                 - inkling
                 - --tool-call-parser
                 - inkling
+                - --speculative-algorithm
+                - EAGLE
+                - --speculative-num-steps
+                - "8"
+                - --speculative-eagle-topk
+                - "1"
+                - --speculative-num-draft-tokens
+                - "9"
+                - --enable-multi-layer-eagle
+                - --speculative-use-rejection-sampling
               env:
                 - name: SGLANG_ENABLE_UNIFIED_RADIX_TREE
                   value: "1"
