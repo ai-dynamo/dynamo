@@ -10,7 +10,9 @@ use tokio::sync::oneshot;
 use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{
     component::{Client, Endpoint},
+    discovery::DiscoveryQuery,
     pipeline::{PushRouter, RouterMode},
+    prelude::DistributedRuntimeProvider,
     protocols::annotated::Annotated,
 };
 
@@ -18,6 +20,7 @@ use super::{InnerPrefillRouter, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::ModelManager,
     kv_router::KvPushRouter,
+    model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
@@ -132,6 +135,28 @@ impl PrefillRouter {
             .await?;
 
         let inner_router = if self.router_mode.is_kv_routing() {
+            let endpoint_id = endpoint.id();
+            let discovered_cards = endpoint
+                .component()
+                .drt()
+                .discovery()
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: endpoint_id.namespace,
+                    component: endpoint_id.component,
+                    endpoint: endpoint_id.name,
+                })
+                .await;
+            let is_eagle = match discovered_cards {
+                Ok(instances) => instances
+                    .into_iter()
+                    .find_map(|instance| instance.deserialize_model::<ModelDeploymentCard>().ok())
+                    .map_or(self.is_eagle, |card| card.runtime_config.enable_eagle),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to read prefill model card; using configured EAGLE mode");
+                    self.is_eagle
+                }
+            };
+
             // Create KV chooser using the endpoint (this is a prefill router)
             let kv_chooser = model_manager
                 .kv_chooser_for(
@@ -141,7 +166,7 @@ impl PrefillRouter {
                     prefill_load_estimator,
                     WORKER_TYPE_PREFILL,
                     Some(self.model_name.clone()),
-                    self.is_eagle,
+                    is_eagle,
                 )
                 .await?;
 
