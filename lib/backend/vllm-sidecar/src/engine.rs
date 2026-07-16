@@ -17,7 +17,7 @@ use crate::model::ConfiguredModel;
 
 const CONNECTIONS: usize = 8;
 
-pub struct VllmRemoteEngine {
+pub struct VllmSidecarEngine {
     endpoint: String,
     connections: usize,
     model: ConfiguredModel,
@@ -26,7 +26,7 @@ pub struct VllmRemoteEngine {
     cancel: CancellationToken,
 }
 
-impl VllmRemoteEngine {
+impl VllmSidecarEngine {
     pub(crate) fn new(
         endpoint: String,
         connections: usize,
@@ -59,12 +59,12 @@ impl VllmRemoteEngine {
         }
         if args.common.disaggregation_mode.is_encode() {
             return Err(client::invalid_argument(
-                "encode mode is not supported by the vLLM remote backend",
+                "encode mode is not supported by the vLLM sidecar",
             ));
         }
         if args.common.route_to_encoder {
             return Err(client::invalid_argument(
-                "route-to-encoder is not supported by the vLLM remote backend",
+                "route-to-encoder is not supported by the vLLM sidecar",
             ));
         }
 
@@ -103,15 +103,13 @@ impl VllmRemoteEngine {
 }
 
 #[async_trait]
-impl LLMEngine for VllmRemoteEngine {
+impl LLMEngine for VllmSidecarEngine {
     async fn start(
         &self,
         _worker_id: u64,
     ) -> Result<dynamo_backend_common::EngineConfig, DynamoError> {
         if self.client.initialized() {
-            return Err(client::engine_shutdown(
-                "vLLM remote backend has already started",
-            ));
+            return Err(client::engine_shutdown("vLLM sidecar has already started"));
         }
         tracing::info!(
             endpoint = %self.endpoint,
@@ -122,7 +120,7 @@ impl LLMEngine for VllmRemoteEngine {
         let connection_count = client.connection_count();
         self.client
             .set(client)
-            .map_err(|_| client::engine_shutdown("vLLM remote backend has already started"))?;
+            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
         tracing::info!(
             endpoint = %self.endpoint,
             connections = connection_count,
@@ -140,7 +138,7 @@ impl LLMEngine for VllmRemoteEngine {
         let client = self
             .client
             .get()
-            .ok_or_else(|| client::engine_shutdown("vLLM remote backend is not started"))?;
+            .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
         let proto_request = build_generate_request(&request, &request_id, self.mode)?;
         let mut state = ResponseState::new(&request, self.mode);

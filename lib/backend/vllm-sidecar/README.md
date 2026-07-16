@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# vLLM remote backend
+# vLLM sidecar
 
-`dynamo-vllm-remote` connects a Dynamo worker to vLLM's native gRPC
+`dynamo-vllm-sidecar` connects a Dynamo worker to vLLM's native gRPC
 `Generate` service. It is a standalone Rust executable.
 
 ## Supported
@@ -34,7 +34,7 @@ secure proxy.
 Start the Dynamo worker explicitly:
 
 ```bash
-dynamo-vllm-remote \
+dynamo-vllm-sidecar \
   --vllm-endpoint 127.0.0.1:50051 \
   --model-path Qwen/Qwen3-0.6B
 ```

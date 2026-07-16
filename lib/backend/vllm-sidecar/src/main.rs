@@ -4,6 +4,6 @@
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
-    let (engine, config) = dynamo_vllm_remote::VllmRemoteEngine::from_env()?;
+    let (engine, config) = dynamo_vllm_sidecar::VllmSidecarEngine::from_env()?;
     dynamo_backend_common::run(Arc::new(engine), config)
 }

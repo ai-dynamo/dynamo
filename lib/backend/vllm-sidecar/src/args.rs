@@ -5,7 +5,7 @@ use dynamo_backend_common::CommonArgs;
 
 #[derive(clap::Parser, Clone, Debug)]
 #[command(
-    name = "dynamo-vllm-remote",
+    name = "dynamo-vllm-sidecar",
     about = "Run a Dynamo worker against vLLM's native gRPC service"
 )]
 pub(crate) struct Args {
@@ -45,7 +45,7 @@ mod tests {
 
     fn required_args() -> Vec<&'static str> {
         vec![
-            "dynamo-vllm-remote",
+            "dynamo-vllm-sidecar",
             "--vllm-endpoint",
             "127.0.0.1:50051",
             "--model-path",

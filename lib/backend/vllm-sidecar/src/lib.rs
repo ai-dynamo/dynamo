@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo backend for vLLM's released native gRPC API.
+//! Dynamo sidecar for vLLM's released native gRPC API.
 
 mod args;
 mod client;
@@ -11,7 +11,7 @@ mod json;
 mod model;
 mod proto;
 
-pub use engine::VllmRemoteEngine;
+pub use engine::VllmSidecarEngine;
 
 #[cfg(test)]
 mod tests;

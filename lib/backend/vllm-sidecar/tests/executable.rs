@@ -5,10 +5,10 @@ use std::process::Command;
 
 #[test]
 fn executable_exposes_native_grpc_configuration() {
-    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-vllm-remote"))
+    let output = Command::new(env!("CARGO_BIN_EXE_dynamo-vllm-sidecar"))
         .arg("--help")
         .output()
-        .expect("run dynamo-vllm-remote --help");
+        .expect("run dynamo-vllm-sidecar --help");
 
     assert!(
         output.status.success(),

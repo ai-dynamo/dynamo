@@ -219,7 +219,7 @@ fn build_kv_parameters(
         ),
         DisaggregationMode::Encode => {
             return Err(client::invalid_argument(
-                "encode mode is not supported by the vLLM remote backend",
+                "encode mode is not supported by the vLLM sidecar",
             ));
         }
     };
@@ -275,7 +275,7 @@ fn validate_request(
     }
     if mode.is_encode() {
         return Err(client::invalid_argument(
-            "encode mode is not supported by the vLLM remote backend",
+            "encode mode is not supported by the vLLM sidecar",
         ));
     }
     if request
@@ -299,7 +299,7 @@ fn validate_request(
     }
     if request.bootstrap_info.is_some() {
         return Err(client::invalid_argument(
-            "Dynamo bootstrap handoff is not supported by the vLLM remote backend",
+            "Dynamo bootstrap handoff is not supported by the vLLM sidecar",
         ));
     }
     if request

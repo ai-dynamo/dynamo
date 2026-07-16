@@ -2,21 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-vllm-remote"
+name = "dynamo-vllm-sidecar"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Rust backend for an out-of-process vLLM native gRPC server"
+description = "Rust sidecar for vLLM's native gRPC server"
 
 [package.metadata.cargo-machete]
 # Referenced by protobuf code generated into OUT_DIR.
 ignored = ["prost"]
 
 [[bin]]
-name = "dynamo-vllm-remote"
+name = "dynamo-vllm-sidecar"
 path = "src/main.rs"
 
 [dependencies]

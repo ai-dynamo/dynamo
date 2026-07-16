@@ -20,7 +20,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
 
 use crate::client::VllmClient;
-use crate::engine::VllmRemoteEngine;
+use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::ConfiguredModel;
 use crate::proto as pb;
@@ -293,8 +293,8 @@ fn request() -> PreprocessedRequest {
         .expect("request")
 }
 
-fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmRemoteEngine {
-    VllmRemoteEngine::new(
+fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmSidecarEngine {
+    VllmSidecarEngine::new(
         endpoint.to_string(),
         connections,
         ConfiguredModel {
@@ -305,7 +305,7 @@ fn engine(endpoint: &str, mode: DisaggregationMode, connections: usize) -> VllmR
 }
 
 async fn collect(
-    engine: &VllmRemoteEngine,
+    engine: &VllmSidecarEngine,
     request: PreprocessedRequest,
 ) -> Vec<dynamo_backend_common::LLMEngineOutput> {
     let context = dynamo_backend_common::testing::mock_context();

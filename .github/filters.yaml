@@ -186,7 +186,7 @@ vllm:
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
-  - 'lib/backend/vllm-remote/**'
+  - 'lib/backend/vllm-sidecar/**'
   - 'container/templates/vllm_*'
   - '!**/*.md'
   - '!**/*.rst'
