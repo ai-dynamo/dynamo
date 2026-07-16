@@ -42,8 +42,8 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -107,11 +107,12 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if boundName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, ""); boundName != "" {
 		return sr.mirrorBoundContent(ctx, snap, boundName)
 	}
-	if err := checkpoint.ValidateEnabled(sr.RuntimeConfig.Gate); err != nil {
-		if !sr.markPending(snap, "CheckpointDisabled", err.Error()) {
+	if !sr.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		const message = "checkpoint functionality is disabled in the operator configuration"
+		if !sr.markPending(snap, "CheckpointDisabled", message) {
 			return ctrl.Result{}, nil
 		}
-		sr.Recorder.Event(snap, corev1.EventTypeWarning, "CheckpointDisabled", err.Error())
+		sr.Recorder.Event(snap, corev1.EventTypeWarning, "CheckpointDisabled", message)
 		return ctrl.Result{}, sr.Status().Update(ctx, snap)
 	}
 	return sr.captureFromSourcePod(ctx, snap)

@@ -19,6 +19,7 @@ package validation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -88,8 +89,8 @@ func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager, gate 
 
 func validateDynamoCheckpoint(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
 	gate := features.MustGateFrom(ctx)
-	if err := checkpoint.ValidateEnabled(gate); err != nil {
-		return err
+	if !gate.Enabled(features.Checkpoint) {
+		return errors.New("checkpoint functionality is disabled in the operator configuration")
 	}
 
 	// A DynamoCheckpoint is itself a Snapshot resource; service specs pass checkpoint.enabled instead.

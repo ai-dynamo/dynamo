@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -288,10 +287,8 @@ func (v *sharedValidation) validateComponentCheckpointConfig(
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
 ) field.ErrorList {
-	if checkpointConfig.Enabled {
-		if err := checkpoint.ValidateEnabled(features.MustGateFrom(v.ctx)); err != nil {
-			return field.ErrorList{field.Forbidden(fldPath, err.Error())}
-		}
+	if checkpointConfig.Enabled && !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
+		return field.ErrorList{field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration")}
 	}
 	if checkpointConfig.Job == nil {
 		return nil

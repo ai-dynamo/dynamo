@@ -46,6 +46,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
 
@@ -220,12 +221,13 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	if err := checkpoint.ValidateEnabled(r.RuntimeConfig.Gate); err != nil {
-		if ckpt.Status.Message == err.Error() {
+	if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		const message = "checkpoint functionality is disabled in the operator configuration"
+		if ckpt.Status.Message == message {
 			return ctrl.Result{}, nil
 		}
-		ckpt.Status.Message = err.Error()
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", err.Error())
+		ckpt.Status.Message = message
+		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", message)
 		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 	}
 	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, r.RuntimeConfig.Gate); err != nil {
