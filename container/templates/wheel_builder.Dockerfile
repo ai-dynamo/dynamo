@@ -687,7 +687,12 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
     echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
     ldconfig
 
-{% if not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev")) %}
+{# SGLang CUDA normally skips the NIXL Python wheel (runtime uses the upstream
+   lmsysorg/sglang NIXL stack; dev links nixl-sys against the native SDK only).
+   Exception: the AWS EFA runtime build (make_efa) needs a Dynamo-built nixl-cu13
+   wheel so templates/aws.Dockerfile can overlay the DYN-3429 fix over the
+   inherited nixl-cu13==1.3.0. #}
+{% if not (framework == "sglang" and device == "cuda" and target in ("runtime", "dev", "local-dev") and not (make_efa == true and target == "runtime")) %}
 # Build NIXL wheel → /opt/dynamo/dist/nixl/nixl*.whl (C++ transport library, all targets)
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \

@@ -66,7 +66,13 @@ ARG SCCACHE_REGION=""
 
 # NIXL configuration
 ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
-{% if "nixl_ref" in context[framework].get(device_key, {}) -%}
+{% if make_efa == true and target == "runtime" and "nixl_efa_ref" in context[framework].get(device_key, {}) -%}
+# DYN-3429 / NVBug 6431579: the AWS EFA runtime build pins the ai-dynamo/nixl
+# release/1.3.1 fix (FI_MORE batching disabled on efa/efa-direct). Scoped to the
+# make_efa runtime image so non-EFA and dev {{ framework }} images keep the default
+# nixl_ref below.
+ARG NIXL_REF={{ context[framework][device_key].nixl_efa_ref }}
+{% elif "nixl_ref" in context[framework].get(device_key, {}) -%}
 ARG NIXL_REF={{ context[framework][device_key].nixl_ref }}
 {% elif "nixl_ref" in context[framework] -%}
 ARG NIXL_REF={{ context[framework].nixl_ref }}

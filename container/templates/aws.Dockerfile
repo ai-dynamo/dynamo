@@ -89,6 +89,27 @@ ENV LD_PRELOAD=/opt/nvidia/nvda_nixl/lib64/libnixl.so
 ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 {% endif %}
 
+{% if framework == "sglang" and target == "runtime" %}
+# DYN-3429 / NVBug 6431579: the upstream lmsysorg/sglang runtime image ships
+# nixl-cu13==1.3.0, whose libfabric rail manager issues unconditional FI_MORE
+# batched writes on efa/efa-direct and hangs. Overlay the Dynamo-built nixl-cu13
+# wheel (compiled from ai-dynamo/nixl @ NIXL_REF in wheel_builder, which the EFA
+# build pins to the release/1.3.1 fix commit) over the inherited one. The fix adds
+# is_efa_provider and gates FI_MORE batching off on EFA. Scoped to the EFA runtime
+# image only; non-EFA sglang images keep the upstream NIXL stack. Runs as root
+# (the USER root above), matching the sglang_runtime pip convention.
+RUN --mount=from=wheel_builder,source=/opt/dynamo/dist/nixl,target=/tmp/nixl-wheel \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    NIXL_WHEEL="$(find /tmp/nixl-wheel -name 'nixl_cu*.whl' | head -n1)" && \
+    if [ -z "$NIXL_WHEEL" ]; then \
+        echo "[aws] ERROR: no Dynamo-built nixl-cu wheel in wheel_builder /opt/dynamo/dist/nixl" >&2; \
+        exit 1; \
+    fi && \
+    echo "[aws] sglang NIXL overlay: installing $(basename "$NIXL_WHEEL") over inherited upstream nixl-cu13" && \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --no-deps --force-reinstall "$NIXL_WHEEL"
+{% endif %}
+
 {% if target == "runtime" %}
 USER dynamo
 {% endif %}
