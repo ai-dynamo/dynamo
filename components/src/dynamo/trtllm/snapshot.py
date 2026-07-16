@@ -3,14 +3,78 @@
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import os
+import uuid
 from typing import Any
 
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 
 _EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
+_WARMUP_INPUT_IDS = (1, 2, 3)
+_WARMUP_CACHE_SALT_PREFIX = "dynamo-snapshot-warmup-"
+_WARMUP_TIMEOUT_SEC = 600.0
+
+
+def _create_warmup_sampling_params() -> Any:
+    from tensorrt_llm.llmapi.llm import SamplingParams
+
+    return SamplingParams(
+        end_id=-1,
+        pad_id=-1,
+        max_tokens=2,
+        temperature=0.0,
+        ignore_eos=True,
+        detokenize=False,
+    )
+
+
+async def warmup_engine(engine: Any) -> None:
+    """Warm TensorRT-LLM before capture.
+
+    The timeout bounds asynchronous result consumption. TensorRT-LLM submits the
+    request synchronously before returning the generation result.
+    """
+
+    async def consume_generation(generation_result: Any) -> None:
+        async for _ in generation_result:
+            pass
+
+        if not generation_result.finished:
+            raise RuntimeError(
+                "TensorRT-LLM snapshot warmup ended without a final output"
+            )
+        if generation_result.error is not None:
+            raise RuntimeError(
+                f"TensorRT-LLM snapshot warmup failed: {generation_result.error}"
+            )
+        if not generation_result.outputs or not generation_result.outputs[0].token_ids:
+            raise RuntimeError("TensorRT-LLM snapshot warmup generated no tokens")
+
+    sampling_params = _create_warmup_sampling_params()
+    # Isolate any evictable prefix-reuse entry left after request completion.
+    cache_salt = f"{_WARMUP_CACHE_SALT_PREFIX}{uuid.uuid4()}"
+    logging.info("TensorRT-LLM snapshot warmup starting")
+    generation_result = engine.llm.generate_async(
+        inputs=list(_WARMUP_INPUT_IDS),
+        sampling_params=sampling_params,
+        streaming=True,
+        cache_salt=cache_salt,
+    )
+    try:
+        await asyncio.wait_for(
+            consume_generation(generation_result),
+            timeout=_WARMUP_TIMEOUT_SEC,
+        )
+    finally:
+        if not generation_result.finished:
+            try:
+                generation_result.abort()
+            except Exception:
+                logging.exception("Failed to abort TensorRT-LLM snapshot warmup")
+    logging.info("TensorRT-LLM snapshot warmup complete")
 
 
 def _should_prefetch_model_for_snapshot(config: Any) -> bool:
@@ -109,6 +173,7 @@ class _SnapshotRuntimeProxy:
             "Checkpoint mode enabled: TRT-LLM engine is initialized before "
             "Dynamo runtime creation"
         )
+        await warmup_engine(engine)
         pause_controller = _NoOpSnapshotPauseController()
         snapshot_controller = _create_engine_snapshot_controller(
             engine=engine,
