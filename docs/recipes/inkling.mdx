@@ -86,9 +86,29 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+### Image
+
+Images ride as an `image_url` content part — a public HTTP(S) URL (the worker pod fetches it, so it needs egress) or a base64 `data:` URI:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this image, including its text and visual elements."},
+        {"type": "image_url", "image_url": {"url": "https://raw.githubusercontent.com/ai-dynamo/dynamo/main/docs/assets/img/frontpage-banner.png"}}
+      ]
+    }],
+    "max_tokens": 256
+  }'
+```
+
 ### Audio
 
-Audio rides as an `audio_url` content part — a public HTTP(S) URL (the worker pod fetches it, so it needs egress) or a base64 `data:` URI. Inkling expects 16 kHz audio; WAV is ideal, and MP3/FLAC/OGG also decode in this image. This sample is 16 kHz mono WAV, matching the model card spec:
+Audio rides as an `audio_url` content part, same URL-or-data-URI rule. Inkling expects 16 kHz audio; WAV is ideal, and MP3/FLAC/OGG also decode in this image. This sample is 16 kHz mono WAV, matching the model card spec:
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
