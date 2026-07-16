@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: inkling
+title: Inkling NVFP4
+page: recipes/inkling.mdx
+provider: thinkingmachines
+model:
+  name: Inkling
+  hf_id: thinkingmachines/Inkling-NVFP4
+  precision: NVFP4
+status: experimental
+targets:
+- id: agg-b200
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: SGLang
+  topology: aggregated
+  techniques:
+  - tp8
+  - eagle-spec-dec
+  - fa4-attention
+  - mamba-radix-cache
+  - multimodal
+  workload:
+    type: multimodal
+    traffic: Day-0 deployment; no published benchmark traffic yet
+  deploy:
+    asset: recipes/inkling/sglang/agg-b200/deploy.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- no perf.yaml / benchmark reproduction path in source (day-0 deploy only)
+- no expected-performance numbers published
+- no related Feature Benchmark page exists for this model
+- runtime is a Day-0 dev image (sglang-runtime:1.4.0-inkling-dev.1, custom SGLang build) pending upstream merge
+- AAC/.m4a audio decode absent from the runtime image (royalty-bearing codec removal); noted on page
+- provider logo sourced from thinkingmachines.ai site icon; formal brand-asset provenance pass pending (same debt as the other provider logos)
+- maintainer unknown

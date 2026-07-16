@@ -524,23 +524,36 @@ def _test_session_affinity(
     engine_workers,
     block_size: int,
     request,
-    frontend_port: int,
+    router_ports: list[int],
     test_payload: dict[str, Any],
     store_backend: str = "etcd",
 ):
-    """Verify one frontend keeps each session on its initially selected worker."""
-    with FrontendRouterProcess(
-        request,
-        block_size,
-        frontend_port,
-        engine_workers.namespace,
-        store_backend,
-        router_mode="kv",
-        min_initial_workers=engine_workers.num_workers,
-        event_plane="nats",
-        session_affinity_ttl_secs=300,
+    """Verify replica affinity overrides conflicting per-frontend KV placement."""
+    with (
+        FrontendRouterProcess(
+            request,
+            block_size,
+            router_ports[0],
+            engine_workers.namespace,
+            store_backend,
+            router_mode="kv",
+            min_initial_workers=engine_workers.num_workers,
+            event_plane="nats",
+            session_affinity_ttl_secs=300,
+        ),
+        FrontendRouterProcess(
+            request,
+            block_size,
+            router_ports[1],
+            engine_workers.namespace,
+            store_backend,
+            router_mode="kv",
+            min_initial_workers=engine_workers.num_workers,
+            event_plane="nats",
+            session_affinity_ttl_secs=300,
+        ),
     ):
-        url = f"http://localhost:{frontend_port}/v1/chat/completions"
+        urls = [f"http://localhost:{port}/v1/chat/completions" for port in router_ports]
 
         async def run_test() -> None:
             runtime = get_runtime(store_backend, "nats")
@@ -553,14 +566,15 @@ def _test_session_affinity(
             assert len(worker_ids) >= 2
             worker_a, worker_b = worker_ids[:2]
 
-            await wait_for_frontend_ready(
-                frontend_url=f"http://localhost:{frontend_port}",
-                expected_num_workers=engine_workers.num_workers,
-                timeout=120,
-                engine_workers=engine_workers,
-                store_backend=store_backend,
-                request_plane="nats",
-            )
+            for port in router_ports:
+                await wait_for_frontend_ready(
+                    frontend_url=f"http://localhost:{port}",
+                    expected_num_workers=engine_workers.num_workers,
+                    timeout=120,
+                    engine_workers=engine_workers,
+                    store_backend=store_backend,
+                    request_plane="nats",
+                )
 
             suffix = uuid.uuid4().hex
             prefix_a = " ".join([f"affinity-alpha-{suffix}"] * (block_size * 2))
@@ -587,6 +601,7 @@ def _test_session_affinity(
 
             async def send(
                 client: aiohttp.ClientSession,
+                url: str,
                 request_payload: dict[str, Any],
                 headers: dict[str, str] | None = None,
             ) -> tuple[int, int]:
@@ -615,12 +630,13 @@ def _test_session_affinity(
 
             async def wait_for_prefix_target(
                 client: aiohttp.ClientSession,
+                url: str,
                 content: str,
                 expected: tuple[int, int],
             ) -> None:
                 for _ in range(50):
                     if (
-                        await send(client, payload(content, query_only=True))
+                        await send(client, url, payload(content, query_only=True))
                         == expected
                     ):
                         return
@@ -641,26 +657,56 @@ def _test_session_affinity(
             }
 
             async with aiohttp.ClientSession() as client:
-                assert await send(client, payload(prefix_a), proposal_a) == (
+                assert await send(client, urls[0], payload(prefix_a), proposal_a) == (
                     worker_a,
                     0,
                 )
-                assert await send(client, payload(prefix_b), proposal_b) == (
+                assert await send(client, urls[1], payload(prefix_b), proposal_b) == (
                     worker_b,
                     0,
                 )
 
-                await wait_for_prefix_target(client, prefix_a, (worker_a, 0))
-                await wait_for_prefix_target(client, prefix_b, (worker_b, 0))
+                await wait_for_prefix_target(client, urls[0], prefix_a, (worker_a, 0))
+                await wait_for_prefix_target(client, urls[1], prefix_b, (worker_b, 0))
 
-                assert await send(client, payload(prefix_b), session_a_headers) == (
-                    worker_a,
-                    0,
-                )
-                assert await send(client, payload(prefix_a), session_b_headers) == (
-                    worker_b,
-                    0,
-                )
+                deadline = time.monotonic() + 10
+                observed_b = None
+                observed_a = None
+                while time.monotonic() < deadline:
+                    observed_b = await send(
+                        client,
+                        urls[0],
+                        payload(prefix_a, query_only=True),
+                        session_b_headers,
+                    )
+                    observed_a = await send(
+                        client,
+                        urls[1],
+                        payload(prefix_b, query_only=True),
+                        session_a_headers,
+                    )
+                    if observed_b == (worker_b, 0) and observed_a == (worker_a, 0):
+                        break
+
+                    assert await send(
+                        client, urls[0], payload(prefix_a), session_a_headers
+                    ) == (worker_a, 0)
+                    assert await send(
+                        client, urls[1], payload(prefix_b), session_b_headers
+                    ) == (worker_b, 0)
+                    await asyncio.sleep(0.1)
+                else:
+                    raise AssertionError(
+                        "replica affinity did not converge before the deadline: "
+                        f"frontend 1 observed {observed_b}, frontend 2 observed {observed_a}"
+                    )
+
+                assert await send(
+                    client, urls[0], payload(prefix_a), session_b_headers
+                ) == (worker_b, 0)
+                assert await send(
+                    client, urls[1], payload(prefix_b), session_a_headers
+                ) == (worker_a, 0)
 
         asyncio.run(run_test())
 

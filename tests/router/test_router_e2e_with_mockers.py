@@ -482,7 +482,7 @@ def test_mocker_session_affinity(
     file_storage_backend,
     store_backend,
 ):
-    """One frontend keeps a session pinned despite conflicting KV-prefix placement."""
+    """Replica affinity overrides conflicting per-frontend KV-prefix placement."""
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
@@ -499,7 +499,7 @@ def test_mocker_session_affinity(
             engine_workers=mockers,
             block_size=BLOCK_SIZE,
             request=request,
-            frontend_port=allocate_frontend_ports(request, 1)[0],
+            router_ports=allocate_frontend_ports(request, 2),
             test_payload=TEST_PAYLOAD,
             store_backend=store_backend,
         )
