@@ -655,6 +655,47 @@ jobs:
 
       - name: Cleanup
         if: always()
+        shell: bash
         run: |
-          kubectl delete job "$TEST_NAME-bench" -n "$NS" --ignore-not-found || true
-          kubectl delete dynamographdeployment "$TEST_NAME" -n "$NS" --ignore-not-found || true
+          set -u
+
+          if [ -z "${TEST_NAME:-}" ]; then
+            echo "TEST_NAME is not set; cleanup skipped"
+            exit 0
+          fi
+
+          SERVICE_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$TEST_NAME"
+          BENCH_SELECTOR="job-name=$TEST_NAME-bench"
+          remaining=0
+
+          echo "Deleting benchmark Job: $TEST_NAME-bench"
+          kubectl delete job "$TEST_NAME-bench" -n "$NS" --ignore-not-found=true --wait=true --timeout=5m || true
+          kubectl delete pods -n "$NS" -l "$BENCH_SELECTOR" --ignore-not-found=true --wait=true --timeout=5m || true
+
+          echo "Deleting DynamoGraphDeployment: $TEST_NAME"
+          kubectl delete dynamographdeployment "$TEST_NAME" -n "$NS" --ignore-not-found=true --wait=true --timeout=6m || true
+          kubectl delete pods -n "$NS" -l "$SERVICE_SELECTOR" --ignore-not-found=true --wait=true --timeout=6m || true
+
+          if kubectl get job "$TEST_NAME-bench" -n "$NS" >/dev/null 2>&1; then
+            echo "ERROR: benchmark Job still exists after cleanup: $TEST_NAME-bench"
+            remaining=1
+          fi
+
+          if kubectl get dynamographdeployment "$TEST_NAME" -n "$NS" >/dev/null 2>&1; then
+            echo "ERROR: DynamoGraphDeployment still exists after cleanup: $TEST_NAME"
+            remaining=1
+          fi
+
+          for selector in "$BENCH_SELECTOR" "$SERVICE_SELECTOR"; do
+            if kubectl get pods -n "$NS" -l "$selector" --no-headers 2>/dev/null | grep -q .; then
+              echo "ERROR: pods still exist after cleanup for selector: $selector"
+              kubectl get pods -n "$NS" -l "$selector" -o wide || true
+              remaining=1
+            fi
+          done
+
+          if [ "$remaining" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "Cleanup verified: benchmark Job, DynamoGraphDeployment, and pods are terminated"
