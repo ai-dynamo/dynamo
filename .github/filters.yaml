@@ -4,7 +4,6 @@
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
 #   snapshot -> snapshot-agent build and test
-#   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -35,7 +34,7 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
-  # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
+  # Canonical agent skills directory (post-flip); .agents/skills is a symlink here.
   - 'skills/**'
 
 examples:
@@ -55,11 +54,6 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
-  # Standalone CRD apiVersion converter: classification-only so it satisfies
-  # the changed-files coverage check without triggering the operator deploy
-  # pipeline (it is excluded from the `deploy` filter below).
-  - 'deploy/utils/convert_api_version.py'
-  - 'deploy/utils/tests/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
@@ -79,11 +73,6 @@ ignore:
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
-  - 'scripts/dco_check.py'
-  - 'scripts/validate_skills.py'
-  # CODEOWNERS generation tooling (data + scripts). Validated by its own
-  # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
-  - '.github/codeowners/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -101,7 +90,6 @@ core:
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
-  - 'container/templates/compliance.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
@@ -109,9 +97,7 @@ core:
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
-  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
-  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
@@ -138,24 +124,12 @@ operator:
   - 'deploy/snapshot/**'
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
-  # The operator check owns the real Go/Python DGD override contract test.
-  - 'components/src/dynamo/profiler/utils/dgd_override.py'
-  - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
+  - *ci
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
-  - 'components/src/dynamo/common/snapshot/**'
-  - 'deploy/operator/internal/checkpoint/**'
-  - 'tests/deploy/test_dynamocheckpoint.py'
-
-power_agent:
-  - *ci
-  - 'deploy/power-agent/**'
-  - 'deploy/helm/charts/power-agent/**'
-  - '!**/*.md'
-  - '!**/*.rst'
 
 deploy:
   - *ci
@@ -164,10 +138,6 @@ deploy:
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   - 'tests/utils/managed_deployment.py'
-  # Standalone CRD apiVersion converter: not used by the deploy-test harness and
-  # has no CI test wiring, so it should not trigger the operator deploy pipeline.
-  - '!deploy/utils/convert_api_version.py'
-  - '!deploy/utils/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -177,9 +147,6 @@ planner:
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
-  # Power-aware planner (PR #9369): per-node power agent component
-  - 'deploy/power-agent/**'
-  - 'deploy/helm/charts/power-agent/**'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
@@ -187,16 +154,18 @@ vllm:
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
   - 'container/templates/vllm_*'
+  # XPU dynamo smoke-test pod manifest (deploy-test-xpu in xpu-ci.yaml). Runs a
+  # vllm backend, so a manifest change should re-run the XPU vllm CI.
+  - '.ci/test/dynamo-smoke/**'
+  # Heterogeneous EPD/P-D test manifests are consumed by PR-XPU and manual EPD workflows.
+  - '.ci/test/dynamo-heterog/k8s/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
 
 sglang:
-  - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
-  - 'components/src/dynamo/sglang_sidecar/**'
   - 'container/templates/sglang_*'
-  - 'container/deps/sglang/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -227,9 +196,7 @@ frontend:
   - 'container/deps/*'
   - 'container/compliance/**'
   - 'components/src/dynamo/router/**'
-  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
-  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
