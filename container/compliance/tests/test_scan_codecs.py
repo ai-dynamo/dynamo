@@ -13,7 +13,6 @@ import json
 from pathlib import Path
 
 import pytest
-
 from compliance.scan_codecs import CodecPolicy, main, scan_filesystem, scan_sbom
 
 # The real shipped policy — the tests assert against it, not a fixture, so a
