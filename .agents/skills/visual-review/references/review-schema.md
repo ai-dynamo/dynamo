@@ -138,7 +138,7 @@ hover.
 
 Every spec must contain one primary `component` diagram covering all runtime components involved in the PR. Add `sequence` diagrams for races, retries, lifecycle changes, or other ordered interactions. For an ordering defect, include separate failing and corrected sequences with the same participants.
 
-Component diagrams are automatically laid out as directed graphs with the vendored Cytoscape.js 3.33.4, Dagre 0.8.5, and cytoscape-dagre 2.5.0 libraries. The rendered graph has labeled arrows, draggable nodes, zoom and pan gestures, clickable evidence links, and Relayout and Fit controls. The libraries are inlined into the output, so the review remains self-contained and offline-capable.
+Component diagrams are automatically laid out as directed graphs with the vendored Cytoscape.js 3.33.4, Dagre 0.8.5, and cytoscape-dagre 2.5.0 libraries. The rendered graph has labeled arrows, draggable nodes, zoom and pan gestures, clickable evidence links with keyboard-accessible text equivalents, and Relayout and Fit controls. The libraries are inlined into the output, so the review remains self-contained and offline-capable.
 
 Component diagram:
 

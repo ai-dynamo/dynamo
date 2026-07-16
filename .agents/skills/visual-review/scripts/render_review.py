@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Render and validate a self-contained visual code-review dashboard."""
 
 from __future__ import annotations
@@ -14,6 +17,22 @@ from urllib.parse import urlsplit, urlunsplit
 
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 DIFF_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
+DIFF_METADATA_PREFIXES = (
+    "index ",
+    "--- ",
+    "+++ ",
+    "new file mode ",
+    "deleted file mode ",
+    "old mode ",
+    "new mode ",
+    "similarity index ",
+    "dissimilarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+)
+DIFF_BINARY_PREFIXES = ("Binary files ", "GIT binary patch")
 VALID_SEVERITIES = {"P0", "P1", "P2", "P3", "note"}
 VALID_SIDES = {"old", "new"}
 VALID_MARKER_KINDS = {"relevant", "risk", "test", "out"}
@@ -42,6 +61,12 @@ def require_string(value: Any, field: str, *, allow_empty: bool = False) -> str:
 def require_list(value: Any, field: str) -> list[Any]:
     if not isinstance(value, list):
         raise ReviewError(f"{field} must be an array")
+    return value
+
+
+def require_positive_int(value: Any, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ReviewError(f"{field} must be a positive integer")
     return value
 
 
@@ -81,6 +106,7 @@ def parse_diff(raw: str) -> dict[str, Any]:
     line_keys: set[tuple[str, str, int]] = set()
     current: dict[str, Any] | None = None
     old_line = new_line = 0
+    skip_binary_payload = False
 
     for number, line in enumerate(
         raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"), 1
@@ -96,6 +122,7 @@ def parse_diff(raw: str) -> dict[str, Any]:
             }
             files.append(current)
             targets.add(f"file-{slug(current['path'])}")
+            skip_binary_payload = False
             continue
 
         if current is None:
@@ -103,6 +130,9 @@ def parse_diff(raw: str) -> dict[str, Any]:
                 raise ReviewError(
                     f"diff line {number}: content before first file header"
                 )
+            continue
+
+        if skip_binary_payload:
             continue
 
         if line.startswith("@@"):
@@ -113,18 +143,11 @@ def parse_diff(raw: str) -> dict[str, Any]:
             new_line = int(match.group(3))
             continue
 
-        if line.startswith(
-            (
-                "index ",
-                "--- ",
-                "+++ ",
-                "new file mode ",
-                "deleted file mode ",
-                "similarity index ",
-                "rename from ",
-                "rename to ",
-            )
-        ):
+        if line.startswith(DIFF_BINARY_PREFIXES):
+            skip_binary_payload = True
+            continue
+
+        if line.startswith(DIFF_METADATA_PREFIXES):
             continue
 
         file_slug = slug(current["path"])
@@ -366,9 +389,7 @@ def validate_spec(spec: dict[str, Any], diff: dict[str, Any]) -> dict[str, Any]:
         side = require_string(finding.get("side"), f"{prefix}.side")
         if side not in VALID_SIDES:
             raise ReviewError(f"{prefix}.side must be old or new")
-        line = finding.get("line")
-        if not isinstance(line, int) or line < 1:
-            raise ReviewError(f"{prefix}.line must be a positive integer")
+        line = require_positive_int(finding.get("line"), f"{prefix}.line")
         if (file_path, side, line) not in diff["line_keys"]:
             raise ReviewError(
                 f"{prefix} points outside the diff: {file_path}:{side}:{line}"
@@ -587,18 +608,14 @@ def validate_spec(spec: dict[str, Any], diff: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(mapped, dict):
             raise ReviewError(f"{prefix} must be an object")
         require_string(mapped.get("path"), f"{prefix}.path")
-        total = mapped.get("total_lines")
-        if not isinstance(total, int) or total < 1:
-            raise ReviewError(f"{prefix}.total_lines must be a positive integer")
+        require_positive_int(mapped.get("total_lines"), f"{prefix}.total_lines")
         for marker_index, marker in enumerate(
             require_list(mapped.get("markers", []), f"{prefix}.markers")
         ):
             marker_prefix = f"{prefix}.markers[{marker_index}]"
             if not isinstance(marker, dict):
                 raise ReviewError(f"{marker_prefix} must be an object")
-            line = marker.get("line")
-            if not isinstance(line, int) or line < 1:
-                raise ReviewError(f"{marker_prefix}.line must be a positive integer")
+            line = require_positive_int(marker.get("line"), f"{marker_prefix}.line")
             kind = marker.get("kind", "relevant")
             if kind not in VALID_MARKER_KINDS:
                 raise ReviewError(
@@ -629,9 +646,7 @@ def validate_spec(spec: dict[str, Any], diff: dict[str, Any]) -> dict[str, Any]:
         side = require_string(row.get("side"), f"{prefix}.side")
         if side not in VALID_SIDES:
             raise ReviewError(f"{prefix}.side must be old or new")
-        line = row.get("line")
-        if not isinstance(line, int) or line < 1:
-            raise ReviewError(f"{prefix}.line must be a positive integer")
+        line = require_positive_int(row.get("line"), f"{prefix}.line")
         if (file_path, side, line) not in diff["line_keys"]:
             raise ReviewError(
                 f"{prefix} points outside the diff: {file_path}:{side}:{line}"
@@ -655,10 +670,9 @@ def validate_spec(spec: dict[str, Any], diff: dict[str, Any]) -> dict[str, Any]:
             )
         seen_highlights: set[int] = set()
         for highlight_index, line in enumerate(highlighted):
-            if not isinstance(line, int) or isinstance(line, bool) or line < 1:
-                raise ReviewError(
-                    f"{prefix}.highlight_lines[{highlight_index}] must be a positive integer"
-                )
+            line = require_positive_int(
+                line, f"{prefix}.highlight_lines[{highlight_index}]"
+            )
             if line > len(code_lines):
                 raise ReviewError(
                     f"{prefix}.highlight_lines[{highlight_index}] points past the {len(code_lines)}-line snippet"
@@ -807,7 +821,7 @@ def main() -> int:
             "__REVIEW_DATA_JSON__": encoded,
             "__CYTOSCAPE_JS__": (
                 "/*\n"
-                + (asset_root / "vendor" / "LICENSE-cytoscape.txt").read_text(
+                + (asset_root / "vendor" / "cytoscape.LICENSE").read_text(
                     encoding="utf-8"
                 )
                 + "\n*/\n"
@@ -817,9 +831,7 @@ def main() -> int:
             ).replace("</", "<\\/"),
             "__DAGRE_JS__": (
                 "/*\n"
-                + (asset_root / "vendor" / "LICENSE-dagre.txt").read_text(
-                    encoding="utf-8"
-                )
+                + (asset_root / "vendor" / "dagre.LICENSE").read_text(encoding="utf-8")
                 + "\n*/\n"
                 + (asset_root / "vendor" / "dagre-0.8.5.min.js").read_text(
                     encoding="utf-8"
@@ -827,7 +839,7 @@ def main() -> int:
             ).replace("</", "<\\/"),
             "__CYTOSCAPE_DAGRE_JS__": (
                 "/*\n"
-                + (asset_root / "vendor" / "LICENSE-cytoscape-dagre.txt").read_text(
+                + (asset_root / "vendor" / "cytoscape-dagre.LICENSE").read_text(
                     encoding="utf-8"
                 )
                 + "\n*/\n"
