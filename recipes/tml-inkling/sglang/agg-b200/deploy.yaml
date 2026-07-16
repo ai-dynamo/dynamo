@@ -23,7 +23,7 @@ spec:
               # Edit this if your cluster provides a shared RWX model PVC
               claimName: model-cache
         mainContainer:
-          image: nvcr.io/nvstaging/nim/sglang-inkling:4cec9ef9d-custom-numba-dynamo-v1.3.0-dev.1-cuda13-inkling-frontend2
+          image: nvcr.io/nvstaging/nim/alexandrem:inkling-sglang-cu13
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache
@@ -87,7 +87,7 @@ spec:
             emptyDir:
               sizeLimit: 32Gi
         mainContainer:
-          image: nvcr.io/nvstaging/nim/sglang-inkling:4cec9ef9d-custom-numba-dynamo-v1.3.0-dev.1-cuda13-inkling-frontend2
+          image: nvcr.io/nvstaging/nim/alexandrem:inkling-sglang-cu13
           workingDir: /workspace/examples/backends/sglang
           env:
             - name: SGLANG_ENABLE_UNIFIED_RADIX_TREE
