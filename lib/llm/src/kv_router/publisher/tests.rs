@@ -3506,9 +3506,7 @@ mod zmq_event_batch_tests {
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, RouterEvent,
     };
 
-    use super::super::sinks::{
-        MAX_ZMQ_KV_EVENT_PAYLOAD_BYTES, RouterEventBatchSink, encode_zmq_event_batches,
-    };
+    use super::super::sinks::{RouterEventBatchSink, encode_zmq_event_batch};
 
     fn router_event(event_id: u64) -> RouterEvent {
         RouterEvent::new(
@@ -3528,62 +3526,24 @@ mod zmq_event_batch_tests {
         let events = vec![router_event(1), router_event(2), router_event(3)];
         let expected = rmp_serde::to_vec_named(&events).unwrap();
 
-        let encoded = encode_zmq_event_batches(&events, expected.len()).unwrap();
+        let encoded = encode_zmq_event_batch(&events).unwrap();
 
-        assert_eq!(encoded, vec![expected]);
+        assert_eq!(encoded, expected);
         assert_eq!(
-            rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded[0]).unwrap(),
+            rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded).unwrap(),
             events
         );
     }
 
     #[test]
-    fn zmq_batch_encoding_splits_at_event_boundaries_in_order() {
-        let events = (0..7).map(router_event).collect::<Vec<_>>();
-
-        let encoded = encode_zmq_event_batches(&events, 1).unwrap();
-        let decoded = encoded
-            .iter()
-            .flat_map(|payload| rmp_serde::from_slice::<Vec<RouterEvent>>(payload).unwrap())
-            .collect::<Vec<_>>();
-
-        assert_eq!(encoded.len(), events.len());
-        assert_eq!(decoded, events);
-    }
-
-    #[test]
-    fn zmq_batch_encoding_enforces_one_mib_payload_cap() {
+    fn zmq_batch_encoding_keeps_large_batches_in_one_payload() {
         let events = (0..20_000).map(router_event).collect::<Vec<_>>();
 
-        let encoded = encode_zmq_event_batches(&events, MAX_ZMQ_KV_EVENT_PAYLOAD_BYTES).unwrap();
-        let decoded = encoded
-            .iter()
-            .flat_map(|payload| {
-                assert!(payload.len() <= MAX_ZMQ_KV_EVENT_PAYLOAD_BYTES);
-                rmp_serde::from_slice::<Vec<RouterEvent>>(payload).unwrap()
-            })
-            .collect::<Vec<_>>();
+        let encoded = encode_zmq_event_batch(&events).unwrap();
+        let decoded = rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded).unwrap();
 
-        assert!(encoded.len() > 1);
+        assert!(encoded.len() > 1024 * 1024);
         assert_eq!(decoded, events);
-    }
-
-    #[test]
-    fn zmq_batch_encoding_allows_one_oversized_event() {
-        let event = router_event(1);
-        let encoded = encode_zmq_event_batches(std::slice::from_ref(&event), 1).unwrap();
-
-        assert_eq!(encoded.len(), 1);
-        assert!(encoded[0].len() > 1);
-        assert_eq!(
-            rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded[0]).unwrap(),
-            vec![event]
-        );
-    }
-
-    #[test]
-    fn zmq_batch_encoding_skips_empty_batches() {
-        assert!(encode_zmq_event_batches(&[], 1024).unwrap().is_empty());
     }
 
     #[derive(Clone, Default)]
