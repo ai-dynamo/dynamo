@@ -19,11 +19,12 @@ pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
 /// Bound normal event-plane batches while always allowing one complete event.
 ///
 /// The default NATS Core `max_payload` is 1 MiB. Production-shaped batches at
-/// this cap, including one multimodal object with one offset per stored block,
-/// remain below that limit in the wire-size regression tests. Multimodal
-/// metadata is not intrinsically bounded, so an exceptional batch can still
-/// exceed a deployment's configured transport limit and fail under the
-/// existing best-effort publication semantics.
+/// these caps, including sparse one-block events and one multimodal object with
+/// one offset per stored block, remain below that limit in the wire-size
+/// regression tests. Multimodal metadata is not intrinsically bounded, so an
+/// exceptional batch can still exceed a deployment's configured transport
+/// limit and fail under the existing best-effort publication semantics.
+pub(super) const MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH: usize = 128;
 pub(super) const MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS: usize = 8_192;
 
 pub(super) trait RouterEventBatchSink: Send + Sync {
@@ -79,7 +80,11 @@ impl<P: RouterEventSink + Send + Sync> RouterEventBatchSink for P {
 impl RouterEventBatchSink for EventPlanePublisher {
     async fn publish_events(&self, events: &[RouterEvent]) -> Result<()> {
         let mut failures = PublishFailures::default();
-        for batch in event_plane_event_batches(events, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS) {
+        for batch in event_plane_event_batches(
+            events,
+            MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH,
+            MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
+        ) {
             if let Err(error) = self.0.publish(&batch).await {
                 let first_event_id = batch.first().map(|event| event.event.event_id);
                 let last_event_id = batch.last().map(|event| event.event.event_id);
@@ -98,10 +103,11 @@ impl RouterEventBatchSink for EventPlanePublisher {
     }
 }
 
-/// Partition ordered events at event boundaries without exceeding the block cap.
-/// A single event larger than the cap is always emitted intact.
+/// Partition ordered events at event boundaries without exceeding either cap.
+/// A single event larger than the block cap is always emitted intact.
 pub(super) fn event_plane_event_batches(
     events: &[RouterEvent],
+    max_events: usize,
     max_blocks: usize,
 ) -> impl Iterator<Item = &[RouterEvent]> {
     let mut batch_start = 0;
@@ -114,12 +120,16 @@ pub(super) fn event_plane_event_batches(
         let mut batch_end = batch_start;
         let mut batch_blocks = 0usize;
         while let Some(event) = events.get(batch_end) {
+            let batch_events = batch_end - batch_start;
             let event_blocks = match &event.event.data {
                 KvCacheEventData::Stored(data) => data.blocks.len(),
                 KvCacheEventData::Removed(data) => data.block_hashes.len(),
                 KvCacheEventData::Cleared => 0,
             };
-            if batch_end > batch_start && batch_blocks.saturating_add(event_blocks) > max_blocks {
+            if batch_events > 0
+                && (batch_events >= max_events
+                    || batch_blocks.saturating_add(event_blocks) > max_blocks)
+            {
                 break;
             }
             batch_blocks = batch_blocks.saturating_add(event_blocks);

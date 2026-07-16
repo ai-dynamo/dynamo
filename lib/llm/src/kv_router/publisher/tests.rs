@@ -3515,8 +3515,8 @@ mod event_plane_batch_tests {
     use dynamo_runtime::{DistributedRuntime, Runtime};
 
     use super::super::sinks::{
-        EventPlanePublisher, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS, RouterEventBatchSink,
-        event_plane_event_batches,
+        EventPlanePublisher, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
+        MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH, RouterEventBatchSink, event_plane_event_batches,
     };
 
     fn router_event(event_id: u64) -> RouterEvent {
@@ -3621,6 +3621,31 @@ mod event_plane_batch_tests {
             multimodal_wire_size < NATS_DEFAULT_MAX_PAYLOAD_BYTES,
             "single-object multimodal production batch encoded to {multimodal_wire_size} bytes"
         );
+
+        for with_mm in [false, true] {
+            let sparse_events = (0..MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS as u64)
+                .map(|event_id| stored_router_event_with_mm(event_id, 1, with_mm))
+                .collect::<Vec<_>>();
+            assert!(
+                encoded_wire_size(&sparse_events) > NATS_DEFAULT_MAX_PAYLOAD_BYTES,
+                "sparse multimodal={with_mm} fixture should exceed the NATS payload limit without the event cap"
+            );
+            let batches = event_plane_event_batches(
+                &sparse_events,
+                MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH,
+                MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
+            )
+            .collect::<Vec<_>>();
+
+            assert_eq!(batches.len(), 64);
+            assert!(
+                batches.iter().all(|batch| {
+                    batch.len() <= MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH
+                        && encoded_wire_size(batch) < NATS_DEFAULT_MAX_PAYLOAD_BYTES
+                }),
+                "sparse multimodal={with_mm} batch exceeded an event or NATS payload cap"
+            );
+        }
     }
 
     #[test]
@@ -3632,7 +3657,7 @@ mod event_plane_batch_tests {
             removed_router_event(4, 1),
         ];
 
-        let batches = event_plane_event_batches(&events, 4).collect::<Vec<_>>();
+        let batches = event_plane_event_batches(&events, usize::MAX, 4).collect::<Vec<_>>();
 
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0], &events[..3]);
@@ -3643,7 +3668,7 @@ mod event_plane_batch_tests {
     fn event_plane_batching_allows_one_oversized_event() {
         let events = vec![removed_router_event(1, 5), removed_router_event(2, 1)];
 
-        let batches = event_plane_event_batches(&events, 4).collect::<Vec<_>>();
+        let batches = event_plane_event_batches(&events, usize::MAX, 4).collect::<Vec<_>>();
 
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0], &events[..1]);
@@ -3652,15 +3677,38 @@ mod event_plane_batch_tests {
 
     #[test]
     fn event_plane_batching_enforces_production_block_cap() {
-        let events = (0..=MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS as u64)
+        let events = vec![
+            removed_router_event(1, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS),
+            router_event(2),
+        ];
+
+        let batches = event_plane_event_batches(
+            &events,
+            MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH,
+            MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
+        )
+        .collect::<Vec<_>>();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], &events[..1]);
+        assert_eq!(batches[1].len(), 1);
+    }
+
+    #[test]
+    fn event_plane_batching_enforces_production_event_cap() {
+        let events = (0..=MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH as u64)
             .map(router_event)
             .collect::<Vec<_>>();
 
-        let batches = event_plane_event_batches(&events, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS)
-            .collect::<Vec<_>>();
+        let batches = event_plane_event_batches(
+            &events,
+            MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH,
+            MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
+        )
+        .collect::<Vec<_>>();
 
         assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0].len(), MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS);
+        assert_eq!(batches[0].len(), MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH);
         assert_eq!(batches[1].len(), 1);
     }
 
