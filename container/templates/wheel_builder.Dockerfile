@@ -602,8 +602,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
 #   uv pip install --no-deps -e /workspace
 # See container/launch_message/dev.txt for the full setup steps.
 
-# Create dist dir with a placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl always has a match.
-RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
+# Create the dist placeholder so downstream COPY --from=wheel_builder /opt/dynamo/dist/*.whl
+# always matches, plus the vendor dir so wheel_builder's unconditional COPY of it succeeds
+# (dev/local-dev run no cargo vendor, so it stays empty here).
+RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} /tmp/dynamo-vendor-full && \
     touch /opt/dynamo/dist/.placeholder.whl
 
 # Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
