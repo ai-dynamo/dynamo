@@ -6,7 +6,7 @@ const ICS_URL = 'https://calendar.google.com/calendar/ical/c_c2448d2efb09eac2dde
 const ALLOWED_ONLINE_HOSTS = ['meet.google.com', 'zoom.us', 'teams.microsoft.com', 'webex.com', 'luma.com'];
 
 function escapeMd(str) {
-  return str.replace(/[[\]|`*_~]/g, '\\$&');
+  return str.replace(/\r?\n/g, ' ').replace(/[[\]|`*_~]/g, '\\$&');
 }
 
 function formatLocation(location) {
@@ -39,11 +39,11 @@ async function main() {
   const now = new Date();
 
   const all = Object.values(events)
-    .filter(e => e.type === 'VEVENT' && e.start)
+    .filter(e => e.type === 'VEVENT' && e.start && String(e.status || '').toUpperCase() !== 'CANCELLED')
     .sort((a, b) => a.start - b.start);
 
-  const past = all.filter(e => e.start < now).slice(-2);
-  const future = all.filter(e => e.start >= now).slice(0, 3);
+  const past = all.filter(e => (e.end || e.start) < now).slice(-2);
+  const future = all.filter(e => (e.end || e.start) >= now).slice(0, 3);
   const selected = [...future.reverse(), ...past.reverse()];
 
   const lines = ['| 📅 Date | 🎤 Event | 📍 Location |', '|:--------|:---------|:------------|'];
@@ -52,7 +52,7 @@ async function main() {
     lines.push('| – | No upcoming events | |');
   } else {
     for (const e of selected) {
-      const isPast = e.start < now;
+      const isPast = (e.end || e.start) < now;
       const date = e.start.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
       const addUrl = buildAddToCalendarURL(e);
       const safeTitle = escapeMd(e.summary);
