@@ -177,6 +177,7 @@ RUN set -eux; \
     python3 -m pip uninstall --yes \
         av \
         decord \
+        decord2 \
         imageio-ffmpeg \
         opencv-python \
         opencv-python-headless \
@@ -190,6 +191,9 @@ RUN set -eux; \
         "${SITE_PACKAGES}"/decord \
         "${SITE_PACKAGES}"/decord-*.dist-info \
         "${SITE_PACKAGES}"/decord.libs \
+        "${SITE_PACKAGES}"/decord2 \
+        "${SITE_PACKAGES}"/decord2-*.dist-info \
+        "${SITE_PACKAGES}"/decord2.libs \
         "${SITE_PACKAGES}"/imageio_ffmpeg \
         "${SITE_PACKAGES}"/imageio_ffmpeg-*.dist-info \
         "${SITE_PACKAGES}"/opencv_python*.dist-info \
