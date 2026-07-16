@@ -12,10 +12,11 @@ name: On-Demand Release
 # fold any new knob into an existing input.
 on:
   # TEMPORARY(test): push events have no inputs, so the fallbacks below run the
-  # test flow as release_version 1.3.0 on release/1.3.0. REVERT before merge.
+  # test flow as release_version 1.3.0.dev2026071601 on release/1.3.0.dev2026071601. REVERT before merge.
   push:
     branches:
       - pvijayakrish/on-demand-release
+      - nmailhot/on-demand-dev-version
   workflow_dispatch:
     inputs:
       source_ref:
@@ -97,9 +98,9 @@ jobs:
         env:
           # TEMPORARY(test): the || fallbacks cover inputless push events. REVERT
           # to bare inputs.* before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0.dev2026071601' }}
           SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0.dev2026071601' || '') }}
           RC_ROUND: ${{ inputs.rc_round || '10' }}
         run: |
           set -euo pipefail
@@ -251,8 +252,8 @@ jobs:
         id: bump
         env:
           # TEMPORARY(test): push fallbacks. REVERT to bare inputs.* before merge.
-          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0.dev2026071601' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0.dev2026071601' || '') }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CONTAINERS: ${{ steps.resolve.outputs.containers }}
@@ -506,7 +507,7 @@ jobs:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
       # TEMPORARY(test): || fallback for inputless push events. REVERT.
-      release_version: ${{ inputs.release_version || '1.3.0' }}
+      release_version: ${{ inputs.release_version || '1.3.0.dev2026071601' }}
       # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.prepare-branch.outputs.rc_number }}
       # Normalized subsets from resolve-selection.
