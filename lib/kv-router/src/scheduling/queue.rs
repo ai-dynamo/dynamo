@@ -555,6 +555,14 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<AdmissionLease>>,
     ) -> Option<Box<AdmissionLease>> {
+        if self.queueing_enabled && lease.is_none() && request.mode.admission_request_id().is_some()
+        {
+            request.respond(Err(KvSchedulerError::BookingFailed(
+                "admission-managed requests must be scheduled through LocalScheduler".to_string(),
+            )));
+            return None;
+        }
+
         let eligibility = request.eligibility();
 
         if let Err(error) = eligibility.validate_pinned_worker_allowed() {
@@ -2767,6 +2775,27 @@ policy_classes:
         let (queue, _slots) = make_queue(1, 16, 64, None);
 
         assert!(queue.new_admission_lease(Some("default-path")).is_none());
+    }
+
+    #[tokio::test]
+    async fn raw_queue_rejects_admission_mode_without_lease() {
+        let state = Arc::new(StdMutex::new(GateState::default()));
+        let (queue, _slots) = make_queue_with_admission_strategy(Box::new(ReconcileGate {
+            state: Arc::clone(&state),
+        }));
+        let (mut request, response) = make_admission_request("raw-admission", 64);
+        request.policy_class = Some("agents".to_owned());
+
+        queue.enqueue(request).await;
+
+        let error = response.await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            KvSchedulerError::BookingFailed(message)
+                if message.contains("must be scheduled through LocalScheduler")
+        ));
+        assert_eq!(queue.pending_count(), 0);
+        assert!(state.lock().unwrap().deferred.is_none());
     }
 
     #[tokio::test]
