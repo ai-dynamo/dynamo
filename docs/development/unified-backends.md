@@ -125,6 +125,21 @@ Lifecycle and runtime:
 - `DynamoException` error chain wrapping
 - Finish reason normalization (handled by the Rust layer)
 - Engine control plumbing, with per-backend profiling, quiesce/resume, and supported weight-update controls
+- vLLM KV block clearing in aggregated, prefill, and decode modes through
+  `POST /engine/control/clear_kv_blocks` on the worker's system port. Send
+  `{}` as the JSON body. A successful reset clears both the prefix cache
+  and connector cache and returns
+  `{"status":"success","message":"KV cache cleared"}`. A rejected reset
+  returns HTTP 200 with
+  `{"status":"error","message":"KV cache reset failed"}`. An unavailable
+  engine returns `{"status":"error","message":"Engine is not running"}`;
+  exceptions return the same error shape with the exception text as the
+  message.
+  The direct control does not pause generation, drain work, or preempt
+  active requests. If blocks remain in use, wait for those requests to
+  finish and retry. The control is available even when prefix caching is
+  not explicitly enabled because the connector cache may still need a
+  reset.
 
 Observability:
 - Health-check canary via `health_check_payload()` (plus

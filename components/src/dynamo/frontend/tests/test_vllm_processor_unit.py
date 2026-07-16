@@ -7,13 +7,13 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
+import importlib.util
 import json
 from types import SimpleNamespace
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
-from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
 from dynamo.frontend.prepost import _prepare_request
 
@@ -24,6 +24,23 @@ from dynamo.frontend.prepost import _prepare_request
 # collection, which breaks the pytest-marker-report pre-commit hook (its vllm
 # stub list does not cover those submodules).
 
+HAS_QWEN3_TOOL_PARSER = (
+    importlib.util.find_spec("vllm.tool_parsers.qwen3_engine_tool_parser") is not None
+    or importlib.util.find_spec("vllm.tool_parsers.qwen3coder_tool_parser") is not None
+)
+
+
+def _resolve_qwen3_tool_parser_class():
+    try:
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+        return Qwen3EngineToolParser
+    except ImportError:
+        from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+
+        return Qwen3CoderToolParser
+
+
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
@@ -33,6 +50,10 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
+    pytest.mark.skipif(
+        not HAS_QWEN3_TOOL_PARSER,
+        reason="requires vllm qwen3 tool parser",
+    ),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -132,6 +153,88 @@ class TestPrepareRequestToolStripping:  # FRONTEND.1 + FRONTEND.3 — tool strip
         assert (
             chat_params.chat_template_kwargs["tools"] is None
         ), "No tools in request should produce None tools in template"
+
+
+class TestChatTemplateArgsPassthrough:
+    """Per-request chat template kwargs must survive into the rendered template.
+
+    pythonize serializes the request field under its Rust name
+    ``chat_template_args`` (serde ``alias`` is deserialize-only), so the vLLM
+    processor must read that key, not only vLLM's native ``chat_template_kwargs``.
+    """
+
+    def test_chat_template_args_reaches_template(self, tokenizer):
+        """Kwargs keyed as chat_template_args (the pythonize'd key) reach the template."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"enable_thinking": False},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("enable_thinking") is False
+        ), "chat_template_args must be forwarded to the chat template"
+
+    def test_chat_template_kwargs_native_key_still_works(self, tokenizer):
+        """The vLLM-native chat_template_kwargs key keeps working."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("enable_thinking") is False
+        ), "native chat_template_kwargs must be forwarded to the chat template"
+
+    def test_nested_reasoning_effort_is_not_clobbered(self, tokenizer):
+        """A reasoning_effort nested in template kwargs survives the top-level default."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"reasoning_effort": "high"},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert (
+            chat_params.chat_template_kwargs.get("reasoning_effort") == "high"
+        ), "nested reasoning_effort must not be overwritten by an absent top-level field"
+
+    def test_top_level_reasoning_effort_wins_over_nested(self, tokenizer):
+        """An explicit top-level reasoning_effort overrides a nested one."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "low",
+                "chat_template_args": {"reasoning_effort": "high"},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
+
+    def test_reserved_render_key_in_template_args_does_not_crash(self, tokenizer):
+        """A renderer-reserved key nested in template kwargs must not raise TypeError."""
+        _, _, _, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"documents": [{"text": "doc"}]},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        # Renderer-managed value wins over the client's nested key (no crash either).
+        assert chat_params.chat_template_kwargs["documents"] is None
 
 
 class TestMultimodalFeatureMetadata:
@@ -631,7 +734,7 @@ class TestSchemaAwareToolParser:
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=Qwen3EngineToolParser,
+            tool_parser_class=_resolve_qwen3_tool_parser_class(),
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 

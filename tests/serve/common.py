@@ -10,7 +10,7 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
@@ -19,7 +19,7 @@ import pytest
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import (
     EngineConfig,
     EngineLogError,
@@ -37,6 +37,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 DEFAULT_TIMEOUT = 10
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
+logger = logging.getLogger(__name__)
 
 
 def _tail_logs(content: str, *, lines: int = 80) -> str:
@@ -167,6 +168,7 @@ class _PreparedDeployment:
     frontend_port: int
     system_ports: list
     disagg_bootstrap_port: Optional[int]
+    extra_allocated_ports: list[int]
 
 
 def _prepare_deployment(
@@ -217,6 +219,19 @@ def _prepare_deployment(
                 str(gib_to_bytes),
             )
 
+    # Stagger engine startup under xdist to avoid vLLM profiling race
+    # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
+    if worker_id.startswith("gw"):
+        worker_num = int(worker_id.removeprefix("gw"))
+        if worker_num > 0:
+            stagger_s = worker_num * 15
+            logger.info("Staggering startup by %ds (xdist %s)", stagger_s, worker_id)
+            time.sleep(stagger_s)
+
+    # Track additional ports allocated for multi-GPU tests (for cleanup in finally)
+    extra_allocated_ports: list[int] = []
+
     if ports is not None:
         dynamic_frontend_port = int(ports.frontend_port)
         dynamic_system_ports = [int(p) for p in ports.system_ports]
@@ -251,8 +266,16 @@ def _prepare_deployment(
         # Unique ZMQ port for vLLM KV event publishing (avoids xdist collisions).
         if ports.kv_event_port:
             merged_env["DYN_VLLM_KV_EVENT_PORT"] = str(ports.kv_event_port)
+            # For multi-worker scripts (xpu_2 router tests), allocate separate
+            # KV event ports for each worker to avoid ZMQ bind collisions.
+            if len(dynamic_system_ports) >= 2:
+                kv_port1 = ports.kv_event_port
+                kv_port2 = allocate_port(ports.kv_event_port + 1)
+                extra_allocated_ports.append(kv_port2)
+                merged_env["DYN_VLLM_KV_EVENT_PORT1"] = str(kv_port1)
+                merged_env["DYN_VLLM_KV_EVENT_PORT2"] = str(kv_port2)
 
-        # Per-worker NIXL side-channel ports, indexed to match DYN_SYSTEM_PORT{idx}.
+        # Per-worker NIXL side-channel ports (avoids xdist collisions on 20097).
         for idx, port in enumerate(ports.nixl_side_channel_ports, start=1):
             merged_env[f"DYN_VLLM_NIXL_SIDE_CHANNEL_PORT{idx}"] = str(port)
 
@@ -279,7 +302,7 @@ def _prepare_deployment(
     # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
     disagg_bootstrap_port: int | None = None
     if config.script_name and "disagg" in config.script_name:
-        disagg_bootstrap_port = allocate_port(12000)
+        disagg_bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
         merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
     return _PreparedDeployment(
@@ -288,6 +311,7 @@ def _prepare_deployment(
         frontend_port=dynamic_frontend_port,
         system_ports=dynamic_system_ports,
         disagg_bootstrap_port=disagg_bootstrap_port,
+        extra_allocated_ports=extra_allocated_ports,
     )
 
 
@@ -432,6 +456,8 @@ def run_prefill_drain_deployment(
     finally:
         if prep.disagg_bootstrap_port is not None:
             deallocate_port(prep.disagg_bootstrap_port)
+        for p in prep.extra_allocated_ports:
+            deallocate_port(p)
 
 
 def run_serve_deployment(
@@ -440,12 +466,14 @@ def run_serve_deployment(
     *,
     ports: ServicePorts | None = None,  # pass `dynamo_dynamic_ports` here
     extra_env: Optional[Dict[str, str]] = None,
+    post_validation: Optional[Callable[[], None]] = None,
 ) -> None:
     """Run a standard serve deployment test for any EngineConfig.
 
     - Launches the engine via EngineProcess.from_script
     - Builds a payload (with optional override/mutator)
     - Iterates configured endpoints and validates responses and logs
+    - Optionally runs a final assertion while the deployment is still alive
     """
 
     logger = logging.getLogger(request.node.name)
@@ -464,6 +492,7 @@ def run_serve_deployment(
     dynamic_frontend_port = prep.frontend_port
     dynamic_system_ports = prep.system_ports
     disagg_bootstrap_port = prep.disagg_bootstrap_port
+    extra_allocated_ports = prep.extra_allocated_ports
 
     try:
         with EngineProcess.from_script(
@@ -577,9 +606,14 @@ def run_serve_deployment(
                 # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
                 if hasattr(payload, "final_validation"):
                     payload.final_validation()
+
+            if post_validation is not None:
+                post_validation()
     finally:
         if disagg_bootstrap_port is not None:
             deallocate_port(disagg_bootstrap_port)
+        for p in extra_allocated_ports:
+            deallocate_port(p)
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

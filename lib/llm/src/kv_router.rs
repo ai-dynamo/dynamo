@@ -15,8 +15,8 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
-        ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestProgressUpdater,
+        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
     },
 };
@@ -43,6 +43,7 @@ pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
+pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
 pub mod prefill_router;
@@ -56,6 +57,7 @@ pub mod shared_cache;
 pub use dynamo_kv_router::scheduling::{
     OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore,
 };
+pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
 pub use push_router::{DirectRoutingRouter, KvPushRouter};
@@ -77,6 +79,8 @@ pub enum FindBestMatchOutcome {
         effective_overlap_blocks: f64,
         cached_tokens: usize,
         routing_hashes: Option<RoutingDecisionHashes>,
+        request_progress: Option<RequestProgressUpdater>,
+        admission_lease: Option<scheduler::AdmissionLease>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -534,12 +538,101 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_inner(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn find_best_match_details_with_admission(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_inner(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn find_best_match_details_with_policy_class_inner(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        use_admission: bool,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states {
+        let mode = if update_states && use_admission {
+            ScheduleMode::TrackedWithAdmission {
+                request_id: context_id.expect("validated above").to_string(),
+            }
+        } else if update_states {
             ScheduleMode::Tracked {
                 request_id: context_id.expect("validated above").to_string(),
             }
@@ -696,6 +789,8 @@ where
             effective_overlap_blocks: response.effective_overlap_blocks,
             cached_tokens: response.cached_tokens,
             routing_hashes,
+            request_progress: response.request_progress,
+            admission_lease: response.admission_lease,
         })
     }
 
@@ -805,6 +900,11 @@ where
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
+    pub async fn mark_dispatched(&self, request_id: &str) {
+        self.scheduler.mark_dispatched(request_id).await;
+    }
+
+    /// Legacy slot cleanup. Admission-managed requests use their `AdmissionLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }

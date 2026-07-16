@@ -30,6 +30,7 @@ from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
+    clear_kv_blocks_payload,
     completion_payload_default,
     completion_payload_with_logprobs,
     elastic_ep_scale_payload,
@@ -163,7 +164,7 @@ vllm_configs = {
         name="aggregated_unified",
         directory=vllm_dir,
         script_name="agg.sh",
-        script_args=["--unified"],
+        script_args=["--unified", "--enable-prefix-caching"],
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
@@ -177,6 +178,7 @@ vllm_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            clear_kv_blocks_payload(),
             guided_decoding_chat_payload_default(),
         ],
     ),
@@ -362,8 +364,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2263"),
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             router_selection_chat_payload_default(),
@@ -379,8 +381,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2264"),
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)

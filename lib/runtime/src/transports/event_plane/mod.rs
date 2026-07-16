@@ -120,11 +120,10 @@ async fn resolve_zmq_broker(
         }));
     }
 
-    // Priority 2: Discovery-based lookup if DYN_ZMQ_BROKER_ENABLED=true
-    if std::env::var(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_ENABLED)
-        .unwrap_or_default()
-        == "true"
-    {
+    // Priority 2: Discovery-based lookup if DYN_ZMQ_BROKER_ENABLED is truthy
+    if crate::config::env_is_truthy(
+        crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+    ) {
         let query = DiscoveryQuery::EventChannels(EventChannelQuery::component(
             scope.namespace().to_string(),
             "zmq_broker".to_string(),
@@ -150,7 +149,7 @@ async fn resolve_zmq_broker(
 
         if xsub_endpoints.is_empty() {
             anyhow::bail!(
-                "DYN_ZMQ_BROKER_ENABLED=true but no broker found in discovery for namespace '{}'",
+                "DYN_ZMQ_BROKER_ENABLED is set but no broker found in discovery for namespace '{}'",
                 scope.namespace()
             );
         }
@@ -243,16 +242,14 @@ impl Stream for DeduplicatingStream {
             match Pin::new(&mut self.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
                     // Decode envelope to extract publisher_id and sequence
-                    match self.codec.decode_envelope(&bytes) {
-                        Ok(envelope) => {
-                            let key = (envelope.publisher_id, envelope.sequence);
-
+                    match self.codec.decode_envelope_identity(&bytes) {
+                        Ok(key) => {
                             // Check if we've seen this event before
                             if self.seen_events.contains(&key) {
                                 // Duplicate - skip and continue loop
                                 tracing::debug!(
-                                    publisher_id = envelope.publisher_id,
-                                    sequence = envelope.sequence,
+                                    publisher_id = key.0,
+                                    sequence = key.1,
                                     "Filtered duplicate event from multi-broker setup"
                                 );
                                 continue;

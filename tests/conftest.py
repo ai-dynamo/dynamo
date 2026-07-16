@@ -24,7 +24,7 @@ from tests.utils.collection_env_guard import (
     format_collection_env_changes,
     snapshot_collection_env,
 )
-from tests.utils.constants import TEST_MODELS, DefaultPort
+from tests.utils.constants import TEST_MODELS, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
     ServicePorts,
@@ -1322,15 +1322,15 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
     # rather than leaking them until stale cleanup and exhausting the xdist pool.
     all_ports: list[int] = []
     try:
-        frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+        frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
         all_ports.append(frontend_port)
-        system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
+        system_port_list = allocate_ports(num_system_ports, DynamoPortRange.SERVE.value)
         all_ports.extend(system_port_list)
-        kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
+        kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
         all_ports.append(kv_event_port)
         # One NIXL side-channel port per worker (avoids xdist collisions on shared hosts).
         nixl_side_channel_ports = allocate_ports(
-            num_system_ports, DefaultPort.SYSTEM1.value
+            num_system_ports, DynamoPortRange.NIXL.value
         )
         all_ports.extend(nixl_side_channel_ports)
         yield ServicePorts(

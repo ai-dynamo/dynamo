@@ -11,10 +11,10 @@ This guide walks you through installing everything needed to deploy models with 
 
 Before you begin, make sure you have:
 
-- A **Kubernetes cluster (v1.24+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
+- A **Kubernetes cluster (v1.30+)** with GPU-capable nodes. See the cloud provider guides if you need to create one:
   - [Amazon EKS](cloud-providers/eks/eks.md) | [Azure AKS](cloud-providers/aks/aks.md) | [Google GKE](cloud-providers/gke/gke.md)
   - For local development: [Minikube Setup](deployment/minikube.md)
-- **kubectl** v1.24+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
+- **kubectl** v1.30+ — [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl)
 - **Helm** v3.0+ — [Install Helm](https://helm.sh/docs/intro/install/)
 
 > [!IMPORTANT]
@@ -23,7 +23,7 @@ Before you begin, make sure you have:
 Verify your tools:
 
 ```bash
-kubectl version --client  # Should show v1.24+
+kubectl version --client  # Should show v1.30+
 helm version              # Should show v3.0+
 ```
 
@@ -83,7 +83,7 @@ Set your environment variables:
 
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.0.2  # match a version from https://github.com/ai-dynamo/dynamo/releases
+export RELEASE_VERSION=1.2.1  # match a version from https://github.com/ai-dynamo/dynamo/releases
 ```
 
 ```bash
@@ -117,7 +117,9 @@ helm install dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
 > ```
 
 > [!WARNING]
-> **Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use the default cluster-wide mode for all new deployments.
+> **Namespace-restricted mode** (`namespaceRestriction.enabled=true`) is only for development and
+> testing. It is not supported for production. Set `dynamo-operator.upgradeCRD=false`; see
+> [Dynamo Operator](dynamo-operator.md#namespace-restricted-mode).
 
 Verify the Dynamo platform is running:
 
@@ -246,13 +248,15 @@ Found existing namespace-restricted Dynamo operators in namespaces: ...
 
 Cause: Attempting cluster-wide install on a shared cluster with existing namespace-restricted operators.
 
-Solution: Migrate the existing namespace-restricted operators to cluster-wide mode. Namespace-restricted mode is deprecated.
+Solution: Remove the development/test namespace-restricted operators, then install one cluster-wide
+operator for production use.
 
 **CRDs already exist**
 
 Cause: Installing CRDs on a cluster where they're already present (common on shared clusters).
 
-Solution: CRDs are installed automatically by the Helm chart. If you encounter conflicts, check existing CRDs with `kubectl get crd | grep dynamo`.
+Solution: The cluster-wide operator's `crd-apply` init container manages CRDs automatically. If you
+encounter conflicts, check existing CRDs with `kubectl get crd | grep dynamo`.
 
 **Pods not starting?**
 ```bash

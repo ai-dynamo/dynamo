@@ -133,6 +133,38 @@ type DynamoGraphDeploymentStatus struct {
 	Placement *PlacementStatus `json:"placement,omitempty"`
 }
 
+// DGD Ready condition reasons used to classify Grove-backed not-ready
+// deployments on status.conditions[type=Ready].reason. These distinguish
+// capacity/scheduling blockers from pods that are scheduled but not yet
+// runtime-ready.
+const (
+	// DGDReadyReasonAllResourcesReady: every component is fully ready. This is
+	// the pre-existing success reason, unchanged.
+	DGDReadyReasonAllResourcesReady = "all_resources_are_ready"
+
+	// DGDReadyReasonInsufficientCapacity: at least one component is blocked
+	// before runtime readiness because Grove reports insufficient scheduled
+	// replicas, schedule-gated pods, or a scheduling/capacity condition.
+	DGDReadyReasonInsufficientCapacity = "insufficient_capacity"
+
+	// DGDReadyReasonPodsNotReady: required pods are scheduled, but at least
+	// one component does not have enough ready/available replicas.
+	DGDReadyReasonPodsNotReady = "pods_not_ready"
+
+	// DGDReadyReasonUpdating: scheduling is sufficient, but at least one
+	// component has not finished rolling out updated replicas.
+	DGDReadyReasonUpdating = "updating"
+
+	// DGDReadyReasonMixedNotReadyReasons: more than one not-ready component
+	// exists and they don't all share the same classification.
+	DGDReadyReasonMixedNotReadyReasons = "mixed_not_ready_reasons"
+
+	// DGDReadyReasonSomeResourcesNotReady: fallback used when the controller
+	// cannot classify the cause of a not-ready component. This is the
+	// pre-existing generic not-ready reason, unchanged.
+	DGDReadyReasonSomeResourcesNotReady = "some_resources_are_not_ready"
+)
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgd

@@ -29,8 +29,9 @@ use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionError, SelectionService as RustSelectionService,
-    SelectionServiceBuilder, SelectionServiceConfig, WorkerPatchRequest, WorkerRequest,
+    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
+    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
+    WorkerPatchRequest, WorkerRequest,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -292,6 +293,18 @@ struct SelectServiceCli {
     /// Comma-separated ZMQ PUB endpoints for peer selectors
     #[arg(long, value_delimiter = ',', requires = "replica_sync_port")]
     replica_sync_peers: Vec<String>,
+
+    /// Seconds an unclaimed pending selection lives before eviction
+    #[arg(long)]
+    selection_cache_ttl_secs: Option<f64>,
+
+    /// Maximum number of resident pending selections
+    #[arg(long)]
+    selection_cache_max_entries: Option<usize>,
+
+    /// Approximate byte budget across resident pending selections
+    #[arg(long)]
+    selection_cache_max_bytes: Option<usize>,
 }
 
 #[cfg(all(test, feature = "select-service"))]
@@ -330,6 +343,29 @@ mod select_service_cli_tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
     }
+
+    #[test]
+    fn parses_selection_cache_overrides() {
+        let cli = SelectServiceCli::try_parse_from([
+            "dynamo.select_service",
+            "--selection-cache-ttl-secs",
+            "30",
+            "--selection-cache-max-entries",
+            "100",
+            "--selection-cache-max-bytes",
+            "1048576",
+        ])
+        .unwrap();
+
+        let config = selection_cache_config_from_overrides(
+            cli.selection_cache_ttl_secs,
+            cli.selection_cache_max_entries,
+            cli.selection_cache_max_bytes,
+        );
+        assert_eq!(config.ttl, std::time::Duration::from_secs(30));
+        assert_eq!(config.max_entries, 100);
+        assert_eq!(config.max_bytes, 1_048_576);
+    }
 }
 
 pub fn run_select_service_cli<I, T>(args: I) -> anyhow::Result<()>
@@ -354,6 +390,11 @@ where
             replica_sync_port: cli.replica_sync_port,
             replica_sync_peers: cli.replica_sync_peers,
             kv_router_config: kv_router_config_from_dynamo_env(),
+            selection_cache: selection_cache_config_from_overrides(
+                cli.selection_cache_ttl_secs,
+                cli.selection_cache_max_entries,
+                cli.selection_cache_max_bytes,
+            ),
         }))
     }
 
@@ -386,6 +427,49 @@ fn selection_to_pyerr(err: SelectionError) -> PyErr {
     })
 }
 
+/// Build a [`RsSelectionCacheConfig`] from optional overrides, falling back to
+/// the service default for each field left unset. Shared by the Python
+/// `SelectionCacheConfig` and the `dynamo.select_service` CLI.
+#[cfg(feature = "select-service")]
+fn selection_cache_config_from_overrides(
+    ttl_secs: Option<f64>,
+    max_entries: Option<usize>,
+    max_bytes: Option<usize>,
+) -> RsSelectionCacheConfig {
+    let mut config = RsSelectionCacheConfig::default();
+    if let Some(ttl_secs) = ttl_secs {
+        config.ttl = std::time::Duration::from_secs_f64(ttl_secs);
+    }
+    if let Some(max_entries) = max_entries {
+        config.max_entries = max_entries;
+    }
+    if let Some(max_bytes) = max_bytes {
+        config.max_bytes = max_bytes;
+    }
+    config
+}
+
+/// Bounds for the in-flight selection cache. Each field defaults to the
+/// service default when omitted.
+#[cfg(feature = "select-service")]
+#[pyclass]
+#[derive(Clone, Default)]
+pub(crate) struct SelectionCacheConfig {
+    inner: RsSelectionCacheConfig,
+}
+
+#[cfg(feature = "select-service")]
+#[pymethods]
+impl SelectionCacheConfig {
+    #[new]
+    #[pyo3(signature = (*, ttl_secs = None, max_entries = None, max_bytes = None))]
+    fn new(ttl_secs: Option<f64>, max_entries: Option<usize>, max_bytes: Option<usize>) -> Self {
+        Self {
+            inner: selection_cache_config_from_overrides(ttl_secs, max_entries, max_bytes),
+        }
+    }
+}
+
 /// In-process handle to a managed Dynamo `SelectionService`.
 #[cfg(feature = "select-service")]
 #[pyclass]
@@ -398,13 +482,14 @@ pub(crate) struct SelectionService {
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None))]
     fn new(
         py: Python<'_>,
         indexer_threads: usize,
         indexer_peers: Option<Vec<String>>,
         replica_sync_port: Option<u16>,
         replica_sync_peers: Option<Vec<String>>,
+        selection_cache: Option<SelectionCacheConfig>,
     ) -> PyResult<Self> {
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
         if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
@@ -414,7 +499,8 @@ impl SelectionService {
         }
         let mut builder = SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
             .indexer_threads(indexer_threads)
-            .indexer_peers(indexer_peers.unwrap_or_default());
+            .indexer_peers(indexer_peers.unwrap_or_default())
+            .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
@@ -550,7 +636,8 @@ impl SelectionService {
         })
     }
 
-    /// Book a request's load against a chosen worker (dict, see `ReservationRequest`).
+    /// Book a request's load (dict, see `ReservationRequest`): replay a cached
+    /// selection via `selection_id`, or book self-contained via `worker_id`.
     fn create_reservation<'p>(
         &self,
         py: Python<'p>,
@@ -572,11 +659,11 @@ impl SelectionService {
     fn prefill_complete<'p>(
         &self,
         py: Python<'p>,
-        reservation_id: String,
+        selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            core.prefill_complete(&reservation_id)
+            core.prefill_complete(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
             Ok(())
@@ -584,14 +671,10 @@ impl SelectionService {
     }
 
     /// Record one decode output block for a reservation, advancing its decode load.
-    #[pyo3(signature = (reservation_id, *, decay_fraction = None))]
-    fn add_output_block(
-        &self,
-        reservation_id: String,
-        decay_fraction: Option<f64>,
-    ) -> PyResult<()> {
+    #[pyo3(signature = (selection_id, *, decay_fraction = None))]
+    fn add_output_block(&self, selection_id: String, decay_fraction: Option<f64>) -> PyResult<()> {
         self.inner
-            .add_output_block(&reservation_id, decay_fraction)
+            .add_output_block(&selection_id, decay_fraction)
             .map_err(selection_to_pyerr)
     }
 
@@ -599,11 +682,11 @@ impl SelectionService {
     fn free_reservation<'p>(
         &self,
         py: Python<'p>,
-        reservation_id: String,
+        selection_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
         let core = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            core.free_reservation(&reservation_id)
+            core.free_reservation(&selection_id)
                 .await
                 .map_err(selection_to_pyerr)?;
             Ok(())
@@ -709,7 +792,7 @@ mod selection_service_lifecycle_tests {
     #[test]
     fn idempotent_shutdown() {
         let service =
-            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None)).unwrap();
+            Python::with_gil(|py| SelectionService::new(py, 1, None, None, None, None)).unwrap();
         Python::with_gil(|py| {
             service.shutdown(py);
             service.shutdown(py);
@@ -904,11 +987,12 @@ impl KvEventPublisher {
     ///         so that routers can recover events directly from this worker.
     ///     zmq_endpoint: Optional ZMQ SUB endpoint to read raw engine events from.
     ///     zmq_topic: ZMQ topic filter (default "").
-    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to accumulate
-    ///         events into a single batch before flushing.
-    ///         ``None`` disables batching: every event is published immediately.
-    ///         ``50`` to enable batching with a 50 ms window.
-    ///         ``0`` is treated as ``None`` (also disables batching).
+    ///     batching_timeout_ms: Maximum time (in **milliseconds**) to retain a
+    ///         compatible pending tail across input lists. ``None`` and ``0``
+    ///         disable cross-list timeout batching and flush at each input-list
+    ///         boundary. A ZMQ input list is one native SGLang/vLLM event batch,
+    ///         so compatible events within that list are still coalesced.
+    ///         Use ``50`` to allow compatible tails to span lists for up to 50 ms.
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
     #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]

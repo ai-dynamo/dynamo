@@ -11,7 +11,6 @@ in-process GMS server.
 from __future__ import annotations
 
 import asyncio
-import itertools
 import os
 import signal
 import socket
@@ -33,7 +32,8 @@ if not HAS_GMS:
 if HAS_PYNVML:
     import pynvml
 
-from gpu_memory_service.client import memory_manager as client_memory_manager
+import gpu_memory_service.common.vmm as _vmm_module
+from _fake_vmm import FakeVMM
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleMemoryLayoutError,
@@ -47,7 +47,7 @@ from gpu_memory_service.common.protocol.messages import (
     GetRuntimeStateRequest,
     GetRuntimeStateResponse,
 )
-from gpu_memory_service.server import allocations as server_allocations
+from gpu_memory_service.common.vmm import VMMDeviceType
 from gpu_memory_service.server.allocations import GMSAllocationManager
 from gpu_memory_service.server.fsm import ServerState
 from gpu_memory_service.server.rpc import GMSRPCServer
@@ -229,81 +229,12 @@ class _WhiteBoxServerThread:
 
 @pytest.fixture
 def running_gms(monkeypatch, tmp_path):
-    server_handles = itertools.count(1000)
-    client_handles = itertools.count(10000)
-    next_va = itertools.count(0x100000, 0x10000)
+    fake_vmm = FakeVMM()
 
-    monkeypatch.setattr(server_allocations, "cuda_ensure_initialized", lambda: None)
-    monkeypatch.setattr(
-        server_allocations,
-        "cumem_get_allocation_granularity",
-        lambda device: 4096,
-    )
-    monkeypatch.setattr(
-        server_allocations,
-        "cumem_create_tolerate_oom",
-        lambda size, device: (True, next(server_handles)),
-    )
-    monkeypatch.setattr(server_allocations, "cumem_release", lambda handle: None)
-
-    def export_fd(handle: int) -> int:
-        read_fd, write_fd = os.pipe()
-        os.close(write_fd)
-        return read_fd
-
-    monkeypatch.setattr(
-        server_allocations, "cumem_export_to_shareable_handle", export_fd
-    )
-
-    monkeypatch.setattr(client_memory_manager, "cuda_ensure_initialized", lambda: None)
-    monkeypatch.setattr(
-        client_memory_manager,
-        "cuda_set_current_device",
-        lambda device: None,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        client_memory_manager,
-        "cumem_get_allocation_granularity",
-        lambda device: 4096,
-    )
-    monkeypatch.setattr(
-        client_memory_manager,
-        "cumem_create_tolerate_oom",
-        lambda size, device: (True, next(client_handles)),
-    )
-    monkeypatch.setattr(client_memory_manager, "cuda_synchronize", lambda: None)
-    monkeypatch.setattr(
-        client_memory_manager,
-        "cumem_address_reserve",
-        lambda size, granularity: next(next_va),
-    )
-    monkeypatch.setattr(
-        client_memory_manager,
-        "cumem_address_free",
-        lambda va, size: None,
-    )
-    monkeypatch.setattr(
-        client_memory_manager, "cumem_map", lambda va, size, handle: None
-    )
-    monkeypatch.setattr(
-        client_memory_manager,
-        "cumem_set_access",
-        lambda va, size, device, mode: None,
-    )
-    monkeypatch.setattr(client_memory_manager, "cumem_unmap", lambda va, size: None)
-    monkeypatch.setattr(client_memory_manager, "cumem_release", lambda handle: None)
-    monkeypatch.setattr(client_memory_manager, "cuda_validate_pointer", lambda va: True)
-
-    def import_fd(fd: int) -> int:
-        os.close(fd)
-        return next(client_handles)
-
-    monkeypatch.setattr(
-        client_memory_manager,
-        "cumem_import_from_shareable_handle_close_fd",
-        import_fd,
-    )
+    # Inject fake VMM into the process-global singleton so that
+    # GMSAllocationManager and GMSClientMemoryManager both use it.
+    monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
+    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.CUDA)
 
     socket_path = str(tmp_path / "gms.sock")
     server = GMSRPCServer(socket_path, device=0, allocation_retry_interval=0.01)
@@ -986,29 +917,20 @@ def test_scratch_reallocation_keeps_committed_allocation_on_cuda_granularity(
 async def test_allocation_manager_caches_exported_fd(monkeypatch):
     export_calls = 0
 
-    monkeypatch.setattr(server_allocations, "cuda_ensure_initialized", lambda: None)
-    monkeypatch.setattr(
-        server_allocations,
-        "cumem_get_allocation_granularity",
-        lambda device: 4096,
-    )
-    monkeypatch.setattr(
-        server_allocations,
-        "cumem_create_tolerate_oom",
-        lambda size, device: (True, 4242),
-    )
-    monkeypatch.setattr(server_allocations, "cumem_release", lambda handle: None)
+    class _CountingVMM(FakeVMM):
+        def create_tolerate_oom(self, size, device):
+            return (True, 4242)
 
-    def export_fd(handle: int) -> int:
-        nonlocal export_calls
-        export_calls += 1
-        read_fd, write_fd = os.pipe()
-        os.close(write_fd)
-        return read_fd
+        def export_to_shareable_handle(self, handle):
+            nonlocal export_calls
+            export_calls += 1
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            return read_fd
 
-    monkeypatch.setattr(
-        server_allocations, "cumem_export_to_shareable_handle", export_fd
-    )
+    fake_vmm = _CountingVMM()
+    monkeypatch.setattr(_vmm_module, "_vmm_instance", fake_vmm)
+    monkeypatch.setattr(_vmm_module, "_vmm_device_type", VMMDeviceType.CUDA)
 
     allocations = GMSAllocationManager(device=0)
     info = await allocations.allocate(size=4096, tag="weights")

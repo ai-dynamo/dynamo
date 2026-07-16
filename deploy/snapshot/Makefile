@@ -68,6 +68,7 @@ build: fmt vet ## Build snapshot-agent binary.
 docker-build-agent: ## Build snapshot-agent docker image (linux/amd64 only).
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target agent \
 		$(CRIU_BUILD_ARGS) \
+		--build-context operator=../operator \
 		-t ${IMG} .
 
 .PHONY: docker-build-placeholder
@@ -83,6 +84,7 @@ endif
 	if [ -z "$$BASE_IMAGE_USER" ]; then BASE_IMAGE_USER=root; fi; \
 	$(CONTAINER_TOOL) build --platform ${RUNTIME_IMAGE_PLATFORM} --target placeholder \
 		$(CRIU_BUILD_ARGS) \
+		--build-context operator=../operator \
 		--build-arg BASE_IMAGE=${PLACEHOLDER_BASE_IMG} \
 		--build-arg BASE_IMAGE_USER=$$BASE_IMAGE_USER \
 		-t ${PLACEHOLDER_IMG} .
