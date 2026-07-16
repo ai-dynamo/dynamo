@@ -650,10 +650,6 @@ impl HttpService {
         self.state().anthropic_api_enabled()
     }
 
-    pub fn generate_api_enabled(&self) -> bool {
-        self.enabled_generate_backends.any()
-    }
-
     pub(crate) fn enabled_generate_backends(&self) -> EnabledGenerateBackends {
         self.enabled_generate_backends
     }
@@ -1557,11 +1553,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn generate_api_enabled_reports_resolved_startup_gate() {
+    fn generate_backends_report_resolved_startup_gate() {
         temp_env::with_var_unset(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
             temp_env::with_var_unset(SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
                 let disabled = HttpService::builder().build().unwrap();
-                assert!(!disabled.generate_api_enabled());
                 assert!(
                     disabled
                         .enabled_generate_backends()
@@ -1591,8 +1586,6 @@ mod tests {
                         SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
                     ]
                 );
-                assert!(enabled.generate_api_enabled());
-
                 for (variable, expected_path, unexpected_path, expected_capability) in [
                     (
                         VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV,
@@ -1609,7 +1602,6 @@ mod tests {
                 ] {
                     temp_env::with_var(variable, Some("1"), || {
                         let enabled = HttpService::builder().build().unwrap();
-                        assert!(enabled.generate_api_enabled());
                         let route_docs: Vec<_> = enabled
                             .route_docs()
                             .iter()

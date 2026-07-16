@@ -65,21 +65,22 @@ impl GenerateBackend {
         }
     }
 
-    fn envelope_key(self) -> &'static str {
-        match self {
-            Self::Vllm => "vllm_tito",
-            Self::Sglang => "sglang_tito",
-        }
-    }
-
     fn worker_envelope(
         self,
         request: &GenerateRequest,
         request_id: &str,
-    ) -> serde_json::Result<serde_json::Value> {
+    ) -> serde_json::Result<(&'static str, serde_json::Value)> {
         match self {
-            Self::Vllm => serde_json::to_value(VllmTitoEnvelope::new(request, request_id)),
-            Self::Sglang => serde_json::to_value(SglangTitoEnvelope::new(request)),
+            Self::Vllm => Ok((
+                "vllm_tito",
+                serde_json::to_value(VllmTitoEnvelope::new(request, request_id))?,
+            )),
+            Self::Sglang => Ok((
+                "sglang_tito",
+                serde_json::to_value(SglangTitoEnvelope {
+                    sampling_params: &request.sampling_params,
+                })?,
+            )),
         }
     }
 }
@@ -268,14 +269,6 @@ struct SglangTitoEnvelope<'a> {
     sampling_params: &'a SamplingParams,
 }
 
-impl<'a> SglangTitoEnvelope<'a> {
-    fn new(request: &'a GenerateRequest) -> Self {
-        Self {
-            sampling_params: &request.sampling_params,
-        }
-    }
-}
-
 fn sglang_logprob_count(name: &str, value: Option<i32>) -> anyhow::Result<Option<u32>> {
     match value {
         Some(value) if value < 0 => {
@@ -355,11 +348,11 @@ fn preprocessed_from_generate(
     let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
     let output_options = generate_output_options(&request, backend)?;
-    let engine_tito = backend.worker_envelope(&request, request_id)?;
+    let (envelope_key, engine_tito) = backend.worker_envelope(&request, request_id)?;
     let mut extra_args = serde_json::Map::new();
     // Do not copy token_ids into this envelope. The worker reconstructs that
     // field from the canonical PreprocessedRequest token_ids after routing.
-    extra_args.insert(backend.envelope_key().to_string(), engine_tito);
+    extra_args.insert(envelope_key.to_string(), engine_tito);
 
     let GenerateRequest {
         token_ids,
