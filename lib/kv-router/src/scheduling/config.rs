@@ -379,15 +379,12 @@ struct KvRouterConfigSerde {
     disk_cache_hit_weight: f64,
     router_temperature: f64,
     use_kv_events: bool,
-    durable_kv_events: bool,
     router_replica_sync: bool,
     router_track_active_blocks: bool,
     router_track_output_blocks: bool,
     router_assume_kv_reuse: bool,
     router_track_prefill_tokens: bool,
     router_prefill_load_model: RouterPrefillLoadModel,
-    router_snapshot_threshold: Option<u32>,
-    router_reset_states: bool,
     router_ttl_secs: f64,
     router_queue_threshold: Option<f64>,
     #[serde(default)]
@@ -414,15 +411,12 @@ impl Default for KvRouterConfigSerde {
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
             use_kv_events: config.use_kv_events,
-            durable_kv_events: config.durable_kv_events,
             router_replica_sync: config.router_replica_sync,
             router_track_active_blocks: config.router_track_active_blocks,
             router_track_output_blocks: config.router_track_output_blocks,
             router_assume_kv_reuse: config.router_assume_kv_reuse,
             router_track_prefill_tokens: config.router_track_prefill_tokens,
             router_prefill_load_model: config.router_prefill_load_model,
-            router_snapshot_threshold: config.router_snapshot_threshold,
-            router_reset_states: config.router_reset_states,
             router_ttl_secs: config.router_ttl_secs,
             router_queue_threshold: config.router_queue_threshold,
             router_policy_config: config.router_policy_config,
@@ -473,11 +467,6 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
-    /// **Deprecated:** Enable durable KV events using NATS JetStream instead of the default event plane.
-    /// This option will be removed in a future release. The event-plane subscriber
-    /// (local_indexer mode) is now the recommended path.
-    pub durable_kv_events: bool,
-
     pub router_replica_sync: bool,
 
     /// Whether to track active blocks in the router (default: true)
@@ -501,13 +490,6 @@ pub struct KvRouterConfig {
 
     /// Optional model for estimating effective prompt-side prefill load over time.
     pub router_prefill_load_model: RouterPrefillLoadModel,
-
-    /// Threshold for triggering snapshots. If None, no snapshots will be performed.
-    #[validate(range(min = 1))]
-    pub router_snapshot_threshold: Option<u32>,
-
-    /// Whether to reset the router state on startup (default: false)
-    pub router_reset_states: bool,
 
     /// TTL for blocks in seconds (only used when use_kv_events is false, default: 120.0)
     #[validate(range(min = 0.0))]
@@ -589,15 +571,12 @@ impl Default for KvRouterConfig {
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
             use_kv_events: true,
-            durable_kv_events: false, // default to NATS Core (local indexer mode)
             router_replica_sync: false,
             router_track_active_blocks: true,
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: default_track_prefill_tokens(),
             router_prefill_load_model: RouterPrefillLoadModel::default(),
-            router_snapshot_threshold: Some(1000000),
-            router_reset_states: false,
             router_ttl_secs: 120.0,
             router_queue_threshold: None,
             router_policy_config: None,
@@ -638,15 +617,12 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
             use_kv_events: compat.use_kv_events,
-            durable_kv_events: compat.durable_kv_events,
             router_replica_sync: compat.router_replica_sync,
             router_track_active_blocks: compat.router_track_active_blocks,
             router_track_output_blocks: compat.router_track_output_blocks,
             router_assume_kv_reuse: compat.router_assume_kv_reuse,
             router_track_prefill_tokens: compat.router_track_prefill_tokens,
             router_prefill_load_model: compat.router_prefill_load_model,
-            router_snapshot_threshold: compat.router_snapshot_threshold,
-            router_reset_states: compat.router_reset_states,
             router_ttl_secs: compat.router_ttl_secs,
             router_queue_threshold: compat.router_queue_threshold,
             router_policy_config: compat.router_policy_config,
@@ -665,17 +641,6 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
 }
 
 fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationError> {
-    if config.durable_kv_events {
-        tracing::warn!(
-            "--durable-kv-events is deprecated and will be removed in a future release. \
-             The event-plane subscriber (local_indexer mode) is now the recommended path."
-        );
-    }
-    if config.durable_kv_events && !config.use_kv_events {
-        return Err(ValidationError::new(
-            "durable_kv_events requires use_kv_events=true",
-        ));
-    }
     if config.router_track_output_blocks && !config.router_track_active_blocks {
         return Err(ValidationError::new(
             "router_track_output_blocks requires router_track_active_blocks=true",

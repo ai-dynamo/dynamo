@@ -233,7 +233,6 @@ def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
 
     assert kwargs["overlap_score_credit"] == 0.0
     assert kwargs["use_kv_events"] is False
-    assert kwargs["durable_kv_events"] is False
     assert kwargs["router_track_active_blocks"] is True
     assert kwargs["router_assume_kv_reuse"] is False
     assert kwargs["router_track_prefill_tokens"] is True

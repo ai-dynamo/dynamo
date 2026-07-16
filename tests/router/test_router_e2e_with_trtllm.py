@@ -75,7 +75,6 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
         single_gpu: bool = False,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        durable_kv_events: bool = False,
         namespace: Optional[str] = None,
         gpu_start_index: int = 0,
         disaggregation_mode: Optional[str] = None,
@@ -98,7 +97,6 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             single_gpu: If True, all workers share GPU 0
             request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
 
         Note: TRT-LLM supports two forms of parallelism for routing:
               1. Multiple workers (num_workers > 1): Each worker is a separate routing target
@@ -179,10 +177,6 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             # Add optional max_seq_len if specified
             if max_seq_len is not None:
                 command.extend(["--max-seq-len", str(max_seq_len)])
-
-            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
-            if durable_kv_events:
-                command.append("--durable-kv-events")
 
             # Set tensor parallel size if specified (needed for attention DP)
             if tensor_parallel_size is not None:
@@ -365,22 +359,12 @@ def test_router_decisions_trtllm_disagg(
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
-@pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
-    [
-        ("etcd", False, "tcp"),
-    ],
-    ids=["nats_core"],
-    indirect=["durable_kv_events", "request_plane"],
-)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_trtllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
-    file_storage_backend,
     set_ucx_tls_no_mm,
-    store_backend,
-    durable_kv_events,
     request_plane,
 ):
     run_indexers_sync_test(
@@ -389,8 +373,7 @@ def test_trtllm_indexers_sync(
         engine_args=TRTLLM_ARGS,
         request=request,
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
-        store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
+        store_backend="etcd",
         request_plane=request_plane,
         block_size=TRTLLM_BLOCK_SIZE,
         model_name=MODEL_NAME,

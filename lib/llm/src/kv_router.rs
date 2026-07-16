@@ -318,7 +318,6 @@ where
         } else if kv_router_config.should_subscribe_to_kv_events() {
             indexer::start_subscriber(
                 component.clone(),
-                &kv_router_config,
                 indexer.clone(),
                 workers_with_configs.clone(),
                 model_name.clone().unwrap_or_else(|| "unknown".to_string()),

@@ -158,7 +158,7 @@ ROUTER_DISAGG_OVERLOAD_529_CASES = (
     ),
 )
 ROUND_ROBIN_MOCKER_SKIP_REASON = (
-    "Flaky on CI: tcp nondurable round-robin mocker router path timed out"
+    "Flaky on CI: TCP round-robin mocker router path timed out"
 )
 COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
     "model": "counter",
@@ -310,27 +310,23 @@ class CounterWorkerProcess:
 
 @pytest.mark.timeout(180)  # planner-profile mocker setup can exceed 120s on CI CPUs
 @pytest.mark.parametrize(
-    "router_mode,durable_kv_events,mocker_args_override",
+    "router_mode,mocker_args_override",
     [
-        pytest.param("kv", False, {}, id="kv-nondurable"),
+        pytest.param("kv", {}, id="kv"),
         pytest.param(
             "kv",
-            False,
             {"planner_profile_data": PLANNER_PROFILE_DATA_DIR},
             id="kv-planner",
         ),
         pytest.param(
             "kv",
-            False,
             {"aic_perf_model": True, "aic_system": "h200_sxm"},
             id="kv-aic",
         ),
-        pytest.param("kv", True, {}, id="kv-durable"),
-        pytest.param("round-robin", False, {}, id="roundrobin"),
-        pytest.param("random", False, {}, id="random"),
-        pytest.param("power-of-two", False, {}, id="power-of-two"),
+        pytest.param("round-robin", {}, id="roundrobin"),
+        pytest.param("random", {}, id="random"),
+        pytest.param("power-of-two", {}, id="power-of-two"),
     ],
-    indirect=["durable_kv_events"],
 )
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.skip(reason=ROUND_ROBIN_MOCKER_SKIP_REASON)
@@ -340,7 +336,6 @@ def test_mocker_router(
     predownload_tokenizers,
     router_mode,
     request_plane,
-    durable_kv_events,
     mocker_args_override,
 ):
     """Test router with multiple mocker engine instances across all router modes.
@@ -352,11 +347,9 @@ def test_mocker_router(
         f"Starting mocker router test: router_mode={router_mode}, request_plane={request_plane}"
     )
 
-    # Create mocker args dictionary - use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
     }
     mocker_args.update(mocker_args_override)
 
@@ -380,22 +373,17 @@ def test_mocker_router(
 
 @pytest.mark.timeout(180)
 @pytest.mark.parametrize("router_mode", ["kv", "round-robin", "random"])
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_mocker_router_soak(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     router_mode,
-    durable_kv_events,
     request_plane,
 ):
     mocker_args = {
         "speedup_ratio": 1000.0,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
     }
 
     run_basic_router_test(
@@ -417,9 +405,6 @@ def test_mocker_router_soak(
 
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)  # Use NATS Core (local indexer)
 @pytest.mark.timeout(180)  # bumped for xdist contention (was 60s; ~19.86s serial avg)
 def test_mocker_two_kv_router(
     request,
@@ -427,7 +412,6 @@ def test_mocker_two_kv_router(
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
-    durable_kv_events,
 ):
     """
     Test with two KV routers and multiple mocker engine instances.
@@ -440,11 +424,9 @@ def test_mocker_two_kv_router(
         f"Starting mocker two KV router test with {store_backend} storage backend"
     )
 
-    # Create mocker args dictionary - use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
     }
 
     with MockerProcess(
@@ -469,7 +451,6 @@ def test_mocker_two_kv_router(
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             store_backend=store_backend,
-            skip_consumer_verification=not durable_kv_events,  # Skip JetStream checks in NATS Core mode
         )
 
 
@@ -486,7 +467,6 @@ def test_mocker_session_affinity(
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": False,
     }
 
     with MockerProcess(
@@ -505,28 +485,22 @@ def test_mocker_session_affinity(
         )
 
 
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)  # Use NATS Core (local indexer)
 @pytest.mark.parametrize("overload_config", ROUTER_OVERLOAD_529_CASES)
 @pytest.mark.timeout(45)  # ~3x average (~13.10s), rounded up (when enabled)
 def test_mocker_kv_router_overload_529(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    durable_kv_events,
     monkeypatch,
     overload_config,
 ):
     """Test that KV router returns 529 when mocker workers are overloaded."""
     monkeypatch.setenv("DYN_LOG", ROUTER_OVERLOAD_DEBUG_DYN_LOG)
     logger.info("Starting mocker KV router overload test for 529 status")
-    # Create mocker args dictionary with limited resources - use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": 0.01,
         "block_size": 4,  # Smaller block size
         "num_gpu_blocks": 64,  # Limited GPU blocks to exhaust quickly
-        "durable_kv_events": durable_kv_events,
     }
 
     with MockerProcess(request, mocker_args=mocker_args, num_mockers=1) as mockers:
@@ -548,12 +522,9 @@ def test_mocker_kv_router_overload_529(
         )
 
 
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)  # Use NATS Core (local indexer)
 @pytest.mark.timeout(45)
 def test_mocker_kv_router_threshold_none_disables_rejection(
-    request, runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events
+    request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
     """Test that explicit CLI None thresholds disable KV router overload rejection."""
     logger.info("Starting mocker KV router explicit-None threshold test")
@@ -561,7 +532,6 @@ def test_mocker_kv_router_threshold_none_disables_rejection(
         "speedup_ratio": 0.01,
         "block_size": 4,
         "num_gpu_blocks": 64,
-        "durable_kv_events": durable_kv_events,
     }
 
     with MockerProcess(request, mocker_args=mocker_args, num_mockers=1) as mockers:
@@ -582,23 +552,17 @@ def test_mocker_kv_router_threshold_none_disables_rejection(
 
 @pytest.mark.timeout(90)  # bumped for xdist contention (was 22s; ~7.10s serial avg)
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)  # Use NATS Core (local indexer)
 def test_kv_router_bindings(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     request_plane,
-    durable_kv_events,
 ):
     """Test KvRouter Python bindings with mocker engines."""
     logger.info("Starting KvRouter bindings test")
-    # Use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
     }
 
     with (
@@ -630,20 +594,18 @@ def test_kv_router_bindings(
 
 
 @pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
+    "store_backend,request_plane",
     [
-        ("etcd", True, "nats"),  # JetStream mode - uses JetStream
-        ("etcd", False, "tcp"),  # NATS core mode (with gap detection) - no JetStream
-        ("file", True, "nats"),  # File backend - uses JetStream
+        ("etcd", "tcp"),
+        ("file", "nats"),
     ],
     ids=[
-        "jetstream",
-        "nats_core",
+        "etcd",
         "file",
     ],
-    indirect=["request_plane", "durable_kv_events"],
+    indirect=["request_plane"],
 )
-# Known flake (nats_core, file variants): Router and Standalone indexer occasionally
+# Known flake: Router and Standalone indexer occasionally
 # disagree on event count by 3-4 events (e.g. "Router 1 has 105 events, Standalone A
 # has 102 events"). Race in event-sync convergence — needs root-cause investigation,
 # not a retry.
@@ -654,21 +616,17 @@ def test_indexers_sync(
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
-    durable_kv_events,
     request_plane,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
     This test verifies that both routers converge to the same internal state.
 
-    Tests with three configurations:
-    - jetstream: etcd backend, JetStream for KV events, NATS request plane
-    - nats_core: etcd backend, NATS Core with gap detection, TCP request plane
-    - file: file backend, JetStream for KV events, NATS request plane
+    Tests with etcd and file discovery backends.
     """
     logger.info(
         f"Starting indexers sync test: store_backend={store_backend}, "
-        f"durable_kv_events={durable_kv_events}, request_plane={request_plane}"
+        f"request_plane={request_plane}"
     )
 
     # Create mocker args dictionary
@@ -676,7 +634,6 @@ def test_indexers_sync(
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
         "dp_size": 2,
     }
 
@@ -687,7 +644,6 @@ def test_indexers_sync(
         request=request,
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
         store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
         request_plane=request_plane,
         block_size=BLOCK_SIZE,
         model_name=MODEL_NAME,
@@ -704,19 +660,14 @@ def test_indexers_sync(
 
 
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 42s; ~13.80s serial avg)
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)  # Use NATS Core (local indexer)
 def test_query_instance_id_returns_worker_and_tokens(
-    request, runtime_services_dynamic_ports, predownload_tokenizers, durable_kv_events
+    request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
     """Test query_instance_id annotation with mocker engines."""
     logger.info("Starting KV router query_instance_id annotation test")
-    # Use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
     }
 
     with MockerProcess(
@@ -742,23 +693,14 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "durable_kv_events,use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
+    "use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
     [
-        (True, True, False, False, None, None),  # JetStream mode with KV events
+        (True, False, False, None, None),  # Event plane with local indexer
+        (True, False, False, 5.0, None),  # Event plane with local side indexer
+        (True, False, True, None, None),  # Event plane with remote indexer
+        (True, False, True, 5.0, None),  # Remote plus local side indexer
+        (False, False, False, None, None),  # Approximate (--no-kv-events)
         (
-            False,
-            True,
-            False,
-            False,
-            None,
-            None,
-        ),  # NATS Core mode with local indexer (default)
-        (False, True, False, False, 5.0, None),  # NATS Core with local side indexer
-        (False, True, False, True, None, None),  # NATS Core with remote indexer
-        (False, True, False, True, 5.0, None),  # Remote plus local side indexer
-        (False, False, False, False, None, None),  # Approximate (--no-kv-events)
-        (
-            False,
             False,
             False,
             True,
@@ -766,25 +708,23 @@ def test_query_instance_id_returns_worker_and_tokens(
             None,
         ),  # Approximate mode with a singleton served remote indexer
         # Raw engine ZMQ → relay → ZMQ event plane, with no NATS service.
-        (False, True, True, False, None, "zmq"),
+        (True, True, False, None, "zmq"),
     ],
     ids=[
-        "jetstream",
-        "nats_core",
-        "nats_core_predict_on_route",
-        "nats_core_remote",
-        "nats_core_remote_predict_on_route",
+        "local_indexer",
+        "local_indexer_predict_on_route",
+        "remote_indexer",
+        "remote_indexer_predict_on_route",
         "no_kv_events",
         "no_kv_events_remote",
         "zmq_nats_free",
     ],
-    indirect=["durable_kv_events", "event_plane"],
+    indirect=["event_plane"],
 )
 def test_router_decisions(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    durable_kv_events,
     use_kv_events,
     request_plane,
     raw_kv_events,
@@ -795,9 +735,8 @@ def test_router_decisions(
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
 
     Parameterized to test:
-    - JetStream mode: KV events via NATS JetStream (durable)
-    - NATS Core mode (default): KV events via NATS Core with local indexer on workers
-    - NATS Core mode with a served remote indexer
+    - Event-plane mode with local indexers on workers
+    - Event-plane mode with a served remote indexer
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
       based on routing decisions with TTL-based expiration and pruning
     - Approximate mode with a singleton served remote indexer
@@ -810,21 +749,17 @@ def test_router_decisions(
 
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        "Starting test router decisions: durable_kv_events=%s, use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, event_plane=%s",
-        durable_kv_events,
+        "Starting test router decisions: use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, event_plane=%s",
         use_kv_events,
         use_remote_indexer,
         router_predicted_ttl_secs,
         event_plane,
     )
 
-    # Create mocker args dictionary with dp_size=4
-    # durable_kv_events=True enables JetStream mode; False (default) uses NATS Core with local indexer
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": 8,
         "dp_size": 4,
-        "durable_kv_events": durable_kv_events and use_kv_events,
     }
 
     process_kwargs = {
@@ -867,7 +802,6 @@ def test_router_decisions(
         engine_process_kwargs=process_kwargs,
         test_kwargs={
             "use_kv_events": use_kv_events,
-            "durable_kv_events": durable_kv_events,
             "router_predicted_ttl_secs": router_predicted_ttl_secs,
         },
     )
@@ -881,7 +815,7 @@ def test_router_decisions_router_aic(
     predownload_tokenizers,
     request_plane,
 ):
-    """Validate agg KV-router decisions with router-side AIC enabled on the NATS Core path."""
+    """Validate aggregated KV-router decisions with router-side AIC enabled."""
     logger.info("Starting agg router decisions test with router-side AIC enabled")
 
     router_aic_config = _require_router_aic()
@@ -889,7 +823,6 @@ def test_router_decisions_router_aic(
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": 8,
         "dp_size": 4,
-        "durable_kv_events": False,
     }
 
     run_router_decisions_test(
@@ -910,7 +843,6 @@ def test_router_decisions_router_aic(
         },
         test_kwargs={
             "use_kv_events": True,
-            "durable_kv_events": False,
             "router_aic_config": router_aic_config,
         },
     )
@@ -943,11 +875,9 @@ def test_router_decisions_disagg(
         f"(registration_order={registration_order}, bootstrap={enable_disagg_bootstrap})"
     )
 
-    # Create mocker args - use NATS Core with local indexer (default mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        # durable_kv_events defaults to False (NATS Core mode)
     }
 
     run_disagg_router_decisions_test(
@@ -975,16 +905,12 @@ def test_router_decisions_disagg(
     )
 
 
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)  # Use NATS Core (local indexer)
 @pytest.mark.parametrize("overload_case", ROUTER_DISAGG_OVERLOAD_529_CASES)
 @pytest.mark.timeout(120)
 def test_mocker_disagg_router_overload_529(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
-    durable_kv_events,
     monkeypatch,
     overload_case,
 ):
@@ -1010,7 +936,6 @@ def test_mocker_disagg_router_overload_529(
             "speedup_ratio": speedup,
             "block_size": 4,
             "num_gpu_blocks": 64,
-            "durable_kv_events": durable_kv_events,
         }
 
     with launch_disagg_workers(
@@ -1222,16 +1147,12 @@ def test_router_decisions_disagg_router_aic(
 
 
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
-@pytest.mark.parametrize(
-    "durable_kv_events", [False], ids=["nondurable"], indirect=True
-)  # Use NATS Core (local indexer)
 @pytest.mark.timeout(120)  # bumped for xdist contention (was 39s; ~12.84s serial avg)
 def test_busy_threshold_endpoint(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     request_plane,
-    durable_kv_events,
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -1247,11 +1168,9 @@ def test_busy_threshold_endpoint(
         f"Starting busy_threshold endpoint test with request_plane={request_plane}"
     )
 
-    # Use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
-        "durable_kv_events": durable_kv_events,
     }
 
     with MockerProcess(

@@ -106,8 +106,6 @@ def _build_mocker_command(
         )
     if "aic_tp_size" in mocker_args:
         command.extend(["--aic-tp-size", str(mocker_args["aic_tp_size"])])
-    if mocker_args.get("durable_kv_events") is True:
-        command.append("--durable-kv-events")
     if "bootstrap_ports" in mocker_args:
         command.extend(["--bootstrap-ports", mocker_args["bootstrap_ports"]])
     if "zmq_kv_events_ports" in mocker_args:

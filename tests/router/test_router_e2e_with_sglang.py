@@ -69,7 +69,6 @@ class SGLangProcess(ManagedEngineProcessMixin):
         data_parallel_size: Optional[int] = None,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
-        durable_kv_events: bool = False,
         namespace: Optional[str] = None,
         gpu_start_index: int = 0,
         disaggregation_mode: Optional[str] = None,
@@ -89,7 +88,6 @@ class SGLangProcess(ManagedEngineProcessMixin):
             data_parallel_size: If set, enables this many data-parallel ranks per worker process.
             request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-            durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
         # Generate unique namespace for isolation
         namespace_suffix = generate_random_suffix()
@@ -200,10 +198,6 @@ class SGLangProcess(ManagedEngineProcessMixin):
             kv_events_port = self._kv_event_ports[worker_idx * kv_event_rank_span]
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
-
-            # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
-            if durable_kv_events:
-                command.append("--durable-kv-events")
 
             # Each SGLang worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
             # Ports are dynamically allocated for xdist-safe parallel execution.
@@ -400,23 +394,13 @@ def test_router_decisions_sglang_disagg(
 @pytest.mark.gpu_1
 @pytest.mark.profiled_vram_gib(12.0)
 @pytest.mark.requested_sglang_kv_tokens(2048)
-@pytest.mark.parametrize(
-    "store_backend,durable_kv_events,request_plane",
-    [
-        ("etcd", False, "tcp"),
-    ],
-    ids=["nats_core"],
-    indirect=["durable_kv_events", "request_plane"],
-)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(320)  # 3x ~106s (sglang gpu_1 log)
 def test_sglang_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
-    file_storage_backend,
     set_ucx_tls_no_mm,
-    store_backend,
-    durable_kv_events,
     request_plane,
 ):
     run_indexers_sync_test(
@@ -425,8 +409,7 @@ def test_sglang_indexers_sync(
         engine_args=SGLANG_ARGS,
         request=request,
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
-        store_backend=store_backend,
-        durable_kv_events=durable_kv_events,
+        store_backend="etcd",
         request_plane=request_plane,
         block_size=PAGE_SIZE,
         model_name=MODEL_NAME,

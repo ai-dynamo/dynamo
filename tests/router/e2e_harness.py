@@ -393,7 +393,6 @@ def run_indexers_sync_test(
     request,
     runtime_services_dynamic_ports,
     store_backend: str,
-    durable_kv_events: bool,
     request_plane: str,
     block_size: int,
     model_name: str,
@@ -414,7 +413,6 @@ def run_indexers_sync_test(
             "num_workers": num_workers,
             "single_gpu": True,
             "store_backend": store_backend,
-            "durable_kv_events": durable_kv_events,
             **process_kwargs,
         },
         engine_process_kwargs=engine_process_kwargs,
@@ -427,9 +425,8 @@ def run_indexers_sync_test(
             num_workers=num_workers,
             store_backend=store_backend,
             request_plane=request_plane,
-            test_nats_interruption=not durable_kv_events,
-            nats_server=nats_process if not durable_kv_events else None,
-            durable_kv_events=durable_kv_events,
+            test_nats_interruption=request_plane == "tcp",
+            nats_server=nats_process if request_plane == "tcp" else None,
             standalone_indexer_url=getattr(
                 engine_workers, "standalone_indexer_url", None
             ),

@@ -1114,35 +1114,6 @@ def event_plane(request, monkeypatch):
     return value
 
 
-@pytest.fixture
-def durable_kv_events(request, event_plane, monkeypatch):
-    """
-    Whether to use durable KV events via JetStream. Defaults to False (NATS Core mode).
-
-    When False (default):
-    - NATS server starts without JetStream (-js flag omitted) for faster startup
-    - Workers use local indexer mode (NATS Core / fire-and-forget events)
-
-    When True:
-    - NATS server starts with JetStream for durable KV event distribution
-    - Workers use --durable-kv-events flag to publish to JetStream
-
-    To use JetStream mode:
-        @pytest.mark.parametrize("durable_kv_events", [True], indirect=True)
-        def test_example(runtime_services_dynamic_ports):
-            ...
-    """
-    value = getattr(request, "param", False)
-    if value:
-        if event_plane not in (None, "nats"):
-            raise ValueError("durable KV events require the NATS event plane")
-        # Durable/JetStream KV events only exist on the NATS event plane. ZMQ is now
-        # the default, so pin NATS here; otherwise the durable subscriber bails at
-        # startup ("--durable-kv-events requires NATS event plane").
-        monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
-    return value
-
-
 @pytest.fixture()
 def runtime_services(request, discovery_backend, request_plane):
     """
@@ -1151,7 +1122,7 @@ def runtime_services(request, discovery_backend, request_plane):
     - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
     - The event plane follows the runtime default (ZMQ); set DYN_EVENT_PLANE=nats
-      (or use durable_kv_events) for tests that need the NATS event plane.
+      for tests that need the NATS event plane.
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -1176,7 +1147,6 @@ def runtime_services_dynamic_ports(
     discovery_backend,
     request_plane,
     event_plane,
-    durable_kv_events,
     monkeypatch,
 ):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
@@ -1193,17 +1163,13 @@ def runtime_services_dynamic_ports(
     - If discovery_backend != "etcd", etcd is not started (returns None)
     - The event plane follows the runtime default (ZMQ). NATS is still started so
       the NATS opt-in paths stay available, unless a TCP test explicitly selects
-      the ZMQ event plane. durable_kv_events=True pins DYN_EVENT_PLANE=nats (see
-      the durable_kv_events fixture).
+      the ZMQ event plane.
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Start NATS when etcd is used so the NATS opt-in paths stay available.
-    # When durable_kv_events=False (default), disable JetStream for faster startup
-    nats_required = (
-        request_plane == "nats" or event_plane == "nats" or durable_kv_events
-    )
+    nats_required = request_plane == "nats" or event_plane == "nats"
     nats_free = event_plane == "zmq" and not nats_required
     if nats_free:
         monkeypatch.delenv("NATS_SERVER", raising=False)
@@ -1215,9 +1181,7 @@ def runtime_services_dynamic_ports(
             )
             yield None, etcd_process
     elif discovery_backend == "etcd":
-        with NatsServer(
-            request, port=0, disable_jetstream=not durable_kv_events
-        ) as nats_process:
+        with NatsServer(request, port=0, disable_jetstream=True) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Set environment variables for this test's dynamic ports.
                 # monkeypatch.setenv auto-restores them (including any values set by
@@ -1231,9 +1195,7 @@ def runtime_services_dynamic_ports(
 
                 yield nats_process, etcd_process
     elif nats_required:
-        with NatsServer(
-            request, port=0, disable_jetstream=not durable_kv_events
-        ) as nats_process:
+        with NatsServer(request, port=0, disable_jetstream=True) as nats_process:
             orig_nats = os.environ.get("NATS_SERVER")
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
             yield nats_process, None

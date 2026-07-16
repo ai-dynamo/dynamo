@@ -1851,15 +1851,12 @@ class KvRouterConfig:
         disk_cache_hit_weight: float = 0.25,
         router_temperature: float = 0.0,
         use_kv_events: bool = True,
-        durable_kv_events: bool = False,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
         router_assume_kv_reuse: bool = True,
         router_track_prefill_tokens: bool = True,
         router_prefill_load_model: str = "none",
-        router_snapshot_threshold: Optional[int] = 1000000,
-        router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
         router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
@@ -1886,9 +1883,6 @@ class KvRouterConfig:
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
-            durable_kv_events: **Deprecated.** Enable durable KV events using NATS JetStream (default: False).
-                This option will be removed in a future release. The event-plane subscriber
-                (local_indexer mode) is now the recommended path.
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
@@ -1901,8 +1895,6 @@ class KvRouterConfig:
             router_prefill_load_model: Prompt-side prefill load model (default: "none").
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.
-            router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
-            router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_queue_threshold: Optional queue threshold fraction for prefill token capacity (default: None).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.

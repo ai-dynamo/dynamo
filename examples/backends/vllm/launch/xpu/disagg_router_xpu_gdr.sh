@@ -25,8 +25,7 @@ export UCX_TLS=ib,rc,ze_copy
 # edit --router-mode to random / round-robin / kv
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 \
-    --router-reset-states &
+    --http-port 8000 &
 
 # two decode workers
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \
