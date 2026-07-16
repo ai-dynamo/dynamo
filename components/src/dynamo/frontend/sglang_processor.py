@@ -264,6 +264,16 @@ def _build_dynamo_preproc(
     """Build the Dynamo preprocessed request dict from request fields."""
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
+    # Inkling's native renderer represents multimodal placeholders with
+    # negative sentinel IDs (-101 for image, -102 for audio). Dynamo's Rust
+    # request boundary stores token IDs as u32, so carry signed sentinels in
+    # their two's-complement representation and restore them in the backend
+    # immediately before calling SGLang.
+    transport_token_ids = [
+        token_id if token_id >= 0 else token_id + (1 << 32)
+        for token_id in prompt_token_ids
+    ]
+
     stop = request.get("stop")
     stop_token_ids = request.get("stop_token_ids", [])
     if isinstance(stop, str):
@@ -289,7 +299,7 @@ def _build_dynamo_preproc(
 
     preproc = {
         "model": model_name,
-        "token_ids": prompt_token_ids,
+        "token_ids": transport_token_ids,
         "require_reasoning": require_reasoning,
         "stop_conditions": {
             "max_tokens": max_tokens,

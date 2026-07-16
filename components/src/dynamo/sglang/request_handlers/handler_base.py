@@ -1013,6 +1013,20 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
             request, use_tokenizer=self.use_sglang_tokenizer
         )
 
+        # Undo the frontend's u32 transport encoding for model-specific
+        # negative multimodal sentinels before SGLang validates placeholders.
+        if (
+            not self.use_sglang_tokenizer
+            and isinstance(request_input, list)
+            and request.get("multi_modal_data")
+        ):
+            request_input = [
+                token_id - (1 << 32)
+                if isinstance(token_id, int) and token_id >= (1 << 31)
+                else token_id
+                for token_id in request_input
+            ]
+
         return {
             "prompt" if isinstance(request_input, str) else "input_ids": request_input
         }
