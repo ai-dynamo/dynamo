@@ -110,6 +110,43 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
     STANDARD.encode(&bytes)
 }
 
+fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        return Err(format!(
+            "base64-decoded embedding byte length {} is not a multiple of 4",
+            bytes.len()
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+#[cfg(test)]
+mod embedding_base64_transport_tests {
+    use super::{decode_base64_to_floats, encode_floats_to_base64};
+
+    #[test]
+    fn portable_embedding_bytes_round_trip() {
+        let expected = vec![0.0, 1.0, -1.0, 3.25];
+        let encoded = encode_floats_to_base64(&expected);
+        assert_eq!(decode_base64_to_floats(&encoded).unwrap(), expected);
+    }
+
+    #[test]
+    fn portable_embedding_bytes_reject_partial_float() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let encoded = STANDARD.encode([0_u8; 5]);
+        let error = decode_base64_to_floats(&encoded).unwrap_err();
+        assert!(error.to_string().contains("not a multiple of 4"));
+    }
+}
+
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
 
@@ -2579,27 +2616,54 @@ impl OpenAIPreprocessor {
         );
         stream.map(move |output| {
             output.map_data(|engine_output| {
-                // Convert engine output to OpenAI response format
-                let embeddings: Vec<dynamo_protocols::types::Embedding> = engine_output
-                    .embeddings
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, embedding)| {
-                        let floats: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
-                        let value = if encode_base64 {
-                            dynamo_protocols::types::EmbeddingVector::Base64(
-                                encode_floats_to_base64(&floats),
-                            )
-                        } else {
-                            dynamo_protocols::types::EmbeddingVector::Float(floats)
-                        };
-                        dynamo_protocols::types::Embedding {
-                            index: index as u32,
-                            object: "embedding".to_string(),
-                            embedding: value,
+                let embeddings: Vec<dynamo_protocols::types::Embedding> =
+                    if !engine_output.embeddings_base64.is_empty() {
+                        if !engine_output.embeddings.is_empty() {
+                            return Err("embedding worker returned both float and base64 payloads"
+                                .to_string());
                         }
-                    })
-                    .collect();
+                        engine_output
+                            .embeddings_base64
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, encoded)| {
+                                let value = if encode_base64 {
+                                    dynamo_protocols::types::EmbeddingVector::Base64(encoded)
+                                } else {
+                                    dynamo_protocols::types::EmbeddingVector::Float(
+                                        decode_base64_to_floats(&encoded)?,
+                                    )
+                                };
+                                Ok::<_, String>(dynamo_protocols::types::Embedding {
+                                    index: index as u32,
+                                    object: "embedding".to_string(),
+                                    embedding: value,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?
+                    } else {
+                        engine_output
+                            .embeddings
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, embedding)| {
+                                let floats: Vec<f32> =
+                                    embedding.into_iter().map(|f| f as f32).collect();
+                                let value = if encode_base64 {
+                                    dynamo_protocols::types::EmbeddingVector::Base64(
+                                        encode_floats_to_base64(&floats),
+                                    )
+                                } else {
+                                    dynamo_protocols::types::EmbeddingVector::Float(floats)
+                                };
+                                dynamo_protocols::types::Embedding {
+                                    index: index as u32,
+                                    object: "embedding".to_string(),
+                                    embedding: value,
+                                }
+                            })
+                            .collect()
+                    };
 
                 let response = NvCreateEmbeddingResponse {
                     inner: dynamo_protocols::types::CreateEmbeddingResponse {

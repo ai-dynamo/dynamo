@@ -1392,7 +1392,11 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler.engine_client.encode = fake_encode
 
         request = {"input": ["a", "b"], "model": "test-model"}
-        responses = [r async for r in handler.generate(request, context)]
+        with patch.dict(
+            mod.os.environ,
+            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "json"},
+        ):
+            responses = [r async for r in handler.generate(request, context)]
 
         assert len(responses) == 1
         response = responses[0]
@@ -1401,16 +1405,112 @@ class TestEmbeddingWorkerHandlerCancellation:
         assert len(response["data"]) == 2
         assert response["data"][0]["index"] == 0
         assert response["data"][1]["index"] == 1
-        # The worker always emits base64 on the internal worker->frontend
-        # wire format; the Rust HTTP frontend decodes back to float at the
-        # HTTP boundary when the client asks for float. So both data items
-        # have the same base64 of [0.1, 0.2, 0.3] here.
-        expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
-        assert response["data"][0]["embedding"] == expected_b64
-        assert response["data"][1]["embedding"] == expected_b64
+        # The default baseline preserves the original JSON float payload.
+        assert response["data"][0]["embedding"] == pytest.approx([0.1, 0.2, 0.3])
+        assert response["data"][1]["embedding"] == pytest.approx([0.1, 0.2, 0.3])
         # No tasks were in flight at gather completion, so the finally
         # cancel-and-await pass must not have touched the engine.
         assert aborted == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_text_numpy_response_transport_uses_base64_bytes(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        with patch.dict(
+            mod.os.environ,
+            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "numpy"},
+        ):
+            responses = [
+                response
+                async for response in handler.generate(
+                    {"input": ["hello"], "model": "test-model"}, context
+                )
+            ]
+
+        expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
+        assert responses[0]["data"][0]["embedding"] == expected_b64
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_tokens_response_uses_engine_output_shape(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        with patch.dict(
+            mod.os.environ,
+            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "json"},
+        ):
+            responses = [
+                response
+                async for response in handler.generate(
+                    {
+                        "token_ids": [[11, 12, 13]],
+                        "model": "test-model",
+                        "encoding_format": "float",
+                    },
+                    context,
+                )
+            ]
+
+        assert responses[0]["embeddings"][0] == pytest.approx([0.1, 0.2, 0.3])
+        assert responses[0]["prompt_tokens"] == 3
+        assert responses[0]["total_tokens"] == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_tokens_numpy_response_uses_base64_engine_output_field(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = prompt["prompt_token_ids"]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+        with patch.dict(
+            mod.os.environ,
+            {mod._EMBEDDING_RESPONSE_TRANSPORT_ENV: "numpy"},
+        ):
+            responses = [
+                response
+                async for response in handler.generate(
+                    {
+                        "token_ids": [[11, 12, 13]],
+                        "model": "test-model",
+                        "encoding_format": "float",
+                    },
+                    context,
+                )
+            ]
+
+        assert responses == [
+            {
+                "embeddings": [],
+                "embeddings_base64": [
+                    mod._encode_floats_to_base64([0.1, 0.2, 0.3])
+                ],
+                "prompt_tokens": 3,
+                "total_tokens": 3,
+            }
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
@@ -1449,8 +1549,7 @@ class TestEmbeddingWorkerHandlerCancellation:
         # No post-hoc truncation: the handler returns exactly the vector vLLM
         # produced (the 128-float stub here), trusting the pooler to have
         # already applied the dimensionality reduction.
-        expected_b64 = mod._encode_floats_to_base64(vec)
-        assert responses[0]["data"][0]["embedding"] == expected_b64
+        assert responses[0]["data"][0]["embedding"] == pytest.approx(vec)
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

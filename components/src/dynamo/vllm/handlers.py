@@ -103,6 +103,9 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_EMBEDDING_RESPONSE_TRANSPORT_ENV: Final = "DYN_EMBEDDING_RESPONSE_TRANSPORT"
+_EMBEDDING_RESPONSE_TRANSPORT_JSON: Final = "json"
+_EMBEDDING_RESPONSE_TRANSPORT_NUMPY: Final = "numpy"
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -3716,9 +3719,9 @@ class EmbeddingWorkerHandler:
         model_name = request.get("model") or self.config.served_model_name or ""
         # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
         # requests carry the same logical batch as 'token_ids'.
-        input_field = request.get("input")
-        if input_field is None:
-            input_field = request.get("token_ids")
+        token_ids_batch = request.get("token_ids")
+        is_tokens_path = token_ids_batch is not None
+        input_field = token_ids_batch if is_tokens_path else request.get("input")
         if input_field is None:
             raise ValueError(
                 "Embedding request missing required 'input' or 'token_ids' field"
@@ -3744,7 +3747,9 @@ class EmbeddingWorkerHandler:
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
 
-        encoding_format = request.get("encoding_format", "float")
+        encoding_format = request.get("encoding_format")
+        if encoding_format is None:
+            encoding_format = "float"
         if encoding_format not in ("float", "base64"):
             raise ValueError(
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
@@ -3853,44 +3858,62 @@ class EmbeddingWorkerHandler:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
-        embedding_objects: list[Dict[str, Any]] = []
+        embedding_rows: list[Any] = []
         prompt_tokens = 0
-        for idx, final_output in enumerate(outputs):
-            # vLLM has already applied any ``dimensions`` Matryoshka reduction
-            # (truncate + re-normalize) inside the pooler, so this is the
-            # final per-input vector -- no post-hoc truncation here.
-            embedding = _pooling_output_to_list(final_output.outputs.data)
+        for final_output in outputs:
+            embedding_rows.append(final_output.outputs.data)
+            token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(token_ids)
 
-            # vLLM rejects an unsupported ``dimensions`` for models that
-            # declare a ``matryoshka_dimensions`` list, but a model enabled
-            # via ``--hf-overrides '{"is_matryoshka": true}'`` (no explicit
-            # list) is only validated for ``dimensions >= 1`` -- the pooler
-            # then silently clamps an oversized request to the model's native
-            # size (``embeddings[..., :dimensions]``). Surface the same clear
-            # error the old post-hoc path raised instead of returning a
-            # shorter-than-requested vector.
-            if dimensions is not None and len(embedding) < dimensions:
-                raise ValueError(
-                    f"dimensions={dimensions} exceeds model embedding "
-                    f"dimension {len(embedding)}"
+        response_transport = _embedding_response_transport()
+        if is_tokens_path:
+            if response_transport == _EMBEDDING_RESPONSE_TRANSPORT_NUMPY:
+                yield {
+                    "embeddings": [],
+                    "embeddings_base64": [
+                        _pooling_output_to_base64(row, dimensions)
+                        for row in embedding_rows
+                    ],
+                    "prompt_tokens": prompt_tokens,
+                    "total_tokens": prompt_tokens,
+                }
+            else:
+                yield {
+                    "embeddings": [
+                        _pooling_output_to_list(row) for row in embedding_rows
+                    ],
+                    "prompt_tokens": prompt_tokens,
+                    "total_tokens": prompt_tokens,
+                }
+            return
+
+        # Keep the existing JSON-float worker/frontend path as the default
+        # baseline. The NumPy transport is an explicit, portable optimization:
+        # torch -> numpy.tobytes -> base64 keeps serialization in native code
+        # and lets the Rust HTTP boundary reconstruct floats only when the
+        # client requested them.
+        embedding_objects: list[Dict[str, Any]] = []
+        for idx, embedding_row in enumerate(embedding_rows):
+            if response_transport == _EMBEDDING_RESPONSE_TRANSPORT_NUMPY:
+                embedding: list[float] | str = _pooling_output_to_base64(
+                    embedding_row, dimensions
                 )
-
-            # Always emit base64 over the worker->frontend wire format. The
-            # Rust frontend decodes back to float when the client's
-            # ``encoding_format`` is float (or unset). 15x1024-float responses
-            # serialized as JSON arrays cost ~110 ms in Python json.dumps +
-            # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
-            # to (de)serialize. Client-visible wire format is preserved
-            # because Rust converts at the HTTP boundary.
+            else:
+                embedding = _pooling_output_to_list(embedding_row)
+                if dimensions is not None and len(embedding) < dimensions:
+                    raise ValueError(
+                        f"dimensions={dimensions} exceeds model embedding "
+                        f"dimension {len(embedding)}"
+                    )
+                if encoding_format == "base64":
+                    embedding = _encode_floats_to_base64(embedding)
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": _encode_floats_to_base64(embedding),
+                    "embedding": embedding,
                     "index": idx,
                 }
             )
-            token_ids = getattr(final_output, "prompt_token_ids", None) or []
-            prompt_tokens += len(token_ids)
 
         yield {
             "object": "list",
@@ -3901,6 +3924,35 @@ class EmbeddingWorkerHandler:
                 "total_tokens": prompt_tokens,
             },
         }
+
+
+def _embedding_response_transport() -> str:
+    """Return the portable worker/frontend embedding response transport.
+
+    "json" preserves the original list-of-floats TCP/JSON path and remains
+    the default baseline. "numpy" sends base64-encoded float32 bytes built
+    with numpy.tobytes and works across processes or nodes.
+    """
+
+    raw = os.environ.get(
+        _EMBEDDING_RESPONSE_TRANSPORT_ENV,
+        _EMBEDDING_RESPONSE_TRANSPORT_JSON,
+    )
+    value = raw.strip().lower()
+    aliases = {
+        "legacy": _EMBEDDING_RESPONSE_TRANSPORT_JSON,
+        "base64": _EMBEDDING_RESPONSE_TRANSPORT_NUMPY,
+    }
+    value = aliases.get(value, value)
+    if value not in {
+        _EMBEDDING_RESPONSE_TRANSPORT_JSON,
+        _EMBEDDING_RESPONSE_TRANSPORT_NUMPY,
+    }:
+        raise ValueError(
+            f"Invalid {_EMBEDDING_RESPONSE_TRANSPORT_ENV}={raw!r}; "
+            "expected 'json' or 'numpy'"
+        )
+    return value
 
 
 def _is_token_id(x: Any) -> bool:
@@ -3978,16 +4030,27 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
     )
 
 
+def _flatten_pooling_tensor(data: "torch.Tensor") -> "torch.Tensor":
+    """Flatten a vLLM ``PoolingOutput.data`` tensor to a 1-D float32 CPU tensor.
+
+    Shared by :func:`_pooling_output_to_list` and
+    :func:`_pooling_output_to_base64` so the detach/cpu/flatten/cast step isn't
+    duplicated. ``float32`` matches the OpenAI base64 f32 wire format.
+
+    vLLM's pooling pipeline can return a tensor with a singleton batch dim
+    (shape ``(1, hidden_dim)``) instead of a 1D vector; we flatten unconditionally.
+    """
+    return data.detach().cpu().flatten().to(torch.float32)
+
+
 def _pooling_output_to_list(data: Any) -> list[float]:
     """Convert a vLLM PoolingOutput.data tensor (or list) to a flat list[float].
 
-    vLLM's pooling pipeline can return a tensor with a singleton batch dim
-    (shape ``(1, hidden_dim)``) instead of a 1D vector (shape ``(hidden_dim,)``).
     The OpenAI ``/v1/embeddings`` response expects ``data[].embedding`` to be a
-    flat array of floats, so we flatten unconditionally.
+    flat array of floats.
     """
     if isinstance(data, torch.Tensor):
-        return data.detach().cpu().flatten().tolist()
+        return _flatten_pooling_tensor(data).tolist()
     if isinstance(data, (list, tuple)):
         # Already a list — flatten one level if it's a list-of-lists.
         if data and isinstance(data[0], (list, tuple)):
@@ -4010,3 +4073,33 @@ def _encode_floats_to_base64(floats: list[float]) -> str:
     """
     packed = struct.pack(f"<{len(floats)}f", *floats)
     return base64.b64encode(packed).decode("ascii")
+
+
+def _pooling_output_to_base64(data: Any, dimensions: int | None = None) -> str:
+    """Serialize a vLLM ``PoolingOutput.data`` tensor straight to a base64
+    float32 string, skipping the intermediate Python ``list[float]`` and the
+    ``struct.pack("<{N}f", *floats)`` varargs expansion.
+
+    ``torch -> numpy.tobytes -> base64`` keeps the heavy work in C; output bytes
+    are identical to the ``struct``-based path on little-endian hosts.
+    """
+    if isinstance(data, torch.Tensor):
+        vec = _flatten_pooling_tensor(data)
+        if dimensions is not None:
+            if dimensions > vec.numel():
+                raise ValueError(
+                    f"dimensions={dimensions} exceeds model embedding "
+                    f"dimension {vec.numel()}"
+                )
+            vec = vec[:dimensions]
+        return base64.b64encode(vec.contiguous().numpy().tobytes()).decode("ascii")
+    # Fallback for non-tensor pooling outputs (rare): reuse the list path.
+    floats = _pooling_output_to_list(data)
+    if dimensions is not None:
+        if dimensions > len(floats):
+            raise ValueError(
+                f"dimensions={dimensions} exceeds model embedding "
+                f"dimension {len(floats)}"
+            )
+        floats = floats[:dimensions]
+    return _encode_floats_to_base64(floats)

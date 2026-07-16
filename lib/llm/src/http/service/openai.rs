@@ -1098,12 +1098,11 @@ async fn embeddings(
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
 
-    // The worker always emits base64-encoded vectors over NATS so we
-    // avoid serializing/parsing a JSON float array on the internal hop.
-    // If the client asked for float (the default), decode back at the
-    // HTTP boundary so the public response shape matches their
-    // ``encoding_format`` choice. See the PR description / DIS-2154 for
-    // measured impact.
+    // The optional portable worker transport emits base64-encoded vectors
+    // over NATS to avoid a JSON float array on the internal hop. If that
+    // transport was selected and the client asked for float (the default),
+    // decode back at the HTTP boundary. The legacy JSON-float baseline
+    // already has the requested public shape and passes through unchanged.
     // Borrow rather than move ``encoding_format`` out of ``request`` so the
     // request value remains intact for the later ``engine.generate(request)``
     // call below.
@@ -1189,8 +1188,8 @@ async fn embeddings(
             err_response
         })?;
 
-    // Worker always emits Base64 -- convert back to Float when the client
-    // asked for float (or didn't specify, defaulting to float per spec).
+    // Convert an optimized internal Base64 payload back to Float when the
+    // client asked for float (or omitted the format, which defaults to float).
     if client_wants_float {
         for embedding_obj in response.inner.data.iter_mut() {
             if let dynamo_protocols::types::EmbeddingVector::Base64(s) = &embedding_obj.embedding {
