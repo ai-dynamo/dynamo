@@ -2893,14 +2893,14 @@ mod local_indexer_tests {
         assert_eq!(local_indexer.buffer_len(), 0);
 
         match local_indexer.get_events_in_id_range(None, None).await {
-            WorkerKvQueryResponse::TreeDump {
-                events,
+            WorkerKvQueryResponse::TreeDumpFailed {
                 last_event_id,
+                message,
             } => {
-                assert!(events.is_empty());
                 assert_eq!(last_event_id, 0);
+                assert_eq!(message, "Indexer is offline");
             }
-            other => panic!("Expected TreeDump, got: {other:?}"),
+            other => panic!("Expected TreeDumpFailed, got: {other:?}"),
         }
     }
 
