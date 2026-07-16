@@ -1196,13 +1196,8 @@ def runtime_services_dynamic_ports(
                 yield nats_process, etcd_process
     elif nats_required:
         with NatsServer(request, port=0, disable_jetstream=True) as nats_process:
-            orig_nats = os.environ.get("NATS_SERVER")
-            os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
+            monkeypatch.setenv("NATS_SERVER", f"nats://localhost:{nats_process.port}")
             yield nats_process, None
-            if orig_nats is not None:
-                os.environ["NATS_SERVER"] = orig_nats
-            else:
-                os.environ.pop("NATS_SERVER", None)
     else:
         yield None, None
 

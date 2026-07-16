@@ -360,12 +360,14 @@ def test_router_decisions_trtllm_disagg(
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_trtllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
+    event_plane,
 ):
     run_indexers_sync_test(
         engine_process_cls=TRTLLMProcess,
@@ -375,6 +377,7 @@ def test_trtllm_indexers_sync(
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
         store_backend="etcd",
         request_plane=request_plane,
+        event_plane=event_plane,
         block_size=TRTLLM_BLOCK_SIZE,
         model_name=MODEL_NAME,
         num_workers=2,

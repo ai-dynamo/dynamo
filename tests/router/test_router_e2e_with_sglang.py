@@ -395,6 +395,7 @@ def test_router_decisions_sglang_disagg(
 @pytest.mark.profiled_vram_gib(12.0)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 @pytest.mark.timeout(320)  # 3x ~106s (sglang gpu_1 log)
 def test_sglang_indexers_sync(
     request,
@@ -402,6 +403,7 @@ def test_sglang_indexers_sync(
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
+    event_plane,
 ):
     run_indexers_sync_test(
         engine_process_cls=SGLangProcess,
@@ -411,6 +413,7 @@ def test_sglang_indexers_sync(
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
         store_backend="etcd",
         request_plane=request_plane,
+        event_plane=event_plane,
         block_size=PAGE_SIZE,
         model_name=MODEL_NAME,
         num_workers=2,

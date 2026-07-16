@@ -677,12 +677,14 @@ def test_router_decisions_vllm_disagg(
 )  # KV cache cap (2x safety over min=165_900_288)
 @pytest.mark.timeout(690)  # 3x ~230s under new scheduler (3d1554f)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_vllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     set_ucx_tls_no_mm,
     request_plane,
+    event_plane,
 ):
     run_indexers_sync_test(
         engine_process_cls=VLLMProcess,
@@ -692,6 +694,7 @@ def test_vllm_indexers_sync(
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
         store_backend="etcd",
         request_plane=request_plane,
+        event_plane=event_plane,
         block_size=BLOCK_SIZE,
         model_name=MODEL_NAME,
         num_workers=2,

@@ -23,9 +23,11 @@ export UCX_TLS=ib,rc,ze_copy
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
 # edit --router-mode to random / round-robin / kv
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+
 python -m dynamo.frontend \
     --router-mode kv \
-    --http-port 8000 &
+    --http-port "$HTTP_PORT" &
 
 # two decode workers
 VLLM_NIXL_SIDE_CHANNEL_PORT=20096 \

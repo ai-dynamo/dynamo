@@ -605,6 +605,7 @@ def test_kv_router_bindings(
     ],
     indirect=["request_plane"],
 )
+@pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 # Known flake: Router and Standalone indexer occasionally
 # disagree on event count by 3-4 events (e.g. "Router 1 has 105 events, Standalone A
 # has 102 events"). Race in event-sync convergence — needs root-cause investigation,
@@ -617,6 +618,7 @@ def test_indexers_sync(
     file_storage_backend,
     store_backend,
     request_plane,
+    event_plane,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests.
@@ -645,6 +647,7 @@ def test_indexers_sync(
         runtime_services_dynamic_ports=runtime_services_dynamic_ports,
         store_backend=store_backend,
         request_plane=request_plane,
+        event_plane=event_plane,
         block_size=BLOCK_SIZE,
         model_name=MODEL_NAME,
         num_workers=NUM_MOCKERS,

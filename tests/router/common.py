@@ -1771,6 +1771,7 @@ def _test_router_indexers_sync(
     num_workers: int,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    event_plane: str | None = None,
     test_nats_interruption: bool = False,
     nats_server: Optional["NatsServer"] = None,
     router_event_threads: int = 4,
@@ -1804,6 +1805,7 @@ def _test_router_indexers_sync(
         num_workers: Expected number of workers
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         request_plane: Request plane to use ("nats" or "tcp"). Defaults to "nats".
+        event_plane: Event plane to use ("nats" or "zmq"). Defaults to runtime behavior.
         test_nats_interruption: If True, test NATS interruption recovery. Defaults to False.
         nats_server: NatsServer instance for stop/start (required if test_nats_interruption=True).
 
@@ -1816,7 +1818,6 @@ def _test_router_indexers_sync(
     # Use async to manage the test flow
     async def run_test(runtime_stack):
         kv_router_config = KvRouterConfig(router_event_threads=router_event_threads)
-        event_plane = None
 
         # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
