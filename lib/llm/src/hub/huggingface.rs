@@ -4,6 +4,7 @@
 use std::{
     env,
     future::Future,
+    io::Write,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -20,6 +21,9 @@ use super::is_offline_mode;
 
 const LORA_DOWNLOAD_TIMEOUT_SECS: &str = "LORA_DOWNLOAD_TIMEOUT_SECS";
 const DEFAULT_LORA_DOWNLOAD_TIMEOUT_SECS: u64 = 3600;
+const HF_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const LORA_COMPLETE_MARKER: &str = ".dynamo_lora_complete";
+const LORA_COMPLETE_MARKER_CONTENT: &[u8] = b"1\n";
 
 /// A Hugging Face model repository and the revision requested by an `hf://` URI.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,7 +78,11 @@ fn validate_hf_relative_path(value: &str, kind: &str) -> anyhow::Result<()> {
 /// Validate a path received from the Hub before passing it to hf-hub, whose cache
 /// writer joins sibling names directly beneath the snapshot directory.
 fn validate_hf_repo_file(filename: &str) -> anyhow::Result<()> {
-    validate_hf_relative_path(filename, "repository filename")
+    validate_hf_relative_path(filename, "repository filename")?;
+    if filename.eq_ignore_ascii_case(LORA_COMPLETE_MARKER) {
+        anyhow::bail!("reserved Hugging Face repository filename: {filename:?}");
+    }
+    Ok(())
 }
 
 fn validate_hf_commit_sha(sha: &str) -> anyhow::Result<()> {
@@ -138,22 +146,40 @@ pub(crate) fn huggingface_cache() -> Cache {
 }
 
 fn huggingface_token() -> Option<String> {
-    env::var(env_model::huggingface::HF_TOKEN)
-        .ok()
-        .filter(|token| !token.trim().is_empty())
-        .or_else(|| {
-            let path = hf_token_path_from_values(
-                env::var(env_model::huggingface::HF_TOKEN_PATH).ok(),
-                env::var(env_model::huggingface::HF_HOME).ok(),
-                env::var("XDG_CACHE_HOME").ok(),
-                env::var("HOME").ok(),
-                env::var("USERPROFILE").ok(),
-            );
-            std::fs::read_to_string(path)
-                .ok()
-                .map(|token| token.trim().to_string())
-                .filter(|token| !token.is_empty())
-        })
+    let token_path = hf_token_path_from_values(
+        env::var(env_model::huggingface::HF_TOKEN_PATH).ok(),
+        env::var(env_model::huggingface::HF_HOME).ok(),
+        env::var("XDG_CACHE_HOME").ok(),
+        env::var("HOME").ok(),
+        env::var("USERPROFILE").ok(),
+    );
+    huggingface_token_from_values(
+        env::var(env_model::huggingface::HF_TOKEN).ok(),
+        env::var(env_model::huggingface::HUGGING_FACE_HUB_TOKEN).ok(),
+        token_path,
+    )
+}
+
+fn non_empty_token(token: Option<String>) -> Option<String> {
+    token
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+fn huggingface_token_from_values(
+    hf_token: Option<String>,
+    legacy_token: Option<String>,
+    token_path: PathBuf,
+) -> Option<String> {
+    non_empty_token(hf_token)
+        .or_else(|| non_empty_token(legacy_token))
+        .or_else(|| non_empty_token(std::fs::read_to_string(token_path).ok()))
+}
+
+fn is_complete_hf_snapshot(snapshot: &Path, anchor_file: &str) -> bool {
+    snapshot.join(anchor_file).is_file()
+        && std::fs::read(snapshot.join(LORA_COMPLETE_MARKER))
+            .is_ok_and(|content| content == LORA_COMPLETE_MARKER_CONTENT)
 }
 
 pub(crate) fn cached_hf_snapshot(
@@ -166,6 +192,7 @@ pub(crate) fn cached_hf_snapshot(
         .repo(repo.clone())
         .get(anchor_file)
         .and_then(|path| path.parent().map(Path::to_path_buf))
+        .filter(|snapshot| is_complete_hf_snapshot(snapshot, anchor_file))
     {
         return Some(snapshot);
     }
@@ -179,7 +206,62 @@ pub(crate) fn cached_hf_snapshot(
         .join(repo.folder_name())
         .join("snapshots")
         .join(&spec.revision);
-    snapshot.join(anchor_file).is_file().then_some(snapshot)
+    is_complete_hf_snapshot(&snapshot, anchor_file).then_some(snapshot)
+}
+
+pub(crate) fn finalize_hf_snapshot(
+    cache: &Cache,
+    spec: &HfRepoSpec,
+    snapshot: &Path,
+) -> anyhow::Result<()> {
+    let commit = snapshot
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Hugging Face snapshot path has no commit SHA")?;
+    validate_hf_commit_sha(commit)?;
+
+    let requested_repo = spec.repo();
+    let expected_snapshot = cache
+        .path()
+        .join(requested_repo.folder_name())
+        .join("snapshots")
+        .join(commit);
+    if snapshot != expected_snapshot {
+        anyhow::bail!(
+            "Hugging Face snapshot {} is outside the expected cache path {}",
+            snapshot.display(),
+            expected_snapshot.display()
+        );
+    }
+
+    let mut marker = tempfile::NamedTempFile::new_in(snapshot).with_context(|| {
+        format!(
+            "creating Hugging Face completion marker in {}",
+            snapshot.display()
+        )
+    })?;
+    marker
+        .write_all(LORA_COMPLETE_MARKER_CONTENT)
+        .context("writing Hugging Face completion marker")?;
+    marker
+        .as_file()
+        .sync_all()
+        .context("syncing Hugging Face completion marker")?;
+    marker
+        .persist(snapshot.join(LORA_COMPLETE_MARKER))
+        .map_err(|error| error.error)
+        .context("publishing Hugging Face completion marker")?;
+
+    cache
+        .repo(requested_repo)
+        .create_ref(commit)
+        .with_context(|| {
+            format!(
+                "publishing Hugging Face cache ref {}@{}",
+                spec.repo_id, spec.revision
+            )
+        })?;
+    Ok(())
 }
 
 fn build_hf_api(cache: Cache) -> anyhow::Result<Api> {
@@ -218,6 +300,47 @@ async fn with_hf_timeout<T>(
         .await
         .context(timeout_context)?
         .with_context(|| context)
+}
+
+async fn with_hf_lock_retry<T, F, Fut>(
+    timeout: Duration,
+    mut operation: F,
+    context: String,
+) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, ApiError>>,
+{
+    let started = tokio::time::Instant::now();
+    let timeout_context = format!(
+        "{context} timed out after {} seconds; configure {LORA_DOWNLOAD_TIMEOUT_SECS} to adjust the limit",
+        timeout.as_secs()
+    );
+
+    loop {
+        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+            anyhow::bail!(timeout_context);
+        };
+        if remaining.is_zero() {
+            anyhow::bail!(timeout_context);
+        }
+
+        match tokio::time::timeout(remaining, operation()).await {
+            Err(_) => anyhow::bail!(timeout_context),
+            Ok(Ok(value)) => return Ok(value),
+            Ok(Err(ApiError::LockAcquisition(lock_path))) => {
+                tracing::debug!(
+                    path = %lock_path.display(),
+                    "waiting for concurrent Hugging Face cache download"
+                );
+                let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                    anyhow::bail!(timeout_context);
+                };
+                tokio::time::sleep(HF_LOCK_RETRY_INTERVAL.min(remaining)).await;
+            }
+            Ok(Err(error)) => return Err(error).with_context(|| context.clone()),
+        }
+    }
 }
 
 struct CancelHfRuntimeOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
@@ -271,8 +394,8 @@ where
 /// Download one immutable repository snapshot into hf-hub's native cache layout.
 ///
 /// The requested branch/tag is resolved once via `info()`. Every sibling is then
-/// downloaded through the commit SHA, and the mutable ref is published only after
-/// the whole snapshot succeeds.
+/// downloaded through the commit SHA. The caller validates the completed LoRA
+/// before publishing the completion marker and mutable cache ref.
 pub(crate) async fn download_hf_snapshot(
     cache: &Cache,
     spec: &HfRepoSpec,
@@ -314,7 +437,6 @@ async fn download_hf_snapshot_inner(cache: Cache, spec: HfRepoSpec) -> anyhow::R
     }
 
     let pinned_repo = Repo::with_revision(spec.repo_id.clone(), RepoType::Model, info.sha.clone());
-    let pinned_api = api.repo(pinned_repo);
     for sibling in &info.siblings {
         let download_context = format!(
             "downloading {} from Hugging Face repository {}@{}",
@@ -324,9 +446,16 @@ async fn download_hf_snapshot_inner(cache: Cache, spec: HfRepoSpec) -> anyhow::R
         // this parent future is dropped. The dedicated runtime surrounding
         // this function is destroyed before the timeout error is returned,
         // which aborts every chunk task before callers can observe failure.
-        with_hf_timeout(
+        let download_api = api.clone();
+        let download_repo = pinned_repo.clone();
+        let filename = sibling.rfilename.clone();
+        with_hf_lock_retry(
             download_timeout,
-            pinned_api.get(&sibling.rfilename),
+            move || {
+                let file_api = download_api.repo(download_repo.clone());
+                let filename = filename.clone();
+                async move { file_api.get(&filename).await }
+            },
             download_context,
         )
         .await?;
@@ -344,15 +473,6 @@ async fn download_hf_snapshot_inner(cache: Cache, spec: HfRepoSpec) -> anyhow::R
         );
     }
 
-    cache
-        .repo(requested_repo)
-        .create_ref(&info.sha)
-        .with_context(|| {
-            format!(
-                "publishing Hugging Face cache ref {}@{}",
-                spec.repo_id, spec.revision
-            )
-        })?;
     Ok(snapshot)
 }
 
@@ -390,7 +510,14 @@ mod tests {
         assert!(validate_hf_repo_file("adapter_config.json").is_ok());
         assert!(validate_hf_repo_file("nested/tokenizer.json").is_ok());
 
-        for path in ["", "../secret", "nested/../../secret", "/etc/passwd"] {
+        for path in [
+            "",
+            "../secret",
+            "nested/../../secret",
+            "/etc/passwd",
+            ".dynamo_lora_complete",
+            ".DYNAMO_LORA_COMPLETE",
+        ] {
             assert!(validate_hf_repo_file(path).is_err(), "accepted {path}");
         }
     }
@@ -429,6 +556,34 @@ mod tests {
                 None,
             ),
             PathBuf::from("/custom/token")
+        );
+    }
+
+    #[test]
+    fn hf_token_precedence_includes_legacy_environment_variable() {
+        let directory = tempfile::tempdir().unwrap();
+        let token_path = directory.path().join("token");
+        std::fs::write(&token_path, "file-token\n").unwrap();
+
+        assert_eq!(
+            huggingface_token_from_values(
+                Some("primary-token".to_string()),
+                Some("legacy-token".to_string()),
+                token_path.clone(),
+            ),
+            Some("primary-token".to_string())
+        );
+        assert_eq!(
+            huggingface_token_from_values(
+                None,
+                Some("legacy-token".to_string()),
+                token_path.clone(),
+            ),
+            Some("legacy-token".to_string())
+        );
+        assert_eq!(
+            huggingface_token_from_values(None, None, token_path),
+            Some("file-token".to_string())
         );
     }
 
@@ -492,6 +647,32 @@ mod tests {
                 .to_string()
                 .contains("testing Hugging Face timeout timed out after 0 seconds")
         );
+    }
+
+    #[tokio::test]
+    async fn hf_lock_contention_is_retried() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let operation_attempts = attempts.clone();
+
+        let result = with_hf_lock_retry(
+            Duration::from_secs(1),
+            move || {
+                let attempt = operation_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if attempt < 2 {
+                        Err(ApiError::LockAcquisition(PathBuf::from("adapter.lock")))
+                    } else {
+                        Ok("downloaded")
+                    }
+                }
+            },
+            "downloading adapter".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "downloaded");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test]

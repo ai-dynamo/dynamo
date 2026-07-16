@@ -571,6 +571,9 @@ pub mod model {
         /// Hugging Face authentication token
         pub const HF_TOKEN: &str = "HF_TOKEN";
 
+        /// Deprecated alias for the Hugging Face authentication token
+        pub const HUGGING_FACE_HUB_TOKEN: &str = "HUGGING_FACE_HUB_TOKEN";
+
         /// Path to the stored Hugging Face authentication token
         pub const HF_TOKEN_PATH: &str = "HF_TOKEN_PATH";
 
@@ -850,6 +853,7 @@ mod tests {
             model::model_express::MODEL_EXPRESS_CACHE_PATH,
             model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE,
             model::huggingface::HF_TOKEN,
+            model::huggingface::HUGGING_FACE_HUB_TOKEN,
             model::huggingface::HF_TOKEN_PATH,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
