@@ -30,7 +30,8 @@ async function main() {
       const date = e.start.toDateString();
       const isPast = e.start < now;
       const status = isPast ? '**Past**' : '**Upcoming**';
-      lines.push(`| ${date} | ${e.summary} | ${status} |`);
+      const label = e.url ? `[${e.summary}](${e.url})` : e.summary;
+      lines.push(`| ${date} | ${label} | ${status} |`);
     }
   }
 
