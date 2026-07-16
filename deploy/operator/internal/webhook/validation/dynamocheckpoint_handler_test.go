@@ -33,8 +33,8 @@ func TestValidateDynamoCheckpointGMSSnapshotRejectsUnpreparedTemplate(t *testing
 		},
 	}
 
-	ctx := features.WithGate(context.Background(), features.Gates{GMSSnapshot: true})
-	err := validateDynamoCheckpointGMSSnapshot(ctx, ckpt)
+	ctx := features.WithGate(context.Background(), features.Gates{Checkpoint: true, GMSSnapshot: true})
+	err := validateDynamoCheckpoint(ctx, ckpt)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gpuMemoryService is metadata-only")
 	assert.Contains(t, err.Error(), "missing pod resource claim")
@@ -85,6 +85,13 @@ func TestValidateDynamoCheckpointGMSSnapshotAllowsPreparedTemplate(t *testing.T)
 		},
 	}
 
-	ctx := features.WithGate(context.Background(), features.Gates{GMSSnapshot: true})
-	require.NoError(t, validateDynamoCheckpointGMSSnapshot(ctx, ckpt))
+	ctx := features.WithGate(context.Background(), features.Gates{Checkpoint: true, GMSSnapshot: true})
+	require.NoError(t, validateDynamoCheckpoint(ctx, ckpt))
+}
+
+func TestValidateDynamoCheckpointRejectsDisabledFeature(t *testing.T) {
+	ctx := features.WithGate(context.Background(), features.Gates{})
+	err := validateDynamoCheckpoint(ctx, &nvidiacomv1alpha1.DynamoCheckpoint{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "checkpoint functionality is disabled")
 }

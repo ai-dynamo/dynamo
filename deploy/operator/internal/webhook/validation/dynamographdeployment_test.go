@@ -73,6 +73,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		mutateRequest func(*testing.T, map[string]any) // mutates the source-version request map
 		manager       ctrl.Manager                     // supplies webhook dependencies
 		groveDisabled bool                             // disables the configured Grove pathway
+		checkpointOff bool                             // disables checkpoint creation and restore
 		userInfo      *authenticationv1.UserInfo       // supplies the admission request identity
 		operator      string                           // sets the configured operator principal
 
@@ -434,6 +435,16 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}
 			}),
+		},
+		{
+			name:          "checkpoint configuration requires operator feature gate",
+			checkpointOff: true,
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
 		},
 
 		// KV-transfer CEL rules.
@@ -1693,7 +1704,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				nvidiacomv1beta1.DynamoGraphDeploymentGVK,
 				tt.userInfo,
 			)
-			ctx = features.WithGate(ctx, features.Gates{Grove: !tt.groveDisabled})
+			ctx = features.WithGate(ctx, features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled})
 
 			var (
 				warnings []string

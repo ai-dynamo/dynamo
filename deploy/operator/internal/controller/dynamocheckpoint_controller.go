@@ -220,6 +220,14 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	if err := checkpoint.ValidateEnabled(r.RuntimeConfig.Gate); err != nil {
+		if ckpt.Status.Message == err.Error() {
+			return ctrl.Result{}, nil
+		}
+		ckpt.Status.Message = err.Error()
+		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointDisabled", err.Error())
+		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+	}
 	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, r.RuntimeConfig.Gate); err != nil {
 		return r.failPendingCheckpoint(ctx, ckpt, "GMSSnapshotDisabled", err)
 	}

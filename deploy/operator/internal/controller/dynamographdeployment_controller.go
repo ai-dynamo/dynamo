@@ -1967,6 +1967,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		if checkpointConfig == nil {
 			continue
 		}
+		if err := checkpoint.ValidateEnabled(r.RuntimeConfig.Gate); err != nil {
+			return nil, nil, fmt.Errorf("component %s: %w", componentName, err)
+		}
 
 		logger.Info("Reconciling checkpoint for component", "component", componentName)
 

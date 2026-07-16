@@ -42,6 +42,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
@@ -105,6 +106,13 @@ func (sr *PodSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// only on the path that has not yet created one.
 	if boundName := ptr.Deref(snap.Status.BoundPodSnapshotContentName, ""); boundName != "" {
 		return sr.mirrorBoundContent(ctx, snap, boundName)
+	}
+	if err := checkpoint.ValidateEnabled(sr.RuntimeConfig.Gate); err != nil {
+		if !sr.markPending(snap, "CheckpointDisabled", err.Error()) {
+			return ctrl.Result{}, nil
+		}
+		sr.Recorder.Event(snap, corev1.EventTypeWarning, "CheckpointDisabled", err.Error())
+		return ctrl.Result{}, sr.Status().Update(ctx, snap)
 	}
 	return sr.captureFromSourcePod(ctx, snap)
 }

@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -283,14 +284,19 @@ func (v *sharedValidation) validateFailoverSpec(
 // validateComponentCheckpointConfig validates checkpoint. checkpoint and fldPath must not be nil.
 // gms may be nil because checkpoint validates that sibling relationship.
 func (v *sharedValidation) validateComponentCheckpointConfig(
-	checkpoint *nvidiacomv1beta1.ComponentCheckpointConfig,
+	checkpointConfig *nvidiacomv1beta1.ComponentCheckpointConfig,
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
 ) field.ErrorList {
-	if checkpoint.Job == nil {
+	if checkpointConfig.Enabled {
+		if err := checkpoint.ValidateEnabled(features.MustGateFrom(v.ctx)); err != nil {
+			return field.ErrorList{field.Forbidden(fldPath, err.Error())}
+		}
+	}
+	if checkpointConfig.Job == nil {
 		return nil
 	}
-	return v.validateComponentCheckpointJobConfig(checkpoint.Job, fldPath.Child("job"), gms)
+	return v.validateComponentCheckpointJobConfig(checkpointConfig.Job, fldPath.Child("job"), gms)
 }
 
 // validateComponentCheckpointJobConfig validates job. job and fldPath must not be nil.

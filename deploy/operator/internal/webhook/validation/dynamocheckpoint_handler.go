@@ -51,7 +51,7 @@ func (h *DynamoCheckpointHandler) ValidateCreate(ctx context.Context, obj runtim
 		return nil, err
 	}
 	logger.Info("validate create", "name", ckpt.Name, "namespace", ckpt.Namespace)
-	return nil, validateDynamoCheckpointGMSSnapshot(ctx, ckpt)
+	return nil, validateDynamoCheckpoint(ctx, ckpt)
 }
 
 func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
@@ -64,7 +64,7 @@ func (h *DynamoCheckpointHandler) ValidateUpdate(ctx context.Context, oldObj, ne
 	if !ckpt.DeletionTimestamp.IsZero() {
 		return nil, nil
 	}
-	return nil, validateDynamoCheckpointGMSSnapshot(ctx, ckpt)
+	return nil, validateDynamoCheckpoint(ctx, ckpt)
 }
 
 func (h *DynamoCheckpointHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
@@ -86,9 +86,14 @@ func (h *DynamoCheckpointHandler) RegisterWithManager(mgr manager.Manager, gate 
 	return nil
 }
 
-func validateDynamoCheckpointGMSSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+func validateDynamoCheckpoint(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+	gate := features.MustGateFrom(ctx)
+	if err := checkpoint.ValidateEnabled(gate); err != nil {
+		return err
+	}
+
 	// A DynamoCheckpoint is itself a Snapshot resource; service specs pass checkpoint.enabled instead.
-	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, features.MustGateFrom(ctx)); err != nil {
+	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService, gate); err != nil {
 		return err
 	}
 	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
