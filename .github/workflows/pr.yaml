@@ -314,6 +314,9 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # temp: exercise cargo-vendor source archival on this PR to validate the
+      # ext-proc fix. Revert before merge.
+      archive_sources: true
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -365,6 +368,9 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # temp: exercise cargo-vendor source archival on this PR to validate the
+      # ext-proc fix. Revert before merge.
+      archive_sources: true
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
@@ -416,6 +422,9 @@ jobs:
       inline_compliance: true
       artifact_retention_days: '7'
       build_timeout_minutes: 60
+      # temp: exercise cargo-vendor source archival on this PR to validate the
+      # ext-proc fix. Revert before merge.
+      archive_sources: true
       # OSRB CSV diff baseline: the target branch selects the rule, while the
       # merge-base pins PR->main diffs to the PR's fork point.
       diff_event_context: pr
