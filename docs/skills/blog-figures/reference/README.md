@@ -84,13 +84,13 @@ manifest before introducing a new value.
 | Kind | Title | Renderer | Generator | Lint |
 |---|---|---|---|---|
 | `hero.scatter` | DynoSim: Simulating the Pareto Frontier | plotly | `dynosim/tools/gen_hero.py` | 100 |
-| `chart.line` | Achieved vs. Offered Throughput | plotly | `flash-indexer/tools/gen_throughput.py` | 97 |
-| `chart.heatmap` | KV Cache Event Density | plotly | `flash-indexer/tools/gen_heatmap.py` | 85 |
+| `chart.line` | Achieved vs. Offered Throughput | plotly | `flash-indexer/tools/gen_throughput.py` | 100 |
+| `chart.heatmap` | KV Cache Event Density | plotly | `flash-indexer/tools/gen_heatmap.py` | 100 |
 
-The two flash-indexer generators predate the 100/100 exemplars and carry
-raw-hex lint flags (off-token series and colorscale colors); see `lint_flags`
-in the manifest. They still render and pass the ship threshold (>= 85), but for
-a fresh figure prefer a 100/100 exemplar of the same kind.
+The two flash-indexer generators predate the 100/100 exemplars but are now
+token-clean: their off-token series and colorscale colors were mapped to design
+tokens (a muted series grey, and the muted fluorite / muted green colorscale
+stops), so both measure 100/100 with no raw-hex flags.
 
 ## Scoring
 

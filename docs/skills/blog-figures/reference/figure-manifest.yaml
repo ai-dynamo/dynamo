@@ -63,7 +63,7 @@ collections:
     note: "Runnable pattern exemplars shipped with the skill. Deterministic, hard-coded sample data; swap in a source of truth before shipping."
   digest:
     root: docs/digest/
-    note: "Generators behind published digest posts. These predate the 100/100 exemplars, so two carry known raw-hex lint flags."
+    note: "Generators behind published digest posts. They predate the 100/100 exemplars but are now token-clean (100/100)."
 
 generators:
   # ---- ModelExpress cold-start set (drafts/modelexpress-coldstart/) ----------
@@ -328,10 +328,8 @@ generators:
     shows: "Log-log achieved-vs-offered throughput lines for five indexer backends with a y=x reference, per-series peak-throughput callouts, and a right-edge bracket naming the Nx gap between best and baseline."
     data: "Real. Reads mooncake_bench sweep data from a JSON path arg (../data/sweep_plot.json)."
     tags: [line, log-log, throughput, peak-callouts, bracket, digest]
-    lint_score: 97.0
+    lint_score: 100.0
     ship_ready: true
-    lint_flags:
-      - "raw-hex: #969696 (a silver-grey series color) is not in the flash-indexer tokens. Predates the 100/100 exemplars."
     source_ref: "Published flash-indexer digest figure (fig-6). Takes a required sweep_plot.json argument."
     use_when: "You need a log-log performance comparison with direct peak labels and an Nx improvement bracket."
 
@@ -348,9 +346,7 @@ generators:
     shows: "A two-row diverging heatmap of Store-vs-Remove KV event density across 16 workers over time (a per-worker matrix plus an aggregate row), on a green-to-gold zero-centered colorscale."
     data: "Real when a Mooncake trace is passed (--real-data); otherwise a deterministic synthetic Gamma/Zipf event pattern."
     tags: [heatmap, diverging, kv-events, workers, digest]
-    lint_score: 85.0
+    lint_score: 100.0
     ship_ready: true
-    lint_flags:
-      - "raw-hex: #c89a00 and #5aaa00 (diverging-colorscale interpolation stops) are not tokens. Predates the 100/100 exemplars."
     source_ref: "Published flash-indexer digest figure (fig-1)."
     use_when: "You need a diverging density matrix of entities over time with a signed (store vs remove) colorbar."
