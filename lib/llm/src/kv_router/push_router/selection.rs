@@ -27,7 +27,6 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
-    pub(super) scheduler_tracked: bool,
     pub(super) request_progress: Option<RequestProgressUpdater>,
     pub(super) admission_lease: Option<AdmissionLease>,
 }
@@ -70,7 +69,6 @@ struct BestMatchArgs<'a> {
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
-    scheduler_tracked: bool,
 }
 
 impl KvPushRouter {
@@ -113,7 +111,6 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                scheduler_tracked: args.scheduler_tracked,
                 request_progress,
                 admission_lease,
             }),
@@ -176,7 +173,6 @@ impl KvPushRouter {
                     pinned_worker: None,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
-                    scheduler_tracked: !is_query_only,
                 })
                 .await?;
 
@@ -249,7 +245,6 @@ impl KvPushRouter {
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
             routing_constraints,
-            scheduler_tracked: !is_query_only,
         })
         .await
     }

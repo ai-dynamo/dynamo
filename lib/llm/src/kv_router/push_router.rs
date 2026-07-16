@@ -253,7 +253,7 @@ impl KvPushRouter {
             self.request_metrics.clone(),
             context_id.clone(),
             request,
-            selection.scheduler_tracked,
+            !is_query_only,
             selection.request_progress.take(),
             selection.admission_lease.take(),
         );
