@@ -489,6 +489,7 @@ areas:
   - benchmarks/mocker/bench_aic_rust_callback.py
   - benchmarks/nat_trace/
   - benchmarks/prefix_data_generator/
+  - benchmarks/profiling/
   - benchmarks/pyproject.toml
   - benchmarks/request_trace/README.md
   - benchmarks/request_trace/__init__.py

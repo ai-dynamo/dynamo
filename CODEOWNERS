@@ -427,6 +427,7 @@
 /recipes/qwen3.6-35b/                                                        @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/incluster/                                                       @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/nat_trace/                                                       @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/profiling/                                                       @ai-dynamo/dynamo-performance-codeowners
 /lib/bench/src/coding/                                                       @ai-dynamo/dynamo-performance-codeowners
 /lib/mocker/src/cache/                                                       @ai-dynamo/dynamo-performance-codeowners
 /recipes/gpt-oss-120b/                                                       @ai-dynamo/dynamo-performance-codeowners
