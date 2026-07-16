@@ -15,9 +15,10 @@
 #
 # AIPerf trace-replay benchmark for GLM-5.2 DGDs.
 #
-# One Job covers the aggregate and disaggregated B200 agentic variants. Edit
-# ENDPOINT below to select a DGD. Restart the DGD pods between independent
-# concurrency points so SGLang and Dynamo routing state are reset.
+# One Job covers the aggregate and disaggregated B200 and H200 agentic
+# variants. Edit ENDPOINT and SYNTHESIS_MAX_ISL below to select a DGD. Restart
+# the DGD pods between independent concurrency points so SGLang and Dynamo
+# routing state are reset.
 #
 # Prerequisites:
 # - Target DGD is Ready (see ../README.md)
@@ -54,6 +55,8 @@ spec:
                 values:
                 - glm52-agg-b200-agentic
                 - glm52-disagg-b200-agentic
+                - glm52-agg-h200-agentic
+                - glm52-disagg-h200-agentic
             topologyKey: kubernetes.io/hostname
       # tolerations: # Uncomment and populate for tainted frontend nodes.
       containers:
@@ -152,7 +155,7 @@ spec:
             --tokenizer-trust-remote-code \
             --input-file "$TRACE_FILE" \
             --custom-dataset-type mooncake_trace \
-            --synthesis-max-isl 500000 \
+            --synthesis-max-isl "$SYNTHESIS_MAX_ISL" \
             --synthesis-max-osl 12000 \
             --num-requests $(/busybox/wc -l < "${TRACE_FILE}") \
             --dataset-sampling-strategy sequential \
@@ -172,14 +175,16 @@ spec:
           echo ""
           echo "Done. Root: ${ROOT_DIR}"
         env:
-        # --- Edit ENDPOINT to target the aggregate or disaggregated DGD. ---
+        # --- Edit ENDPOINT to target one of the four GLM-5.2 DGDs. ---
         - name: ENDPOINT
           value: glm52-agg-b200-agentic-frontend:8000
         - name: TRACE_FILE
           value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+        - name: SYNTHESIS_MAX_ISL
+          value: "500000"
         - name: CONCURRENCY
           value: "64"
-        # --- The remainder is shared across both variants. ---
+        # --- The remainder is shared across all four variants. ---
         - name: TARGET_MODEL
           value: zai-org/GLM-5.2
         - name: AIPERF_HTTP_CONNECTION_LIMIT

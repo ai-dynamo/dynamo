@@ -16,46 +16,43 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: glm52-disagg-b200-agentic-sglang-config
+  name: glm52-disagg-h200-agentic-sglang-config
   labels:
-    app.kubernetes.io/name: glm52-disagg-b200-agentic
+    app.kubernetes.io/name: glm52-disagg-h200-agentic
     app.kubernetes.io/part-of: dynamo
 data:
   prefill.yaml: |-
-    model-path: nvidia/GLM-5.2-NVFP4
+    model-path: zai-org/GLM-5.2-FP8
     served-model-name: zai-org/GLM-5.2
     # Decode connects to the pod IP advertised by Dynamo, so the SGLang
     # bootstrap server must not use its loopback-only default.
     host: 0.0.0.0
     trust-remote-code: true
-    tensor-parallel-size: 4
-    data-parallel-size: 4
-    enable-dp-attention: true
-    ep-size: 4
-    quantization: modelopt_fp4
+    tensor-parallel-size: 8
+    data-parallel-size: 1
+    ep-size: 8
+    moe-a2a-backend: megamoe
     kv-cache-dtype: fp8_e4m3
-    context-length: 500000
-    mem-fraction-static: 0.93
+    fp8-gemm-backend: flashinfer_deepgemm
+    mem-fraction-static: 0.92
+    max-running-requests: 64
     attention-backend: dsa
-    dsa-prefill-backend: trtllm
-    dsa-decode-backend: trtllm
-    moe-runner-backend: flashinfer_trtllm_routed
-    chunked-prefill-size: 16384
-    max-prefill-tokens: 32768
-    max-running-requests: 32
-    watchdog-timeout: 3600
+    dsa-prefill-backend: flashmla_kv
+    enable-prefill-cp: true
+    cp-strategy: interleave
+    disable-overlap-schedule: true
     cuda-graph-backend-prefill: disabled
     cuda-graph-backend-decode: disabled
-    disaggregation-mode: prefill
-    disaggregation-transfer-backend: nixl
-    disaggregation-bootstrap-port: 12345
     speculative-algorithm: EAGLE
     speculative-num-steps: 3
     speculative-eagle-topk: 1
     speculative-num-draft-tokens: 4
-    enable-dp-lm-head: true
-    hicache-size: 200
-    enable-hierarchical-cache: true
+    context-length: 250000
+    watchdog-timeout: 3600
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: nixl
+    disaggregation-bootstrap-port: 12345
+    enable-metrics: true
     kv-events-config:
       publisher: zmq
       topic: kv-events
@@ -63,47 +60,83 @@ data:
     model-loader-extra-config:
       enable_multithread_load: true
       num_threads: 32
-    disable-overlap-schedule: true
-    enable-metrics: true
 
   decode.yaml: |-
-    model-path: nvidia/GLM-5.2-NVFP4
+    model-path: zai-org/GLM-5.2-FP8
     served-model-name: zai-org/GLM-5.2
+    host: 0.0.0.0
     trust-remote-code: true
     tensor-parallel-size: 8
     data-parallel-size: 8
     enable-dp-attention: true
+    ep-size: 1
     moe-a2a-backend: none
-    fp4-gemm-backend: flashinfer_cutlass
-    enable-symm-mem: true
-    quantization: modelopt_fp4
+    fp8-gemm-backend: deep_gemm
+    enforce-shared-experts-fusion: true
     kv-cache-dtype: fp8_e4m3
-    context-length: 500000
-    disaggregation-mode: decode
-    disaggregation-transfer-backend: nixl
-    disaggregation-bootstrap-port: 12345
+    context-length: 250000
+    mem-fraction-static: 0.88
+    max-running-requests: 160
+    cuda-graph-max-bs: 160
+    cuda-graph-bs:
+      - 1
+      - 2
+      - 4
+      - 8
+      - 16
+      - 20
+      - 24
+      - 28
+      - 32
+      - 36
+      - 40
+      - 44
+      - 48
+      - 52
+      - 56
+      - 60
+      - 64
+      - 68
+      - 72
+      - 76
+      - 80
+      - 84
+      - 88
+      - 92
+      - 96
+      - 100
+      - 104
+      - 108
+      - 112
+      - 116
+      - 120
+      - 124
+      - 128
+      - 132
+      - 136
+      - 140
+      - 144
+      - 148
+      - 152
+      - 156
+      - 160
+    attention-backend: dsa
+    dsa-prefill-backend: flashmla_kv
+    dsa-decode-backend: flashmla_kv
     speculative-algorithm: EAGLE
     speculative-num-steps: 3
     speculative-eagle-topk: 1
     speculative-num-draft-tokens: 4
-    speculative-attention-mode: decode
-    max-running-requests: 256
-    cuda-graph-max-bs: 256
-    mem-fraction-static: 0.87
+    watchdog-timeout: 3600
+    disaggregation-mode: decode
+    disaggregation-transfer-backend: nixl
+    disaggregation-bootstrap-port: 12345
     enable-metrics: true
-    speculative-moe-runner-backend: flashinfer_cutlass
-    speculative-moe-a2a-backend: none
-    num-continuous-decode-steps: 3
-    enable-flashinfer-allreduce-fusion: true
-    enable-dp-lm-head: true
-    model-loader-extra-config:
-      enable_multithread_load: true
-      num_threads: 32
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: glm52-disagg-b200-agentic
+  name: glm52-disagg-h200-agentic
 spec:
   backendFramework: sglang
   components:
@@ -111,6 +144,8 @@ spec:
       type: frontend
       podTemplate:
         spec:
+          imagePullSecrets:
+            - name: nvcr-imagepullsecret
           containers:
             - name: main
               command:
@@ -136,6 +171,8 @@ spec:
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
+          imagePullSecrets:
+            - name: nvcr-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -144,7 +181,7 @@ spec:
                       - key: nvidia.com/gpu.product
                         operator: In
                         values:
-                          - NVIDIA-B200
+                          - NVIDIA-H200
           containers:
             - name: main
               command:
@@ -171,6 +208,10 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
                 - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
                   value: UCX
                 - name: UCX_TLS
@@ -182,11 +223,11 @@ spec:
               imagePullPolicy: Always
               resources:
                 requests:
-                  nvidia.com/gpu: "4"
+                  nvidia.com/gpu: "8"
                   rdma/shared_ib: "1"
                   memory: 1Ti
                 limits:
-                  nvidia.com/gpu: "4"
+                  nvidia.com/gpu: "8"
                   rdma/shared_ib: "1"
                   memory: 1Ti
               securityContext:
@@ -213,22 +254,24 @@ spec:
           volumes:
             - name: sglang-config
               configMap:
-                name: glm52-disagg-b200-agentic-sglang-config
+                name: glm52-disagg-h200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
-                claimName: model-cache
+                claimName: shared-model-cache
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
               value: "true"
               effect: NoSchedule
-      replicas: 3
+      replicas: 1
 
     - name: decode
       type: decode
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
+          imagePullSecrets:
+            - name: nvcr-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -237,7 +280,16 @@ spec:
                       - key: nvidia.com/gpu.product
                         operator: In
                         values:
-                          - NVIDIA-B200
+                          - NVIDIA-H200
+            podAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        nvidia.com/dynamo-component-type: prefill
+                        nvidia.com/dynamo-graph-deployment-name: glm52-disagg-h200-agentic
+                    topologyKey: topology.nebius.com/tier-1
           containers:
             - name: main
               command:
@@ -264,6 +316,10 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
                 # Synthetic MTP acceptance length for performance benchmarking.
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "2.69"
@@ -315,10 +371,10 @@ spec:
           volumes:
             - name: sglang-config
               configMap:
-                name: glm52-disagg-b200-agentic-sglang-config
+                name: glm52-disagg-h200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
-                claimName: model-cache
+                claimName: shared-model-cache
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal

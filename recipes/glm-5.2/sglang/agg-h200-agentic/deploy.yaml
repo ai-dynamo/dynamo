@@ -16,40 +16,34 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: glm52-agg-b200-agentic-sglang-config
+  name: glm52-agg-h200-agentic-sglang-config
   labels:
-    app.kubernetes.io/name: glm52-agg-b200-agentic
+    app.kubernetes.io/name: glm52-agg-h200-agentic
     app.kubernetes.io/part-of: dynamo
 data:
   agg.yaml: |-
-    model-path: nvidia/GLM-5.2-NVFP4
+    model-path: zai-org/GLM-5.2-FP8
     served-model-name: zai-org/GLM-5.2
     trust-remote-code: true
-    tensor-parallel-size: 4
-    data-parallel-size: 4
-    enable-dp-attention: true
-    moe-runner-backend: flashinfer_trtllm
-    moe-a2a-backend: none
-    fp4-gemm-backend: flashinfer_trtllm
-    speculative-attention-mode: decode
-    quantization: modelopt_fp4
+    quantization: fp8
     kv-cache-dtype: fp8_e4m3
-    context-length: 500000
+    context-length: 250000
+    mem-fraction-static: 0.90
     speculative-algorithm: EAGLE
     speculative-num-steps: 3
     speculative-eagle-topk: 1
     speculative-num-draft-tokens: 4
-    max-running-requests: 128
-    cuda-graph-max-bs: 128
+    tensor-parallel-size: 8
+    ep-size: 8
+    attention-backend: dsa
+    dsa-prefill-backend: flashmla_kv
+    enable-prefill-cp: true
+    cp-strategy: interleave
+    moe-a2a-backend: megamoe
+    fp8-gemm-backend: flashinfer_deepgemm
+    enable-symm-mem: true
     watchdog-timeout: 3600
-    mem-fraction-static: 0.927
-    enable-dp-lm-head: true
     enable-metrics: true
-    speculative-moe-runner-backend: flashinfer_cutlass
-    speculative-moe-a2a-backend: none
-    enable-flashinfer-allreduce-fusion: true
-    hicache-size: 200
-    enable-hierarchical-cache: true
     kv-events-config:
       publisher: zmq
       topic: kv-events
@@ -61,7 +55,7 @@ data:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: glm52-agg-b200-agentic
+  name: glm52-agg-h200-agentic
 spec:
   backendFramework: sglang
   components:
@@ -69,6 +63,8 @@ spec:
       type: frontend
       podTemplate:
         spec:
+          imagePullSecrets:
+            - name: nvcr-imagepullsecret
           containers:
             - name: main
               command:
@@ -94,6 +90,8 @@ spec:
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
+          imagePullSecrets:
+            - name: nvcr-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -102,7 +100,7 @@ spec:
                       - key: nvidia.com/gpu.product
                         operator: In
                         values:
-                          - NVIDIA-B200
+                          - NVIDIA-H200
           containers:
             - name: main
               args:
@@ -123,6 +121,10 @@ spec:
                       fieldPath: metadata.uid
                 - name: HF_HOME
                   value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
                 # Synthetic MTP acceptance length for performance benchmarking.
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "2.69"
@@ -137,10 +139,10 @@ spec:
               imagePullPolicy: Always
               resources:
                 requests:
-                  nvidia.com/gpu: "4"
+                  nvidia.com/gpu: "8"
                   memory: 1Ti
                 limits:
-                  nvidia.com/gpu: "4"
+                  nvidia.com/gpu: "8"
                   memory: 1Ti
               securityContext:
                 runAsUser: 0
@@ -166,13 +168,13 @@ spec:
           volumes:
             - name: sglang-config
               configMap:
-                name: glm52-agg-b200-agentic-sglang-config
+                name: glm52-agg-h200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
-                claimName: model-cache
+                claimName: shared-model-cache
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
               value: "true"
               effect: NoSchedule
-      replicas: 4
+      replicas: 1

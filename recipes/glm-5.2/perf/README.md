@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # GLM-5.2 Benchmark Recipe
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers both GLM-5.2 DGDs. The benchmark is identical
-across variants; only `ENDPOINT` needs to change.
+[`perf.yaml`](perf.yaml) — covers all four GLM-5.2 DGDs. Set `ENDPOINT` for the
+target DGD and `SYNTHESIS_MAX_ISL` for its context limit.
 
 The Job waits for the target model on the DGD frontend, runs a short warmup,
 replays the configured trace at one `CONCURRENCY` value, and writes raw
@@ -18,10 +18,12 @@ a DGD frontend through `podAffinity`.
 
 Edit the `env` block in [`perf.yaml`](perf.yaml):
 
-| Variant target | `ENDPOINT` | `TRACE_FILE` |
-| --- | --- | --- |
-| B200 aggregate agentic | `glm52-agg-b200-agentic-frontend:8000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
-| B200 disaggregated agentic | `glm52-disagg-b200-agentic-frontend:8000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| Variant target | `ENDPOINT` | `SYNTHESIS_MAX_ISL` | `TRACE_FILE` |
+| --- | --- | --- | --- |
+| B200 aggregate agentic | `glm52-agg-b200-agentic-frontend:8000` | `500000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| B200 disaggregated agentic | `glm52-disagg-b200-agentic-frontend:8000` | `500000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 aggregate agentic | `glm52-agg-h200-agentic-frontend:8000` | `250000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 disaggregated agentic | `glm52-disagg-h200-agentic-frontend:8000` | `250000` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 
 If you run more than one benchmark in the same namespace, also update
 `metadata.name` and `labels.app` so Jobs and artifact directories stay
@@ -108,7 +110,7 @@ frontend/router state between independent runs:
 ```bash
 kubectl delete job glm52-bench -n ${NAMESPACE} --ignore-not-found
 
-DGD=glm52-agg-b200-agentic # or glm52-disagg-b200-agentic
+DGD=glm52-agg-b200-agentic # Choose one of the four variant names above.
 kubectl delete pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD}
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
@@ -130,6 +132,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | --- | --- | --- |
 | `ENDPOINT` | `glm52-agg-b200-agentic-frontend:8000` | Change per DGD variant |
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
+| `SYNTHESIS_MAX_ISL` | `500000` | Use `250000` for H200 recipes |
 | `CONCURRENCY` | `64` | Single value; reset server state between values |
 | `TARGET_MODEL` | `zai-org/GLM-5.2` | Must match `--served-model-name` |
 

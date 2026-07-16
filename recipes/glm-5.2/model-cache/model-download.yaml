@@ -50,6 +50,7 @@ spec:
               set -eux
               pip install --no-cache-dir huggingface_hub==1.16.4
               hf download nvidia/GLM-5.2-NVFP4
+              hf download zai-org/GLM-5.2-FP8
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache
