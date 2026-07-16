@@ -187,7 +187,12 @@ async fn publish_output<P: RouterEventBatchSink>(
         return;
     }
     if let Err(e) = publisher.publish_events(output).await {
-        tracing::error!(worker_id, event_count = output.len(), error = %e, "Failed to publish events");
+        tracing::error!(
+            worker_id,
+            attempted_event_count = output.len(),
+            error = %e,
+            "One or more KV event publishes failed"
+        );
     }
 }
 

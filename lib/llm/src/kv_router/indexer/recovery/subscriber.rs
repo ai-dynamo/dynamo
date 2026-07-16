@@ -104,11 +104,17 @@ async fn consume_events(
                 break;
             }
 
-            Some(result) = subscriber.next() => {
+            result = subscriber.next() => {
+                let Some(result) = result else {
+                    tracing::warn!("KV Router event-plane stream closed");
+                    break;
+                };
                 let (envelope, events) = match result {
                     Ok((envelope, events)) => (envelope, events),
                     Err(e) => {
-                        tracing::warn!("Failed to receive RouterEvent payload from event plane: {e:?}");
+                        tracing::warn!(
+                            "Failed to receive RouterEvent batch from event plane; publisher/subscriber versions or payload formats may not match: {e:?}"
+                        );
                         continue;
                     }
                 };

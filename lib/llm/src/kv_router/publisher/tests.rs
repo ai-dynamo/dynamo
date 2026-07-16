@@ -3503,12 +3503,19 @@ mod event_processor_tests {
 mod event_plane_batch_tests {
     use super::*;
     use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
+        BlockExtraInfo, BlockMmObjectInfo, ExternalSequenceBlockHash, KvCacheEvent,
+        KvCacheEventData, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
+        LocalBlockHash, RouterEvent,
     };
+    use dynamo_runtime::config::environment_names::zmq_broker as broker_env;
+    use dynamo_runtime::distributed::DistributedConfig;
+    use dynamo_runtime::transports::event_plane::{
+        EventPublisher, EventSubscriber, EventTransportKind, MsgpackCodec,
+    };
+    use dynamo_runtime::{DistributedRuntime, Runtime};
 
     use super::super::sinks::{
-        MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS, RouterEventBatchSink, encode_event_plane_batch,
+        EventPlanePublisher, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS, RouterEventBatchSink,
         event_plane_event_batches,
     };
 
@@ -3532,6 +3539,14 @@ mod event_plane_batch_tests {
     }
 
     fn stored_router_event(event_id: u64, block_count: usize) -> RouterEvent {
+        stored_router_event_with_mm(event_id, block_count, false)
+    }
+
+    fn stored_router_event_with_mm(
+        event_id: u64,
+        block_count: usize,
+        with_mm: bool,
+    ) -> RouterEvent {
         RouterEvent::new(
             7,
             KvCacheEvent {
@@ -3545,13 +3560,39 @@ mod event_plane_batch_tests {
                                 event_id * 100_000 + index as u64,
                             ),
                             tokens_hash: LocalBlockHash(event_id * 100_000 + index as u64),
-                            mm_extra_info: None,
+                            mm_extra_info: with_mm.then(|| BlockExtraInfo {
+                                mm_objects: vec![BlockMmObjectInfo {
+                                    mm_hash: event_id * 100_000 + index as u64,
+                                    offsets: vec![(0, 16)],
+                                }],
+                            }),
                         })
                         .collect(),
                 }),
                 dp_rank: (event_id % 2) as u32,
             },
         )
+    }
+
+    fn production_stored_batch(with_mm: bool) -> Vec<RouterEvent> {
+        assert_eq!(
+            MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS % DEFAULT_MAX_BATCH_BLOCKS,
+            0
+        );
+        (0..MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS / DEFAULT_MAX_BATCH_BLOCKS)
+            .map(|event_id| {
+                stored_router_event_with_mm(event_id as u64, DEFAULT_MAX_BATCH_BLOCKS, with_mm)
+            })
+            .collect()
+    }
+
+    fn encoded_wire_size(events: &[RouterEvent]) -> usize {
+        let codec = MsgpackCodec;
+        let payload = codec.encode_payload(&events).unwrap();
+        codec
+            .encode_envelope_parts(u64::MAX, u64::MAX, u64::MAX, KV_EVENT_SUBJECT, &payload)
+            .unwrap()
+            .len()
     }
 
     fn cleared_router_event(event_id: u64) -> RouterEvent {
@@ -3566,16 +3607,19 @@ mod event_plane_batch_tests {
     }
 
     #[test]
-    fn event_plane_batch_encoding_matches_named_msgpack_and_roundtrips() {
-        let events = vec![router_event(1), router_event(2), router_event(3)];
-        let expected = rmp_serde::to_vec_named(&events).unwrap();
+    fn production_event_plane_batches_fit_default_nats_payload() {
+        const NATS_DEFAULT_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 
-        let encoded = encode_event_plane_batch(&events).unwrap();
+        let plain_wire_size = encoded_wire_size(&production_stored_batch(false));
+        assert!(
+            plain_wire_size < NATS_DEFAULT_MAX_PAYLOAD_BYTES,
+            "plain production batch encoded to {plain_wire_size} bytes"
+        );
 
-        assert_eq!(encoded, expected);
-        assert_eq!(
-            rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded).unwrap(),
-            events
+        let multimodal_wire_size = encoded_wire_size(&production_stored_batch(true));
+        assert!(
+            multimodal_wire_size < NATS_DEFAULT_MAX_PAYLOAD_BYTES,
+            "single-object multimodal production batch encoded to {multimodal_wire_size} bytes"
         );
     }
 
@@ -3645,5 +3689,108 @@ mod event_plane_batch_tests {
             .unwrap();
 
         assert_eq!(*sink.events.lock().unwrap(), events);
+    }
+
+    #[derive(Clone)]
+    struct FailingSingletonSink {
+        attempted_event_ids: Arc<std::sync::Mutex<Vec<u64>>>,
+        failing_event_ids: Arc<Vec<u64>>,
+    }
+
+    impl RouterEventSink for FailingSingletonSink {
+        fn publish_event(
+            &self,
+            event: &RouterEvent,
+        ) -> impl Future<Output = anyhow::Result<()>> + Send {
+            let event_id = event.event.event_id;
+            self.attempted_event_ids.lock().unwrap().push(event_id);
+            let should_fail = self.failing_event_ids.contains(&event_id);
+            async move {
+                if should_fail {
+                    anyhow::bail!("synthetic publish failure for event {event_id}");
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_sink_reports_each_failure_and_attempts_later_events() {
+        let attempted_event_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = FailingSingletonSink {
+            attempted_event_ids: Arc::clone(&attempted_event_ids),
+            failing_event_ids: Arc::new(vec![2, 4]),
+        };
+        let events = (1..=4).map(router_event).collect::<Vec<_>>();
+
+        let error = RouterEventBatchSink::publish_events(&sink, &events)
+            .await
+            .unwrap_err();
+
+        assert_eq!(*attempted_event_ids.lock().unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(
+            error.to_string(),
+            "2 publish attempt(s) failed; 2 event(s) dropped; first error: synthetic publish failure for event 2"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_plane_publisher_roundtrips_batch_through_production_codec() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+                    .await
+                    .expect("create distributed runtime");
+                let component = drt
+                    .namespace("kv-event-batch-codec-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+                let publisher = EventPublisher::for_component_with_transport(
+                    &component,
+                    KV_EVENT_SUBJECT,
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create publisher");
+                let mut subscriber = EventSubscriber::for_component_with_transport(
+                    &component,
+                    KV_EVENT_SUBJECT,
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create subscriber")
+                .typed::<Vec<RouterEvent>>();
+                let sink = EventPlanePublisher(publisher);
+                let events = vec![router_event(1), router_event(2), router_event(3)];
+
+                let received = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        RouterEventBatchSink::publish_events(&sink, &events)
+                            .await
+                            .expect("publish event batch");
+                        match tokio::time::timeout(Duration::from_millis(100), subscriber.next())
+                            .await
+                        {
+                            Ok(Some(Ok((_envelope, received)))) => break received,
+                            Ok(Some(Err(error))) => panic!("receive event batch: {error}"),
+                            Ok(None) => panic!("event-plane stream closed"),
+                            Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                        }
+                    }
+                })
+                .await
+                .expect("subscriber should receive an event batch");
+
+                assert_eq!(received, events);
+                drt.shutdown();
+            },
+        )
+        .await;
     }
 }
