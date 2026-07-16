@@ -2231,9 +2231,7 @@ async fn tool_calls_qwen3_coder_auto_routes_through_experimental_gate() {
         ..
     } = drain_stream(output_stream).await;
 
-    let path = if std::env::var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2")
-        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
-    {
+    let path = if dynamo_runtime::config::env_is_truthy("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2") {
         "qwen3_coder auto -> dynamo-parsers-v2 (DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 on)"
     } else {
         "qwen3_coder auto -> v1 jail (flag off)"
