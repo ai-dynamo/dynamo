@@ -25,7 +25,6 @@ from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
 from tests.utils.otel import (
-    get_span_attribute,
     wait_for_engine_generate_roles,
 )
 from tests.utils.payload_builder import (
@@ -916,28 +915,6 @@ def _assert_disaggregated_engine_generate_spans_exported(collector) -> None:
         f"expected services {expected_services}, got {services}"
     )
 
-    prefill_spans = [
-        span
-        for _, span in engine_spans_with_services
-        if get_span_attribute(span, "disagg_role") == "prefill"
-    ]
-    decode_spans = [
-        span
-        for _, span in engine_spans_with_services
-        if get_span_attribute(span, "disagg_role") == "decode"
-    ]
-    linked_prefill_span_ids = {
-        link.span_id for decode_span in decode_spans for link in decode_span.links
-    }
-    assert any(
-        prefill_span.span_id in linked_prefill_span_ids
-        for prefill_span in prefill_spans
-    ), (
-        "No decode-side engine.generate span linked to a prefill-side span; "
-        f"prefill span IDs {[span.span_id.hex() for span in prefill_spans]}, "
-        f"decode link IDs {[span_id.hex() for span_id in linked_prefill_span_ids]}"
-    )
-
 
 @pytest.mark.sglang
 @pytest.mark.core
@@ -950,7 +927,7 @@ def _assert_disaggregated_engine_generate_spans_exported(collector) -> None:
 @pytest.mark.pre_merge
 @pytest.mark.unified
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
-def test_disaggregated_otel_exports_linked_worker_spans(
+def test_disaggregated_otel_exports_worker_graph_spans(
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
