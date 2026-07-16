@@ -850,9 +850,7 @@ class VllmLLMEngine(LLMEngine):
         async with lock:
             # A pending request may have waited behind an unload. Re-resolve
             # under the lock instead of admitting its stale path afterwards.
-            admitted_lora_request = self._resolve_lora_request(
-                lora_request.lora_name
-            )
+            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
             generator = create_generator(admitted_lora_request)
             self._track_lora_request_activation(admitted_lora_request)
             try:

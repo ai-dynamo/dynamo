@@ -237,8 +237,7 @@ async def test_legacy_prefill_request_admission_serializes_with_unload(monkeypat
 
     async def _unload():
         return [
-            result
-            async for result in handler.unload_lora({"lora_name": "adapterA"})
+            result async for result in handler.unload_lora({"lora_name": "adapterA"})
         ]
 
     unload_task = asyncio.create_task(_unload())

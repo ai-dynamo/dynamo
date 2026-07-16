@@ -1016,9 +1016,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._engine_loaded_loras: set[str] = set()
         # Fixed stripes serialize same-name lifecycle and lazy-request admission
         # without retaining one asyncio.Lock per adapter ever seen.
-        self._lora_load_locks = [
-            asyncio.Lock() for _ in range(_LORA_LOCK_STRIPES)
-        ]
+        self._lora_load_locks = [asyncio.Lock() for _ in range(_LORA_LOCK_STRIPES)]
         self._paused: bool = False
         self._weight_version: str = "initial"
 
@@ -1981,9 +1979,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         async with lock:
             # A pending request may have waited behind an unload. Re-resolve
             # under the lock instead of admitting its stale path afterwards.
-            admitted_lora_request = self._resolve_lora_request(
-                lora_request.lora_name
-            )
+            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
             if admitted_lora_request is None:
                 raise ValueError(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
