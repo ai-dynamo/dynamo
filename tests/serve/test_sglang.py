@@ -25,6 +25,7 @@ from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
 from tests.utils.otel import (
+    get_span_attribute,
     wait_for_engine_generate_roles,
 )
 from tests.utils.payload_builder import (
@@ -904,15 +905,17 @@ def _assert_disaggregated_engine_generate_spans_exported(collector) -> None:
         for service_name, span in collector.snapshot_with_service_names()
         if span.name == "engine.generate"
     ]
-    expected_services = {"dynamo-worker-prefill", "dynamo-worker-decode"}
-    services = {
-        service_name
-        for service_name, _ in engine_spans_with_services
-        if service_name is not None
+    expected_workers = {
+        ("dynamo-worker-prefill", "prefill"),
+        ("dynamo-worker-decode", "decode"),
     }
-    assert expected_services.issubset(services), (
+    observed_workers = {
+        (service_name, get_span_attribute(span, "disagg_role"))
+        for service_name, span in engine_spans_with_services
+    }
+    assert expected_workers.issubset(observed_workers), (
         "OTLP engine spans did not cover the disaggregated worker graph; "
-        f"expected services {expected_services}, got {services}"
+        f"expected workers {expected_workers}, got {observed_workers}"
     )
 
 
@@ -933,7 +936,7 @@ def test_disaggregated_otel_exports_worker_graph_spans(
     predownload_models,
     otlp_collector,
 ):
-    """Disaggregated OTEL must export linked prefill and decode worker spans."""
+    """Disaggregated OTEL must export prefill and decode worker spans."""
     assert num_system_ports >= 2
     collector, otlp_port = otlp_collector
     config = dataclasses.replace(
