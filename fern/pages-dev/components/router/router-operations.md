@@ -74,7 +74,7 @@ The operational concern is replica synchronization. Active blocks are tracked lo
 There are two operating modes for active blocks:
 
 - **Local-only tracking**: Leave replicas unsynchronized. Each router balances using the subset of active requests it routed itself. This is simpler and may be acceptable when traffic is already well distributed across replicas or when active-load precision is less important.
-- **Replica sync**: Enable `--router-replica-sync` so replicas publish and subscribe to active-sequence lifecycle events through NATS core messaging. This gives each replica a more complete active-load view across the router fleet.
+- **Replica sync**: Enable `--router-replica-sync` so replicas publish and subscribe to component-scoped active-sequence lifecycle events through the Runtime event plane. This gives each replica a more complete active-load view across the router fleet.
 
 ```bash
 # Router replica 1
@@ -85,6 +85,14 @@ python -m dynamo.frontend --router-mode kv --http-port 8001 --router-replica-syn
 ```
 
 With replica sync enabled, a new router still starts with zero active-block knowledge, but it converges through live request handling and active-sequence events from other replicas. Without it, each replica keeps an isolated active-block view, which can lead to suboptimal load balancing.
+
+Session-affinity synchronization starts automatically when
+`--router-session-affinity-ttl-secs` is set. That path is best effort: each replica
+owns its local idle TTL, rejects targets outside its local worker membership, and
+keeps the first live binding it observes. The origin publishes after dispatch for
+concurrent visibility and again when the lease ends to restart peer idle timers.
+Long requests and dropped completion updates can temporarily desynchronize those
+timers. Use ingress stickiness or authoritative storage when affinity must be strict.
 
 ## Dynamo-Native Remote Indexer
 
