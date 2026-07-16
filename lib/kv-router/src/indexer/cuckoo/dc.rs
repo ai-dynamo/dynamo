@@ -493,19 +493,20 @@ impl DcCkfState {
     }
 
     pub fn snapshot(&mut self) -> Result<(Option<DcCkfDelta>, DcCkfSnapshot), CkfBuildError> {
-        let delta = self.drain_publication();
         let mut buckets = Vec::new();
         buckets
             .try_reserve_exact(self.format.bucket_count)
             .map_err(|_| CkfBuildError::AllocationFailed)?;
         buckets
             .extend((0..self.format.bucket_count).map(|bucket| self.filter.load_bucket(bucket).0));
+        let buckets = buckets.into_boxed_slice();
+        let delta = self.drain_publication();
         Ok((
             delta,
             DcCkfSnapshot {
                 sequence: self.publication.sequence,
                 format: self.format,
-                buckets: buckets.into_boxed_slice(),
+                buckets,
             },
         ))
     }

@@ -19,7 +19,7 @@ from tests.utils.constants import ROUTER_MODEL_NAME
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
-    pytest.mark.integration,
+    pytest.mark.e2e,
     pytest.mark.router,
     pytest.mark.model(ROUTER_MODEL_NAME),
 ]

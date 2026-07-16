@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import logging
 import os
 
@@ -55,6 +56,10 @@ async def worker(runtime: DistributedRuntime) -> None:
     await relay.start()
     diagnostics = KvDcRelayDiagnostics(relay)
     namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
+    relay_identity = hashlib.sha256(
+        f"{args.model_name}\0{args.dc_id}".encode()
+    ).hexdigest()[:32]
+    diagnostics_component = f"kv_dc_relay_{relay_identity}"
 
     logger.info(
         "KV DC Relay started for model=%s dc_id=%s endpoint=%s",
@@ -62,26 +67,47 @@ async def worker(runtime: DistributedRuntime) -> None:
         args.dc_id,
         args.endpoint,
     )
+    endpoint_tasks = []
     try:
-        await asyncio.gather(
-            runtime.endpoint(f"{namespace}.kv_dc_relay.stats").serve_endpoint(
-                diagnostics.stats,
-                graceful_shutdown=True,
-                metrics_labels=[("service", "kv_dc_relay")],
-            ),
-            runtime.endpoint(f"{namespace}.kv_dc_relay.snapshot").serve_endpoint(
-                diagnostics.snapshot,
-                graceful_shutdown=True,
-                metrics_labels=[("service", "kv_dc_relay")],
-            ),
-            runtime.endpoint(f"{namespace}.kv_dc_relay.health").serve_endpoint(
-                diagnostics.health,
-                graceful_shutdown=True,
-                metrics_labels=[("service", "kv_dc_relay")],
-                health_check_payload={"text": "health"},
-            ),
+        endpoint_tasks.append(
+            asyncio.create_task(
+                runtime.endpoint(
+                    f"{namespace}.{diagnostics_component}.stats"
+                ).serve_endpoint(
+                    diagnostics.stats,
+                    graceful_shutdown=True,
+                    metrics_labels=[("service", "kv_dc_relay")],
+                )
+            )
         )
+        endpoint_tasks.append(
+            asyncio.create_task(
+                runtime.endpoint(
+                    f"{namespace}.{diagnostics_component}.snapshot"
+                ).serve_endpoint(
+                    diagnostics.snapshot,
+                    graceful_shutdown=True,
+                    metrics_labels=[("service", "kv_dc_relay")],
+                )
+            )
+        )
+        endpoint_tasks.append(
+            asyncio.create_task(
+                runtime.endpoint(
+                    f"{namespace}.{diagnostics_component}.health"
+                ).serve_endpoint(
+                    diagnostics.health,
+                    graceful_shutdown=True,
+                    metrics_labels=[("service", "kv_dc_relay")],
+                    health_check_payload={"text": "health"},
+                )
+            )
+        )
+        await asyncio.gather(*endpoint_tasks)
     finally:
+        for task in endpoint_tasks:
+            task.cancel()
+        await asyncio.gather(*endpoint_tasks, return_exceptions=True)
         await relay.shutdown()
         logger.info("KV DC Relay stopped")
 

@@ -529,7 +529,7 @@ impl ModelKvDcRelay {
         let recovery = self.recovery.health_snapshot().await;
         let activity = self.handle.activity.lock();
         KvDcRelayHealth {
-            healthy: !activity.shutting_down,
+            healthy: !activity.shutting_down && !self.handle.sender.is_closed(),
             shutting_down: activity.shutting_down,
             active_command: activity.active_command.map(str::to_string),
             active_command_age_ms: activity
