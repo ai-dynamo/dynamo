@@ -23,6 +23,8 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.async_utils import make_async
 
+from .thinking import apply_default_thinking_mode_to_template_kwargs
+
 
 class _Renderer(Protocol):
     """Structural type for vLLM's chat-template renderer."""
@@ -93,6 +95,7 @@ def _prepare_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_thinking_mode: str | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -144,10 +147,20 @@ def _prepare_request(
     chat_template_kwargs = dict(
         request_for_sampling.chat_template_kwargs or raw_template_args or {}
     )
-    # Don't let an absent top-level field clobber a nested reasoning_effort.
+    # reasoning_effort is a request-level thinking control. Put an explicit
+    # value into the kwargs before applying the deployment default so the two
+    # cannot produce contradictory template controls.
     if request_for_sampling.reasoning_effort is not None:
         chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
-    else:
+    chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
+        chat_template_kwargs,
+        default_thinking_mode,
+        request_has_root_thinking=(
+            isinstance(request, dict) and request.get("thinking") is not None
+        ),
+    )
+    # Don't let an absent top-level field clobber a nested reasoning_effort.
+    if request_for_sampling.reasoning_effort is None:
         chat_template_kwargs.setdefault("reasoning_effort", None)
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
@@ -193,6 +206,7 @@ async def preprocess_chat_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_thinking_mode: str | None = None,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -206,6 +220,7 @@ async def preprocess_chat_request(
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
+        default_thinking_mode=default_thinking_mode,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)

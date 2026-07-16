@@ -827,6 +827,70 @@ class TestChatTemplateKwargsForwarding:
         )
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
 
+    def test_reasoning_effort_takes_precedence_over_deployment_default(self, tokenizer):
+        _, _, chat_template_kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "reasoning_effort": "high",
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert chat_template_kwargs["reasoning_effort"] == "high"
+        assert "thinking" not in chat_template_kwargs
+        assert "enable_thinking" not in chat_template_kwargs
+        assert "thinking_mode" not in chat_template_kwargs
+
+    def test_default_thinking_mode_disabled_reaches_template_kwargs(self, tokenizer):
+        _, _, chat_template_kwargs, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+
+        for kwargs in (chat_template_kwargs, chat_params.chat_template_kwargs):
+            assert kwargs["thinking"] is False
+            assert kwargs["enable_thinking"] is False
+            assert kwargs["thinking_mode"] == "disabled"
+
+    def test_default_thinking_mode_does_not_override_request_kwargs(self, tokenizer):
+        _, _, chat_template_kwargs, _, chat_params = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+
+        for kwargs in (chat_template_kwargs, chat_params.chat_template_kwargs):
+            assert kwargs["enable_thinking"] is True
+            assert "thinking" not in kwargs
+            assert "thinking_mode" not in kwargs
+
+    def test_null_root_thinking_does_not_suppress_deployment_default(self, tokenizer):
+        _, _, chat_template_kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "thinking": None,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+            default_thinking_mode="disabled",
+        )
+
+        assert chat_template_kwargs["enable_thinking"] is False
+
 
 @pytest.mark.parametrize(
     ("runtime_config", "expected"),

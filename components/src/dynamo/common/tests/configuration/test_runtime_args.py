@@ -111,3 +111,28 @@ def test_fpm_trace_help_lists_flag_and_env(monkeypatch):
     assert "--fpm-trace" in help_text
     assert "--no-fpm-trace" in help_text
     assert "DYN_FPM_TRACE" in help_text
+
+
+@pytest.mark.parametrize("mode", ["enabled", "disabled"])
+def test_default_thinking_mode_cli(mode, monkeypatch):
+    monkeypatch.delenv("DYN_DEFAULT_THINKING_MODE", raising=False)
+
+    config, help_text = _parse_runtime_args(["--dyn-default-thinking-mode", mode])
+
+    assert config.dyn_default_thinking_mode == mode
+    assert "DYN_DEFAULT_THINKING_MODE" in help_text
+
+
+def test_default_thinking_mode_env(monkeypatch):
+    monkeypatch.setenv("DYN_DEFAULT_THINKING_MODE", "disabled")
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_default_thinking_mode == "disabled"
+
+
+def test_default_thinking_mode_rejects_invalid_value(monkeypatch):
+    monkeypatch.delenv("DYN_DEFAULT_THINKING_MODE", raising=False)
+
+    with pytest.raises(SystemExit):
+        _parse_runtime_args(["--dyn-default-thinking-mode", "adaptive"])

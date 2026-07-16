@@ -152,6 +152,7 @@ impl NvCreateChatCompletionRequest {
             match mode {
                 OpenAiThinkingMode::Enabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(true));
+                    args.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("enabled".to_string()),
@@ -159,6 +160,10 @@ impl NvCreateChatCompletionRequest {
                 }
                 OpenAiThinkingMode::Disabled => {
                     args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+                    args.insert(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(false),
+                    );
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("disabled".to_string()),
@@ -1113,6 +1118,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("enabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("max")));
     }
@@ -1163,6 +1169,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
     }
 
@@ -1193,6 +1200,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
         assert!(request.thinking.is_none());

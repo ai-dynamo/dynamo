@@ -551,6 +551,11 @@ async def init_llm_worker(
         runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
+        if config.dyn_default_thinking_mode is not None:
+            runtime_config.set_engine_specific(
+                "default_thinking_mode",
+                json.dumps(config.dyn_default_thinking_mode),
+            )
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )

@@ -35,6 +35,7 @@ from .sglang_prepost import (
     detect_force_reasoning_from_template,
     preprocess_chat_request,
 )
+from .thinking import runtime_default_thinking_mode
 from .utils import (
     PreprocessError,
     extract_mm_urls,
@@ -143,6 +144,7 @@ _w_tool_call_parser_name: str | None = None
 _w_reasoning_parser_name: str | None = None
 _w_exclude_tools_when_tool_choice_none: bool = True
 _w_template_force_reasoning: bool = False
+_w_default_thinking_mode: str | None = None
 
 
 def _load_chat_template(chat_template: str | None) -> str | None:
@@ -192,10 +194,12 @@ def _init_worker(
     trust_remote_code: bool = False,
     template_force_reasoning: bool = False,
     chat_template: str | None = None,
+    default_thinking_mode: str | None = None,
 ) -> None:
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
+    global _w_default_thinking_mode
     _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     if chat_template is not None:
         _w_tokenizer.chat_template = chat_template
@@ -203,6 +207,7 @@ def _init_worker(
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
     _w_template_force_reasoning = template_force_reasoning
+    _w_default_thinking_mode = default_thinking_mode
 
 
 def _preprocess_worker(
@@ -218,6 +223,7 @@ def _preprocess_worker(
         reasoning_parser_name=_w_reasoning_parser_name,
         exclude_tools_when_tool_choice_none=_w_exclude_tools_when_tool_choice_none,
         template_force_reasoning=_w_template_force_reasoning,
+        default_thinking_mode=_w_default_thinking_mode,
     )
 
     n = request.get("n", 1)
@@ -350,6 +356,7 @@ class SglangProcessor:
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
         stream_interval: int = 1,
+        default_thinking_mode: str | None = None,
     ):
         self.tokenizer = tokenizer
         # Detect force_reasoning once from the chat template, matching
@@ -373,6 +380,7 @@ class SglangProcessor:
         self.eos_token_ids = _normalize_eos_token_ids(eos_token_ids)
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
+        self.default_thinking_mode = default_thinking_mode
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
             self._worker_semaphore: asyncio.Semaphore | None = asyncio.Semaphore(
@@ -429,6 +437,7 @@ class SglangProcessor:
                 reasoning_parser_name=self.reasoning_parser_name,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 template_force_reasoning=self.template_force_reasoning,
+                default_thinking_mode=self.default_thinking_mode,
             )
 
             if self.debug_perf:
@@ -779,11 +788,14 @@ class SglangEngineFactory:
             self.reasoning_parser_name
             or _runtime_config_parser_name(mdc, "reasoning_parser")
         )
+        default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
 
         if tool_call_parser_name:
             logger.info("SGLang tool call parser: %s", tool_call_parser_name)
         if reasoning_parser_name:
             logger.info("SGLang reasoning parser: %s", reasoning_parser_name)
+        if default_thinking_mode:
+            logger.info("SGLang default thinking mode: %s", default_thinking_mode)
 
         preprocess_pool = None
         preprocess_workers = self.config.preprocess_workers
@@ -804,6 +816,7 @@ class SglangEngineFactory:
                     self.trust_remote_code,
                     template_force_reasoning,
                     chat_template,
+                    default_thinking_mode,
                 ),
             )
             futures = [
@@ -839,6 +852,7 @@ class SglangEngineFactory:
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,
             stream_interval=self.stream_interval,
+            default_thinking_mode=default_thinking_mode,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

@@ -188,6 +188,8 @@ pub struct WorkerConfig {
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
     pub media_fetcher: Option<MediaFetcher>,
+    /// Deployment-level default thinking mode written to runtime metadata.
+    pub default_thinking_mode: Option<String>,
 }
 
 impl WorkerConfig {
@@ -227,6 +229,7 @@ impl Default for WorkerConfig {
             route_to_encoder: false,
             media_decoder: None,
             media_fetcher: None,
+            default_thinking_mode: None,
         }
     }
 }
@@ -1633,6 +1636,14 @@ async fn build_local_model(
         _ => None,
     };
 
+    let mut runtime_data = engine_config.runtime_data.clone();
+    if let Some(default_thinking_mode) = config.default_thinking_mode.as_deref() {
+        runtime_data.insert(
+            "default_thinking_mode".to_string(),
+            serde_json::json!(default_thinking_mode),
+        );
+    }
+
     let rt_cfg = ModelRuntimeConfig {
         context_length: llm.context_length,
         total_kv_blocks: llm.total_kv_blocks,
@@ -1648,7 +1659,7 @@ async fn build_local_model(
         structural_tag_schema: config.structural_tag_schema,
         enable_local_indexer,
         disaggregated_endpoint,
-        runtime_data: engine_config.runtime_data.clone(),
+        runtime_data,
         ..ModelRuntimeConfig::default()
     };
 
@@ -1915,6 +1926,7 @@ mod tests {
         let config = WorkerConfig {
             tool_call_parser: Some("kimi_k2".to_string()),
             reasoning_parser: Some("kimi_k25".to_string()),
+            default_thinking_mode: Some("disabled".to_string()),
             exclude_tools_when_tool_choice_none: false,
             enable_local_indexer: false,
             ..WorkerConfig::default()
@@ -1947,6 +1959,13 @@ mod tests {
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
         assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
+        assert_eq!(
+            runtime_config
+                .runtime_data
+                .get("default_thinking_mode")
+                .and_then(|value| value.as_str()),
+            Some("disabled")
+        );
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
         assert!(!runtime_config.enable_local_indexer);
         assert_eq!(

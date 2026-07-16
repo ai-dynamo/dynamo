@@ -362,6 +362,11 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.dyn_reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.dyn_tool_call_parser
+    if dynamo_args.dyn_default_thinking_mode is not None:
+        runtime_config.set_engine_specific(
+            "default_thinking_mode",
+            json.dumps(dynamo_args.dyn_default_thinking_mode),
+        )
     runtime_config.exclude_tools_when_tool_choice_none = (
         dynamo_args.exclude_tools_when_tool_choice_none
     )

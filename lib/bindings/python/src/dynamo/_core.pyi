@@ -3369,6 +3369,7 @@ class backend:
             route_to_encoder: bool = ...,
             media_decoder: Optional[MediaDecoder] = None,
             media_fetcher: Optional[MediaFetcher] = None,
+            default_thinking_mode: Optional[str] = None,
         ) -> None: ...
 
     class Worker:
