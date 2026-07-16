@@ -34,7 +34,7 @@ Dynamo + SGLang deployment profile:
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
-2. **Image pull secret** with access to `nvcr.io/nvstaging/nim` (staging registry):
+2. **Image pull secret** with access to `nvcr.io/nvidia/ai-dynamo` (NGC registry):
    ```bash
    export NAMESPACE=your-namespace
    kubectl create secret docker-registry nvcr-imagepullsecret \
@@ -61,7 +61,8 @@ kubectl create namespace ${NAMESPACE}
 
 ### 2. Create Storage
 
-> **Note:** Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (`kubectl get storageclass`). On clusters that already provide a shared RWX PVC (e.g. `shared-model-cache` on the Dynamo dev clusters), skip this step and replace the `model-cache` claim name in the manifests with the shared PVC name.
+> [!NOTE]
+> Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (`kubectl get storageclass`). On clusters that already provide a shared RWX PVC (e.g. `shared-model-cache` on the Dynamo dev clusters), skip this step and replace the `model-cache` claim name in three places: `model-cache/model-download.yaml` (`.spec.template.spec.volumes[0].persistentVolumeClaim.claimName`) and `sglang/agg-b200/deploy.yaml` (both the Frontend and decode component volumes).
 
 ```bash
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
@@ -76,7 +77,7 @@ kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/inkling-model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
-### 4. Deploy the DGD
+### 4. Deploy the DynamoGraphDeployment
 
 ```bash
 kubectl apply -f sglang/agg-b200/deploy.yaml -n ${NAMESPACE}
@@ -214,6 +215,33 @@ curl -s http://localhost:8000/v1/chat/completions \
     "max_tokens": 128
   }'
 ```
+
+## Cleanup
+
+To tear down the deployment and free cluster resources:
+
+```bash
+# Stop the port-forward if it is still running
+pkill -f "kubectl port-forward svc/tml-inkling-sglang-agg-frontend" 2>/dev/null || true
+
+# Delete the deployment (stops all pods)
+kubectl delete dynamographdeployment tml-inkling-sglang-agg -n ${NAMESPACE} 2>/dev/null || true
+
+# Delete the model-download job (idempotent — already finished or not yet run)
+kubectl delete job inkling-model-download -n ${NAMESPACE} 2>/dev/null || true
+
+# Delete secrets (optional — omit if you reuse them across deployments)
+kubectl delete secret nvcr-imagepullsecret hf-token-secret -n ${NAMESPACE} 2>/dev/null || true
+
+# Delete the PVC — WARNING: this destroys the downloaded 592 GB model.
+# Skip this step if you plan to redeploy or share the PVC with other workloads.
+# kubectl delete pvc model-cache -n ${NAMESPACE}
+
+# Delete the namespace — WARNING: this destroys everything in it.
+# kubectl delete namespace ${NAMESPACE}
+```
+
+For a one-shot cleanup run see [`cleanup.sh`](cleanup.sh).
 
 ## Known Issues
 
