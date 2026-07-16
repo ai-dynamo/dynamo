@@ -42,6 +42,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
+const alternateAdmissionModel = "Qwen/Qwen3-8B"
+
 type crdRequestValidator struct {
 	schemaValidator apiextensionsvalidation.SchemaValidator
 	celValidator    apitest.CELValidateFunc

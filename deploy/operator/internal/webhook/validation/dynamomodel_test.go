@@ -24,6 +24,7 @@ import (
 	"time"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -79,6 +80,13 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 			model: loraModelForAdmission("file:///local/path"),
 		},
 		{
+			name: "invalid shared metadata annotation uses its exact field path",
+			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
+				model.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
+			}),
+			wantWebhook: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
+		},
+		{
 			name: "empty required names aggregate in API declaration order",
 			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
 				model.Spec.ModelName = ""
@@ -92,7 +100,7 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 		{
 			name: "LoRA model requires source",
 			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
-				model.Spec.ModelType = "lora"
+				model.Spec.ModelType = dynamoModelTypeLoRA
 			}),
 			wantWebhook: []string{`spec.source: Required value: is required when spec.modelType is "lora"`},
 		},
@@ -104,24 +112,24 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:  "LoRA model rejects HTTP source",
-			model: loraModelForAdmission("http://example.com/model"),
+			name:  "LoRA model redacts rejected source URI",
+			model: loraModelForAdmission("https://user:secret@example.com/model?token=secret"),
 			wantWebhook: []string{
-				`spec.source.uri: Invalid value: "http://example.com/model": must start with "s3://", "hf://", or "file:///"`,
+				`spec.source.uri: Invalid value: "<redacted>": must start with "s3://", "hf://", or "file:///"`,
 			},
 		},
 		{
 			name:  "LoRA model rejects file URI with host",
 			model: loraModelForAdmission("file://host/local/path"),
 			wantWebhook: []string{
-				`spec.source.uri: Invalid value: "file://host/local/path": must start with "s3://", "hf://", or "file:///"`,
+				`spec.source.uri: Invalid value: "<redacted>": must start with "s3://", "hf://", or "file:///"`,
 			},
 		},
 		{
 			name:  "LoRA model rejects bare file URI",
 			model: loraModelForAdmission("file://"),
 			wantWebhook: []string{
-				`spec.source.uri: Invalid value: "file://": must start with "s3://", "hf://", or "file:///"`,
+				`spec.source.uri: Invalid value: "<redacted>": must start with "s3://", "hf://", or "file:///"`,
 			},
 		},
 		{
@@ -148,7 +156,7 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 			name:     "baseModelName is immutable and warns",
 			oldModel: dynamoModelForAdmission(nil),
 			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
-				model.Spec.BaseModelName = "Qwen/Qwen3-8B"
+				model.Spec.BaseModelName = alternateAdmissionModel
 			}),
 			wantWebhook: []string{
 				`spec.baseModelName: Invalid value: "Qwen/Qwen3-8B": is immutable and cannot be changed after creation`,
@@ -168,7 +176,7 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 			name:     "independent immutable fields aggregate and warn in API declaration order",
 			oldModel: dynamoModelForAdmission(nil),
 			model: loraModelForAdmission("s3://bucket/adapter", func(model *nvidiacomv1alpha1.DynamoModel) {
-				model.Spec.BaseModelName = "Qwen/Qwen3-8B"
+				model.Spec.BaseModelName = alternateAdmissionModel
 			}),
 			wantWebhook: []string{
 				`spec.baseModelName: Invalid value: "Qwen/Qwen3-8B": is immutable and cannot be changed after creation`,
@@ -189,14 +197,14 @@ func TestDynamoModelValidator_Validate(t *testing.T) {
 			oldModel: loraModelForAdmission("s3://bucket/adapter-v1"),
 			model:    loraModelForAdmission("http://example.com/adapter"),
 			wantWebhook: []string{
-				`spec.source.uri: Invalid value: "http://example.com/adapter": must start with "s3://", "hf://", or "file:///"`,
+				`spec.source.uri: Invalid value: "<redacted>": must start with "s3://", "hf://", or "file:///"`,
 			},
 		},
 		{
 			name:     "deleting model skips update validation",
 			oldModel: dynamoModelForAdmission(nil),
 			model: dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
-				model.Spec.ModelType = "lora"
+				model.Spec.ModelType = dynamoModelTypeLoRA
 				model.DeletionTimestamp = &metav1.Time{Time: time.Unix(1, 0)}
 			}),
 		},
@@ -296,7 +304,7 @@ func loraModelForAdmission(
 	mutations ...func(*nvidiacomv1alpha1.DynamoModel),
 ) *nvidiacomv1alpha1.DynamoModel {
 	return dynamoModelForAdmission(func(model *nvidiacomv1alpha1.DynamoModel) {
-		model.Spec.ModelType = "lora"
+		model.Spec.ModelType = dynamoModelTypeLoRA
 		model.Spec.Source = &nvidiacomv1alpha1.ModelSource{URI: uri}
 		for _, mutate := range mutations {
 			mutate(model)

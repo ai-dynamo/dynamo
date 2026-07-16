@@ -23,6 +23,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+const (
+	dynamoModelTypeLoRA    = "lora"
+	redactedModelSourceURI = "<redacted>"
+)
+
 // DynamoModelValidator validates DynamoModel resources.
 type DynamoModelValidator struct{}
 
@@ -34,11 +39,7 @@ func NewDynamoModelValidator() *DynamoModelValidator {
 // dynamoModelValidation carries DynamoModel request accumulation.
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoModelValidation struct {
-	warnings admission.Warnings
-}
-
-func (v *dynamoModelValidation) warn(message string) {
-	v.warnings = append(v.warnings, message)
+	sharedValidation
 }
 
 // Validate performs stateless validation on model. model must not be nil.
@@ -65,7 +66,10 @@ func (v *DynamoModelValidator) ValidateUpdate(
 func (v *dynamoModelValidation) validateDynamoModel(
 	model *nvidiacomv1alpha1.DynamoModel,
 ) field.ErrorList {
-	return v.validateDynamoModelSpec(&model.Spec, field.NewPath("spec"))
+	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, v.validateObjectMeta(&model.ObjectMeta, field.NewPath("metadata"), false)...)
+	allErrs = append(allErrs, v.validateDynamoModelSpec(&model.Spec, field.NewPath("spec"))...)
+	return allErrs
 }
 
 // validateDynamoModelSpec validates spec. spec and fldPath must not be nil.
@@ -81,7 +85,7 @@ func (v *dynamoModelValidation) validateDynamoModelSpec(
 		allErrs = append(allErrs, field.Required(fldPath.Child("baseModelName"), "must not be empty"))
 	}
 
-	if spec.ModelType == "lora" {
+	if spec.ModelType == dynamoModelTypeLoRA {
 		if spec.Source == nil {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("source"),
@@ -106,7 +110,7 @@ func (v *dynamoModelValidation) validateModelSource(
 	if !hasSupportedModelSourceScheme(source.URI) {
 		return field.ErrorList{field.Invalid(
 			uriPath,
-			source.URI,
+			redactedModelSourceURI,
 			`must start with "s3://", "hf://", or "file:///"`,
 		)}
 	}

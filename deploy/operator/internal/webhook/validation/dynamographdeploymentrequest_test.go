@@ -24,6 +24,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -83,6 +84,14 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 
 		// Structural create rules.
 		{
+			name: "invalid shared metadata annotation uses its exact field path",
+			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
+				request.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
+			}),
+			gpuDiscovery: true,
+			wantWebhook:  []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
+		},
+		{
 			name: "thorough search requires a concrete backend",
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
 				request.Spec.Backend = nvidiacomv1beta1.BackendTypeAuto
@@ -138,7 +147,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseProfiling
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.Model = "Qwen/Qwen3-8B"
+				request.Spec.Model = alternateAdmissionModel
 			}),
 			gpuDiscovery: true,
 			wantWebhook: []string{
@@ -151,7 +160,7 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 				request.Status.Phase = nvidiacomv1beta1.DGDRPhaseFailed
 			}),
 			request: betaDGDRForAdmission(func(request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) {
-				request.Spec.Model = "Qwen/Qwen3-8B"
+				request.Spec.Model = alternateAdmissionModel
 			}),
 			gpuDiscovery: true,
 		},

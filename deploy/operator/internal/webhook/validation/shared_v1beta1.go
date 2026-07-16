@@ -21,11 +21,15 @@ import (
 	"context"
 	"fmt"
 
+	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
@@ -47,6 +51,61 @@ func (v *sharedValidation) warn(message string) {
 
 func (v *sharedValidation) warnf(format string, args ...any) {
 	v.warn(fmt.Sprintf(format, args...))
+}
+
+// validateObjectMeta validates objectMeta. objectMeta and fldPath must not be nil.
+func (v *sharedValidation) validateObjectMeta(
+	objectMeta *metav1.ObjectMeta,
+	fldPath *field.Path,
+	hasIntraPodFailover bool,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	annotationsPath := fldPath.Child("annotations")
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+		if _, err := semver.NewVersion(value); err != nil {
+			allErrs = append(allErrs, field.Invalid(
+				annotationsPath.Key(consts.KubeAnnotationDynamoOperatorOriginVersion),
+				value,
+				"must be valid semver",
+			))
+		}
+	}
+	if value, invalid := invalidVLLMDistributedExecutorBackendAnnotation(objectMeta.Annotations); invalid {
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationVLLMDistributedExecutorBackend),
+			value,
+			`must be "mp" or "ray"`,
+		))
+	}
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationGroveUpdateStrategy]; exists &&
+		value != string(grovev1alpha1.RollingRecreateStrategy) &&
+		value != string(grovev1alpha1.OnDeleteStrategy) {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationGroveUpdateStrategy),
+			value,
+			[]string{
+				string(grovev1alpha1.RollingRecreateStrategy),
+				string(grovev1alpha1.OnDeleteStrategy),
+			},
+		))
+	}
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode]; exists && value != "pod" && value != "container" {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
+			value,
+			[]string{"pod", "container"},
+		))
+	}
+
+	if hasIntraPodFailover && objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode] != "container" {
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
+			objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode],
+			`must be "container" when intra-pod failover is configured`,
+		))
+	}
+
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.

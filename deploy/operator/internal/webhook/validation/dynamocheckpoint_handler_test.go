@@ -82,6 +82,13 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			gmsSnapshot: true,
 		},
 		{
+			name: "invalid shared metadata annotation uses its exact field path",
+			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
+				checkpoint.Annotations = map[string]string{consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver"}
+			}),
+			wantWebhook: []string{`metadata.annotations[nvidia.com/dynamo-operator-origin-version]: Invalid value: "not-semver": must be valid semver`},
+		},
+		{
 			name:       "GMS checkpoint feature gate is enforced",
 			checkpoint: preparedDynamoCheckpointForAdmission(nil),
 			wantWebhook: []string{
@@ -194,7 +201,7 @@ func TestDynamoCheckpointValidator_Validate(t *testing.T) {
 			name:          "identity immutability is enforced by source CEL",
 			oldCheckpoint: dynamoCheckpointForAdmission(nil),
 			checkpoint: dynamoCheckpointForAdmission(func(checkpoint *nvidiacomv1alpha1.DynamoCheckpoint) {
-				checkpoint.Spec.Identity.Model = "Qwen/Qwen3-8B"
+				checkpoint.Spec.Identity.Model = alternateAdmissionModel
 			}),
 			wantCELErr: "<nil>: Invalid value: spec.identity is immutable after creation",
 		},

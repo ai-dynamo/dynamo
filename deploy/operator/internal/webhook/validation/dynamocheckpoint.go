@@ -30,7 +30,7 @@ func NewDynamoCheckpointValidator() *DynamoCheckpointValidator {
 // dynamoCheckpointValidation carries DynamoCheckpoint-specific request state.
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoCheckpointValidation struct {
-	ctx context.Context
+	sharedValidation
 }
 
 // Validate performs stateless validation on checkpoint. ctx and checkpoint must not be nil.
@@ -38,9 +38,9 @@ func (v *DynamoCheckpointValidator) Validate(
 	ctx context.Context,
 	checkpoint *nvidiacomv1alpha1.DynamoCheckpoint,
 ) (admission.Warnings, error) {
-	validation := &dynamoCheckpointValidation{ctx: ctx}
+	validation := &dynamoCheckpointValidation{sharedValidation: sharedValidation{ctx: ctx}}
 	allErrs := validation.validateDynamoCheckpoint(checkpoint)
-	return nil, invalidDynamoCheckpointError(checkpoint, allErrs)
+	return validation.warnings, invalidDynamoCheckpointError(checkpoint, allErrs)
 }
 
 // ValidateUpdate validates newCheckpoint against oldCheckpoint.
@@ -50,16 +50,19 @@ func (v *DynamoCheckpointValidator) ValidateUpdate(
 	oldCheckpoint *nvidiacomv1alpha1.DynamoCheckpoint,
 	newCheckpoint *nvidiacomv1alpha1.DynamoCheckpoint,
 ) (admission.Warnings, error) {
-	validation := &dynamoCheckpointValidation{ctx: ctx}
+	validation := &dynamoCheckpointValidation{sharedValidation: sharedValidation{ctx: ctx}}
 	allErrs := validation.validateDynamoCheckpointUpdate(newCheckpoint, oldCheckpoint)
-	return nil, invalidDynamoCheckpointError(newCheckpoint, allErrs)
+	return validation.warnings, invalidDynamoCheckpointError(newCheckpoint, allErrs)
 }
 
 // validateDynamoCheckpoint validates checkpoint. checkpoint must not be nil.
 func (v *dynamoCheckpointValidation) validateDynamoCheckpoint(
 	checkpoint *nvidiacomv1alpha1.DynamoCheckpoint,
 ) field.ErrorList {
-	return v.validateDynamoCheckpointSpec(&checkpoint.Spec, field.NewPath("spec"))
+	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, v.validateObjectMeta(&checkpoint.ObjectMeta, field.NewPath("metadata"), false)...)
+	allErrs = append(allErrs, v.validateDynamoCheckpointSpec(&checkpoint.Spec, field.NewPath("spec"))...)
+	return allErrs
 }
 
 // validateDynamoCheckpointSpec validates spec. spec and fldPath must not be nil.

@@ -39,7 +39,7 @@ func NewDynamoGraphDeploymentRequestValidator() *DynamoGraphDeploymentRequestVal
 // dynamoGraphDeploymentRequestValidation carries DGDR-specific request state.
 // API values, paths, and accumulated errors remain explicit validator arguments.
 type dynamoGraphDeploymentRequestValidation struct {
-	ctx context.Context
+	sharedValidation
 }
 
 // Validate performs stateless validation on request. ctx and request must not be nil.
@@ -47,9 +47,9 @@ func (v *DynamoGraphDeploymentRequestValidator) Validate(
 	ctx context.Context,
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	validation := &dynamoGraphDeploymentRequestValidation{sharedValidation: sharedValidation{ctx: ctx}}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(request)
-	return nil, invalidDynamoGraphDeploymentRequestError(request, allErrs)
+	return validation.warnings, invalidDynamoGraphDeploymentRequestError(request, allErrs)
 }
 
 // ValidateUpdate validates newRequest against oldRequest. ctx, oldRequest, and newRequest must not be nil.
@@ -58,17 +58,20 @@ func (v *DynamoGraphDeploymentRequestValidator) ValidateUpdate(
 	oldRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) (admission.Warnings, error) {
-	validation := &dynamoGraphDeploymentRequestValidation{ctx: ctx}
+	validation := &dynamoGraphDeploymentRequestValidation{sharedValidation: sharedValidation{ctx: ctx}}
 	allErrs := validation.validateDynamoGraphDeploymentRequest(newRequest)
 	allErrs = append(allErrs, validation.validateDynamoGraphDeploymentRequestUpdate(newRequest, oldRequest)...)
-	return nil, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
+	return validation.warnings, invalidDynamoGraphDeploymentRequestError(newRequest, allErrs)
 }
 
 // validateDynamoGraphDeploymentRequest validates request. request must not be nil.
 func (v *dynamoGraphDeploymentRequestValidation) validateDynamoGraphDeploymentRequest(
 	request *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 ) field.ErrorList {
-	return v.validateDynamoGraphDeploymentRequestSpec(&request.Spec, field.NewPath("spec"))
+	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, v.validateObjectMeta(&request.ObjectMeta, field.NewPath("metadata"), false)...)
+	allErrs = append(allErrs, v.validateDynamoGraphDeploymentRequestSpec(&request.Spec, field.NewPath("spec"))...)
+	return allErrs
 }
 
 // validateDynamoGraphDeploymentRequestSpec validates spec. spec and fldPath must not be nil.
