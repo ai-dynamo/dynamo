@@ -18,10 +18,11 @@ Dynamo + SGLang deployment profile:
 | **MoE runner backend**   | FLASHINFER_TRTLLM_ROUTED              |
 | **AllReduce backend**    | Torch symmetric memory                |
 | **Mamba radix cache**    | extra_buffer strategy                 |
+| **Speculative decoding** | EAGLE multi-layer (8 steps, topk 1, 9 draft tokens, rejection sampling) |
 
 ## Supported features
 
-- Modalities: Text + Image
+- Modalities: Text + Image + Audio input
 - Reasoning (`inkling` reasoning parser)
 - Tool calling (`inkling` tool-call parser)
 
@@ -89,3 +90,16 @@ curl -s http://localhost:8000/v1/chat/completions \
     "max_tokens": 64
   }'
 ```
+
+## Known issues
+
+1. `sglang-runtime:1.4.0-inkling-dev.1-rc.0`: the forward-pass metrics reporter crashes
+   the scheduler on EAGLE speculative batches (`metrics_reporter._build_scheduled_request_metrics`
+   iterates `batch.seq_lens_cpu`, which is `None` for spec-decode batches). The Dynamo
+   operator injects `DYN_FORWARDPASS_METRIC_PORT` into workers, which auto-enables the
+   reporter — `deploy.yaml` therefore overrides it to an empty value. Remove the override
+   once the image carries the fix; this only disables per-forward-pass telemetry, not
+   request-level frontend metrics.
+2. `reasoning_content` is not populated in responses — reasoning text is returned inline
+   in `content`. The `inkling` reasoning parser is registered in SGLang but the split is
+   not engaged on the Dynamo frontend path.
