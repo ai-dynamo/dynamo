@@ -24,6 +24,7 @@ kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:
 dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-truthy = { workspace = true }
 kvbm-logical = { workspace = true }
 
 # kvbm-offload feature dependencies (G1↔G2 transport simulation)
