@@ -23,7 +23,7 @@ jobs:
   # ============================================================================
 
   guard:
-    runs-on: xpu-heterogeneous-ubuntu-latest
+    runs-on: ubuntu-latest
     outputs:
       has_xpu_label: ${{ steps.pr-info.outputs.has_xpu_label }}
     steps:
@@ -57,7 +57,7 @@ jobs:
   changed-files:
     needs: [guard]
     if: needs.guard.outputs.has_xpu_label == 'true'
-    runs-on: xpu-heterogeneous-ubuntu-latest
+    runs-on: ubuntu-latest
     outputs:
       core: ${{ github.event_name == 'schedule' && 'true' || steps.changes.outputs.core }}
       vllm: ${{ github.event_name == 'schedule' && 'true' || steps.changes.outputs.vllm }}
@@ -249,7 +249,7 @@ jobs:
   # ============================================================================
 
   xpu-status-check:
-    runs-on: xpu-heterogeneous-ubuntu-latest
+    runs-on: ubuntu-latest
     needs: [guard, changed-files, build-xpu, heterog-test-px-dn, heterog-test-pn-dx]
     if: always() && needs.guard.outputs.has_xpu_label == 'true'
     steps:
