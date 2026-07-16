@@ -103,6 +103,8 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
+_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -120,6 +122,15 @@ def build_prompt_tokens_details(
     if num_cached_tokens is None:
         return None
     return {"cached_tokens": num_cached_tokens}
+
+
+def _rl_init_weights_timeout_s() -> float:
+    return float(
+        os.environ.get(
+            _RL_INIT_WEIGHTS_TIMEOUT_ENV,
+            str(_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S),
+        )
+    )
 
 
 class _DeferredAbort:
@@ -1089,8 +1100,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"VisionEncoderBackend subclass, got {backend_cls!r}."
             )
         # The author writes the VisionEncoderBackend; Dynamo wraps it in the
-        # AsyncVisionEncoder glue, which owns the preprocess pool and actor
-        # thread. load() runs backend.build() on the actor thread
+        # AsyncVisionEncoder glue, which owns the preprocess pool and
+        # ThreadedMicroBatcher actor thread. load() runs backend.build() there
         # (the backend picks its own device) and cleans that thread up on failure.
         encoder = AsyncVisionEncoder(backend_cls())
         encoder.load(config.model)
@@ -1103,11 +1114,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             config.model,
         )
 
-    def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
-        logger.error(f"vLLM EngineDeadError: {e}")
+    def _shutdown_worker(self) -> NoReturn:
         logger.warning("Initiating Dynamo Runtime shutdown.")
         self.runtime.shutdown()
         os._exit(1)
+
+    def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
+        logger.error(f"vLLM EngineDeadError: {e}")
+        self._shutdown_worker()
 
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
@@ -1720,7 +1734,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         kwargs = {k: v for k, v in body.items() if k != "engine_rpc"}
         async with self._pause_lock:
             try:
-                await self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                timeout_s = _rl_init_weights_timeout_s()
+                rpc_task = asyncio.create_task(
+                    self.engine_client.collective_rpc(rpc, kwargs=kwargs)
+                )
+                try:
+                    done, _ = await asyncio.wait({rpc_task}, timeout=timeout_s)
+                except asyncio.CancelledError:
+                    rpc_task.cancel()
+                    await asyncio.gather(rpc_task, return_exceptions=True)
+                    raise
+                if rpc_task not in done:
+                    rpc_task.cancel()
+                    await asyncio.gather(rpc_task, return_exceptions=True)
+                    logger.error(
+                        f"[RL] init_weights_update_group timed out after "
+                        f"{timeout_s:.1f} seconds (rpc={rpc}); terminating the "
+                        "worker because EngineCore may still be blocked"
+                    )
+                    self._shutdown_worker()
+
+                await rpc_task
                 logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
                 return {"status": "ok", "message": "Weight update group initialized"}
             except EngineDeadError as e:
@@ -2925,8 +2959,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # failure becomes a structured request error instead of escaping the
         # request coroutine and tearing down the stream.
         try:
-            # encode() preprocesses off-thread and serializes forwards on one
-            # dedicated actor thread.
+            # AsyncVisionEncoder preprocesses off-thread; its ThreadedMicroBatcher
+            # coalesces concurrent calls onto one dedicated actor thread.
             img_tensors: list[torch.Tensor] = await self._custom_encoder.encode(
                 image_urls
             )

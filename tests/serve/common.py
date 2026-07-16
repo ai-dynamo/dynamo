@@ -10,7 +10,7 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
@@ -19,7 +19,7 @@ import pytest
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.conftest import ServicePorts
 from tests.utils.client import send_request
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import (
     EngineConfig,
     EngineLogError,
@@ -302,7 +302,7 @@ def _prepare_deployment(
     # Disagg scripts need a unique bootstrap port so parallel runs don't collide.
     disagg_bootstrap_port: int | None = None
     if config.script_name and "disagg" in config.script_name:
-        disagg_bootstrap_port = allocate_port(12000)
+        disagg_bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
         merged_env["DYN_DISAGG_BOOTSTRAP_PORT"] = str(disagg_bootstrap_port)
 
     return _PreparedDeployment(
@@ -466,12 +466,14 @@ def run_serve_deployment(
     *,
     ports: ServicePorts | None = None,  # pass `dynamo_dynamic_ports` here
     extra_env: Optional[Dict[str, str]] = None,
+    post_validation: Optional[Callable[[], None]] = None,
 ) -> None:
     """Run a standard serve deployment test for any EngineConfig.
 
     - Launches the engine via EngineProcess.from_script
     - Builds a payload (with optional override/mutator)
     - Iterates configured endpoints and validates responses and logs
+    - Optionally runs a final assertion while the deployment is still alive
     """
 
     logger = logging.getLogger(request.node.name)
@@ -604,6 +606,9 @@ def run_serve_deployment(
                 # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
                 if hasattr(payload, "final_validation"):
                     payload.final_validation()
+
+            if post_validation is not None:
+                post_validation()
     finally:
         if disagg_bootstrap_port is not None:
             deallocate_port(disagg_bootstrap_port)

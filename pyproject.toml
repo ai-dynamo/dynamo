@@ -59,7 +59,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu13]==1.1.0",
-    "vllm[flashinfer,runai,otel]==0.24.0",
+    "vllm[flashinfer,runai,otel]==0.25.1",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -82,7 +82,9 @@ sglang = [
 
 mocker = [
     # No direct URL: it blocks the wheel release (PyPI/Warehouse rejects direct references).
-    "aiconfigurator>=0.9.0",
+    # Cap below 0.10: the 0.10 SDK/CLI API and AIC Rust engine wire-format
+    # broke the profiler; lift the cap when the 0.10 migration lands.
+    "aiconfigurator>=0.9.0,<0.10.0",
 ]
 
 [project.entry-points.pytest11]
