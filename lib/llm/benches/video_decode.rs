@@ -24,7 +24,7 @@ fn bench_video_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("video_decode_h264_320x240_100_to_30");
     group.throughput(Throughput::Elements(num_frames));
 
-    group.bench_function("video_rs", |b| {
+    group.bench_function("ffmpeg_next", |b| {
         b.iter_batched(
             || EncodedMediaData::from_bytes(CI_VIDEO.to_vec()),
             |data| black_box(decoder.decode(data).unwrap()),
@@ -68,7 +68,7 @@ fn bench_video_concurrent_decode(c: &mut Criterion) {
             .unwrap();
         group.throughput(Throughput::Elements(concurrency as u64));
         group.bench_with_input(
-            BenchmarkId::new("video_rs", format!("c{concurrency}")),
+            BenchmarkId::new("ffmpeg_next", format!("c{concurrency}")),
             &concurrency,
             |b, &concurrency| {
                 b.iter_batched(

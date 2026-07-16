@@ -53,7 +53,18 @@ class FrontendDecodedVideo(np.ndarray, VideoDecoderWrapper):
         video = np.ascontiguousarray(video_frames).view(cls)
         duration = float(video_metadata.get("duration") or 0)
         source_fps = float(video_metadata.get("fps") or 0)
-        video._avg_fps = len(video_frames) / duration if duration > 0 else source_fps
+        effective_fps = len(video_frames) / duration if duration > 0 else source_fps
+        frame_indices = video_metadata.get("frames_indices")
+        if (
+            source_fps > 0
+            and frame_indices is not None
+            and len(frame_indices) == len(video_frames)
+            and len(frame_indices) > 1
+        ):
+            span_frames = float(frame_indices[-1]) - float(frame_indices[0])
+            if span_frames > 0:
+                effective_fps = (len(video_frames) - 1) * source_fps / span_frames
+        video._avg_fps = effective_fps
         if video._avg_fps <= 0:
             raise ValueError("Frontend-decoded video metadata must contain a valid fps")
         return video

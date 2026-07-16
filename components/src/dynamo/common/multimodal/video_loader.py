@@ -189,10 +189,10 @@ class VideoLoader:
             )
 
         frame_indices = [
-            max(0, int(round(float(timestamp) * source_fps)))
+            max(0, round(float(timestamp) * source_fps))
             for timestamp in sampled_timestamps
         ]
-        total_num_frames = max(frame_count, int(round(source_duration * source_fps)))
+        total_num_frames = max(frame_count, round(source_duration * source_fps))
         return {
             "fps": source_fps,
             "duration": source_duration,

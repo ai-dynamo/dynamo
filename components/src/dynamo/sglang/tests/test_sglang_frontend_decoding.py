@@ -12,7 +12,10 @@ from PIL import Image
 
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.sglang.backend_args import DynamoSGLangConfig
-from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
+from dynamo.sglang.request_handlers.llm.decode_handler import (
+    DecodeWorkerHandler,
+    FrontendDecodedVideo,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -109,6 +112,17 @@ async def _empty_stream() -> AsyncGenerator[Dict[str, Any], None]:
         yield {}
 
 
+@pytest.mark.parametrize(("frame_indices", "frame_count"), [([120], 1), ([0, 0], 2)])
+def test_frontend_decoded_video_falls_back_to_duration_fps(frame_indices, frame_count):
+    frames = np.zeros((frame_count, 4, 4, 3), dtype=np.uint8)
+    video = FrontendDecodedVideo(
+        frames,
+        {"fps": 24.0, "duration": 10.0, "frames_indices": frame_indices},
+    )
+
+    assert video.avg_fps == frame_count / 10.0
+
+
 @pytest.mark.asyncio
 async def test_aggregated_fd_off_passes_media_url_strings():
     """Without frontend decoding, media URL items pass through as strings."""
@@ -181,12 +195,12 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
 @pytest.mark.asyncio
 async def test_aggregated_fd_on_loads_decoded_video_frames():
     handler = _new_decode_handler(enable_frontend_decoding=True)
-    frames = np.zeros((2, 4, 4, 3), dtype=np.uint8)
+    frames = np.zeros((4, 4, 4, 3), dtype=np.uint8)
     metadata = {
-        "fps": 2.0,
-        "duration": 1.0,
-        "frames_indices": [0, 1],
-        "total_num_frames": 2,
+        "fps": 24.0,
+        "duration": 10.0,
+        "frames_indices": [0, 80, 160, 239],
+        "total_num_frames": 240,
     }
     video_loader = SimpleNamespace(
         load_video_batch=AsyncMock(return_value=[(frames, metadata)])
@@ -216,8 +230,8 @@ async def test_aggregated_fd_on_loads_decoded_video_frames():
     assert len(captured["video_data"]) == 1
     video = captured["video_data"][0]
     assert isinstance(video, np.ndarray)
-    assert video.avg_fps == 2.0
-    np.testing.assert_array_equal(video.get_frames_at([0, 1]), frames)
+    assert video.avg_fps == pytest.approx(72 / 239)
+    np.testing.assert_array_equal(video.get_frames_at([0, 1]), frames[[0, 1]])
 
 
 @pytest.mark.asyncio
