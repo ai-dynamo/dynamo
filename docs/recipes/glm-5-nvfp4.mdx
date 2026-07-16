@@ -88,10 +88,10 @@ If your cluster already provides a shared RWX cache PVC, skip `model-cache.yaml`
 
 <div data-variant="standard">
 
-Edit `sglang/disagg/deploy.yaml` and replace the `<your-namespace>` placeholder, then:
+Edit `sglang/disagg-gb200/deploy.yaml` and replace the `<your-namespace>` placeholder, then:
 
 ```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg-gb200/deploy.yaml
 kubectl wait --for=condition=Ready pod \
   -l nvidia.com/dynamo-graph-deployment-name=glm5-sglang \
   -n ${NAMESPACE} --timeout=7200s
@@ -114,18 +114,18 @@ docker buildx build \
   --platform linux/arm64 \
   --build-arg ARCH=arm64 \
   -t <your-registry>/sglang-dynamo-glm5-efa:latest \
-  -f recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa \
+  -f recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/Dockerfile.efa \
   --push .
 ```
 
-Then edit `sglang/disagg/efa/deploy.yaml` to replace `<your-namespace>` and the image placeholder, and:
+Then edit `sglang/disagg-gb200/efa/deploy.yaml` to replace `<your-namespace>` and the image placeholder, and:
 
 ```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/deploy.yaml
 kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/part-of=glm5-sglang-efa -w
 ```
 
-After startup, verify the LIBFABRIC backend is actually carrying KV traffic (not silent TCP fallback) — the [EFA README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/README.md) includes three checks (NIXL backend log line, executable `libplugin_LIBFABRIC.so` mapping, and `nixl_num_failed_transfers_total` staying at 0).
+After startup, verify the LIBFABRIC backend is actually carrying KV traffic (not silent TCP fallback) — the [EFA README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/README.md) includes three checks (NIXL backend log line, executable `libplugin_LIBFABRIC.so` mapping, and `nixl_num_failed_transfers_total` staying at 0).
 
 </div>
 
@@ -173,10 +173,10 @@ aiperf profile \
   --concurrency 512 --request-count 1536
 ```
 
-Edit `sglang/disagg/perf.yaml` to replace the namespace placeholder, then:
+Edit `sglang/disagg-gb200/perf.yaml` to replace the namespace placeholder, then:
 
 ```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/perf.yaml
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg-gb200/perf.yaml
 kubectl logs -f -l job-name=glm5-disagg-bench -n ${NAMESPACE}
 ```
 
@@ -196,10 +196,10 @@ aiperf profile \
   --concurrency 512 --request-count 1536
 ```
 
-Edit `sglang/disagg/efa/perf.yaml` to replace the namespace placeholder, then:
+Edit `sglang/disagg-gb200/efa/perf.yaml` to replace the namespace placeholder, then:
 
 ```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/perf.yaml
 kubectl logs -f -l job-name=glm5-disagg-efa-bench -n ${NAMESPACE}
 ```
 
@@ -233,7 +233,7 @@ Reference AIPerf run for the EFA variant at the same workload shape (ISL=1k, OSL
 | ITL avg | 24.5 ms/token |
 | Output tokens/user/sec | 41.0 |
 
-At long context (ISL=20k, OSL=2k, concurrency=64), the LIBFABRIC backend delivers 39% higher throughput and 56% lower TTFT p50 than the UCX default — full tables in the [EFA README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/README.md).
+At long context (ISL=20k, OSL=2k, concurrency=64), the LIBFABRIC backend delivers 39% higher throughput and 56% lower TTFT p50 than the UCX default — full tables in the [EFA README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/README.md).
 
 </div>
 
@@ -261,6 +261,6 @@ Both targets run the same disaggregated topology — 1 prefill node (TP4) plus 4
 ## Source
 
 - Source README: [recipes/glm-5-nvfp4/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/README.md)
-- SGLang disaggregated prefill/decode: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/perf.yaml)
-- EFA variant: [README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/README.md), [Dockerfile.efa](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa), [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml), and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml)
+- SGLang disaggregated prefill/decode: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg-gb200/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg-gb200/perf.yaml)
+- EFA variant: [README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/README.md), [Dockerfile.efa](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/Dockerfile.efa), [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/deploy.yaml), and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/perf.yaml)
 - Setup assets: [recipes/glm-5-nvfp4/model-cache/model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/model-cache/model-cache.yaml) and [recipes/glm-5-nvfp4/model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/model-cache/model-download.yaml)

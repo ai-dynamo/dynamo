@@ -83,10 +83,10 @@ kubectl cp <local_trace.jsonl> ${NAMESPACE}/<helper-pod>:/model-cache/traces/age
 
 ```bash
 # Pick one variant per run (resources are sized for the full 24 GPUs).
-kubectl apply -f trtllm/disagg-eagle-kv-router/deploy.yaml -n ${NAMESPACE}
-# kubectl apply -f trtllm/agg-eagle-kv-router/deploy.yaml      -n ${NAMESPACE}
-# kubectl apply -f trtllm/agg-eagle-round-robin/deploy.yaml    -n ${NAMESPACE}
-# kubectl apply -f trtllm/agg-round-robin/deploy.yaml          -n ${NAMESPACE}
+kubectl apply -f trtllm/disagg-gb200-eagle-kv-router/deploy.yaml -n ${NAMESPACE}
+# kubectl apply -f trtllm/agg-gb200-eagle-kv-router/deploy.yaml      -n ${NAMESPACE}
+# kubectl apply -f trtllm/agg-gb200-eagle-round-robin/deploy.yaml    -n ${NAMESPACE}
+# kubectl apply -f trtllm/agg-gb200-round-robin/deploy.yaml          -n ${NAMESPACE}
 
 # Wait for ready (replace DGD name for each variant)
 kubectl wait --for=condition=ready pod \
@@ -94,7 +94,7 @@ kubectl wait --for=condition=ready pod \
   -n ${NAMESPACE} --timeout=1800s
 
 # Run benchmark (one perf.yaml per deploy.yaml), 1 hour duration.
-kubectl apply -f trtllm/disagg-eagle-kv-router/perf.yaml -n ${NAMESPACE}
+kubectl apply -f trtllm/disagg-gb200-eagle-kv-router/perf.yaml -n ${NAMESPACE}
 ```
 
 ## Expected metrics

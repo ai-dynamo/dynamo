@@ -40,7 +40,7 @@ docker buildx build \
   --platform linux/arm64 \
   --build-arg ARCH=arm64 \
   -t <your-registry>/sglang-dynamo-glm5-efa:latest \
-  -f recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa \
+  -f recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/Dockerfile.efa \
   --push .
 ```
 
@@ -72,13 +72,13 @@ kubectl wait --for=condition=complete job/model-download --timeout=3600s
 
 ## Step 3: Deploy
 
-Edit `sglang/disagg/efa/deploy.yaml` and replace all `<placeholder>` values:
+Edit `sglang/disagg-gb200/efa/deploy.yaml` and replace all `<placeholder>` values:
 
 - `<your-namespace>` — your Kubernetes namespace
 - `<your-registry>/sglang-dynamo-glm5-efa:latest` — your built container image
 
 ```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/deploy.yaml
 ```
 
 Monitor startup:
@@ -126,10 +126,10 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Step 6: Benchmark
 
-Edit `sglang/disagg/efa/perf.yaml` to set your namespace and PVC name, then run:
+Edit `sglang/disagg-gb200/efa/perf.yaml` to set your namespace and PVC name, then run:
 
 ```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg-gb200/efa/perf.yaml
 kubectl logs -f -l job-name=glm5-disagg-efa-bench -n <your-namespace>
 ```
 

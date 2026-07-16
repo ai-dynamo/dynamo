@@ -10,7 +10,7 @@ model:
   precision: NVFP4
 status: validated
 targets:
-- id: disagg-eagle-kv-router
+- id: disagg-gb200-eagle-kv-router
   recommended: true
   hardware:
     gpu: GB200
@@ -28,10 +28,10 @@ targets:
     traffic: Mooncake-format agentic coding trace, ~200K ctx, 1-hour replay, c=32
     sla: goodput TTFT 5000ms / ITL 10ms
   deploy:
-    asset: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/deploy.yaml
+    asset: recipes/kimi-k2.5/trtllm/disagg-gb200-eagle-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/kimi-k2.5/trtllm/disagg-eagle-kv-router/perf.yaml
+    asset: recipes/kimi-k2.5/trtllm/disagg-gb200-eagle-kv-router/perf.yaml
   expected_performance:
     available: true
     summary: ~130 tok/s/user avg, ~5,400 tok/s/GPU (Pareto winner of 4-arm comparison)

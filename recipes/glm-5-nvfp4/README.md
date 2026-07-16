@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 Serves [nvidia/GLM-5-NVFP4](https://huggingface.co/nvidia/GLM-5-NVFP4) using SGLang with
 disaggregated prefill/decode and EAGLE speculative decoding via Dynamo on GB200 nodes.
 
-For GB200 on AWS, please see the [efa variant](sglang/disagg/efa/README.md).
+For GB200 on AWS, please see the [efa variant](sglang/disagg-gb200/efa/README.md).
 
 ## Topology
 
@@ -58,19 +58,19 @@ kubectl wait --for=condition=complete job/model-download -n ${NAMESPACE} --timeo
 
 If your cluster already provides a shared RWX cache PVC, skip
 `model-cache/model-cache.yaml` and update `claimName: model-cache` in
-`model-cache/model-download.yaml`, `sglang/disagg/deploy.yaml`, and
-`sglang/disagg/perf.yaml` to that PVC's name. Keep the mount path as
+`model-cache/model-download.yaml`, `sglang/disagg-gb200/deploy.yaml`, and
+`sglang/disagg-gb200/perf.yaml` to that PVC's name. Keep the mount path as
 `/model-store` so the workers, model download job, and benchmark job share the
 same HuggingFace cache and JIT artifacts.
 
 ## Step 3: Deploy
 
-Edit `sglang/disagg/deploy.yaml` and replace the namespace placeholder:
+Edit `sglang/disagg-gb200/deploy.yaml` and replace the namespace placeholder:
 
 - `<your-namespace>` — the value of `${NAMESPACE}`
 
 ```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg-gb200/deploy.yaml
 kubectl wait --for=condition=Ready pod \
   -l nvidia.com/dynamo-graph-deployment-name=glm5-sglang \
   -n ${NAMESPACE} --timeout=7200s
@@ -94,11 +94,11 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## Step 5: Benchmark (optional)
 
-Edit `sglang/disagg/perf.yaml` to replace the namespace placeholder with
+Edit `sglang/disagg-gb200/perf.yaml` to replace the namespace placeholder with
 `${NAMESPACE}`, then run:
 
 ```bash
-kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/perf.yaml
+kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg-gb200/perf.yaml
 kubectl logs -f -l job-name=glm5-disagg-bench -n ${NAMESPACE}
 ```
 
