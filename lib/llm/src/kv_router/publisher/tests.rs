@@ -233,6 +233,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -247,6 +248,7 @@ mod test_event_processing {
             None,
             Some("tenant-a"),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
             None,
             None,
@@ -286,6 +288,7 @@ mod test_event_processing {
             None,
             None,
             None,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -322,6 +325,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -374,6 +378,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &wc,
             None,
+            None,
         )
         .unwrap();
         let lora_out = convert_event(
@@ -382,6 +387,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
             None,
         )
         .unwrap();
@@ -446,6 +452,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &wc,
             None,
+            None,
         )
         .unwrap();
         let out2 = convert_event(
@@ -454,6 +461,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
             None,
         )
         .unwrap();
@@ -547,6 +555,7 @@ mod test_event_processing {
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
             None,
+            None,
         )
         .unwrap();
 
@@ -563,6 +572,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
             None,
         )
         .unwrap();
@@ -1285,6 +1295,7 @@ mod tests_startup_helpers {
                 4,
                 next_event_id,
                 None,
+                None,
             )
         });
 
@@ -1415,6 +1426,7 @@ mod tests_startup_helpers {
                 4,
                 Arc::new(AtomicU64::new(0)),
                 None,
+                None,
             )
         });
 
@@ -1513,6 +1525,7 @@ mod tests_startup_helpers {
                 4,
                 Arc::new(AtomicU64::new(0)),
                 None,
+                None,
             )
         });
 
@@ -1595,7 +1608,7 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;

@@ -47,6 +47,7 @@ pub struct ZmqEventNormalizer {
     /// Lets `convert_event` normalize vLLM BlockStored events to the canonical
     /// pad_value scheme. `None` for text-only models / non-MM deployments.
     image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
@@ -100,6 +101,7 @@ impl ZmqEventNormalizer {
         Self {
             kv_block_size,
             image_token_id: None,
+            video_token_id: None,
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
@@ -110,6 +112,7 @@ impl ZmqEventNormalizer {
         Self {
             kv_block_size,
             image_token_id: None,
+            video_token_id: None,
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
@@ -121,6 +124,11 @@ impl ZmqEventNormalizer {
     /// models (leave unset).
     pub fn with_image_token_id(mut self, image_token_id: Option<u32>) -> Self {
         self.image_token_id = image_token_id;
+        self
+    }
+
+    pub fn with_video_token_id(mut self, video_token_id: Option<u32>) -> Self {
+        self.video_token_id = video_token_id;
         self
     }
 
@@ -212,6 +220,7 @@ impl ZmqEventNormalizer {
             worker,
             &self.warning_count,
             self.image_token_id,
+            self.video_token_id,
         )
     }
 
