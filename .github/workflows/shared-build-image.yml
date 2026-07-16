@@ -583,6 +583,10 @@ jobs:
           builder_name: ${{ inputs.builder_name }}
           artifact_name_prefix: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
           git_sha: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          # Freshly-built ECR EPP image (frontend only) — must match the build's
+          # EPP_IMAGE so the epp stage cache-hits instead of resolving the
+          # rendered default upstream staging tag, which gets garbage-collected.
+          epp_image: ${{ steps.build-epp-image.outputs.epp_image_uri || '' }}
           # Match the build's sccache build-args so the extract reuses the warm
           # wheel_builder/pre_runtime cache instead of a cold rebuild.
           sccache_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
