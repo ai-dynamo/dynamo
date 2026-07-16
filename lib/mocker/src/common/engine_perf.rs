@@ -77,12 +77,14 @@ impl AicEngineConfig {
             backend: parse_backend_kind(&self.backend)?,
             backend_version: self.backend_version,
             kv_block_size: self.kv_block_size,
+            perf_db_sources: Default::default(),
             parallel: ParallelMapping {
                 tp_size: self.tp_size,
                 pp_size: self.pp_size,
                 attention_dp_size: self.attention_dp_size,
                 moe_tp_size: self.moe_tp_size,
                 moe_ep_size: self.moe_ep_size,
+                cp_size: None,
             },
             quantization: QuantizationConfig {
                 weight_dtype: self
@@ -1052,6 +1054,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
         backend: parse_backend_kind(backend)?,
         backend_version: args.aic_backend_version.clone(),
         kv_block_size: Some(to_u32(args.block_size, "block_size")?),
+        perf_db_sources: Default::default(),
         parallel: ParallelMapping {
             tp_size: to_u32(args.aic_tp_size.unwrap_or(1), "aic_tp_size")?,
             pp_size: 1,
@@ -1067,6 +1070,7 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .aic_moe_ep_size
                 .map(|value| to_u32(value, "aic_moe_ep_size"))
                 .transpose()?,
+            cp_size: None,
         },
         // Native analytics path: quant dtypes are parsed by `parse_data_type`
         // into `aiconfigurator_core::DataType` (accepted: bfloat16, float16,
