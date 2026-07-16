@@ -56,7 +56,7 @@ async function main() {
   const future = all.filter(e => (e.end || e.start) >= now).slice(0, 3);
   const selected = [...future, ...past.reverse()];
 
-  const lines = ['| 📅 Date | 🎤 Event | 📍 Location |', '|:--------|:---------|:------------|'];
+  const lines = ['| Date | Event | Location |', '|:-----|:------|:---------|'];
 
   if (selected.length === 0) {
     lines.push('| – | No upcoming events | |');
