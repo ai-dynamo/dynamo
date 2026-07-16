@@ -683,6 +683,7 @@ async def init_llm_worker(
             additional_metrics=additional_metrics,
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
+            conversation_affinity=config.conversation_affinity,
         )
 
         media_decoder = None

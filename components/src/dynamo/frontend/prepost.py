@@ -139,10 +139,17 @@ def _prepare_request(
         )
         else None
     )
-    chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
+    # serde's `alias` is deserialize-only, so pythonize emits the Rust field
+    # name `chat_template_args`; read it too or client kwargs are dropped.
+    raw_template_args = (
+        request.get("chat_template_args") if isinstance(request, dict) else None
+    )
+    chat_template_kwargs = dict(
+        request_for_sampling.chat_template_kwargs or raw_template_args or {}
+    )
     # reasoning_effort is a request-level thinking control. Put an explicit
-    # value into the kwargs before applying the deployment
-    # default so the two cannot produce contradictory template controls.
+    # value into the kwargs before applying the deployment default so the two
+    # cannot produce contradictory template controls.
     if request_for_sampling.reasoning_effort is not None:
         chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
     chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
@@ -152,7 +159,9 @@ def _prepare_request(
             isinstance(request, dict) and request.get("thinking") is not None
         ),
     )
-    chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
+    # Don't let an absent top-level field clobber a nested reasoning_effort.
+    if request_for_sampling.reasoning_effort is None:
+        chat_template_kwargs.setdefault("reasoning_effort", None)
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
@@ -169,14 +178,15 @@ def _prepare_request(
     chat_params = ChatParams(
         chat_template=request_for_sampling.chat_template,
         chat_template_content_format="auto",
-        chat_template_kwargs=dict(
-            add_generation_prompt=request_for_sampling.add_generation_prompt,
-            continue_final_message=request_for_sampling.continue_final_message,
-            tools=tool_dicts,
-            documents=request_for_sampling.documents,
-            tokenize=tokenize_in_template,
+        # Renderer-managed keys last so a nested duplicate can't raise TypeError.
+        chat_template_kwargs={
             **chat_template_kwargs,
-        ),
+            "add_generation_prompt": request_for_sampling.add_generation_prompt,
+            "continue_final_message": request_for_sampling.continue_final_message,
+            "tools": tool_dicts,
+            "documents": request_for_sampling.documents,
+            "tokenize": tokenize_in_template,
+        },
     )
 
     return (
