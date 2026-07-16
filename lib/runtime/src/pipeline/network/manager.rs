@@ -140,6 +140,7 @@ pub struct NetworkManager {
     mode: RequestPlaneMode,
     config: NetworkConfig,
     server: Arc<OnceCell<Arc<dyn RequestPlaneServer>>>,
+    engine_max_num_seqs_hint: OnceLock<usize>,
     cancellation_token: CancellationToken,
     component_registry: crate::component::Registry,
 }
@@ -192,9 +193,19 @@ impl NetworkManager {
             mode,
             config,
             server: Arc::new(OnceCell::new()),
+            engine_max_num_seqs_hint: OnceLock::new(),
             cancellation_token,
             component_registry,
         }
+    }
+
+    /// Record the normalized engine capacity for one-time TCP worker-pool sizing.
+    ///
+    /// This only publishes a startup hint. The request-plane server remains
+    /// uninitialized until Self::server is called. The first recorded hint wins.
+    pub fn set_engine_max_num_seqs_hint(&self, engine_max_num_seqs: usize) {
+        self.engine_max_num_seqs_hint
+            .get_or_init(|| engine_max_num_seqs);
     }
 
     /// Get or create the request plane server
@@ -215,7 +226,10 @@ impl NetworkManager {
     pub async fn server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         let server = self
             .server
-            .get_or_try_init(async { self.create_server().await })
+            .get_or_try_init(async {
+                let engine_max_num_seqs = self.engine_max_num_seqs_hint.get().copied();
+                self.create_server(engine_max_num_seqs).await
+            })
             .await?;
 
         Ok(server.clone())
@@ -253,14 +267,20 @@ impl NetworkManager {
     // PRIVATE: Server Creation
     // ============================================================================
 
-    async fn create_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
+    async fn create_server(
+        &self,
+        engine_max_num_seqs: Option<usize>,
+    ) -> Result<Arc<dyn RequestPlaneServer>> {
         match self.mode {
-            RequestPlaneMode::Tcp => self.create_tcp_server().await,
+            RequestPlaneMode::Tcp => self.create_tcp_server(engine_max_num_seqs).await,
             RequestPlaneMode::Nats => self.create_nats_server().await,
         }
     }
 
-    async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
+    async fn create_tcp_server(
+        &self,
+        engine_max_num_seqs: Option<usize>,
+    ) -> Result<Arc<dyn RequestPlaneServer>> {
         // Use the global TCP server to ensure all workers in the same process share
         // a single server. This is critical for correct endpoint routing.
         let server = GLOBAL_TCP_SERVER
@@ -277,7 +297,11 @@ impl NetworkManager {
                     "Creating TCP request plane server"
                 );
 
-                let server = SharedTcpServer::new(bind_addr, GLOBAL_TCP_SERVER_TOKEN.clone());
+                let server = SharedTcpServer::new(
+                    bind_addr,
+                    GLOBAL_TCP_SERVER_TOKEN.clone(),
+                    engine_max_num_seqs,
+                )?;
 
                 // Bind and start server, getting the actual bound address
                 let actual_addr = server.clone().bind_and_start().await?;
@@ -371,5 +395,15 @@ mod tests {
             ),
             Err(err) => assert!(err.to_string().contains("NATS client required")),
         }
+    }
+
+    #[test]
+    fn engine_capacity_hint_does_not_initialize_server() {
+        let manager = manager_for(RequestPlaneMode::Tcp);
+
+        manager.set_engine_max_num_seqs_hint(12);
+
+        assert_eq!(manager.engine_max_num_seqs_hint.get(), Some(&12));
+        assert!(manager.server.get().is_none());
     }
 }

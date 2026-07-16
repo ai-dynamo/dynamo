@@ -856,6 +856,7 @@ class ModelRuntimeConfig:
     context_length: int | None
     total_kv_blocks: int | None
     max_num_seqs: int | None
+    engine_max_num_seqs: int | None
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
@@ -3323,6 +3324,7 @@ class backend:
             data_parallel_start_rank: Optional[int] = None,
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
+            engine_max_num_seqs: Optional[int] = None,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3332,6 +3334,8 @@ class backend:
         def total_kv_blocks(self) -> Optional[int]: ...
         @property
         def max_num_seqs(self) -> Optional[int]: ...
+        @property
+        def engine_max_num_seqs(self) -> Optional[int]: ...
         @property
         def max_num_batched_tokens(self) -> Optional[int]: ...
         @property

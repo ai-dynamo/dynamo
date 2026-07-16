@@ -4,8 +4,10 @@
 //! Dynamo backend for SGLang's native `sglang.runtime.v1` gRPC server.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -160,9 +162,23 @@ impl LLMEngine for SglangSidecarEngine {
                 self.disaggregation_mode, observed_mode
             )));
         }
+        let (_, data_parallel_start_rank, data_parallel_size) =
+            data_parallel_scope(&discovery.server_info);
+        let effective_loads = wait_for_effective_loads(
+            |deadline| {
+                let mut control = control.clone();
+                async move { client::get_load(&mut control, deadline).await }
+            },
+            deadline,
+            self.transport.poll_interval,
+            data_parallel_start_rank,
+            data_parallel_size,
+        )
+        .await;
 
         let config = build_engine_config(
             &discovery,
+            effective_loads.as_deref(),
             self.disaggregation_mode,
             self.bootstrap_host.clone(),
             self.bootstrap_port,
@@ -524,8 +540,84 @@ fn is_routable_host(host: &str) -> bool {
         .unwrap_or(true)
 }
 
+fn data_parallel_scope(server_info: &Value) -> (u32, u32, u32) {
+    let dp_size = client::json_u32(server_info, "dp_size").unwrap_or(1).max(1);
+    let enable_dp_attention = server_info
+        .get("enable_dp_attention")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let nnodes = client::json_u32(server_info, "nnodes").unwrap_or(1).max(1);
+    let node_rank = client::json_u32(server_info, "node_rank").unwrap_or(0);
+    let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
+        let local_size = (dp_size / nnodes).max(1);
+        (node_rank.saturating_mul(local_size), local_size)
+    } else {
+        (0, dp_size)
+    };
+    (dp_size, data_parallel_start_rank, data_parallel_size)
+}
+
+async fn wait_for_effective_loads<F, Fut>(
+    mut get_load: F,
+    deadline: Instant,
+    poll_interval: Duration,
+    data_parallel_start_rank: u32,
+    data_parallel_size: u32,
+) -> Option<Vec<Value>>
+where
+    F: FnMut(Instant) -> Fut,
+    Fut: Future<Output = Result<Vec<Value>, DynamoError>>,
+{
+    loop {
+        if Instant::now() >= deadline {
+            tracing::warn!("SGLang effective capacity was unavailable before the startup deadline");
+            return None;
+        }
+
+        if let Ok(loads) = get_load(deadline).await
+            && effective_engine_max_num_seqs(
+                Some(&loads),
+                data_parallel_start_rank,
+                data_parallel_size,
+            )
+            .is_some()
+        {
+            return Some(loads);
+        }
+
+        tokio::time::sleep_until((Instant::now() + poll_interval).min(deadline)).await;
+    }
+}
+
+fn effective_engine_max_num_seqs(
+    loads: Option<&[Value]>,
+    data_parallel_start_rank: u32,
+    data_parallel_size: u32,
+) -> Option<u64> {
+    let loads = loads?;
+    let end_rank = data_parallel_start_rank.checked_add(data_parallel_size)?;
+    let mut smallest = None;
+
+    for rank in data_parallel_start_rank..end_rank {
+        let mut matching = loads
+            .iter()
+            .filter(|load| client::json_u32(load, "dp_rank") == Some(rank));
+        let capacity = matching
+            .next()
+            .and_then(|load| client::json_u64(load, "max_running_requests"))
+            .filter(|capacity| *capacity > 0)?;
+        if matching.next().is_some() {
+            return None;
+        }
+        smallest = Some(smallest.map_or(capacity, |current: u64| current.min(capacity)));
+    }
+
+    smallest.map(|capacity| capacity.saturating_mul(u64::from(data_parallel_size)))
+}
+
 fn build_engine_config(
     discovery: &Discovery,
+    effective_loads: Option<&[Value]>,
     mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
@@ -538,9 +630,8 @@ fn build_engine_config(
         }
         _ => None,
     };
-    let dp_size = client::json_u32(&discovery.server_info, "dp_size")
-        .unwrap_or(1)
-        .max(1);
+    let (dp_size, data_parallel_start_rank, data_parallel_size) =
+        data_parallel_scope(&discovery.server_info);
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
             if dp_size > 1 {
@@ -552,21 +643,11 @@ fn build_engine_config(
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
 
-    let enable_dp_attention = discovery
-        .server_info
-        .get("enable_dp_attention")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let nnodes = client::json_u32(&discovery.server_info, "nnodes")
-        .unwrap_or(1)
-        .max(1);
-    let node_rank = client::json_u32(&discovery.server_info, "node_rank").unwrap_or(0);
-    let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
-        let local_size = (dp_size / nnodes).max(1);
-        (Some(node_rank.saturating_mul(local_size)), Some(local_size))
-    } else {
-        (Some(0), Some(1))
-    };
+    let engine_max_num_seqs = effective_engine_max_num_seqs(
+        effective_loads,
+        data_parallel_start_rank,
+        data_parallel_size,
+    );
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -589,9 +670,10 @@ fn build_engine_config(
             kv_cache_block_size: page_size,
             total_kv_blocks,
             max_num_seqs,
+            engine_max_num_seqs,
             max_num_batched_tokens,
-            data_parallel_size,
-            data_parallel_start_rank,
+            data_parallel_size: Some(data_parallel_size),
+            data_parallel_start_rank: Some(data_parallel_start_rank),
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
             bootstrap_port: mode.is_prefill().then_some(bootstrap_port).flatten(),
         }),
@@ -600,9 +682,17 @@ fn build_engine_config(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::collections::VecDeque;
+    use std::future::ready;
+    use std::time::Duration;
 
-    use super::{Discovery, resolve_bootstrap_host_with_local};
+    use dynamo_backend_common::{DisaggregationMode, DynamoError};
+    use serde_json::json;
+    use tokio::time::Instant;
+
+    use super::{
+        Discovery, build_engine_config, resolve_bootstrap_host_with_local, wait_for_effective_loads,
+    };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
         Discovery {
@@ -661,5 +751,118 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("--bootstrap-host"));
+    }
+
+    #[test]
+    fn engine_config_normalizes_max_num_seqs_to_local_dp_scope() {
+        let loads = vec![
+            json!({"dp_rank": 2, "max_running_requests": 12}),
+            json!({"dp_rank": 3, "max_running_requests": 12}),
+        ];
+        let config = build_engine_config(
+            &discovery(json!({
+                "max_running_requests": 48,
+                "dp_size": 4,
+                "enable_dp_attention": true,
+                "nnodes": 2,
+                "node_rank": 1
+            })),
+            Some(&loads),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        let llm = config
+            .llm
+            .expect("SGLang sidecar must register LLM capacity");
+
+        assert_eq!(llm.max_num_seqs, Some(12));
+        assert_eq!(llm.data_parallel_size, Some(2));
+        assert_eq!(llm.data_parallel_start_rank, Some(2));
+        assert_eq!(llm.engine_max_num_seqs, Some(24));
+    }
+
+    #[test]
+    fn engine_config_reports_all_ranks_owned_by_ordinary_dp() {
+        let loads = (0..4)
+            .map(|dp_rank| json!({"dp_rank": dp_rank, "max_running_requests": 12}))
+            .collect::<Vec<_>>();
+        let llm = build_engine_config(
+            &discovery(json!({"max_running_requests": 48, "dp_size": 4})),
+            Some(&loads),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .llm
+        .unwrap();
+
+        assert_eq!(
+            (
+                llm.data_parallel_start_rank,
+                llm.data_parallel_size,
+                llm.engine_max_num_seqs,
+            ),
+            (Some(0), Some(4), Some(48)),
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_waits_for_complete_effective_capacity() {
+        let mut samples = VecDeque::from([
+            vec![json!({"dp_rank": 0, "max_running_requests": 0})],
+            vec![
+                json!({"dp_rank": 0, "max_running_requests": 12}),
+                json!({"dp_rank": 1, "max_running_requests": 10}),
+            ],
+        ]);
+        let loads = wait_for_effective_loads(
+            |_| ready(Ok::<_, DynamoError>(samples.pop_front().unwrap())),
+            Instant::now() + Duration::from_secs(1),
+            Duration::ZERO,
+            0,
+            2,
+        )
+        .await
+        .expect("a complete positive capacity snapshot");
+
+        let llm = build_engine_config(
+            &discovery(json!({"max_running_requests": 24, "dp_size": 2})),
+            Some(&loads),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .llm
+        .unwrap();
+
+        assert_eq!(llm.engine_max_num_seqs, Some(20));
+        assert!(samples.is_empty());
+    }
+
+    #[test]
+    fn effective_capacity_requires_all_owned_ranks_and_uses_smallest() {
+        let loads = |capacities: &[u64]| {
+            capacities
+                .iter()
+                .enumerate()
+                .map(|(dp_rank, capacity)| {
+                    json!({"dp_rank": dp_rank, "max_running_requests": capacity})
+                })
+                .collect::<Vec<_>>()
+        };
+        let complete = loads(&[11, 10, 9, 10]);
+        let incomplete = loads(&[12, 12, 12]);
+
+        for (loads, expected) in [
+            (Some(complete.as_slice()), Some(36)),
+            (None, None),
+            (Some(incomplete.as_slice()), None),
+        ] {
+            assert_eq!(super::effective_engine_max_num_seqs(loads, 0, 4), expected);
+        }
     }
 }

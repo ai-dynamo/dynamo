@@ -131,6 +131,10 @@ class LlmRegistration:
     # them so the frontend's PrefillRouter can take its Bootstrap path.
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+    # Backend-normalized sequence capacity owned by this local engine. This is
+    # consumed by worker-side admission and is not published in discovery.
+    # Keep new fields after the legacy positional constructor fields.
+    engine_max_num_seqs: Optional[int] = None
 
 
 @dataclass

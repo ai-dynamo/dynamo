@@ -116,6 +116,72 @@ def test_kv_event_block_size_falls_back_to_cache_config():
     assert get_configured_kv_event_block_size(vllm_config) == 16
 
 
+@pytest.mark.asyncio
+async def test_register_vllm_model_reports_normalized_local_engine_capacity(
+    monkeypatch,
+):
+    vllm_main = _load_vllm_main()
+    captured = {}
+
+    async def fake_register_model(*args, **kwargs):
+        captured["runtime_config"] = kwargs["runtime_config"]
+
+    monkeypatch.setattr(vllm_main, "register_model", fake_register_model)
+    monkeypatch.setattr(
+        vllm_main,
+        "get_engine_cache_info",
+        lambda _: {
+            "num_gpu_blocks": 63,
+            "max_num_seqs": 8,
+            "max_num_batched_tokens": 1024,
+            "kv_event_block_size": 16,
+        },
+    )
+    monkeypatch.setattr(vllm_main, "get_dp_range_for_worker", lambda _: (2, 3))
+    monkeypatch.setattr(vllm_main, "get_spec_decode_runtime_data", lambda *_: None)
+    monkeypatch.setattr(vllm_main, "apply_topology_config", lambda _: None)
+    monkeypatch.setattr(
+        vllm_main, "create_frontend_media_config", lambda _: (None, None)
+    )
+
+    config = SimpleNamespace(
+        enable_local_indexer=True,
+        disaggregation_mode=DisaggregationMode.AGGREGATED,
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
+        exclude_tools_when_tool_choice_none=True,
+        dyn_enable_structural_tag=False,
+        dyn_structural_tag_scope="auto",
+        dyn_structural_tag_schema="auto",
+        engine_args=SimpleNamespace(stream_interval=None, enable_lora=False),
+        frontend_decoding=False,
+        served_model_name="qwen",
+        custom_jinja_template=None,
+        model="Qwen/Qwen3-0.6B",
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            max_model_len=4096,
+            model_weights="",
+            model="Qwen/Qwen3-0.6B",
+        )
+    )
+
+    await vllm_main.register_vllm_model(
+        vllm_main.ModelInput.Tokens,
+        vllm_main.ModelType.Chat,
+        SimpleNamespace(),
+        config,
+        SimpleNamespace(),
+        vllm_config,
+        vllm_main.WorkerType.Aggregated,
+    )
+
+    runtime_config = captured["runtime_config"]
+    assert runtime_config.max_num_seqs == 8
+    assert runtime_config.engine_max_num_seqs == 24
+
+
 def test_custom_jinja_template_invalid_path(mock_vllm_cli):
     """Test that invalid file path raises FileNotFoundError."""
     invalid_path = "/nonexistent/path/to/template.jinja"

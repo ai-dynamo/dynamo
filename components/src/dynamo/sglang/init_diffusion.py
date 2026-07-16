@@ -92,22 +92,22 @@ async def init_llm_diffusion(
     )
 
     try:
+        await register_model_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            output_type=parse_endpoint_types(dynamo_args.endpoint_types),
+            readiness_gate=ready_event,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
-            ),
-            register_model_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
-                readiness_gate=ready_event,
-                worker_type=WorkerType.Aggregated,
-                needs=[],
             ),
         )
     except Exception as e:

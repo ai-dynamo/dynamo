@@ -377,6 +377,11 @@ def build_runtime_config(
         engine_args.enable_local_indexer and not engine_args.is_decode()
     )
     rc.data_parallel_size = engine_args.dp_size
+    rc.engine_max_num_seqs = (
+        rc.max_num_seqs * max(engine_args.dp_size, 1)
+        if rc.max_num_seqs is not None
+        else None
+    )
     rc.set_engine_specific("output_replay_consumer", "true")
 
     bootstrap_port = engine_args.bootstrap_port

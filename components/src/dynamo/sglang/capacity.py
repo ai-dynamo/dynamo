@@ -3,10 +3,25 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from dynamo.common.native_offloading import native_offloading_capacity
+
+logger = logging.getLogger(__name__)
+
+_INTERNAL_STATE_TIMEOUT_SECONDS = 5.0
+
+# A timed-out probe must survive to release SGLang's queueing communicator.
+_IN_FLIGHT_INTERNAL_STATE_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _drain_internal_state_task(task: asyncio.Task[Any]) -> None:
+    _IN_FLIGHT_INTERNAL_STATE_TASKS.discard(task)
+    if not task.cancelled():
+        _ = task.exception()
 
 
 @dataclass(frozen=True)
@@ -47,6 +62,52 @@ def per_rank_max_running_requests(server_args: Any) -> int | None:
         return max_running_requests
 
     return max_running_requests // dp_size
+
+
+async def resolve_engine_max_num_seqs(
+    engine: Any, server_args: Any, local_dp_size: int
+) -> int | None:
+    """Return post-initialization concurrent-sequence capacity for this worker.
+
+    SGLang may clamp the configured maximum after KV profiling. Prefer the
+    scheduler-reported effective per-DP value and conservatively use the
+    smallest local rank when every represented rank supplies a usable value.
+    Fall back to the configured per-rank value otherwise.
+    """
+    effective: list[int] = []
+    expected_dp_size = max(local_dp_size, 1)
+    try:
+        state_task = asyncio.create_task(engine.tokenizer_manager.get_internal_state())
+        _IN_FLIGHT_INTERNAL_STATE_TASKS.add(state_task)
+        state_task.add_done_callback(_drain_internal_state_task)
+        states = await asyncio.wait_for(
+            asyncio.shield(state_task),
+            timeout=_INTERNAL_STATE_TIMEOUT_SECONDS,
+        )
+        if isinstance(states, dict):
+            states = [states]
+        if isinstance(states, (list, tuple)) and len(states) == expected_dp_size:
+            for state in states:
+                if not isinstance(state, dict):
+                    continue
+                value = state.get("effective_max_running_requests_per_dp")
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    effective.append(value)
+    except Exception as exc:
+        logger.warning(
+            "Unable to read SGLang effective scheduler capacity; falling back "
+            "to configured max_running_requests: %s",
+            exc,
+        )
+
+    per_rank = (
+        min(effective)
+        if len(effective) == expected_dp_size
+        else per_rank_max_running_requests(server_args)
+    )
+    if per_rank is None or per_rank <= 0:
+        return None
+    return per_rank * expected_dp_size
 
 
 def tokens_to_kv_blocks(tokens: int, page_size: int | None) -> int:

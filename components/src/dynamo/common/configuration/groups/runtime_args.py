@@ -318,19 +318,17 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "default health_check_payload(). Unified backend only.",
         )
 
-        # Worker-side request admission/rejection. Defaults to None (disabled);
-        # when unset the worker behaves exactly as before. Surfaces an env var —
-        # the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT directly. The Dynamo-side
-        # overflow queue is a small fixed burst (default 16, hard cap N+16) and is
-        # not a user-facing knob; advanced users may override it via the
-        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT env var.
+        # Highest-priority explicit worker-pool size. When unset, TCP admission
+        # uses DYN_TCP_WORKER_POOL_SIZE, automatic backend sizing, or the 10,000
+        # fallback. DYN_DYNAMO_REQUEST_QUEUE_LIMIT controls the logical queue
+        # only when this engine limit is set.
         add_argument(
             g,
             flag_name="--engine-request-limit",
             env_var="DYN_ENGINE_REQUEST_LIMIT",
             default=None,
             arg_type=int,
-            help="Max requests handled concurrently by the engine (worker-pool "
-            "semaphore size). Enables worker-side request rejection when set. "
-            "Disabled by default.",
+            help="Highest-priority explicit TCP worker-pool size. When unset, "
+            "Dynamo uses DYN_TCP_WORKER_POOL_SIZE, automatic sizing from backend "
+            "capacity, or the 10,000 fallback.",
         )

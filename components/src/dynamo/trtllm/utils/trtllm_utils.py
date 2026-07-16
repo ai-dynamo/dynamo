@@ -7,6 +7,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from dynamo.trtllm.constants import DisaggregationMode
+
 
 def deep_update(target: dict[str, Any], source: Mapping[str, Any]) -> None:
     """Recursively update nested dictionaries.
@@ -77,3 +79,22 @@ def get_spec_decode_runtime_data(engine_args: Any) -> dict[str, Any] | None:
     if method:
         data["method"] = str(method)
     return data
+
+
+def engine_max_num_seqs(engine: Any) -> int | None:
+    """Return TRT-LLM's post-initialization, engine-wide request capacity."""
+    if (
+        getattr(engine, "disaggregation_mode", None) == DisaggregationMode.ENCODE
+        and not engine.encoder_available
+    ):
+        return None
+
+    value = engine.llm.args.max_batch_size
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
+def populate_engine_max_num_seqs(runtime_config: Any, engine: Any) -> None:
+    """Publish TRT-LLM's post-initialization capacity on its registration."""
+    runtime_config.engine_max_num_seqs = engine_max_num_seqs(engine)

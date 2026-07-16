@@ -158,6 +158,22 @@ pub async fn health_check(client: &mut Client, deadline: Instant) -> Result<bool
     .map(|response| response.into_inner().healthy)
 }
 
+pub async fn get_load(client: &mut Client, deadline: Instant) -> Result<Vec<Value>, DynamoError> {
+    let response = rpc_with_deadline(
+        "GetLoad",
+        deadline,
+        client.get_load(pb::GetLoadRequest { dp_rank: None }),
+    )
+    .await?
+    .into_inner();
+    let value: Value = serde_json::from_str(&response.json_info)
+        .map_err(|err| protocol_error(format!("invalid GetLoad.json_info: {err}")))?;
+    value
+        .as_array()
+        .cloned()
+        .ok_or_else(|| protocol_error("GetLoad.json_info must be a JSON array"))
+}
+
 pub async fn abort(
     client: &mut Client,
     request: pb::AbortRequest,

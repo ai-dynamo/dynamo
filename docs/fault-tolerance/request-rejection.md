@@ -409,29 +409,45 @@ If `active_decode_blocks_threshold` is configured but you suspect `router_track_
 ## Worker-Side Request Admission
 
 In addition to the frontend's metric-driven busy detection above, a worker can
-enforce a hard concurrency cap directly at its request-plane ingress. This is
-disabled by default — when neither knob is set, the worker behaves exactly as
-before (a large pool plus a large overflow queue, no rejection).
+enforce bounded admission directly at its TCP request-plane ingress. The worker
+pool is fixed when the process-global TCP server is first initialized, before a
+capacity-bearing worker is published as ready.
+
+Pool size is resolved in this order:
+
+1. `DYN_ENGINE_REQUEST_LIMIT`;
+2. `DYN_TCP_WORKER_POOL_SIZE`;
+3. `ceil(1.5 * engine_max_num_seqs)`, when the backend reports a normalized
+   engine capacity;
+4. the compatibility fallback, `10000`.
 
 ### Knobs
 
 | Flag | Env var | Meaning |
 | --- | --- | --- |
-| `--engine-request-limit N` | `DYN_ENGINE_REQUEST_LIMIT` | Max requests handled **concurrently by the engine** (the worker-pool semaphore size). Setting this enables worker-side rejection. |
-| _(env-only)_ | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Max requests **waiting in Dynamo** (not yet in the engine) — the overflow queue size. Not a CLI knob; a small fixed burst defaulting to **16** (hard cap `N + 16`). Only takes effect when the engine limit is set. Advanced override only; must be **≥ 2**. |
+| `--engine-request-limit N` | `DYN_ENGINE_REQUEST_LIMIT` | Highest-priority explicit worker-pool size. |
+| _(env-only)_ | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Logical number of requests allowed to wait outside the engine when the engine limit is set. Defaults to **16** and must be **>= 2**. |
+| _(env-only)_ | `DYN_TCP_WORKER_POOL_SIZE` | Explicit worker-pool size used when the engine limit is unset. |
+| _(env-only)_ | `DYN_TCP_WORK_QUEUE_SIZE` | Physical TCP overflow-channel size used when the engine limit is unset. Defaults to **16**. |
 
 When `--engine-request-limit` is set, the worker accepts a request directly into
 the engine while a slot is free; once all `N` engine slots are busy, further
-requests go into the small overflow queue of size `Q`; when the engine **and**
-the queue are both full the worker rejects the request with
+requests wait outside the engine. The overflow channel is sized to `Q - 1`
+because the dispatcher can hold one request while waiting for an engine permit;
+the logical waiting limit remains exactly `Q`, for a hard cap of `N + Q`.
+
+Without the engine limit, the worker uses the explicit TCP pool override,
+automatic backend sizing, or the `10000` fallback. The ordinary TCP overflow
+channel defaults to `16`; the dispatcher can hold one additional request while
+waiting for a worker-pool permit.
+
+When the pool and applicable queue are full, the worker returns
 `Server overloaded: worker at capacity`. The frontend maps this rejection to
-`ResourceExhausted` → **HTTP 529**, and temporarily marks the worker overloaded
-so it is skipped on the next routing decision (cleared automatically on the next
-metric recompute). The effective hard cap is **N + Q** in-flight requests per
-worker. The overflow channel is sized to `Q-1` because the single dispatcher
-holds one request in transit between the queue and the engine; this makes the
-cap exact for **Q ≥ 2** (at `Q = 1` the channel floors at 1, so the queued
-peak is 2 — hence the `Q ≥ 2` requirement).
+`ResourceExhausted` -> **HTTP 529** and temporarily skips that worker until its
+load is recomputed.
+
+The TCP server is process-global and is not resized. If a process hosts multiple
+workers, the first initialization determines its fixed pool and queue sizes.
 
 ### Metrics
 

@@ -52,6 +52,7 @@ from . import envs
 from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
+    engine_max_num_seqs,
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
@@ -695,6 +696,9 @@ async def register_vllm_model(
         num_gpu_blocks = 0
     runtime_config.total_kv_blocks = per_rank_kv_blocks(num_gpu_blocks, dp_range[1])
     runtime_config.max_num_seqs = runtime_values["max_num_seqs"]
+    runtime_config.engine_max_num_seqs = engine_max_num_seqs(
+        runtime_values["max_num_seqs"], dp_range[1]
+    )
     runtime_config.max_num_batched_tokens = runtime_values["max_num_batched_tokens"]
     # Decode workers don't create the WorkerKvQuery endpoint, so don't advertise local indexer
     runtime_config.enable_local_indexer = (

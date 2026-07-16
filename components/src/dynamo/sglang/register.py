@@ -31,6 +31,7 @@ from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     model_card_dp_rank_bounds,
+    resolve_engine_max_num_seqs,
     runtime_capacity,
 )
 
@@ -38,7 +39,9 @@ SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
-def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> str:
+def _register_model_source_path(
+    engine: Optional[sgl.Engine], server_args: ServerArgs
+) -> str:
     """Pick the path passed to `register_model` for MDC construction.
 
     When `--model-path` is a remote URI (`s3://...`, `gs://...`), SGLang's
@@ -60,6 +63,8 @@ def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> 
     the Rust-side HF download entirely (lib/bindings/python/rust/lib.rs:314)
     and don't need this rewrite.
     """
+    if engine is None:
+        return server_args.model_path
     try:
         mc = engine.tokenizer_manager.model_config
     except AttributeError:
@@ -88,7 +93,7 @@ def _build_media_decoder_and_fetcher():
 
 
 async def _register_model_with_runtime_config(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
     endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,
@@ -345,7 +350,7 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
 
 
 async def _get_runtime_config(
-    engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
+    engine: Optional[sgl.Engine], server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
     """Extract runtime configuration from SGLang engine and args.
 
@@ -381,6 +386,10 @@ async def _get_runtime_config(
     registered_dp_size = end_dp_rank - start_dp_rank
     runtime_config.data_parallel_start_rank = start_dp_rank
     runtime_config.data_parallel_size = registered_dp_size
+    if engine is not None:
+        runtime_config.engine_max_num_seqs = await resolve_engine_max_num_seqs(
+            engine, server_args, registered_dp_size
+        )
     if registered_dp_size > 1:
         logging.info(
             "Registering with routable data_parallel rank range [%s, %s)",
@@ -408,14 +417,15 @@ async def _get_runtime_config(
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 
-    # Set bootstrap endpoint for disaggregated serving (prefill workers)
-    bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
-    if bootstrap_host and bootstrap_port:
-        runtime_config.set_disaggregated_endpoint(bootstrap_host, bootstrap_port)
-        logging.info(
-            f"Publishing disaggregated endpoint to discovery: "
-            f"{bootstrap_host}:{bootstrap_port}"
-        )
+    if engine is not None:
+        # Set bootstrap endpoint for disaggregated serving (prefill workers)
+        bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
+        if bootstrap_host and bootstrap_port:
+            runtime_config.set_disaggregated_endpoint(bootstrap_host, bootstrap_port)
+            logging.info(
+                f"Publishing disaggregated endpoint to discovery: "
+                f"{bootstrap_host}:{bootstrap_port}"
+            )
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
     # undocumented value. The value here will be None if not explicitly set by user.
@@ -456,6 +466,11 @@ async def _get_runtime_config(
             logging.warning(
                 f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
             )
+
+    # Encode/proxy workers intentionally have no SGLang engine. All remaining
+    # metadata depends on scheduler state, so their configuration is complete.
+    if engine is None:
+        return runtime_config
 
     try:
         scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
@@ -511,7 +526,7 @@ async def _get_runtime_config(
 
 
 async def register_model_with_readiness_gate(
-    engine: sgl.Engine,
+    engine: Optional[sgl.Engine],
     generate_endpoint: Endpoint,
     server_args: ServerArgs,
     dynamo_args: DynamoConfig,

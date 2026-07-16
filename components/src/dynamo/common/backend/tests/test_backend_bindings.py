@@ -21,6 +21,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from dynamo.common.backend.engine import LlmRegistration as PyLlmRegistration
+
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 
@@ -76,6 +78,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
             kv_cache_block_size=16,
             total_kv_blocks=1000,
             max_num_seqs=64,
+            engine_max_num_seqs=128,
             max_num_batched_tokens=2048,
         ),
     )
@@ -87,7 +90,34 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert llm.kv_cache_block_size == 16
     assert llm.total_kv_blocks == 1000
     assert llm.max_num_seqs == 64
+    assert llm.engine_max_num_seqs == 128
     assert llm.max_num_batched_tokens == 2048
+
+
+def test_llm_registration_preserves_existing_positional_order():
+    legacy_args = (
+        2048,
+        16,
+        1000,
+        64,
+        2048,
+        2,
+        3,
+        "bootstrap.example",
+        9000,
+    )
+
+    for llm in (
+        PyLlmRegistration(*legacy_args),
+        backend.LlmRegistration(*legacy_args),
+    ):
+        assert llm.max_num_seqs == 64
+        assert llm.max_num_batched_tokens == 2048
+        assert llm.data_parallel_size == 2
+        assert llm.data_parallel_start_rank == 3
+        assert llm.bootstrap_host == "bootstrap.example"
+        assert llm.bootstrap_port == 9000
+        assert llm.engine_max_num_seqs is None
 
 
 def test_worker_config_minimum_args():

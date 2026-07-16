@@ -729,24 +729,24 @@ class WorkerFactory:
 
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
+            await self.register_vllm_model(
+                ModelInput.Text,
+                ModelType.Embedding,
+                generate_endpoint,
+                config,
+                engine_client,
+                vllm_config,
+                # Embedding workers have no prefill/decode split — they
+                # always serve a single pooling pass, so they advertise
+                # as Aggregated with no peer dependencies.
+                worker_type=WorkerType.Aggregated,
+                needs=[],
+            )
             await asyncio.gather(
                 generate_endpoint.serve_endpoint(
                     handler.generate,
                     metrics_labels=[("model", config.model)],
                     health_check_payload=embedding_health_check_payload,
-                ),
-                self.register_vllm_model(
-                    ModelInput.Text,
-                    ModelType.Embedding,
-                    generate_endpoint,
-                    config,
-                    engine_client,
-                    vllm_config,
-                    # Embedding workers have no prefill/decode split — they
-                    # always serve a single pooling pass, so they advertise
-                    # as Aggregated with no peer dependencies.
-                    worker_type=WorkerType.Aggregated,
-                    needs=[],
                 ),
             )
         except Exception as e:
