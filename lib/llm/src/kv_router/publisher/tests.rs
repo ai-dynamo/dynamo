@@ -3500,33 +3500,77 @@ mod event_processor_tests {
 }
 
 #[cfg(test)]
-mod zmq_event_batch_tests {
+mod event_plane_batch_tests {
     use super::*;
     use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, RouterEvent,
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
+        KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
     };
 
-    use super::super::sinks::{RouterEventBatchSink, encode_zmq_event_batch};
+    use super::super::sinks::{
+        MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS, RouterEventBatchSink, encode_event_plane_batch,
+        event_plane_event_batches,
+    };
 
     fn router_event(event_id: u64) -> RouterEvent {
+        removed_router_event(event_id, 1)
+    }
+
+    fn removed_router_event(event_id: u64, block_count: usize) -> RouterEvent {
         RouterEvent::new(
             7,
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![ExternalSequenceBlockHash(event_id + 100)],
+                    block_hashes: (0..block_count)
+                        .map(|index| ExternalSequenceBlockHash(event_id * 100_000 + index as u64))
+                        .collect(),
                 }),
                 dp_rank: (event_id % 2) as u32,
             },
         )
     }
 
+    fn stored_router_event(event_id: u64, block_count: usize) -> RouterEvent {
+        RouterEvent::new(
+            7,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: (0..block_count)
+                        .map(|index| KvCacheStoredBlockData {
+                            block_hash: ExternalSequenceBlockHash(
+                                event_id * 100_000 + index as u64,
+                            ),
+                            tokens_hash: LocalBlockHash(event_id * 100_000 + index as u64),
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+                dp_rank: (event_id % 2) as u32,
+            },
+        )
+    }
+
+    fn cleared_router_event(event_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            7,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Cleared,
+                dp_rank: (event_id % 2) as u32,
+            },
+        )
+    }
+
     #[test]
-    fn zmq_batch_encoding_matches_named_msgpack_and_roundtrips() {
+    fn event_plane_batch_encoding_matches_named_msgpack_and_roundtrips() {
         let events = vec![router_event(1), router_event(2), router_event(3)];
         let expected = rmp_serde::to_vec_named(&events).unwrap();
 
-        let encoded = encode_zmq_event_batch(&events).unwrap();
+        let encoded = encode_event_plane_batch(&events).unwrap();
 
         assert_eq!(encoded, expected);
         assert_eq!(
@@ -3536,14 +3580,58 @@ mod zmq_event_batch_tests {
     }
 
     #[test]
-    fn zmq_batch_encoding_keeps_large_batches_in_one_payload() {
+    fn event_plane_batch_encoding_has_no_byte_size_cap() {
         let events = (0..20_000).map(router_event).collect::<Vec<_>>();
+        let batches = event_plane_event_batches(&events, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS)
+            .collect::<Vec<_>>();
 
-        let encoded = encode_zmq_event_batch(&events).unwrap();
+        assert_eq!(batches.len(), 1);
+        let encoded = encode_event_plane_batch(batches[0]).unwrap();
         let decoded = rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded).unwrap();
 
         assert!(encoded.len() > 1024 * 1024);
         assert_eq!(decoded, events);
+    }
+
+    #[test]
+    fn event_plane_batching_counts_stored_and_removed_blocks() {
+        let events = vec![
+            stored_router_event(1, 2),
+            removed_router_event(2, 2),
+            cleared_router_event(3),
+            removed_router_event(4, 1),
+        ];
+
+        let batches = event_plane_event_batches(&events, 4).collect::<Vec<_>>();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], &events[..3]);
+        assert_eq!(batches[1], &events[3..]);
+    }
+
+    #[test]
+    fn event_plane_batching_allows_one_oversized_event() {
+        let events = vec![removed_router_event(1, 5), removed_router_event(2, 1)];
+
+        let batches = event_plane_event_batches(&events, 4).collect::<Vec<_>>();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0], &events[..1]);
+        assert_eq!(batches[1], &events[1..]);
+    }
+
+    #[test]
+    fn event_plane_batching_enforces_production_block_cap() {
+        let events = (0..=MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS as u64)
+            .map(router_event)
+            .collect::<Vec<_>>();
+
+        let batches = event_plane_event_batches(&events, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS)
+            .collect::<Vec<_>>();
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS);
+        assert_eq!(batches[1].len(), 1);
     }
 
     #[derive(Clone, Default)]
@@ -3562,7 +3650,7 @@ mod zmq_event_batch_tests {
     }
 
     #[tokio::test]
-    async fn non_zmq_batch_sink_preserves_singleton_publication() {
+    async fn jetstream_batch_sink_preserves_singleton_publication() {
         let sink = SingletonSink::default();
         let events = vec![router_event(1), router_event(2), router_event(3)];
 

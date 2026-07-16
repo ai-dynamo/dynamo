@@ -13,7 +13,7 @@ use dynamo_runtime::{
     component::Component,
     discovery::EventTransportKind,
     prelude::*,
-    transports::event_plane::{EventEnvelope, EventSubscriber, TypedEventSubscriber},
+    transports::event_plane::{EventSubscriber, TypedEventSubscriber},
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -43,7 +43,8 @@ async fn start_kv_router_background_event_plane(
     // to be a subset of what the subscription will deliver.
     let subscriber =
         EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
-            .await?;
+            .await?
+            .typed::<Vec<RouterEvent>>();
 
     // Brief delay to let the subscription fully establish with the NATS server
     // before recovery fetches the initial dump from workers.
@@ -83,45 +84,14 @@ async fn start_kv_router_background_event_plane(
     }
 
     tokio::spawn(async move {
-        let subscriber = match transport_kind {
-            EventTransportKind::Nats => {
-                RouterEventSubscriber::Singleton(subscriber.typed::<RouterEvent>())
-            }
-            EventTransportKind::Zmq => {
-                RouterEventSubscriber::Batch(subscriber.typed::<Vec<RouterEvent>>())
-            }
-        };
         consume_events(subscriber, worker_query_client, cancellation_token).await;
     });
 
     Ok(())
 }
 
-enum RouterEventSubscriber {
-    Singleton(TypedEventSubscriber<RouterEvent>),
-    Batch(TypedEventSubscriber<Vec<RouterEvent>>),
-}
-
-enum RouterEventPayload {
-    Singleton(RouterEvent),
-    Batch(Vec<RouterEvent>),
-}
-
-impl RouterEventSubscriber {
-    async fn next(&mut self) -> Option<Result<(EventEnvelope, RouterEventPayload)>> {
-        match self {
-            Self::Singleton(subscriber) => subscriber.next().await.map(|result| {
-                result.map(|(envelope, event)| (envelope, RouterEventPayload::Singleton(event)))
-            }),
-            Self::Batch(subscriber) => subscriber.next().await.map(|result| {
-                result.map(|(envelope, events)| (envelope, RouterEventPayload::Batch(events)))
-            }),
-        }
-    }
-}
-
 async fn consume_events(
-    mut subscriber: RouterEventSubscriber,
+    mut subscriber: TypedEventSubscriber<Vec<RouterEvent>>,
     worker_query_client: Arc<WorkerQueryClient>,
     cancellation_token: CancellationToken,
 ) {
@@ -135,8 +105,8 @@ async fn consume_events(
             }
 
             Some(result) = subscriber.next() => {
-                let (envelope, payload) = match result {
-                    Ok((envelope, payload)) => (envelope, payload),
+                let (envelope, events) = match result {
+                    Ok((envelope, events)) => (envelope, events),
                     Err(e) => {
                         tracing::warn!("Failed to receive RouterEvent payload from event plane: {e:?}");
                         continue;
@@ -144,26 +114,16 @@ async fn consume_events(
                 };
 
                 tracing::trace!(
-                    event_count = match &payload {
-                        RouterEventPayload::Singleton(_) => 1,
-                        RouterEventPayload::Batch(events) => events.len(),
-                    },
+                    event_count = events.len(),
                     "Received event payload from publisher {} (seq {})",
                     envelope.publisher_id,
                     envelope.sequence
                 );
-                match payload {
-                    RouterEventPayload::Singleton(event) => {
-                        forward_live_event(&worker_query_client, event).await;
+                for event in events {
+                    if cancellation_token.is_cancelled() {
+                        break;
                     }
-                    RouterEventPayload::Batch(events) => {
-                        for event in events {
-                            if cancellation_token.is_cancelled() {
-                                break;
-                            }
-                            forward_live_event(&worker_query_client, event).await;
-                        }
-                    }
+                    forward_live_event(&worker_query_client, event).await;
                 }
             }
         }
