@@ -19,19 +19,17 @@ async function main() {
     .filter(e => e.start >= now)
     .slice(0, 3);
 
-  const selected = [...past, ...future];
+  const selected = [...future.reverse(), ...past.reverse()];
 
-  const lines = ['| Date | Event | Status |', '|------|-------|--------|'];
+  const lines = ['| Date | Event |', '|------|-------|'];
 
   if (selected.length === 0) {
-    lines.push('| – | No events to show | |');
+    lines.push('| – | No events to show |');
   } else {
     for (const e of selected) {
       const date = e.start.toDateString();
-      const isPast = e.start < now;
-      const status = isPast ? '**Past**' : '**Upcoming**';
       const label = e.url ? `[${e.summary}](${e.url})` : e.summary;
-      lines.push(`| ${date} | ${label} | ${status} |`);
+      lines.push(`| ${date} | ${label} |`);
     }
   }
 
