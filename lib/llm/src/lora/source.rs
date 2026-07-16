@@ -26,6 +26,11 @@ pub trait LoRASource: Send + Sync {
 
     /// Check if LoRA exists in this source
     async fn exists(&self, lora_uri: &str) -> Result<bool>;
+
+    /// Return a complete source-owned cache path without network access.
+    fn cached_path(&self, _lora_uri: &str) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
 }
 
 /// Hugging Face Hub LoRA source.
@@ -79,12 +84,20 @@ impl LoRASource for HuggingFaceLoRASource {
                 "Hugging Face repository {hf_uri} is not a valid LoRA: expected adapter_config.json and adapter weights"
             );
         }
+        hub::finalize_hf_snapshot(&self.cache, &spec, &snapshot)?;
         Ok(snapshot)
     }
 
     async fn exists(&self, hf_uri: &str) -> Result<bool> {
         HfRepoSpec::from_uri(hf_uri)?;
         Ok(true)
+    }
+
+    fn cached_path(&self, hf_uri: &str) -> Result<Option<PathBuf>> {
+        if !hf_uri.starts_with("hf://") {
+            return Ok(None);
+        }
+        self.cached_snapshot(&HfRepoSpec::from_uri(hf_uri)?)
     }
 }
 
@@ -457,8 +470,13 @@ mod tests {
         fs::write(repo_dir.join("refs/main"), "abc123").unwrap();
         fs::write(snapshot.join("adapter_config.json"), "{}").unwrap();
         fs::write(snapshot.join("adapter_model.safetensors"), "weights").unwrap();
+        fs::write(snapshot.join(".dynamo_lora_complete"), "1\n").unwrap();
 
         let source = HuggingFaceLoRASource::with_cache(Cache::new(temp.path().to_path_buf()));
+        assert_eq!(
+            source.cached_path("hf://org/adapter").unwrap(),
+            Some(snapshot.clone())
+        );
         let result = temp_env::async_with_vars(
             [("HF_HUB_OFFLINE", Some("1"))],
             source.download("hf://org/adapter", Path::new("unused")),
@@ -481,6 +499,7 @@ mod tests {
         fs::create_dir_all(&snapshot).unwrap();
         fs::write(snapshot.join("adapter_config.json"), "{}").unwrap();
         fs::write(snapshot.join("adapter_model.safetensors"), "weights").unwrap();
+        fs::write(snapshot.join(".dynamo_lora_complete"), "1\n").unwrap();
 
         let source = HuggingFaceLoRASource::with_cache(Cache::new(temp.path().to_path_buf()));
         let result = temp_env::async_with_vars(
@@ -549,6 +568,7 @@ mod tests {
             [
                 ("HF_ENDPOINT", Some(server.url().as_str())),
                 ("HF_TOKEN", None),
+                ("HUGGING_FACE_HUB_TOKEN", None),
                 ("HF_TOKEN_PATH", token_path.to_str()),
                 ("HF_HUB_OFFLINE", None),
             ],
@@ -575,6 +595,10 @@ mod tests {
             fs::read_to_string(temp.path().join("models--org--adapter/refs/main")).unwrap(),
             commit
         );
+        assert_eq!(
+            fs::read_to_string(snapshot.join(".dynamo_lora_complete")).unwrap(),
+            "1\n"
+        );
 
         info.assert_async().await;
         config.assert_async().await;
@@ -583,15 +607,18 @@ mod tests {
 
     #[serial_test::serial]
     #[tokio::test]
-    async fn hf_source_does_not_publish_requested_ref_after_partial_download() {
+    async fn hf_source_does_not_mark_partial_commit_snapshot_complete() {
         let mut server = mockito::Server::new_async().await;
         let commit = "0123456789abcdef0123456789abcdef01234567";
         let info = server
-            .mock("GET", "/api/models/org/adapter/revision/main")
+            .mock(
+                "GET",
+                format!("/api/models/org/adapter/revision/{commit}").as_str(),
+            )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(format!(
-                r#"{{"siblings":[{{"rfilename":"adapter_config.json"}},{{"rfilename":"adapter_model.safetensors"}}],"sha":"{commit}"}}"#
+                r#"{{"siblings":[{{"rfilename":"adapter_config.json"}},{{"rfilename":"adapter_model.safetensors"}},{{"rfilename":"README.md"}}],"sha":"{commit}"}}"#
             ))
             .create_async()
             .await;
@@ -615,6 +642,20 @@ mod tests {
                 format!("/org/adapter/resolve/{commit}/adapter_model.safetensors").as_str(),
             )
             .match_header("range", Matcher::Regex("bytes=0-.*".to_string()))
+            .with_status(200)
+            .with_header("x-repo-commit", commit)
+            .with_header("etag", "weights-etag")
+            .with_header("content-range", "bytes 0-6/7")
+            .with_body("weights")
+            .expect(2)
+            .create_async()
+            .await;
+        let readme = server
+            .mock(
+                "GET",
+                format!("/org/adapter/resolve/{commit}/README.md").as_str(),
+            )
+            .match_header("range", Matcher::Regex("bytes=0-.*".to_string()))
             .with_status(500)
             .expect(1)
             .create_async()
@@ -626,17 +667,39 @@ mod tests {
             [
                 ("HF_ENDPOINT", Some(server.url().as_str())),
                 ("HF_TOKEN", None),
+                ("HUGGING_FACE_HUB_TOKEN", None),
                 ("HF_TOKEN_PATH", None),
                 ("HF_HUB_OFFLINE", None),
             ],
-            source.download("hf://org/adapter", Path::new("unused")),
+            source.download(
+                format!("hf://org/adapter@{commit}").as_str(),
+                Path::new("unused"),
+            ),
         )
         .await;
 
         assert!(result.is_err());
-        assert!(!temp.path().join("models--org--adapter/refs/main").exists());
+        let snapshot = temp
+            .path()
+            .join("models--org--adapter/snapshots")
+            .join(commit);
+        assert!(snapshot.join("adapter_config.json").is_file());
+        assert!(snapshot.join("adapter_model.safetensors").is_file());
+        assert!(!snapshot.join(".dynamo_lora_complete").exists());
+
+        let offline_result = temp_env::async_with_vars(
+            [("HF_HUB_OFFLINE", Some("1"))],
+            source.download(
+                format!("hf://org/adapter@{commit}").as_str(),
+                Path::new("unused"),
+            ),
+        )
+        .await;
+        assert!(offline_result.is_err());
+
         info.assert_async().await;
         config.assert_async().await;
         weights.assert_async().await;
+        readme.assert_async().await;
     }
 }

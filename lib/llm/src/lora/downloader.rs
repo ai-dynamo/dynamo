@@ -15,6 +15,18 @@ impl LoRADownloader {
         Self { sources, cache }
     }
 
+    /// Check source-owned caches and then the Dynamo LoRA cache for a URI.
+    pub fn is_cached(&self, lora_uri: &str) -> Result<bool> {
+        for source in &self.sources {
+            if let Some(path) = source.cached_path(lora_uri)? {
+                return LoRACache::validate_path(&path);
+            }
+        }
+
+        let cache_key = self.uri_to_cache_key(lora_uri);
+        self.cache.validate_cached(&cache_key)
+    }
+
     /// Download LoRA if not in cache, return local path
     ///
     /// For local file:// URIs, this will return the original path without copying.
@@ -92,6 +104,10 @@ mod tests {
         async fn exists(&self, _lora_uri: &str) -> Result<bool> {
             Ok(true)
         }
+
+        fn cached_path(&self, lora_uri: &str) -> Result<Option<PathBuf>> {
+            Ok(lora_uri.starts_with("hf://").then(|| self.snapshot.clone()))
+        }
     }
 
     #[tokio::test]
@@ -115,5 +131,22 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, hf_cache.path());
+    }
+
+    #[test]
+    fn is_cached_uses_source_owned_snapshot() {
+        let dynamo_cache = TempDir::new().unwrap();
+        let hf_cache = TempDir::new().unwrap();
+        std::fs::write(hf_cache.path().join("adapter_config.json"), "{}").unwrap();
+        std::fs::write(hf_cache.path().join("adapter_model.safetensors"), "").unwrap();
+
+        let downloader = LoRADownloader::new(
+            vec![Arc::new(ExternalSnapshotSource {
+                snapshot: hf_cache.path().to_path_buf(),
+            })],
+            LoRACache::new(dynamo_cache.path().to_path_buf()),
+        );
+
+        assert!(downloader.is_cached("hf://org/adapter").unwrap());
     }
 }

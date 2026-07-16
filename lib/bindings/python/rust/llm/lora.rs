@@ -78,9 +78,11 @@ impl LoRADownloader {
         self.cache.get_cache_path(cache_key).display().to_string()
     }
 
-    /// Check if LoRA is cached (by cache key).
-    fn is_cached(&self, cache_key: &str) -> bool {
-        self.cache.is_cached(cache_key)
+    /// Check if a LoRA URI is cached in its source-owned or Dynamo cache.
+    fn is_cached(&self, lora_uri: &str) -> PyResult<bool> {
+        self.inner.is_cached(lora_uri).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Cache lookup failed: {}", e))
+        })
     }
 
     /// Validate cached LoRA has required files.
