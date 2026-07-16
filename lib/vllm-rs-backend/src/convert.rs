@@ -10,8 +10,12 @@ use dynamo_backend_common::{
     PrefillResult, PreprocessedRequest, StopReason as DynamoStopReason, TopLogprob, usage,
 };
 use vllm_engine_core_client::protocol::{
-    EngineCoreSamplingParams, StopReason as VllmStopReason, StructuredOutputsParams,
     logprobs::Logprobs as VllmLogprobs,
+    output::StopReason as VllmStopReason,
+    sampling::EngineCoreSamplingParams,
+    structured_outputs::{
+        StructuredOutputConstraint, StructuredOutputOptions, StructuredOutputsParams,
+    },
 };
 use vllm_llm::{FinishReason as VllmFinishReason, GenerateOutput, GenerateRequest};
 
@@ -85,11 +89,12 @@ pub(crate) fn lower_request(
         structured_outputs: sampling
             .guided_decoding
             .as_ref()
-            .map(structured_outputs_from_guided_decoding),
+            .and_then(structured_outputs_from_guided_decoding),
         logprob_token_ids: None,
         skip_reading_prefix_cache: None,
         thinking_token_budget: request.stop_conditions.max_thinking_tokens.map(u64::from),
         extra_args: extra_args_as_object(request.extra_args)?,
+        repetition_detection: None,
     };
     apply_disaggregation_mode(
         disaggregation_mode,
@@ -115,7 +120,7 @@ pub(crate) fn lower_request(
         trace_headers: trace_headers(),
         priority,
         data_parallel_rank,
-        reasoning_ended: None,
+        reasoning_parser_kwargs: None,
         lora_request: None,
     })
 }
@@ -242,16 +247,31 @@ fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
 
 fn structured_outputs_from_guided_decoding(
     guided: &GuidedDecodingOptions,
-) -> StructuredOutputsParams {
-    StructuredOutputsParams {
-        json: guided.json.clone(),
-        regex: guided.regex.clone(),
-        choice: guided.choice.clone(),
-        grammar: guided.grammar.clone(),
-        whitespace_pattern: guided.whitespace_pattern.clone(),
-        structural_tag: guided.structural_tag.as_ref().map(structural_tag_to_string),
-        ..Default::default()
-    }
+) -> Option<StructuredOutputsParams> {
+    let constraint = if let Some(json) = guided.json.clone() {
+        StructuredOutputConstraint::Json(json)
+    } else if let Some(regex) = guided.regex.clone() {
+        StructuredOutputConstraint::Regex(regex)
+    } else if let Some(choice) = guided.choice.clone() {
+        StructuredOutputConstraint::Choice(choice)
+    } else if let Some(grammar) = guided.grammar.clone() {
+        StructuredOutputConstraint::Grammar(grammar)
+    } else if let Some(structural_tag) =
+        guided.structural_tag.as_ref().map(structural_tag_to_string)
+    {
+        StructuredOutputConstraint::StructuralTag(structural_tag)
+    } else {
+        // whitespace_pattern alone is not a constraint; skip structured outputs.
+        return None;
+    };
+    Some(StructuredOutputsParams {
+        constraint,
+        options: StructuredOutputOptions {
+            whitespace_pattern: guided.whitespace_pattern.clone(),
+            ..Default::default()
+        },
+        backend: Default::default(),
+    })
 }
 
 fn structural_tag_to_string(tag: &serde_json::Value) -> String {
@@ -301,7 +321,7 @@ pub(crate) fn map_output(
             "vLLM backend generation finished with an engine error".to_string(),
         )
         .with_usage(usage(prompt_tokens, completion_tokens)),
-        Some(VllmFinishReason::Repetition) => {
+        Some(VllmFinishReason::Repetition(_)) => {
             LLMEngineOutput::stop().with_usage(usage(prompt_tokens, completion_tokens))
         }
     };
@@ -372,7 +392,8 @@ mod tests {
         StopReason as DynamoStopReason,
     };
     use serde_json::json;
-    use vllm_engine_core_client::protocol::StopReason as VllmStopReason;
+    use vllm_engine_core_client::protocol::output::StopReason as VllmStopReason;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputConstraint;
     use vllm_llm::{FinishReason as VllmFinishReason, GenerateOutput, Logprobs};
     use vllm_llm::{PositionLogprobs, TokenLogprob};
 
@@ -443,9 +464,12 @@ mod tests {
         assert_eq!(sampling.eos_token_id, Some(2));
         assert_eq!(sampling.all_stop_token_ids, [2, 3, 99].into());
         let structured_outputs = sampling.structured_outputs.unwrap();
-        assert_eq!(structured_outputs.json, Some(json!({"type": "object"})));
         assert_eq!(
-            structured_outputs.whitespace_pattern.as_deref(),
+            structured_outputs.constraint,
+            StructuredOutputConstraint::Json(json!({"type": "object"}))
+        );
+        assert_eq!(
+            structured_outputs.options.whitespace_pattern.as_deref(),
             Some(r"\s*")
         );
         assert_eq!(
@@ -762,7 +786,7 @@ mod tests {
         let error = map_output(finished(VllmFinishReason::Error), 3, 2).unwrap();
         assert!(matches!(error.finish_reason, Some(FinishReason::Error(_))));
 
-        let repetition = map_output(finished(VllmFinishReason::Repetition), 3, 2).unwrap();
+        let repetition = map_output(finished(VllmFinishReason::Repetition(None)), 3, 2).unwrap();
         assert_eq!(repetition.finish_reason, Some(FinishReason::Stop));
     }
 
