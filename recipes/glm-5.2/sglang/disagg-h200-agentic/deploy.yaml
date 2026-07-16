@@ -208,6 +208,8 @@ spec:
                   value: "1"
                 - name: PYTHONUNBUFFERED
                   value: "1"
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
                 - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
                   value: UCX
                 - name: UCX_TLS
@@ -314,6 +316,8 @@ spec:
                   value: "1"
                 - name: PYTHONUNBUFFERED
                   value: "1"
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
                 # Synthetic MTP acceptance length for performance benchmarking.
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "2.69"
