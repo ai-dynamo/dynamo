@@ -34,10 +34,9 @@ Dynamo + vLLM deployment profiles for the agentic workload. This set covers
 
 1. **Dynamo Platform installed** on the target cluster with DGD CRDs served —
    see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
-2. **NGC/nvcr image pull access** — a `docker-registry` secret attached to the
-   namespace's default service account. The deploy manifests pull
-   `nvcr.io/nvstaging/ai-dynamo` and do not reference a pull secret by name, so
-   any secret name works as long as it is attached to the service account.
+2. **NGC/nvcr image pull access** — an NGC pull secret named `nvcr-secret`
+   attached to the namespace's default service account (the deploy manifests pull
+   from `nvcr.io/nvstaging/ai-dynamo`).
 3. **Hugging Face token** with access to `nvidia/Qwen3.5-122B-A10B-NVFP4`, stored
    as `hf-token-secret` — used by both the model-download Job and the serving
    workers.
@@ -65,11 +64,11 @@ kubectl create secret generic hf-token-secret \
 > create one and attach it to the namespace's default service account:
 >
 > ```bash
-> kubectl create secret docker-registry nvcr-imagepullsecret \
+> kubectl create secret docker-registry nvcr-secret \
 >   --docker-server=nvcr.io --docker-username='$oauthtoken' \
 >   --docker-password="<your-NGC-API-key>" -n ${NAMESPACE}
 > kubectl patch serviceaccount default -n ${NAMESPACE} \
->   -p '{"imagePullSecrets":[{"name":"nvcr-imagepullsecret"}]}'
+>   -p '{"imagePullSecrets":[{"name":"nvcr-secret"}]}'
 > ```
 
 ### 2. Create storage
