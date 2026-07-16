@@ -21,6 +21,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 <input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-openai" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-zai" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-thinkingmachines" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="runtime-all" name="runtime" defaultChecked />
 <input className="dynamo-filter-input" type="radio" id="runtime-vllm" name="runtime" />
 <input className="dynamo-filter-input" type="radio" id="runtime-trtllm" name="runtime" />
@@ -35,11 +36,11 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
-      <h3>10 model families</h3>
+      <h3>11 model families</h3>
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>29</strong>
+      <strong>30</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -52,7 +53,8 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 <label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-openai">OpenAI</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-zai">Z.AI</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="provider-zai">Z.AI</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-thinkingmachines">Thinking Machines</label></div></div>
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Runtime</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="runtime-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-vllm">vLLM</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-trtllm">TensorRT-LLM</label>
@@ -65,6 +67,14 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
+  <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang" data-hardware="b200" data-technique="aggregated spec-decoding" data-workload="multimodal-reuse">
+    <div className="dynamo-model-card-top">
+      <div><h3>Inkling NVFP4</h3><p>Thinking Machines</p></div>
+    </div>
+    <p className="dynamo-model-summary">Day-0 aggregated SGLang recipe for Thinking Machines' first open-weights model — multimodal MoE with controllable reasoning effort, TP8 with EAGLE speculation.</p>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>8x B200</span><span>Text + image</span><span>Day-0</span></div>
+  <a className="dynamo-card-link" href="./inkling.mdx" aria-label="Open the Inkling NVFP4 recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../assets/img/recipes/providers/moonshotai.webp" alt="" />
