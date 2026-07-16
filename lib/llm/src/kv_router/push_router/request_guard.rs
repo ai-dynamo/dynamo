@@ -28,8 +28,7 @@ struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
-    request_progress: Option<RequestProgressUpdater>,
-    admission_lease: Option<AdmissionLease>,
+    admission: Option<(RequestProgressUpdater, AdmissionLease)>,
     freed: bool,
 }
 
@@ -38,23 +37,20 @@ impl RequestCleanup {
         chooser: Arc<KvRouter>,
         context_id: String,
         scheduler_tracked: bool,
-        request_progress: Option<RequestProgressUpdater>,
-        admission_lease: Option<AdmissionLease>,
+        admission: Option<(RequestProgressUpdater, AdmissionLease)>,
     ) -> Self {
-        debug_assert!(request_progress.is_none() || scheduler_tracked);
-        debug_assert_eq!(request_progress.is_some(), admission_lease.is_some());
+        debug_assert!(admission.is_none() || scheduler_tracked);
         Self {
             chooser,
             context_id,
             scheduler_tracked,
-            request_progress,
-            admission_lease,
+            admission,
             freed: false,
         }
     }
 
     async fn finish(&mut self) {
-        if let Some(lease) = self.admission_lease.take() {
+        if let Some((_progress, lease)) = self.admission.take() {
             // AdmissionLease reports the terminal outcome to the scheduler actor.
             // The scheduler actor remains the sole owner of booking and queue cleanup.
             drop(lease);
@@ -73,7 +69,7 @@ impl RequestCleanup {
 
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
-        if self.freed || !self.scheduler_tracked || self.admission_lease.is_some() {
+        if self.freed || !self.scheduler_tracked || self.admission.is_some() {
             return;
         }
 
@@ -296,8 +292,7 @@ impl RequestGuard {
         context_id: String,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
-        request_progress: Option<RequestProgressUpdater>,
-        admission_lease: Option<AdmissionLease>,
+        admission: Option<(RequestProgressUpdater, AdmissionLease)>,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -309,19 +304,13 @@ impl RequestGuard {
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        let track_request_progress = request_progress.is_some();
+        let track_request_progress = admission.is_some();
         if scheduler_tracked {
             request_metrics.requests_started_total().inc();
         }
 
         Self {
-            cleanup: RequestCleanup::new(
-                chooser,
-                context_id,
-                scheduler_tracked,
-                request_progress,
-                admission_lease,
-            ),
+            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked, admission),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
@@ -347,7 +336,7 @@ impl RequestGuard {
     }
 
     pub(super) async fn mark_dispatched(&mut self) {
-        if let Some(lease) = self.cleanup.admission_lease.as_mut() {
+        if let Some((_progress, lease)) = self.cleanup.admission.as_mut() {
             // Backend dispatch already succeeded. Record that fact synchronously so
             // lease cleanup still reports Dispatched before the terminal event if it
             // overtakes the actor command.
@@ -398,7 +387,7 @@ impl RequestGuard {
             return;
         };
 
-        if let Some(progress) = &self.cleanup.request_progress {
+        if let Some((progress, _lease)) = &self.cleanup.admission {
             progress.update_context_tokens(
                 self.output_blocks.isl_tokens.saturating_add(cumulative_osl),
             );
@@ -433,10 +422,10 @@ impl RequestGuard {
         let context_tokens = self
             .observability
             .context_tokens(self.output_blocks.isl_tokens);
-        if let Some(progress) = &self.cleanup.request_progress {
+        if let Some((progress, _lease)) = &self.cleanup.admission {
             progress.update_context_tokens(context_tokens);
         }
-        if let Some(lease) = self.cleanup.admission_lease.as_mut() {
+        if let Some((_progress, lease)) = self.cleanup.admission.as_mut() {
             lease.mark_completed(context_tokens);
         }
     }

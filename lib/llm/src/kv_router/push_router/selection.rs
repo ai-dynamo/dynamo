@@ -27,8 +27,7 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
-    pub(super) request_progress: Option<RequestProgressUpdater>,
-    pub(super) admission_lease: Option<AdmissionLease>,
+    pub(super) admission: Option<(RequestProgressUpdater, AdmissionLease)>,
 }
 
 #[derive(Clone, Copy)]
@@ -95,8 +94,6 @@ impl KvPushRouter {
                 true,
             )
             .await?;
-        let (request_progress, admission_lease) = admission.unzip();
-
         match outcome {
             FindBestMatchOutcome::Routed {
                 worker,
@@ -111,8 +108,7 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                request_progress,
-                admission_lease,
+                admission,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

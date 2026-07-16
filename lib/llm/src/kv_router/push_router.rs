@@ -254,8 +254,7 @@ impl KvPushRouter {
             context_id.clone(),
             request,
             !is_query_only,
-            selection.request_progress.take(),
-            selection.admission_lease.take(),
+            selection.admission.take(),
         );
 
         let record_result: Result<(), Error> = async {
@@ -816,8 +815,10 @@ mod tests {
                 request_id.clone(),
                 &request(),
                 true,
-                response.request_progress.take(),
-                response.admission_lease.take(),
+                response
+                    .request_progress
+                    .take()
+                    .zip(response.admission_lease.take()),
             );
             guard.mark_dispatched().await;
 
