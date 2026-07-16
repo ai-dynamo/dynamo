@@ -253,6 +253,28 @@ func TestConvertTo_StatusFields(t *testing.T) {
 	}
 }
 
+func TestScrubDGDRInternalAnnotationsRemovesRetiredKeys(t *testing.T) {
+	metadata := &metav1.ObjectMeta{Annotations: map[string]string{
+		annDGDRSpec:        "spec",
+		annDGDRStatus:      "status",
+		"example.com/keep": "value",
+	}}
+	for _, key := range retiredDGDRAnnotationKeys {
+		metadata.Annotations[key] = "stale"
+	}
+
+	scrubDGDRInternalAnnotations(metadata)
+
+	for _, key := range append([]string{annDGDRSpec, annDGDRStatus}, retiredDGDRAnnotationKeys...) {
+		if _, ok := metadata.Annotations[key]; ok {
+			t.Errorf("internal annotation %q was not scrubbed", key)
+		}
+	}
+	if got := metadata.Annotations["example.com/keep"]; got != "value" {
+		t.Errorf("unrelated annotation = %q, want value", got)
+	}
+}
+
 // TestAlpha1RoundTrip verifies v1alpha1 → v1beta1 → v1alpha1 preserves all round-tripped fields.
 func TestAlpha1RoundTrip(t *testing.T) {
 	original := newV1alpha1DGDR()
@@ -542,22 +564,6 @@ func TestStripDGDRTypedProfilingConfig(t *testing.T) {
 				t.Fatalf("input was mutated (-want +got):\n%s", diff)
 			}
 		})
-	}
-}
-
-func assertProfilingConfigBlobHas(t *testing.T, raw *apiextensionsv1.JSON, want map[string]any) {
-	t.Helper()
-	if raw == nil {
-		t.Fatal("profiling config is nil")
-	}
-	var got map[string]any
-	if err := json.Unmarshal(raw.Raw, &got); err != nil {
-		t.Fatalf("unmarshal profiling config: %v", err)
-	}
-	for key, wantValue := range want {
-		if diff := cmp.Diff(wantValue, got[key]); diff != "" {
-			t.Fatalf("profiling config %q mismatch (-want +got):\n%s", key, diff)
-		}
 	}
 }
 

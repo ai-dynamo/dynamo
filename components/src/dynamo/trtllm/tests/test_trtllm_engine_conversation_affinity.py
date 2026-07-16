@@ -14,6 +14,11 @@ Exercises the four branches of ``_generate_started`` around
   ``conversation_params.conversation_id == session_id``.
 * on + no session id → ``scheduling_params=None`` and ``conversation_params=None``
   (the kwarg is still passed so the engine's no-id balancing fallback runs).
+
+Plus the manual ``--conversation-affinity`` / ``DYN_ENGINE_CONV_AFFINITY`` override
+(``_engine_conversation_affinity_override``), which forces the affinity branch even when
+engine detection is off and raises when the ConversationParams API is missing — matching
+the legacy ``HandlerBase`` override tests.
 """
 
 from __future__ import annotations
@@ -81,6 +86,9 @@ def _make_engine(
     engine._no_inflight_requests.set()
     engine._reject_new_requests = False
     engine._conversation_affinity = conversation_affinity
+    # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY); off by
+    # default, individual tests flip it to exercise the override path.
+    engine._engine_conversation_affinity_override = False
     engine._attention_dp_size = attention_dp_size
     engine._override_sampling_params = lambda default, request: SimpleNamespace(
         max_tokens=None
@@ -189,3 +197,72 @@ async def test_affinity_on_without_session_id_passes_none_conversation_params(
     assert captured["scheduling_params"] is None
     assert "conversation_params" in captured
     assert captured["conversation_params"] is None
+
+
+async def test_override_suppresses_dp_rank_and_forwards_conversation_params(
+    monkeypatch,
+):
+    """DYN_ENGINE_CONV_AFFINITY override=True + engine detection disabled →
+    dp_rank suppressed, conversation_params forwarded. Mirrors the legacy
+    HandlerBase override test so both entry points stay in lockstep."""
+    monkeypatch.setattr(
+        "dynamo.trtllm.llm_engine.CONVERSATION_PARAMS_AVAILABLE",
+        True,
+    )
+    monkeypatch.setattr(
+        "dynamo.trtllm.conversation_affinity.ConversationParams",
+        _FakeConversationParams,
+    )
+
+    captured: dict = {}
+
+    def fake_generate_async(**kwargs):
+        captured.update(kwargs)
+        return _empty_async_iter()
+
+    # Engine detection returns False (no engine-side affinity config)...
+    engine = _make_engine(
+        fake_generate_async, conversation_affinity=False, attention_dp_size=8
+    )
+    # ...but the operator forced it via DYN_ENGINE_CONV_AFFINITY.
+    engine._engine_conversation_affinity_override = True
+    # Router still stamps a rank; the override must ignore it just like
+    # auto-detection does.
+    await _drain(
+        engine,
+        {
+            "token_ids": [1, 2, 3],
+            "routing": {"dp_rank": 3},
+            "agent_context": {"session_id": "run-99:agent-0"},
+        },
+    )
+
+    assert captured["scheduling_params"] is None
+    conv_params = captured["conversation_params"]
+    assert conv_params is not None
+    assert conv_params.conversation_id == "run-99:agent-0"
+
+
+async def test_override_raises_when_conversation_params_api_missing(monkeypatch):
+    """DYN_ENGINE_CONV_AFFINITY=true on a build without ConversationParams →
+    RuntimeError in _generate_started, before generate_async is called."""
+    monkeypatch.setattr(
+        "dynamo.trtllm.llm_engine.CONVERSATION_PARAMS_AVAILABLE",
+        False,
+    )
+
+    called = False
+
+    def fake_generate_async(**kwargs):
+        nonlocal called
+        called = True
+        return _empty_async_iter()
+
+    engine = _make_engine(
+        fake_generate_async, conversation_affinity=False, attention_dp_size=8
+    )
+    engine._engine_conversation_affinity_override = True
+
+    with pytest.raises(RuntimeError, match="DYN_ENGINE_CONV_AFFINITY"):
+        await _drain(engine, {"token_ids": [1, 2, 3]})
+    assert called is False

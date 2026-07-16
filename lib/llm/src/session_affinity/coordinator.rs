@@ -112,6 +112,11 @@ impl AffinityCoordinator {
             waiter_observed: Arc::new(Notify::new()),
         });
         Self::spawn_reaper(&inner);
+        tracing::info!(
+            ttl_secs = ttl.as_secs(),
+            max_entries,
+            "session affinity enabled"
+        );
         Ok(Self { inner })
     }
 
@@ -184,6 +189,10 @@ impl AffinityCoordinator {
             match self.inner.entries.entry(session_id.clone()) {
                 Entry::Vacant(entry) => {
                     self.reserve_entry()?;
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "session affinity miss: new session, pinning after worker selection"
+                    );
                     return Ok(AffinityAcquire::Initialize(entry.insert_initializing(
                         &self.inner,
                         session_id,
@@ -219,6 +228,10 @@ impl AffinityCoordinator {
                         active_leases,
                         idle_deadline,
                     } if *active_leases == 0 && *idle_deadline <= now => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "session affinity miss: pin expired (idle past TTL), re-selecting worker"
+                        );
                         let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
                         let notify = Arc::new(Notify::new());
                         *entry.get_mut() = AffinityEntry::Initializing {
@@ -242,6 +255,13 @@ impl AffinityCoordinator {
                         ..
                     } => {
                         validate_bound_target(&session_id, *target, requested_target)?;
+                        tracing::debug!(
+                            session_id = %session_id,
+                            worker_id = target.worker_id,
+                            dp_rank = ?target.dp_rank,
+                            active_leases = *active_leases + 1,
+                            "session affinity hit: reusing pinned worker"
+                        );
                         *active_leases += 1;
                         let lease = AffinityLease {
                             coordinator: Arc::downgrade(&self.inner),
@@ -281,6 +301,13 @@ impl AffinityCoordinator {
             return Ok(None);
         }
         validate_bound_target(session_id.as_str(), *target, requested_target)?;
+        tracing::debug!(
+            session_id = %session_id.as_str(),
+            worker_id = target.worker_id,
+            dp_rank = ?target.dp_rank,
+            "session affinity hit: reusing pinned worker"
+        );
+
         Ok(Some(*target))
     }
 

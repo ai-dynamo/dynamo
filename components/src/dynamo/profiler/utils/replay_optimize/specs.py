@@ -44,12 +44,8 @@ from .constants import (
     DEFAULT_PREFILL_LOAD_SCALES,
 )
 
-_OVERLAP_CREDITS_RANGE_ERROR = "overlapCredits must be between 0.0 and 1.0"
-_OVERLAP_CREDITS_MIGRATION_ERROR = (
-    "overlapCredits must be between 0.0 and 1.0; values above 1.0 are probably "
-    "not what you intended. If you want to weigh TTFT/prompt-side prefill load "
-    "more heavily, keep overlapCredits <= 1.0 and use that larger value for "
-    "prefillLoadScales instead; prefill_load_scale is applied after overlap credits."
+_OVERLAP_CREDITS_RANGE_ERROR = (
+    "overlapCredits must contain only finite, non-negative values"
 )
 
 
@@ -352,9 +348,7 @@ class RouterSpec(BaseModel):
         if len(credits) == 0:
             raise ValueError("overlapCredits must not be empty")
         parsed = [float(credit) for credit in credits]
-        if any(credit > 1.0 for credit in parsed):
-            raise ValueError(_OVERLAP_CREDITS_MIGRATION_ERROR)
-        if any(not 0.0 <= credit <= 1.0 for credit in parsed):
+        if any(not math.isfinite(credit) or credit < 0.0 for credit in parsed):
             raise ValueError(_OVERLAP_CREDITS_RANGE_ERROR)
         return credits
 
