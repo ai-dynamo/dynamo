@@ -41,5 +41,4 @@ gaps:
 - runtime is a Day-0 dev image (sglang-runtime:1.4.0-inkling-dev.1, custom SGLang build) pending upstream merge
 - AAC/.m4a audio decode absent from the runtime image (royalty-bearing codec removal); noted on page
 - provider logo sourced from thinkingmachines.ai site icon; formal brand-asset provenance pass pending (same debt as the other provider logos)
-- confirm final NGC image tag on the merged deploy.yaml post-publish (staging rc tag at authoring time)
 - maintainer unknown
