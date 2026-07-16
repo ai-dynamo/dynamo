@@ -55,10 +55,8 @@ class DynamoWorkerProcess(ManagedProcess):
         is_prefill: bool | None = None,
         timeout_s: int = 300,
     ):
-        # Allocate system port for this worker
-        system_port = allocate_port(DynamoPortRange.SERVE.value)
-        request.addfinalizer(lambda port=system_port: deallocate_port(port))
-        self.system_port = system_port
+        self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
         self.frontend_port = frontend_port
 
         # Determine max-model-len based on worker type:
@@ -81,58 +79,47 @@ class DynamoWorkerProcess(ManagedProcess):
             str(get_default_vllm_block_size()),
         ]
 
-        # Configure disaggregation mode, KV transfer, and health checks per worker type
         if is_prefill is True:
-            # Prefill worker: disaggregated prefill mode; check own status endpoint only
             command.extend(["--disaggregation-mode", "prefill"])
-            command.extend(
-                [
-                    "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
-                ]
-            )
             health_check_urls = [
-                (f"http://localhost:{system_port}/health", self.is_ready)
+                (f"http://localhost:{self.system_port}/health", self.is_ready)
             ]
         elif is_prefill is False:
-            # Decode worker: disaggregated decode mode; also verify frontend sees the model
             command.extend(["--disaggregation-mode", "decode"])
-            command.extend(
-                [
-                    "--kv-transfer-config",
-                    build_nixl_kv_transfer_config_json(),
-                ]
-            )
             health_check_urls = [
-                (f"http://localhost:{system_port}/health", self.is_ready),
+                (f"http://localhost:{self.system_port}/health", self.is_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
         else:
-            # Aggregated worker: no disaggregation mode; verify frontend sees the model
             health_check_urls = [
-                (f"http://localhost:{system_port}/health", self.is_ready),
+                (f"http://localhost:{self.system_port}/health", self.is_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
 
-        # Set environment variables
         env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
-
         env["DYN_LOG"] = "debug"
-        # Disable canary health check - these tests expect full control over requests
-        # sent to the workers where canary health check intermittently sends dummy
-        # requests to workers interfering with the test process which may cause
-        # intermittent failures
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = str(system_port)
+        env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
-        # Set KV events config and NIXL side channel port only for prefill worker
-        # to avoid conflicts with decode worker
+        if is_prefill is not None:
+            self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+            request.addfinalizer(lambda port=self.fpm_port: deallocate_port(port))
+            env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
+
         if is_prefill is True:
+            self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
+            request.addfinalizer(
+                lambda port=self.kv_event_port: deallocate_port(port)
+            )
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            request.addfinalizer(
+                lambda port=self.nixl_side_channel_port: deallocate_port(port)
+            )
             command.extend(
                 [
                     "--kv-events-config",
@@ -140,17 +127,14 @@ class DynamoWorkerProcess(ManagedProcess):
                         {
                             "publisher": "zmq",
                             "topic": "kv-events",
-                            "endpoint": "tcp://*:20082",
+                            "endpoint": f"tcp://*:{self.kv_event_port}",
                             "enable_kv_cache_events": True,
                         }
                     ),
                 ]
             )
-            env[
-                "VLLM_NIXL_SIDE_CHANNEL_PORT"
-            ] = "5601"  # TODO: use dynamic port allocation
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
-        # Set log directory based on worker type
         if is_prefill is True:
             worker_type = "prefill_worker"
         elif is_prefill is False:
@@ -159,12 +143,10 @@ class DynamoWorkerProcess(ManagedProcess):
             worker_type = "worker"
         log_dir = f"{request.node.name}_{worker_type}"
 
-        # Clean up any existing log directory from previous runs
         try:
             shutil.rmtree(log_dir)
             logger.info(f"Cleaned up existing log directory: {log_dir}")
         except FileNotFoundError:
-            # Directory doesn't exist, which is fine
             pass
 
         super().__init__(
@@ -174,13 +156,8 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=timeout_s,
             display_output=True,
             terminate_all_matching_process_names=False,
-            # Ensure any orphaned vLLM engine cores or child helpers are cleaned up
-            stragglers=[
-                "VLLM::EngineCore",
-            ],
-            straggler_commands=[
-                "-m dynamo.vllm",
-            ],
+            stragglers=["VLLM::EngineCore"],
+            straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
 
@@ -193,10 +170,15 @@ class DynamoWorkerProcess(ManagedProcess):
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated port when worker exits."""
         try:
-            # system_port is always allocated in __init__
             deallocate_port(self.system_port)
+            if hasattr(self, "fpm_port"):
+                deallocate_port(self.fpm_port)
+            if hasattr(self, "kv_event_port"):
+                deallocate_port(self.kv_event_port)
+            if hasattr(self, "nixl_side_channel_port"):
+                deallocate_port(self.nixl_side_channel_port)
         except Exception as e:
-            logging.warning(f"Failed to release vLLM worker port: {e}")
+            logging.warning(f"Failed to release vLLM worker ports: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
 

@@ -20,13 +20,14 @@ from tests.fault_tolerance.etcd_ha.utils import (
     send_inference_request,
     wait_for_processes_to_terminate,
 )
-from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.constants import DynamoPortRange, FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.device import (
     build_nixl_kv_transfer_config,
     get_default_vllm_block_size,
 )
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.payloads import check_health_generate, check_models_api
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,9 @@ class DynamoWorkerProcess(ManagedProcess):
         etcd_endpoints: list,
         mode: WorkerMode = WorkerMode.AGGREGATED,
     ):
+        self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
+
         command = [
             "python3",
             "-m",
@@ -67,10 +71,8 @@ class DynamoWorkerProcess(ManagedProcess):
             str(get_default_vllm_block_size()),
         ]
 
-        # Set port based on worker type
-        port = "8082" if mode == WorkerMode.PREFILL else "8081"
+        port = str(self.system_port)
 
-        # Configure disaggregation mode, KV transfer, and health checks per worker type
         if mode == WorkerMode.PREFILL:
             command.extend(["--disaggregation-mode", "prefill"])
             health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
@@ -83,14 +85,12 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
             ]
 
-        # Set debug logging and ETCD endpoints
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
 
-        # Both prefill and decode workers need kv-transfer-config for disaggregated mode
         if mode != WorkerMode.AGGREGATED:
             command.extend(
                 [
@@ -98,9 +98,19 @@ class DynamoWorkerProcess(ManagedProcess):
                     json.dumps(build_nixl_kv_transfer_config()),
                 ]
             )
+            self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
+            request.addfinalizer(lambda port=self.fpm_port: deallocate_port(port))
+            env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
-        # KV events config and NIXL side channel port only for prefill worker
         if mode == WorkerMode.PREFILL:
+            self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
+            request.addfinalizer(
+                lambda port=self.kv_event_port: deallocate_port(port)
+            )
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            request.addfinalizer(
+                lambda port=self.nixl_side_channel_port: deallocate_port(port)
+            )
             command.extend(
                 [
                     "--kv-events-config",
@@ -108,19 +118,17 @@ class DynamoWorkerProcess(ManagedProcess):
                         {
                             "publisher": "zmq",
                             "topic": "kv-events",
-                            "endpoint": "tcp://*:20082",
+                            "endpoint": f"tcp://*:{self.kv_event_port}",
                             "enable_kv_cache_events": True,
                         }
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
-        # Set log directory based on worker type
         worker_type = "prefill_worker" if mode == WorkerMode.PREFILL else "worker"
         log_dir = f"{request.node.name}_{worker_type}"
 
-        # Clean up any existing log directory from previous runs
         try:
             shutil.rmtree(log_dir)
             logger.info(f"Cleaned up existing log directory: {log_dir}")
@@ -134,16 +142,27 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=120,
             display_output=True,
             terminate_all_matching_process_names=False,
-            stragglers=[
-                "VLLM::EngineCore",
-            ],
-            straggler_commands=[
-                "-m dynamo.vllm",
-            ],
+            stragglers=["VLLM::EngineCore"],
+            straggler_commands=["-m dynamo.vllm"],
             log_dir=log_dir,
         )
 
         self.mode = mode
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release allocated ports when worker exits."""
+        try:
+            deallocate_port(self.system_port)
+            if hasattr(self, "fpm_port"):
+                deallocate_port(self.fpm_port)
+            if hasattr(self, "kv_event_port"):
+                deallocate_port(self.kv_event_port)
+            if hasattr(self, "nixl_side_channel_port"):
+                deallocate_port(self.nixl_side_channel_port)
+        except Exception as e:
+            logging.warning(f"Failed to release ETCD HA vLLM worker ports: {e}")
+
+        return super().__exit__(exc_type, exc_val, exc_tb)
 
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
