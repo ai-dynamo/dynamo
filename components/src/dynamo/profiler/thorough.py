@@ -38,9 +38,7 @@ from dynamo.profiler.utils.aiperf import (
     get_prefill_ttft,
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from dynamo.profiler.utils.config_modifiers.trtllm import (
-    enable_trtllm_chunked_prefill,
-)
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.dgd_materialization import (
     DGDMaterializationPurpose,
     materialize_dgd,

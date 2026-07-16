@@ -38,9 +38,7 @@ from dynamo.planner.config.planner_config import (
     PlannerPreDeploymentSweepMode,
 )
 from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
-from dynamo.profiler.utils.config_modifiers.trtllm import (
-    enable_trtllm_chunked_prefill,
-)
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_planner_image,

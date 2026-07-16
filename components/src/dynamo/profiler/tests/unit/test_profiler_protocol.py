@@ -609,10 +609,7 @@ async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) 
     assert final_args.count("--override-applied") == 1
 
     # Neither merge mutates the clean picked DGD.
-    assert (
-        "tolerations"
-        not in base_dgd["spec"]["services"]["decode"]["extraPodSpec"]
-    )
+    assert "tolerations" not in base_dgd["spec"]["services"]["decode"]["extraPodSpec"]
 
 
 # ---------------------------------------------------------------------------
