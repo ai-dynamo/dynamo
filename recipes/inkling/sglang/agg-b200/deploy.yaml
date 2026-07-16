@@ -34,7 +34,7 @@ spec:
             - --model-path
             - /model-cache/thinkingmachines/Inkling-NVFP4
             - --model-name
-            - inkling-model
+            - thinkingmachines/Inkling-NVFP4
             - --dyn-chat-processor
             - sglang
             - --reasoning-parser
@@ -118,7 +118,7 @@ spec:
             - --model-path
             - /model-cache/thinkingmachines/Inkling-NVFP4
             - --served-model-name
-            - inkling-model
+            - thinkingmachines/Inkling-NVFP4
             - --tensor-parallel-size
             - "8"
             - --quantization
