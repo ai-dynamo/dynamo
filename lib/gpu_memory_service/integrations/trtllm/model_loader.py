@@ -265,7 +265,7 @@ def _move_untracked_params(
     discovered_storages = _discover_module_storages(model)
     located_storage_ids = {
         id(discovered_storage)
-        for discovered_storage in _match_storages_to_gms_mappings(
+        for discovered_storage, _, _ in _match_storages_to_gms_mappings(
             discovered_storages,
             gms_client.mappings,
             require_parameters=False,
@@ -280,7 +280,6 @@ def _move_untracked_params(
     ]
     replacements: dict[int, torch.Tensor] = {}
     objects = []
-    source_owners: list[torch.Tensor] = []
 
     with torch.no_grad():
         for discovered_storage in storages:
@@ -288,12 +287,7 @@ def _move_untracked_params(
             nbytes = int(storage.nbytes())
             base_va = gms_client.create_mapping(size=nbytes, tag="weights")
             target_storage = _storage_from_pointer(base_va, nbytes, device_index)
-            source_owner = _tensor_from_storage(storage, [nbytes], [1], torch.uint8)
-            target_owner = _tensor_from_storage(
-                target_storage, [nbytes], [1], torch.uint8
-            )
-            target_owner.copy_(source_owner)
-            source_owners.append(source_owner)
+            target_storage.copy_(storage)
 
             for tensor_object in discovered_storage.objects:
                 tensor = tensor_object.tensor
