@@ -426,6 +426,36 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
 		},
 
+		// Grove forceScalingGroup rules.
+		{
+			name:          "component grove.forceScalingGroup requires Grove",
+			groveDisabled: true,
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components"},
+		},
+		{
+			name: "v1beta1 grove.forceScalingGroup on a single-node component reaches the webhook",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+			}),
+		},
+		{
+			name: "v1beta1 redundant grove.forceScalingGroup on a multinode component reaches the webhook",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+			}),
+		},
+
 		// Checkpoint rules.
 		{
 			name: "v1beta1 valid checkpoint configuration reaches the webhook",
@@ -1451,6 +1481,51 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: null: the inter-pod GMS layout cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
 				"spec.components[1].experimental.failover: Invalid value: null: inter-pod GMS failover cannot be toggled after creation; delete and recreate the DynamoGraphDeployment",
 			},
+		},
+		// Grove forceScalingGroup updates.
+		{
+			name:          "grove.forceScalingGroup addition is immutable",
+			oldDeployment: newBetaDGDForValidation(),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Invalid value: true: cannot be toggled after creation; delete and recreate the DynamoGraphDeployment to change it"},
+		},
+		{
+			name: "grove.forceScalingGroup removal is immutable",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+			}),
+			deployment:      newBetaDGDForValidation(),
+			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Invalid value: null: cannot be toggled after creation; delete and recreate the DynamoGraphDeployment to change it"},
+		},
+		{
+			name: "unchanged grove.forceScalingGroup update reaches the webhook",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+			}),
+		},
+		{
+			name: "explicit false grove.forceScalingGroup addition reaches the webhook",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{}
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: false},
+				}
+			}),
 		},
 		{
 			name: "inter-pod failover shadow count is immutable",

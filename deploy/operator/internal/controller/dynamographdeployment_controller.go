@@ -511,11 +511,10 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		var isReady bool
 		var reason string
 		// Keep in sync with reconcileGroveScaling and Grove status aggregation:
-		// any component that requires a PodCliqueScalingGroup (multinode or
-		// inter-pod GMS) must be queried via CheckPCSGReady, otherwise
-		// single-node GMS components stall in the in-progress list because the
-		// corresponding PodClique never exists.
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		// any component that requires a PodCliqueScalingGroup must be queried
+		// via CheckPCSGReady, otherwise PCSG-backed components stall in the
+		// in-progress list because the corresponding PodClique never exists.
+		usesPCSG := component.UsesPCSG()
 		// A transient read error surfaces here as isReady=false, so the component
 		// conservatively remains in-progress (we never mark a restart complete on
 		// a component we could not read). The reconcile that owns readiness
@@ -999,7 +998,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(
 			replicas = 0
 		}
 
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		usesPCSG := component.UsesPCSG()
 		resourceName := fmt.Sprintf("%s-%d-%s", pcsName, replicaIndex, strings.ToLower(componentName))
 
 		if usesPCSG {

@@ -319,6 +319,19 @@ func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
 		s.Experimental.GPUMemoryService.Mode == GMSModeInterPod
 }
 
+// IsGroveScalingGroupForced reports whether the ScalingGroup layout is explicitly requested.
+func (s *DynamoComponentDeploymentSharedSpec) IsGroveScalingGroupForced() bool {
+	return s.Experimental != nil &&
+		s.Experimental.Grove != nil &&
+		s.Experimental.Grove.ForceScalingGroup
+}
+
+// UsesPCSG reports whether Grove renders this component as a
+// PodCliqueScalingGroup rather than a standalone PodClique.
+func (s *DynamoComponentDeploymentSharedSpec) UsesPCSG() bool {
+	return s.GetNumberOfNodes() > 1 || s.IsInterPodGMSEnabled() || s.IsGroveScalingGroupForced()
+}
+
 // IsInterPodFailoverEnabled reports whether inter-pod GMS failover is configured.
 func (s *DynamoComponentDeploymentSharedSpec) IsInterPodFailoverEnabled() bool {
 	return s.Experimental != nil &&

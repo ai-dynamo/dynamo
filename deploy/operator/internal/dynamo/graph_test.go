@@ -4961,6 +4961,23 @@ func TestExpandRolesForService(t *testing.T) {
 	}
 }
 
+// forceScalingGroup is v1beta1-only, so it gets its own case instead of a
+// row in the alpha-shaped table above: the engine PCLQ holds one pod
+// regardless of the component replica count (the PCSG carries the scale).
+func TestExpandRolesForComponent_SingleNodeForceScalingGroup(t *testing.T) {
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		Replicas: ptr.To(int32(4)),
+		Experimental: &v1beta1.ExperimentalSpec{
+			Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+		},
+	}
+	got := expandRolesForComponent("svc", component.Replicas, 1, component)
+	want := []ServiceRole{{Name: "svc", Role: RoleMain, Replicas: 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("expandRolesForComponent() = %v, want %v", got, want)
+	}
+}
+
 func TestRoleEnum(t *testing.T) {
 	// Test that role constants are defined correctly
 	if RoleLeader != "leader" {
@@ -8650,6 +8667,62 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup pins the
+// experimental grove.forceScalingGroup opt-in: a single-node component
+// renders as a PCSG whose replica count carries the horizontal scale, with a
+// single one-pod engine PCLQ per PCSG replica.
+func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(4)),
+					MinAvailable:  ptr.To(int32(2)),
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+				},
+			},
+		},
+	}
+
+	// grove.forceScalingGroup is v1beta1-only, so set it after conversion.
+	beta := betaDGD(t, dgd)
+	require.Len(t, beta.Spec.Components, 1)
+	beta.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		beta,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	require.Len(t, got.Spec.Template.Cliques, 1)
+	clique := got.Spec.Template.Cliques[0]
+	assert.Equal(t, "worker", clique.Name)
+	assert.EqualValues(t, 1, clique.Spec.Replicas, "engine PCLQ must hold exactly one pod per PCSG replica")
+	require.NotNil(t, clique.Spec.MinAvailable)
+	assert.EqualValues(t, 1, *clique.Spec.MinAvailable)
+
+	require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+	pcsg := got.Spec.Template.PodCliqueScalingGroupConfigs[0]
+	assert.Equal(t, "worker", pcsg.Name)
+	assert.Equal(t, []string{"worker"}, pcsg.CliqueNames)
+	require.NotNil(t, pcsg.Replicas)
+	assert.EqualValues(t, 4, *pcsg.Replicas, "PCSG replicas must carry the component replica count")
+	require.NotNil(t, pcsg.MinAvailable)
+	assert.EqualValues(t, 2, *pcsg.MinAvailable)
 }
 
 // TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant pins

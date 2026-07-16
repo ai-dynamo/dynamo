@@ -65,6 +65,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 			"is currently supported only for Grove-backed DynamoGraphDeployment components",
 		))
 	}
+	if forceScalingGroupFor(spec.Experimental) && !grovePathway {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("experimental", "grove", "forceScalingGroup"),
+			"is currently supported only for Grove-backed DynamoGraphDeployment components",
+		))
+	}
 	if spec.SharedMemorySize != nil && spec.SharedMemorySize.Sign() < 0 {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("sharedMemorySize"),
@@ -384,6 +390,13 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				fmt.Sprintf("inter-pod GMS failover cannot be toggled after creation; delete and recreate the %s", ownerKind.Kind),
 			))
 		}
+		if forceScalingGroupFor(oldComponent.Experimental) {
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("experimental", "grove", "forceScalingGroup"),
+				nil,
+				fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
+			))
+		}
 	}
 	return allErrs
 }
@@ -440,6 +453,16 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 			fldPath.Child("failover", "numShadows"),
 			newFailover.NumShadows,
 			fmt.Sprintf("is immutable for inter-pod GMS failover; delete and recreate the %s to change it", ownerKind.Kind),
+		))
+	}
+
+	// false and omitted both mean automatic selection, so only the
+	// effective opt-in is immutable.
+	if forceScalingGroupFor(newExperimental) != forceScalingGroupFor(oldExperimental) {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("grove", "forceScalingGroup"),
+			forceScalingGroupFor(newExperimental),
+			fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 		))
 	}
 	return allErrs

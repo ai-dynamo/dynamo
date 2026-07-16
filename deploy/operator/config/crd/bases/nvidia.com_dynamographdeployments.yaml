@@ -12613,6 +12613,20 @@ spec:
                                 rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''InterPod'''
                               - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
                                 rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
+                          grove:
+                            description: grove groups Grove-specific rendering options.
+                            properties:
+                              forceScalingGroup:
+                                description: |-
+                                  forceScalingGroup opts a single-node component into rendering as a
+                                  PodCliqueScalingGroup with one single-pod PodClique per replica, so
+                                  each replica is gang-scheduled independently and scaling changes the
+                                  scaling-group replica count. `false` or omitted means automatic
+                                  selection (multi-node and inter-pod GMS components use a scaling
+                                  group, other single-node components a standalone PodClique), not
+                                  "force PodClique". Immutable after creation.
+                                type: boolean
+                            type: object
                         type: object
                       frontendSidecar:
                         description: |-
