@@ -24,8 +24,14 @@ python -m dynamo.frontend --router-mode kv &
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL" --disaggregation-mode decode --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
-# wait for decode worker to initialize
-sleep 20
+# Wait for the decode worker to be ready before launching prefill — the prefill
+# worker's Nixl transfer needs the decode peer up. Poll its /health endpoint with
+# a bounded timeout and fail hard if it never becomes ready (no fixed-sleep race).
+DECODE_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
+if ! wait_for_ready "http://localhost:${DECODE_SYSTEM_PORT}/health" 60; then
+    echo "ERROR: decode worker did not become ready within 60s; aborting." >&2
+    exit 1
+fi
 
 # prefill worker (GPU 1) with LMCache.
 # --disable-hybrid-kv-cache-manager: LMCacheConnectorV1 doesn't support HMA (MultiConnector asserts).
