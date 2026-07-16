@@ -7,7 +7,7 @@ subtitle: Build Dynamo runtime images for built-in or custom backends
 
 Dynamo runtime images package the Dynamo runtime with an inference engine. The same container build flow can generate images for the built-in engines or a backend that you add on top of the Dynamo runtime.
 
-Use [`container/render.py`](../../container/render.py) to select the engine family and Docker target:
+Use [`container/render.py`](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/container/render.py) to select the engine family and Docker target:
 
 ```bash
 # vLLM runtime image

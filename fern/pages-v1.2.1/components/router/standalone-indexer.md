@@ -14,7 +14,7 @@ The standalone KV indexer (`python -m dynamo.indexer`) is a lightweight service 
 - It preserves P2P recovery and gap detection/replay for the standalone ZMQ path.
 - It indexes device, host-pinned, and disk tier blocks and reports per-tier matches in `/query` responses.
 
-This is distinct from the [Standalone Router](../../../components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
+This is distinct from the [Standalone Router](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/components/src/dynamo/router/README.md), which is a full routing service. The standalone indexer provides only the indexing and query layer without routing logic.
 
 For Dynamo-native remote indexing, use `--serve-indexer` on `dynamo.frontend` or `dynamo.router` and `--use-remote-indexer` on consumers instead. That request-plane service reuses the router's existing event ingestion and recovery machinery; it is not implemented by `dynamo.indexer`.
 
@@ -504,4 +504,4 @@ sequenceDiagram
 - **[Mooncake KV Indexer RFC](https://github.com/kvcache-ai/Mooncake/issues/1403)**: Community API standardization for KV cache indexers
 - **[Configuration and Tuning](router-configuration.md)**: Full KV router configuration and tuning
 - **[Router Design](../../design-docs/router-design.md)**: Architecture and event transport modes
-- **[Standalone Router](../../../components/src/dynamo/router/README.md)**: Full routing service (routes requests to workers)
+- **[Standalone Router](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/components/src/dynamo/router/README.md)**: Full routing service (routes requests to workers)

@@ -59,7 +59,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/blob/v0.9.1/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -170,7 +170,7 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 ### Benchmarking
 
 To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/v0.9.1/benchmarks/llm/perf.sh)
 
 ## KV Cache Transfer in Disaggregated Serving
 
@@ -214,7 +214,7 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 ## Benchmarking
 
 To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/v0.9.1/benchmarks/llm/perf.sh)
 
 ## Multimodal support
 
@@ -279,7 +279,7 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/performance-sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/blob/v0.9.1/examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 

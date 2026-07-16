@@ -85,7 +85,7 @@ the git source) and imports `dynamo.common.backend`. The steps below
 assume you're starting a fresh package in your own repo.
 
 The reference example is the **sample engine** at
-[`sample_engine.py`](../../components/src/dynamo/common/backend/sample_engine.py)
+[`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/components/src/dynamo/common/backend/sample_engine.py)
 — a complete, runnable implementation under 120 lines. Read it
 alongside this guide.
 
@@ -93,7 +93,7 @@ alongside this guide.
 
 - This guide — step-by-step walkthrough for someone starting a new
   backend from scratch.
-- [`LLMEngine` ABC docstrings](../../components/src/dynamo/common/backend/engine.py)
+- [`LLMEngine` ABC docstrings](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/components/src/dynamo/common/backend/engine.py)
   — authoritative method-by-method contract.
 - [Package README](../../components/src/dynamo/common/backend/README.md)
   — in-tree reference: `GenerateRequest` / `GenerateChunk` field
@@ -568,7 +568,7 @@ pip install -e ".[dev]"
 ```
 
 The sample engine has a unit-test
-[suite](../../components/src/dynamo/common/backend/tests/test_engine.py)
+[suite](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/components/src/dynamo/common/backend/tests/test_engine.py)
 that you can copy as a starting point. The shape of a useful test:
 
 ```python
@@ -669,7 +669,7 @@ the framework configures `tracing` from `DYN_LOG`.
 
 ### Python reference: sample engine
 
-[`sample_engine.py`](../../components/src/dynamo/common/backend/sample_engine.py)
+[`sample_engine.py`](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/components/src/dynamo/common/backend/sample_engine.py)
 is the canonical minimal reference. Run it as-is:
 
 ```bash
@@ -706,11 +706,11 @@ Before shipping:
 
 ### Python see also
 
-- [`LLMEngine` ABC](../../components/src/dynamo/common/backend/engine.py)
+- [`LLMEngine` ABC](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/components/src/dynamo/common/backend/engine.py)
   — authoritative contract.
 - [Package README](../../components/src/dynamo/common/backend/README.md)
   — feature gaps, error model, request/response contract.
-- [Sample engine](../../components/src/dynamo/common/backend/sample_engine.py)
+- [Sample engine](https://github.com/ai-dynamo/dynamo/blob/v1.2.1/components/src/dynamo/common/backend/sample_engine.py)
   — example user guide.
 - Rust tab on this page — the Rust counterpart, same contract,
   lower-level.
