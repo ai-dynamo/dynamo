@@ -240,43 +240,32 @@ class TestChatTemplateArgsPassthrough:
 class TestServerDefaultChatTemplateKwargs:
     """The server-wide --default-chat-template-kwargs must reach the template."""
 
-    def test_server_default_applied_when_request_omits_kwargs(self, tokenizer):
-        """A server default reaches the template when the request carries no kwargs."""
+    def _enable_thinking(self, tokenizer, request_args):
+        """Return the template's enable_thinking under a `{enable_thinking: False}` default."""
+        request = {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}]}
+        if request_args is not None:
+            request["chat_template_args"] = request_args
         _, _, _, _, chat_params = _prepare_request(
-            {"model": MODEL, "messages": [{"role": "user", "content": "Hello"}]},
+            request,
             tokenizer=tokenizer,
             tool_parser_class=None,
             default_chat_template_kwargs={"enable_thinking": False},
         )
-        assert chat_params.chat_template_kwargs.get("enable_thinking") is False
+        return chat_params.chat_template_kwargs.get("enable_thinking")
 
-    def test_request_kwargs_override_server_default(self, tokenizer):
-        """A per-request kwarg takes precedence over the server default."""
-        _, _, _, _, chat_params = _prepare_request(
-            {
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "chat_template_args": {"enable_thinking": True},
-            },
-            tokenizer=tokenizer,
-            tool_parser_class=None,
-            default_chat_template_kwargs={"enable_thinking": False},
-        )
-        assert chat_params.chat_template_kwargs.get("enable_thinking") is True
-
-    def test_unset_request_value_keeps_server_default(self, tokenizer):
-        """A None/unset request value must not erase the server default (vLLM parity)."""
-        _, _, _, _, chat_params = _prepare_request(
-            {
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "chat_template_args": {"enable_thinking": None},
-            },
-            tokenizer=tokenizer,
-            tool_parser_class=None,
-            default_chat_template_kwargs={"enable_thinking": False},
-        )
-        assert chat_params.chat_template_kwargs.get("enable_thinking") is False
+    @pytest.mark.parametrize(
+        "request_args, expected",
+        [
+            (None, False),  # omitted request kwargs: the server default applies
+            ({"enable_thinking": True}, True),  # a request kwarg overrides the default
+            (
+                {"enable_thinking": None},
+                False,
+            ),  # unset (None) request value keeps the default
+        ],
+    )
+    def test_server_default_precedence(self, tokenizer, request_args, expected):
+        assert self._enable_thinking(tokenizer, request_args) is expected
 
     def test_server_default_is_not_mutated(self, tokenizer):
         """Processing must not mutate the shared server-default dict."""
