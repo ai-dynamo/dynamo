@@ -380,5 +380,7 @@ runs:
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
       with:
         name: compliance-${{ inputs.git_sha }}-${{ inputs.artifact_name_prefix }}-sources
-        path: /tmp/sources/sources.zip
+        # Multi-arch builds export per-arch linux_<arch>/sources.zip subdirs (same
+        # as the compliance artifact above), so upload the dir, not a fixed filename.
+        path: /tmp/sources/
         retention-days: 365   # OSRB submissions retain longer than NOTICES/SBOMs
