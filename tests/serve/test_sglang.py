@@ -922,9 +922,7 @@ def _assert_disaggregated_engine_generate_spans_exported(collector) -> None:
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(470)
-# TODO: revert to pytest.mark.nightly after pre_merge validation
-# on this PR (see .ai/ci-guidelines.md).
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.unified
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_disaggregated_otel_exports_worker_graph_spans(
