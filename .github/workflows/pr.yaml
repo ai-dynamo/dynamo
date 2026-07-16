@@ -737,9 +737,9 @@ jobs:
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      gpu_test_markers: 'pre_merge and none and gpu_1'
+      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
+      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm or planner) and (gpu_0)'
+      gpu_test_markers: 'pre_merge and none and gpu_1 and not planner'
     secrets: inherit
 
   # ============================================================================

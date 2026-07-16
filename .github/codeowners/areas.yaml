@@ -208,9 +208,9 @@ areas:
   - components/src/dynamo/planner/monitoring/
   - components/src/dynamo/planner/offline/
   - components/src/dynamo/planner/tests/
-  - components/src/dynamo/profiler/
-  - components/src/dynamo/profiler/tests/
-  - components/src/dynamo/profiler/utils/
+  - components/profiler/
+  - components/profiler/src/dynamo/profiler/tests/
+  - components/profiler/src/dynamo/profiler/utils/
   - examples/global_planner/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
@@ -846,15 +846,15 @@ shared:
   owners:
   - planner
   - operator
-- glob: components/src/dynamo/profiler/utils/dgd_generation.py
+- glob: components/profiler/src/dynamo/profiler/utils/dgd_generation.py
   owners:
   - planner
   - operator
-- glob: components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py
+- glob: components/profiler/src/dynamo/profiler/utils/dgdr_v1beta1_types.py
   owners:
   - planner
   - operator
-- glob: components/src/dynamo/profiler/utils/dgdr_validate.py
+- glob: components/profiler/src/dynamo/profiler/utils/dgdr_validate.py
   owners:
   - planner
   - operator

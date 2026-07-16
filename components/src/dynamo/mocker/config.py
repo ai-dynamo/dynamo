@@ -142,7 +142,7 @@ def _estimate_aic_num_gpu_blocks(
     except AicMemoryEstimatorUnavailableError as exc:
         logger.warning(
             "AIC KV-cache capacity estimation is unavailable: %s. Falling back "
-            "to default num_gpu_blocks=%d; upgrade aiconfigurator or set "
+            "to default num_gpu_blocks=%d; upgrade aiconfigurator-core or set "
             "--num-gpu-blocks-override explicitly.",
             exc,
             _DEFAULT_NUM_GPU_BLOCKS,

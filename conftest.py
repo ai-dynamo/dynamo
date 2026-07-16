@@ -15,6 +15,13 @@ import os
 import sys
 from pathlib import Path
 
+# Make standalone component source trees participate in the ``dynamo``
+# namespace during repo-local test collection. Runtime images do not install
+# the optional profiler wheel; its tests run in the dedicated planner image.
+_PROFILER_SRC = Path(__file__).resolve().parent / "components" / "profiler" / "src"
+if _PROFILER_SRC.is_dir():
+    sys.path.insert(0, str(_PROFILER_SRC))
+
 # Seed sys.modules with the venv copies before pytest collection runs.
 for _name in ("vllm", "sglang"):
     try:

@@ -522,6 +522,7 @@ RUN --mount=type=cache,id=aic-core-cargo-registry,target=/root/.cargo/registry,s
 ##### runtime_wheel_builder ######
 ##################################
 # Builds ai-dynamo, ai-dynamo-runtime, and gpu_memory_service wheels, sans nixl.
+# The planner target also builds the pure-Python ai-dynamo-profiler leaf wheel.
 
 FROM wheel_builder_base AS runtime_wheel_builder
 
@@ -550,6 +551,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
+{% if framework == "dynamo" and target == "planner" %}
+    uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/components/profiler && \
+{% endif %}
     cd /opt/dynamo/lib/bindings/python && \
     if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \

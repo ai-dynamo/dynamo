@@ -25,7 +25,6 @@ from aiconfigurator.generator.enumerate import enumerate_profiling_configs
 from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
 from aiconfigurator.sdk.task_v2 import Task
 
-from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.profiler.rapid import _generate_dgd_from_pick
 from dynamo.profiler.utils.aic_dataframe import (
     build_decode_row,
@@ -47,6 +46,10 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,
     ProfilingPhase,
+)
+from dynamo.profiler.utils.dynamo_deployment import (
+    DeploymentFailedError,
+    DynamoDeploymentClient,
 )
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,

@@ -1,11 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Dependencies required by the planner, profiler, and global_planner services.
-
-# The published upper 0.10 wheel provides the profiler APIs but does not declare
-# the split core dependency.
-aiconfigurator==0.10.0
+# Dependencies required by the planner and global_planner services. Profiler-only
+# dependencies are declared by the ai-dynamo-profiler wheel.
 
 # Runtime/planner modeling uses a local core wheel built from the exact AIC
 # revision linked into ai-dynamo-runtime.

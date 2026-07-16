@@ -9,6 +9,7 @@ collapsed distinct 5-tuples to the same string — notably
 ``aiconfigurator.sdk.picking`` ``groupby("parallel")`` dedup. These tests
 pin the post-fix unique encoding.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -23,7 +24,6 @@ pytestmark = [
 
 try:
     from dynamo.planner.config.parallelization import PickedParallelConfig
-    from dynamo.profiler.utils.aic_dataframe import make_parallel_label
 except ImportError as e:
     pytest.skip(f"Skip (missing dependency): {e}", allow_module_level=True)
 
@@ -52,12 +52,10 @@ def _enumerate() -> list[tuple[int, int, int, int, int]]:
 
 @pytest.mark.parametrize("tup", _enumerate())
 def test_label_unique_per_tuple(tup: tuple[int, int, int, int, int]) -> None:
-    """Both label producers (``PickedParallelConfig.label`` and
-    ``make_parallel_label``) must agree on every enumerated tuple."""
+    """Every enumerated tuple must produce a non-empty label."""
     tp, pp, dp, moe_tp, moe_ep = tup
     cfg = PickedParallelConfig(tp=tp, pp=pp, dp=dp, moe_tp=moe_tp, moe_ep=moe_ep)
-    df = make_parallel_label(tp, pp, dp, moe_tp, moe_ep)
-    assert cfg.label() == df
+    assert cfg.label()
 
 
 def test_label_distinct_across_all_enumerated_tuples() -> None:
@@ -109,4 +107,3 @@ def test_label_format_pin(
     separator / prefix change must be a deliberate, test-breaking edit."""
     cfg = PickedParallelConfig(tp=tp, pp=pp, dp=dp, moe_tp=moe_tp, moe_ep=moe_ep)
     assert cfg.label() == expected
-    assert make_parallel_label(tp, pp, dp, moe_tp, moe_ep) == expected

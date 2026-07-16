@@ -23,7 +23,6 @@ import yaml
 from aiconfigurator.generator.enumerate import check_model_hardware_support
 from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
 
-from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
@@ -50,6 +49,7 @@ from dynamo.profiler.utils.dgdr_validate import (
     valid_dgdr_spec,
     validate_dgdr_dynamo_features,
 )
+from dynamo.profiler.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     determine_picking_mode,

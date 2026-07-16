@@ -6,8 +6,6 @@ from typing import Any
 
 from transformers import AutoConfig
 
-from dynamo.profiler.utils.model_info import get_model_info
-
 logger = logging.getLogger(__name__)
 
 # Mapping from dtype strings to byte sizes for KV cache.
@@ -65,8 +63,8 @@ def compute_kv_bytes_per_token(
 
     Formula: num_layers * 2 (K+V) * num_kv_heads * head_dim * dtype_bytes
 
-    Uses get_model_info from dynamo.profiler for robust detection of num_kv_heads
-    across different model architectures.
+    Reads the model's text config directly so the mocker stays independent of
+    the optional profiler wheel.
 
     Args:
         model_path: Path to model directory or HuggingFace model ID.
@@ -76,19 +74,28 @@ def compute_kv_bytes_per_token(
         KV bytes per token, or None if model config cannot be parsed.
     """
     try:
-        info = get_model_info(model_path)
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
+        if hasattr(config, "get_text_config"):
+            config = config.get_text_config()
         num_layers = config.num_hidden_layers
-        num_kv_heads = info.num_kv_heads
+        num_kv_heads = getattr(config, "num_key_value_heads", None)
+        if num_kv_heads is None:
+            num_kv_heads = getattr(config, "num_kv_heads", None)
+        if num_kv_heads is None:
+            num_kv_heads = config.num_attention_heads
         head_dim = config.hidden_size // config.num_attention_heads
         dtype_bytes = get_kv_cache_dtype_bytes(config, kv_cache_dtype)
         kv_bytes = num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
         logger.debug(
-            f"Auto-computed kv_bytes_per_token={kv_bytes} "
-            f"({num_layers} layers, {num_kv_heads} kv_heads, {head_dim} head_dim, "
-            f"{dtype_bytes} dtype_bytes)"
+            "Auto-computed kv_bytes_per_token=%s "
+            "(%s layers, %s kv_heads, %s head_dim, %s dtype_bytes)",
+            kv_bytes,
+            num_layers,
+            num_kv_heads,
+            head_dim,
+            dtype_bytes,
         )
         return kv_bytes
     except Exception as e:
-        logger.warning(f"Could not compute kv_bytes_per_token from model config: {e}")
+        logger.warning("Could not compute kv_bytes_per_token from model config: %s", e)
         return None

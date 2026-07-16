@@ -139,9 +139,9 @@ operator:
   - 'docs/kubernetes/api-reference.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
-  - 'components/src/dynamo/profiler/utils/dgd_override.py'
-  - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
-  - 'components/src/dynamo/profiler/utils/dgdr_*'
+  - 'components/profiler/src/dynamo/profiler/utils/dgd_override.py'
+  - 'components/profiler/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
+  - 'components/profiler/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
   - 'deploy/snapshot/**'
@@ -175,7 +175,7 @@ planner:
   - 'container/templates/planner.Dockerfile'
   - 'components/src/dynamo/planner/**'
   - 'components/src/dynamo/global_planner/**'
-  - 'components/src/dynamo/profiler/**'
+  - 'components/profiler/**'
   - 'components/src/dynamo/global_router/**'
   # Power-aware planner (PR #9369): per-node power agent component
   - 'deploy/power-agent/**'

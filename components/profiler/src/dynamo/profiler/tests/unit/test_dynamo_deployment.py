@@ -14,19 +14,24 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-# Skip the whole module if the deploy.utils runtime deps aren't available
+# Skip the whole module if the profiler runtime deps aren't available
 # in this environment. The test doesn't actually exercise these — it just
 # needs the import of `dynamo_deployment` to succeed.
 pytest.importorskip("aiofiles")
 pytest.importorskip("kubernetes_asyncio")
 pytest.importorskip("httpx")
 
-from deploy.utils.dynamo_deployment import (  # noqa: E402
+from dynamo.profiler.utils.dynamo_deployment import (  # noqa: E402
     DeploymentFailedError,
     DynamoDeploymentClient,
 )
 
-pytestmark = pytest.mark.pre_merge
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.planner,
+]
 
 
 async def test_wait_for_deployment_ready_raises_deployment_failed_on_crashloop(
@@ -51,7 +56,9 @@ async def test_wait_for_deployment_ready_raises_deployment_failed_on_crashloop(
     async def _no_sleep(_seconds):
         return None
 
-    monkeypatch.setattr("deploy.utils.dynamo_deployment.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dynamo_deployment.asyncio.sleep", _no_sleep
+    )
 
     with pytest.raises(DeploymentFailedError) as excinfo:
         # Pass a generous timeout so a regression (timeout instead of

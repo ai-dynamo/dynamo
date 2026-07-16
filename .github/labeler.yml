@@ -62,7 +62,7 @@ planner:
   - changed-files:
       - any-glob-to-any-file:
           - components/src/dynamo/planner/**
-          - components/src/dynamo/profiler/**
+          - components/profiler/**
           - components/src/dynamo/global_planner/**
 
 # Deployment labels

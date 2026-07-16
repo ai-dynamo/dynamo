@@ -13,6 +13,7 @@ argument -- a suffix like '.dev20260423' -- and rewrites, in place:
 
 Empty suffix is a no-op, so safe to run unconditionally in every workflow.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -25,6 +26,7 @@ PYPROJECT_TARGETS = [
     "lib/bindings/python/pyproject.toml",
     "lib/bindings/kvbm/pyproject.toml",
     "lib/gpu_memory_service/pyproject.toml",
+    "components/profiler/pyproject.toml",
 ]
 
 # Sub-crate Cargo files with an EXPLICIT [package].version (not workspace-inherited).
@@ -52,6 +54,8 @@ VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")\s*$', re.MULTILIN
 
 # Root pyproject cross-ref to the runtime wheel.
 PY_RUNTIME_PIN_RE = re.compile(r'("ai-dynamo-runtime==)([^"]+)(")')
+# Profiler pyproject cross-ref to the base Python wheel.
+PY_DYNAMO_PIN_RE = re.compile(r'("ai-dynamo==)([^"]+)(")')
 
 
 def pep440(suffix: str, base: str) -> str:
@@ -93,6 +97,11 @@ def rewrite_pyproject(path: Path, suffix: str, is_root: bool) -> None:
 
     if is_root:
         text = PY_RUNTIME_PIN_RE.sub(
+            lambda m: f"{m.group(1)}{pep440(suffix, m.group(2))}{m.group(3)}",
+            text,
+        )
+    elif path.as_posix().endswith("components/profiler/pyproject.toml"):
+        text = PY_DYNAMO_PIN_RE.sub(
             lambda m: f"{m.group(1)}{pep440(suffix, m.group(2))}{m.group(3)}",
             text,
         )

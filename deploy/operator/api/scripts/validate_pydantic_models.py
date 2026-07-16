@@ -47,19 +47,23 @@ def _repo_root() -> Path:
     return start
 
 
-_components_src = _repo_root() / "components" / "src"
+_root = _repo_root()
+_components_src = _root / "components" / "src"
+_profiler_src = _root / "components" / "profiler" / "src"
 
-# In the operator Docker build the context is deploy/operator/ only — components/src
-# is not copied in. The generated files are already committed, so skip validation.
-if not _components_src.exists():
+# In the operator Docker build the context is deploy/operator/ only — component
+# sources are not copied in. The generated files are already committed, so skip
+# validation.
+if not _components_src.exists() or not _profiler_src.exists():
     print(
-        f"Note: {_components_src} not found (operator-only build context). "
+        "Note: Dynamo component sources not found (operator-only build context). "
         "Skipping Pydantic validation tests."
     )
     sys.exit(0)
 
-# Add the components src to path so we can import the generated models
+# Add both namespace-package roots so we can import the generated models.
 sys.path.insert(0, str(_components_src))
+sys.path.insert(0, str(_profiler_src))
 
 # ---------------------------------------------------------------------------
 # Stub dynamo.runtime.logging and bypass the heavy dynamo.planner.__init__
@@ -70,12 +74,15 @@ sys.path.insert(0, str(_components_src))
 # filesystem.  dynamo.planner is pre-registered as a stub to skip its heavy
 # __init__.py, while still allowing dynamo.planner.config.* to load normally.
 # ---------------------------------------------------------------------------
-_dynamo_path = str(_components_src / "dynamo")
+_dynamo_paths = [
+    str(_profiler_src / "dynamo"),
+    str(_components_src / "dynamo"),
+]
 _planner_path = str(_components_src / "dynamo" / "planner")
 
 if "dynamo" not in sys.modules:
     _dynamo_mod = types.ModuleType("dynamo")
-    _dynamo_mod.__path__ = [_dynamo_path]  # type: ignore[attr-defined]
+    _dynamo_mod.__path__ = _dynamo_paths  # type: ignore[attr-defined]
     _dynamo_mod.__package__ = "dynamo"
     sys.modules["dynamo"] = _dynamo_mod
 

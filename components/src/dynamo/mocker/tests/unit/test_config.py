@@ -583,6 +583,26 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
 
 
+def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
+    from dynamo.mocker.utils import kv_cache
+
+    text_config = SimpleNamespace(
+        num_hidden_layers=2,
+        num_key_value_heads=4,
+        num_attention_heads=8,
+        hidden_size=64,
+        dtype="bfloat16",
+    )
+    config = SimpleNamespace(get_text_config=lambda: text_config)
+    monkeypatch.setattr(
+        kv_cache.AutoConfig,
+        "from_pretrained",
+        lambda *args, **kwargs: config,
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token("model") == 256
+
+
 def test_replay_engine_args_forwards_aic_kv_cache_dtype(monkeypatch):
     # Offload KV-byte estimation must use the configured (normalized) KV dtype,
     # not always "auto".

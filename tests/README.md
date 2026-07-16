@@ -38,6 +38,8 @@ dynamo/
 │   │   └── tests/                  # Rust integration tests for llm
 │   └── ...
 ├── components/
+│   ├── profiler/src/dynamo/profiler/
+│   │   └── tests/                  # Profiler wheel unit/integration tests
 │   └── src/dynamo/
 │       ├── vllm/
 │       │   └── tests/              # Python unit/integration tests for vllm backend
@@ -50,7 +52,6 @@ dynamo/
 │       ├── planner/
 │       ├── router/
 │       ├── frontend/
-│       ├── profiler/
 │       └── ...
 ├── tests/                          # End-to-end and cross-component tests
 │   ├── serve/                      # Serve E2E tests (vllm, sglang, trtllm)
@@ -69,7 +70,9 @@ dynamo/
 │   ├── llm/
 │   └── ...
 ```
-- Place **unit/integration tests** for a component in its `tests/` subfolder under `components/src/dynamo/<component>/tests/`.
+- Place **unit/integration tests** in the component's `tests/` subfolder. Most
+  live under `components/src/dynamo/<component>/tests/`; standalone wheels such
+  as the profiler keep tests in their own source tree.
 - Place **end-to-end (E2E) tests** and cross-component tests in `tests/`.
 - Name test files as `test_<component>_<flow>.py` for clarity.
 
@@ -94,7 +97,7 @@ dynamo/
 | Router             | Router E2E with backends              | `tests/router/`                               |
 | Planner            | Planner unit + integration tests      | `components/src/dynamo/planner/tests/`        |
 | Frontend           | Frontend HTTP/gRPC tests              | `tests/frontend/`                             |
-| Profiler           | Profiler unit + integration tests     | `components/src/dynamo/profiler/tests/`       |
+| Profiler           | Profiler unit + integration tests     | `components/profiler/src/dynamo/profiler/tests/` |
 | Global Planner     | Global planner unit tests             | `components/src/dynamo/global_planner/tests/` |
 | Fault Tolerance    | Chaos, migration, cancellation        | `tests/fault_tolerance/`                      |
 | Deployment         | Deployment validation                 | `tests/deploy/`                               |

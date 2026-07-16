@@ -76,13 +76,13 @@ runs:
       shell: bash
       env:
         DYNAMO_RUN_DGD_OVERRIDE_GO_INTEGRATION: "1"
-        PYTHONPATH: ${{ github.workspace }}/components/src
+        PYTHONPATH: ${{ github.workspace }}/components/profiler/src:${{ github.workspace }}/components/src
       run: |
         go version
         python -m pytest \
           -c /dev/null \
-          --confcutdir=components/src/dynamo/profiler/tests/integration \
+          --confcutdir=components/profiler/src/dynamo/profiler/tests/integration \
           -W ignore::pytest.PytestUnknownMarkWarning \
           -o "cache_dir=${RUNNER_TEMP}/dgd-override-pytest-cache" \
           -q \
-          components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py
+          components/profiler/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py

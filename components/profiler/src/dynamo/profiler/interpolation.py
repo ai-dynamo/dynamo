@@ -27,7 +27,6 @@ import os
 
 import yaml
 
-from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
@@ -35,6 +34,10 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
 )
 from dynamo.profiler.utils.defaults import EngineType
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
+from dynamo.profiler.utils.dynamo_deployment import (
+    DeploymentFailedError,
+    DynamoDeploymentClient,
+)
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     inject_tolerations_into_dgd,

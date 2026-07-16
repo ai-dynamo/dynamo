@@ -290,6 +290,7 @@ STUB_MODULES = [
 PROJECT_PATHS = [
     os.getcwd(),
     os.path.join(os.getcwd(), "components", "src"),
+    os.path.join(os.getcwd(), "components", "profiler", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
 ]
 sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
@@ -604,8 +605,11 @@ def parse_args():
     parser.add_argument(
         "--tests",
         nargs="*",
-        default=["tests", "components/src"],
-        help="Paths to test directories (default: tests components/src)",
+        default=["tests", "components/src", "components/profiler/src"],
+        help=(
+            "Paths to test directories "
+            "(default: tests components/src components/profiler/src)"
+        ),
     )
     parser.add_argument(
         "--verbose",

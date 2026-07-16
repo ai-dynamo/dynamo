@@ -138,6 +138,25 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
             f"{ai_dynamo.name} does not pin local runtime version {runtime_version}"
         )
 
+    requirement_names = {
+        canonical_name(re.split(r"[ ;(<>=@\[]", requirement, maxsplit=1)[0])
+        for requirement in ai_meta.get("Requires-Dist", [])
+    }
+    if "aiconfigurator" in requirement_names:
+        raise AssertionError(
+            f"{ai_dynamo.name} must not depend on the upper aiconfigurator wheel"
+        )
+
+    with zipfile.ZipFile(ai_dynamo) as archive:
+        profiler_members = [
+            member for member in archive.namelist() if "/profiler/" in member
+        ]
+    if profiler_members:
+        raise AssertionError(
+            f"{ai_dynamo.name} must not contain dynamo.profiler; "
+            "ship it in ai-dynamo-profiler"
+        )
+
     for wheel in (ai_dynamo, runtime):
         assert_arch_tag(wheel, target_arch)
 

@@ -160,19 +160,19 @@
 /examples/diffusers/                                                         @ai-dynamo/dynamo-diffusion-codeowners
 
 # === planner  (@ai-dynamo/dynamo-planner-codeowners) ===
+/components/profiler/                                                        @ai-dynamo/dynamo-planner-codeowners
 /examples/global_planner/                                                    @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                              @ai-dynamo/dynamo-planner-codeowners
-/components/src/dynamo/profiler/                                             @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/core/                                         @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/tests/                                        @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/global_planner/                                       @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/config/                                       @ai-dynamo/dynamo-planner-codeowners
-/components/src/dynamo/profiler/tests/                                       @ai-dynamo/dynamo-planner-codeowners
-/components/src/dynamo/profiler/utils/                                       @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/offline/                                      @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/connectors/                                   @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/monitoring/                                   @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/global_planner/tests/                                 @ai-dynamo/dynamo-planner-codeowners
+/components/profiler/src/dynamo/profiler/tests/                              @ai-dynamo/dynamo-planner-codeowners
+/components/profiler/src/dynamo/profiler/utils/                              @ai-dynamo/dynamo-planner-codeowners
 
 # === runtime  (@ai-dynamo/dynamo-runtime-codeowners) ===
 /tests/                                                                      @ai-dynamo/dynamo-runtime-codeowners
@@ -687,9 +687,7 @@
 /components/src/dynamo/trtllm/multimodal_processor.py                        @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/vllm/instrumented_scheduler.py                        @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/kv_connector_protocols.py                        @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
-/components/src/dynamo/profiler/utils/dgdr_validate.py                       @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/planner/connectors/kubernetes.py                      @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
-/components/src/dynamo/profiler/utils/dgd_generation.py                      @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/common/multimodal/routing_utils.py                    @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/trtllm/configs/diffusion_config.py                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/engines/diffusion_engine.py                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
@@ -697,21 +695,23 @@
 /components/src/dynamo/common/recv_forward_pass_metrics.py                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/request_handlers/multimodal/                   @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/planner/connectors/kubernetes_api.py                  @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
-/components/src/dynamo/profiler/utils/dgdr_v1beta1_types.py                  @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /deploy/inference-gateway/epp/pkg/plugins/dynamo_kv_scorer/                  @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/planner/monitoring/planner_metrics.py                 @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/planner/monitoring/traffic_metrics.py                 @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-observability-codeowners
 /deploy/observability/grafana-planner-dashboard-configmap.yaml               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-planner-codeowners
+/components/profiler/src/dynamo/profiler/utils/dgdr_validate.py              @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/sglang/request_handlers/image_diffusion/              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/workers/image_diffusion_worker.py              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/workers/video_diffusion_worker.py              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /deploy/observability/grafana-operator-dashboard-configmap.yaml              @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners
+/components/profiler/src/dynamo/profiler/utils/dgd_generation.py             @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/common/utils/label_injecting_collector.py             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/request_handlers/video_generation/             @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/vllm/tests/test_vllm_sleep_wake_handlers.py           @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/sglang/request_handlers/embedding/metrics.py          @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/sglang/tests/test_sglang_gms_memory_saver.py          @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/trtllm/tests/test_trtllm_gms_delay_commit.py          @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
+/components/profiler/src/dynamo/profiler/utils/dgdr_v1beta1_types.py         @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/trtllm/tests/test_trtllm_gms_mpi_bootstrap.py         @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/trtllm/tests/test_trtllm_sleep_wake_handlers.py       @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/sglang/request_handlers/llm/diffusion_handler.py      @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners

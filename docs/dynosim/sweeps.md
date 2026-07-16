@@ -121,7 +121,7 @@ export DYN_LOG='info,dynamo_kv_router::scheduling::selector=warn'
 The canonical starting point is the checked-in driver script:
 
 ```bash
-.venv/bin/python components/src/dynamo/profiler/utils/replay_optimize/example.py \
+.venv/bin/python components/profiler/src/dynamo/profiler/utils/replay_optimize/example.py \
   --max-parallel-evals 4
 ```
 
@@ -165,7 +165,7 @@ Only add those when the experiment is specifically about scheduler limits.
 To run against a Mooncake-style trace instead of the synthetic workload:
 
 ```bash
-.venv/bin/python components/src/dynamo/profiler/utils/replay_optimize/example.py \
+.venv/bin/python components/profiler/src/dynamo/profiler/utils/replay_optimize/example.py \
   --trace-file /path/to/mooncake_trace.jsonl \
   --arrival-speedup-ratio 1.0 \
   --max-parallel-evals 4
@@ -182,7 +182,7 @@ curl -sL \
 Then run:
 
 ```bash
-.venv/bin/python components/src/dynamo/profiler/utils/replay_optimize/example.py \
+.venv/bin/python components/profiler/src/dynamo/profiler/utils/replay_optimize/example.py \
   --trace-file /tmp/toolagent_trace.jsonl \
   --arrival-speedup-ratio 1.0 \
   --max-parallel-evals 4

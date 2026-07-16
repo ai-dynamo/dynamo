@@ -524,8 +524,9 @@ jobs:
           fi
 
   # ============================================================================
-  # ARTIFACTORY STAGING: extract wheels from the dynamo-runtime image in ECR
-  # and upload them to JFrog Artifactory so consumers can pip-install them.
+  # ARTIFACTORY STAGING: extract core wheels from the dynamo-runtime image and
+  # the leaf profiler wheel from the planner image, then upload them to JFrog
+  # Artifactory so consumers can pip-install them.
   # Runs in parallel with release-publish (both gated only on prepare-release).
   # ============================================================================
 
@@ -561,7 +562,7 @@ jobs:
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
           aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | crane auth login --username AWS --password-stdin "${ECR_HOSTNAME}"
 
-      - name: Extract wheels from dynamo-runtime image
+      - name: Extract wheels from runtime and planner images
         id: extract
         run: |
           set -euo pipefail
@@ -577,7 +578,7 @@ jobs:
           ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime${NIGHTLY_TAG_SUFFIX}"
 
           STAGE="${RUNNER_TEMP}/wheels"
-          mkdir -p "${STAGE}/amd64" "${STAGE}/arm64"
+          mkdir -p "${STAGE}/amd64" "${STAGE}/arm64" "${STAGE}/planner"
 
           echo "Exporting amd64 filesystem from ${ECR_IMAGE}..."
           crane export --platform=linux/amd64 "${ECR_IMAGE}" - \
@@ -594,12 +595,25 @@ jobs:
                 'opt/dynamo/wheelhouse/ai_dynamo_runtime-*aarch64*.whl' \
                 'opt/dynamo/wheelhouse/kvbm-*aarch64*.whl'
 
+          # Nightly does not build or publish the planner image. Stable/RC
+          # releases extract the pure-Python profiler wheel from amd64 only;
+          # the wheel is architecture-independent.
+          if [ "${NIGHTLY}" != "true" ]; then
+            PLANNER_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+            echo "Exporting profiler wheel from ${PLANNER_IMAGE}..."
+            crane export --platform=linux/amd64 "${PLANNER_IMAGE}" - \
+              | tar -x -C "${STAGE}/planner" \
+                  --wildcards \
+                  'opt/dynamo/wheelhouse/ai_dynamo_profiler-*py3-none-any.whl'
+          fi
+
           OUT="${STAGE}/upload"
           mkdir -p "${OUT}"
 
           shopt -s nullglob
           AMD64_WHEELS=("${STAGE}/amd64/opt/dynamo/wheelhouse/"*.whl)
           ARM64_WHEELS=("${STAGE}/arm64/opt/dynamo/wheelhouse/"*.whl)
+          PROFILER_WHEELS=("${STAGE}/planner/opt/dynamo/wheelhouse/"*.whl)
           shopt -u nullglob
 
           if [ ${#AMD64_WHEELS[@]} -eq 0 ]; then
@@ -613,6 +627,9 @@ jobs:
 
           cp "${AMD64_WHEELS[@]}" "${OUT}/"
           cp "${ARM64_WHEELS[@]}" "${OUT}/"
+          if [ ${#PROFILER_WHEELS[@]} -gt 0 ]; then
+            cp "${PROFILER_WHEELS[@]}" "${OUT}/"
+          fi
 
           echo "Wheels staged for upload:"
           ls -la "${OUT}/"
@@ -627,21 +644,31 @@ jobs:
           set -euo pipefail
 
           # Catches UTC-midnight drift between the build-time version stamp and
-          # prepare-release's wheel_version; ai_dynamo and ai_dynamo_runtime must agree.
+          # prepare-release's wheel_version; all Dynamo wheels must agree.
           shopt -s nullglob
           AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
           AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
+          AI_DYNAMO_PROFILER_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_profiler-*-py3-none-any.whl)
           shopt -u nullglob
 
           if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
             echo "::error::Missing ai_dynamo or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
             exit 1
           fi
+          if [ "${NIGHTLY}" != "true" ] && [ ${#AI_DYNAMO_PROFILER_WHEELS[@]} -eq 0 ]; then
+            echo "::error::Missing ai_dynamo_profiler wheel in ${UPLOAD_DIR}"
+            exit 1
+          fi
 
           echo "Expected wheel version: ${EXPECTED_WHEEL_VERSION}"
 
+          WHEELS_TO_VERIFY=("${AI_DYNAMO_WHEELS[@]}" "${AI_DYNAMO_RUNTIME_WHEELS[@]}")
+          if [ ${#AI_DYNAMO_PROFILER_WHEELS[@]} -gt 0 ]; then
+            WHEELS_TO_VERIFY+=("${AI_DYNAMO_PROFILER_WHEELS[@]}")
+          fi
+
           mismatch=0
-          for path in "${AI_DYNAMO_WHEELS[@]}" "${AI_DYNAMO_RUNTIME_WHEELS[@]}"; do
+          for path in "${WHEELS_TO_VERIFY[@]}"; do
             file="$(basename "${path}")"
             # PEP 427: <dist>-<version>-<tags>.whl; version sits between the 1st and 2nd hyphen.
             rest="${file#*-}"
