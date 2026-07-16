@@ -10,14 +10,14 @@ Extensions are **opt-in**: the frontend only loads a provider you explicitly sel
 
 ## Minimal example
 
-**1. Write a route provider.** A provider is a callable that returns a `FrontendRoute` (or an iterable of them). Each handler is synchronous, receives a `FrontendRouteContext`, and returns a JSON-serializable body (HTTP 200) or a `(status_code, body)` tuple.
+**1. Write a route provider.** A provider is a callable that returns a `FrontendRoute` (or an iterable of them). Each handler is synchronous, receives a `FrontendExtensionContext`, and returns a JSON-serializable body (HTTP 200) or a `(status_code, body)` tuple.
 
 ```python
 # hello_routes.py
-from dynamo.llm import FrontendRoute, FrontendRouteContext
+from dynamo.llm import FrontendRoute, FrontendExtensionContext
 
 
-def _hello(ctx: FrontendRouteContext):
+def _hello(ctx: FrontendExtensionContext):
     return {"message": "hello world!"}
 
 
@@ -65,9 +65,9 @@ A registered entry-point name always takes precedence; the path fallback only ap
 
 ## Handler contract
 
-- **Signature:** `handler(ctx: FrontendRouteContext)` — synchronous. Async handlers are rejected.
+- **Signature:** `handler(ctx: FrontendExtensionContext)` — synchronous. Async handlers are rejected.
 - **Return:** a JSON-serializable value (implies `200`), or a `(status_code, body)` tuple to set the status.
-- **Live state:** `FrontendRouteContext` exposes the current frontend state so responses reflect models registering/draining at runtime — e.g. `ctx.has_any_ready_model()`, `ctx.serving_ready_display_names()`, `ctx.is_model_ready_to_serve(name)`, `ctx.is_ready()`.
+- **Live state:** `FrontendExtensionContext` exposes the current frontend state so responses reflect models registering/draining at runtime — e.g. `ctx.has_any_ready_model()`, `ctx.serving_ready_display_names()`, `ctx.is_model_ready_to_serve(name)`, `ctx.is_ready()`.
 
 ## Notes
 

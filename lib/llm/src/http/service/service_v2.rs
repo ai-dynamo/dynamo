@@ -17,7 +17,9 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
-use super::frontend_route::{FrontendRouteContext, FrontendRouteExtension, FrontendRouteSet};
+use super::frontend_extension::{
+    FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
+};
 use super::metrics;
 use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
 use crate::discovery::ModelManager;
@@ -917,7 +919,7 @@ fn append_route_docs(
 impl HttpServiceConfigBuilder {
     pub fn add_frontend_route_extension<F>(mut self, extension: F) -> Self
     where
-        F: Fn(FrontendRouteContext) -> FrontendRouteSet + Send + Sync + 'static,
+        F: Fn(FrontendExtensionContext) -> FrontendRouteSet + Send + Sync + 'static,
     {
         self.frontend_route_extensions
             .get_or_insert_with(Vec::new)
@@ -1077,7 +1079,7 @@ impl HttpServiceConfigBuilder {
             );
         }
         for extension in &config.frontend_route_extensions {
-            let route_set = extension(FrontendRouteContext::new(state.clone()));
+            let route_set = extension(FrontendExtensionContext::new(state.clone()));
             system_routes.push(route_set.into_parts());
         }
         let mut system_router = axum::Router::new();
@@ -1479,82 +1481,75 @@ mod tests {
         ))
     }
 
-    fn readiness_extension(context: FrontendRouteContext) -> FrontendRouteSet {
+    // The test extensions read live state through the narrowed
+    // FrontendExtensionContext (read-only accessors) captured in the handler
+    // closure — the same shape the Python bridge uses — rather than installing
+    // the full internal State via Router::with_state.
+    fn readiness_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
         let route_docs = vec![RouteDoc::new(
             axum::http::Method::GET,
             "/test/frontend-route",
         )];
-        let route = axum::Router::new()
-            .route(
-                "/test/frontend-route",
-                axum::routing::get(readiness_extension_handler),
-            )
-            .with_state(context.state_clone());
+        let route = axum::Router::new().route(
+            "/test/frontend-route",
+            axum::routing::get(move || {
+                let context = context.clone();
+                async move {
+                    if context.has_any_ready_model() {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
+            }),
+        );
         FrontendRouteSet::new(route_docs, route)
     }
 
-    async fn readiness_extension_handler(
-        axum::extract::State(state): axum::extract::State<Arc<State>>,
-    ) -> axum::http::StatusCode {
-        if state.manager().has_any_ready_model() {
-            axum::http::StatusCode::OK
-        } else {
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
-        }
-    }
-
-    fn first_test_extension(context: FrontendRouteContext) -> FrontendRouteSet {
+    fn first_test_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
         test_status_extension(context, "/test/frontend-route/one")
     }
 
-    fn second_test_extension(context: FrontendRouteContext) -> FrontendRouteSet {
+    fn second_test_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
         test_status_extension(context, "/test/frontend-route/two")
     }
 
-    fn duplicate_health_extension(context: FrontendRouteContext) -> FrontendRouteSet {
+    fn duplicate_health_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
         test_status_extension(context, "/health")
     }
 
-    fn duplicate_test_extension(context: FrontendRouteContext) -> FrontendRouteSet {
+    fn duplicate_test_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
         test_status_extension(context, "/test/frontend-route/duplicate")
     }
 
-    fn draining_extension(context: FrontendRouteContext) -> FrontendRouteSet {
+    fn draining_extension(context: FrontendExtensionContext) -> FrontendRouteSet {
         let route_docs = vec![RouteDoc::new(
             axum::http::Method::GET,
             "/test/frontend-route/draining",
         )];
-        let route = axum::Router::new()
-            .route(
-                "/test/frontend-route/draining",
-                axum::routing::get(draining_extension_handler),
-            )
-            .with_state(context.state_clone());
+        let route = axum::Router::new().route(
+            "/test/frontend-route/draining",
+            axum::routing::get(move || {
+                let context = context.clone();
+                async move {
+                    if context.is_ready() {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::ACCEPTED
+                    }
+                }
+            }),
+        );
         FrontendRouteSet::new(route_docs, route)
     }
 
-    fn test_status_extension(context: FrontendRouteContext, path: &str) -> FrontendRouteSet {
+    fn test_status_extension(_context: FrontendExtensionContext, path: &str) -> FrontendRouteSet {
         let route_docs = vec![RouteDoc::new(axum::http::Method::GET, path)];
-        let route = axum::Router::new()
-            .route(path, axum::routing::get(no_content_extension_handler))
-            .with_state(context.state_clone());
+        let route = axum::Router::new().route(
+            path,
+            axum::routing::get(|| async { axum::http::StatusCode::NO_CONTENT }),
+        );
         FrontendRouteSet::new(route_docs, route)
-    }
-
-    async fn no_content_extension_handler(
-        axum::extract::State(_state): axum::extract::State<Arc<State>>,
-    ) -> axum::http::StatusCode {
-        axum::http::StatusCode::NO_CONTENT
-    }
-
-    async fn draining_extension_handler(
-        axum::extract::State(state): axum::extract::State<Arc<State>>,
-    ) -> axum::http::StatusCode {
-        if state.is_ready() {
-            axum::http::StatusCode::OK
-        } else {
-            axum::http::StatusCode::ACCEPTED
-        }
     }
 
     async fn get_status(port: u16, path: &str) -> reqwest::StatusCode {

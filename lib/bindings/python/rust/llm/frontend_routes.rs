@@ -10,8 +10,8 @@ use dynamo_llm::http::service::axum::{
     routing::{delete, get, patch, post, put},
 };
 use dynamo_llm::http::service::{
-    FrontendRouteContext as RsFrontendRouteContext, FrontendRouteExtension, FrontendRouteSet,
-    RouteDoc,
+    FrontendExtensionContext as RsFrontendExtensionContext, FrontendRouteExtension,
+    FrontendRouteSet, RouteDoc,
 };
 use pyo3::{
     exceptions::{PyTypeError, PyValueError},
@@ -67,14 +67,14 @@ impl PyFrontendRoute {
 }
 
 /// Read-only live frontend state exposed to Python frontend route handlers.
-#[pyclass(name = "FrontendRouteContext")]
+#[pyclass(name = "FrontendExtensionContext")]
 #[derive(Clone)]
-pub(crate) struct PyFrontendRouteContext {
-    inner: RsFrontendRouteContext,
+pub(crate) struct PyFrontendExtensionContext {
+    inner: RsFrontendExtensionContext,
 }
 
 #[pymethods]
-impl PyFrontendRouteContext {
+impl PyFrontendExtensionContext {
     pub fn is_ready(&self) -> bool {
         self.inner.is_ready()
     }
@@ -84,24 +84,19 @@ impl PyFrontendRouteContext {
     }
 
     pub fn has_any_ready_model(&self) -> bool {
-        self.inner.manager().has_any_ready_model()
+        self.inner.has_any_ready_model()
     }
 
     pub fn is_model_ready_to_serve(&self, model: &str) -> bool {
-        self.inner.manager().is_model_ready_to_serve(model)
+        self.inner.is_model_ready_to_serve(model)
     }
 
     pub fn model_display_names(&self) -> Vec<String> {
-        sorted_strings(self.inner.manager().model_display_names().into_iter())
+        sorted_strings(self.inner.model_display_names().into_iter())
     }
 
     pub fn serving_ready_display_names(&self) -> Vec<String> {
-        sorted_strings(
-            self.inner
-                .manager()
-                .serving_ready_display_names()
-                .into_iter(),
-        )
+        sorted_strings(self.inner.serving_ready_display_names().into_iter())
     }
 }
 
@@ -146,7 +141,7 @@ pub(crate) fn frontend_route_extensions_from_py(
 
 fn frontend_route_extension_from_routes(routes: Vec<PyFrontendRoute>) -> FrontendRouteExtension {
     let routes = Arc::new(routes);
-    Arc::new(move |context: RsFrontendRouteContext| {
+    Arc::new(move |context: RsFrontendExtensionContext| {
         let mut docs = Vec::with_capacity(routes.len());
         let mut router = Router::new();
 
@@ -196,7 +191,7 @@ fn frontend_route_extension_from_routes(routes: Vec<PyFrontendRoute>) -> Fronten
 
 async fn call_python_frontend_route(
     handler: Arc<PyObject>,
-    context: RsFrontendRouteContext,
+    context: RsFrontendExtensionContext,
 ) -> Response {
     // Run the synchronous Python handler on a blocking thread so a slow
     // extension cannot pin a tokio worker and reduce request concurrency.
@@ -229,9 +224,9 @@ async fn call_python_frontend_route(
 fn call_python_frontend_route_inner(
     py: Python<'_>,
     handler: &PyObject,
-    context: RsFrontendRouteContext,
+    context: RsFrontendExtensionContext,
 ) -> PyResult<(StatusCode, Value)> {
-    let py_context = Py::new(py, PyFrontendRouteContext { inner: context })?;
+    let py_context = Py::new(py, PyFrontendExtensionContext { inner: context })?;
     let result = handler.call1(py, (py_context,))?;
     normalize_route_response(py, result)
 }

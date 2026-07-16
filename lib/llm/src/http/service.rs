@@ -25,7 +25,7 @@ mod openai;
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
-pub mod frontend_route;
+pub mod frontend_extension;
 pub mod generate;
 pub mod health;
 pub mod metrics;
@@ -34,7 +34,7 @@ pub mod realtime;
 pub mod service_v2;
 
 pub use axum;
-pub use frontend_route::{FrontendRouteContext, FrontendRouteExtension, FrontendRouteSet};
+pub use frontend_extension::{FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet};
 pub use metrics::Metrics;
 
 /// Documentation for a route
