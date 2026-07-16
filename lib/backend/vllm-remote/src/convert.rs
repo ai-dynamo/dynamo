@@ -15,7 +15,6 @@ use crate::proto as pb;
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
-    model_name: &str,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(request, mode)?;
@@ -36,7 +35,7 @@ pub(crate) fn build_generate_request(
 
     Ok(pb::GenerateRequest {
         request_id: request_id.to_string(),
-        model: model_name.to_string(),
+        model: String::new(),
         prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
             ids: request.token_ids.clone(),
         })),

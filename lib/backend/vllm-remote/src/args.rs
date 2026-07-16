@@ -16,32 +16,9 @@ pub(crate) struct Args {
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
     pub vllm_endpoint: String,
 
-    /// Number of independent gRPC connections used for generation streams.
-    #[arg(
-        long,
-        env = "VLLM_GRPC_CONNECTIONS",
-        default_value_t = 8,
-        value_parser = parse_positive_usize
-    )]
-    pub vllm_connections: usize,
-
     /// Hugging Face model ID or local path used for tokenization and templates.
     #[arg(long)]
     pub model_path: String,
-
-    /// Model name registered with Dynamo and sent to vLLM.
-    #[arg(long)]
-    pub model_name: String,
-}
-
-fn parse_positive_usize(raw: &str) -> Result<usize, String> {
-    let value = raw
-        .parse::<usize>()
-        .map_err(|error| format!("invalid connection count `{raw}`: {error}"))?;
-    if value == 0 {
-        return Err("connection count must be greater than zero".to_string());
-    }
-    Ok(value)
 }
 
 pub(crate) fn normalize_endpoint(raw: &str) -> Result<String, String> {
@@ -73,24 +50,13 @@ mod tests {
             "127.0.0.1:50051",
             "--model-path",
             "Qwen/Qwen3-0.6B",
-            "--model-name",
-            "qwen",
         ]
     }
 
     #[test]
-    fn parses_required_args_and_defaults() {
+    fn parses_required_args() {
         let args = Args::try_parse_from(required_args()).expect("parse args");
-        assert_eq!(args.vllm_connections, 8);
         assert_eq!(args.model_path, "Qwen/Qwen3-0.6B");
-        assert_eq!(args.model_name, "qwen");
-    }
-
-    #[test]
-    fn rejects_zero_connections() {
-        let mut args = required_args();
-        args.extend(["--vllm-connections", "0"]);
-        assert!(Args::try_parse_from(args).is_err());
     }
 
     #[test]

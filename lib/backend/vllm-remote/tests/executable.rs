@@ -16,13 +16,10 @@ fn executable_exposes_native_grpc_configuration() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("help output is UTF-8");
-    for flag in [
-        "--vllm-endpoint",
-        "--vllm-connections",
-        "--model-path",
-        "--model-name",
-        "--disaggregation-mode",
-    ] {
+    for flag in ["--vllm-endpoint", "--model-path", "--disaggregation-mode"] {
         assert!(stdout.contains(flag), "missing {flag} in help output");
+    }
+    for flag in ["--vllm-connections", "--model-name"] {
+        assert!(!stdout.contains(flag), "obsolete {flag} in help output");
     }
 }

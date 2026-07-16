@@ -34,10 +34,9 @@ impl VllmClient {
         let mut channels = vec![first];
         let remaining = try_join_all((1..connections).map(|_| {
             let endpoint = endpoint.clone();
-            async move { endpoint.connect().await }
+            async move { connect_until_ready(endpoint).await }
         }))
-        .await
-        .map_err(|error| cannot_connect(format!("failed to connect to vLLM: {error}")))?;
+        .await?;
         channels.extend(remaining);
         Ok(Self {
             channels,

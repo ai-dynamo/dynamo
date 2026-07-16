@@ -17,4 +17,4 @@ lib/llm/tests/data/** linguist-vendored
 lib/llm/tests/snapshots/** linguist-vendored
 
 # Preserve the released vLLM proto byte-for-byte, including its trailing blank line.
-lib/backend/vllm-remote/proto/vllm_grpc.proto whitespace=-blank-at-eof
+lib/backend/vllm-remote/proto/vllm_grpc.proto -text diff whitespace=-blank-at-eof

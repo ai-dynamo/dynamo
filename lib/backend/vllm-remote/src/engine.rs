@@ -15,6 +15,8 @@ use crate::client::{self, VllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
 
+const CONNECTIONS: usize = 8;
+
 pub struct VllmRemoteEngine {
     endpoint: String,
     connections: usize,
@@ -52,10 +54,8 @@ impl VllmRemoteEngine {
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        if args.model_path.trim().is_empty() || args.model_name.trim().is_empty() {
-            return Err(client::invalid_argument(
-                "model-path and model-name must not be empty",
-            ));
+        if args.model_path.trim().is_empty() {
+            return Err(client::invalid_argument("model-path must not be empty"));
         }
         if args.common.disaggregation_mode.is_encode() {
             return Err(client::invalid_argument(
@@ -71,10 +71,9 @@ impl VllmRemoteEngine {
         let endpoint = normalize_endpoint(&args.vllm_endpoint).map_err(client::invalid_argument)?;
         let model = ConfiguredModel {
             source: args.model_path,
-            served_name: args.model_name,
         };
         let mode = args.common.disaggregation_mode;
-        let engine = Self::new(endpoint, args.vllm_connections, model.clone(), mode);
+        let engine = Self::new(endpoint, CONNECTIONS, model.clone(), mode);
         let (tool_call_parser, reasoning_parser) = if mode.is_prefill() {
             (None, None)
         } else {
@@ -90,7 +89,7 @@ impl VllmRemoteEngine {
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
             model_name: model.source.clone(),
-            served_model_name: Some(model.served_name.clone()),
+            served_model_name: None,
             tool_call_parser,
             reasoning_parser,
             exclude_tools_when_tool_choice_none: args.common.exclude_tools_when_tool_choice_none,
@@ -127,7 +126,7 @@ impl LLMEngine for VllmRemoteEngine {
         tracing::info!(
             endpoint = %self.endpoint,
             connections = connection_count,
-            model = %self.model.served_name,
+            model = %self.model.source,
             "vLLM gRPC is ready"
         );
         Ok(self.model.engine_config())
@@ -143,11 +142,22 @@ impl LLMEngine for VllmRemoteEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM remote backend is not started"))?;
         let request_id = ctx.id().to_string();
-        let proto_request =
-            build_generate_request(&request, &request_id, &self.model.served_name, self.mode)?;
+        let proto_request = build_generate_request(&request, &request_id, self.mode)?;
         let mut state = ResponseState::new(&request, self.mode);
-        let mut stream = client.generate_stream(proto_request).await?;
         let cancel = self.cancel.clone();
+        let stream = tokio::select! {
+            biased;
+            _ = ctx.stopped() => None,
+            _ = cancel.cancelled() => None,
+            result = client.generate_stream(proto_request) => Some(result?),
+        };
+        let Some(mut stream) = stream else {
+            let output = LLMEngineOutput::cancelled().with_usage(usage(
+                state.prompt_tokens(),
+                state.reported_completion_tokens(),
+            ));
+            return Ok(Box::pin(futures::stream::once(async move { Ok(output) })));
+        };
 
         Ok(Box::pin(async_stream::stream! {
             loop {
