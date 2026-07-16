@@ -288,9 +288,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_REPLICA_SYNC",
             default=False,
             help=(
-                "KV Router: Enable replica synchronization across multiple router instances. "
-                "When true, routers will publish and subscribe to events to maintain "
-                "consistent state."
+                "KV Router: Enable best-effort active-sequence synchronization through "
+                "the Runtime event plane."
             ),
         )
         add_negatable_bool_argument(
