@@ -37,7 +37,7 @@ def go_override_binary(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if go is None:
         pytest.fail("Go is required when the DGD override integration test is enabled")
 
-    repository_root = Path(__file__).resolve().parents[6]
+    repository_root = Path(__file__).resolve().parents[7]
     operator_dir = repository_root / "deploy" / "operator"
     binary = tmp_path_factory.mktemp("dgd-override-go") / "dgd-apply-overrides"
     environment = os.environ.copy()

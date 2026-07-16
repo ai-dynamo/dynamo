@@ -17,11 +17,12 @@ in-flight fault tolerance, and a Kubernetes operator for deployment.
 The stack is deliberately layered and large. A **Rust core** (a Cargo workspace of
 twenty-plus crates, mostly under `lib/`) holds the runtime, LLM, routing, and
 KV-block-manager engines. A **Python
-extensibility layer** (the `ai-dynamo` wheel, bound to the Rust core through PyO3/maturin)
-holds the frontend, backends, planner, and profiler. A **Kubernetes layer** (`deploy/`)
-holds the operator, Helm charts, and gateway integration. Treat any change that crosses
-these boundaries as non-trivial. Dynamo also sits inside a wider `ai-dynamo` ecosystem of
-sibling repos (below) that it integrates with rather than vendors.
+extensibility layer** (the `ai-dynamo` wheel, bound to the Rust core through PyO3/maturin,
+plus the `ai-dynamo-profiler` leaf wheel) holds the frontend, backends, planner, and
+profiler. A **Kubernetes layer** (`deploy/`) holds the operator, Helm charts, and gateway
+integration. Treat any change that crosses these boundaries as non-trivial. Dynamo also
+sits inside a wider `ai-dynamo` ecosystem of sibling repos (below) that it integrates with
+rather than vendors.
 
 ## Skills
 
@@ -72,7 +73,8 @@ Sibling repositories this repo integrates with:
 | Path | Contents |
 |------|----------|
 | `lib/` | Rust workspace crates: `runtime`, `llm`, `kv-router`, `kvbm-*`, `mocker`, and more (see the root [`Cargo.toml`](Cargo.toml) `[workspace] members`), plus `bindings/python` — the PyO3 extension crate, built via maturin and deliberately excluded from the workspace |
-| `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, `profiler`, and more |
+| `components/src/dynamo/` | Base-wheel Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, and more |
+| `components/profiler/` | Standalone `ai-dynamo-profiler` leaf wheel, preserving the `dynamo.profiler` import path |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
 | `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/AGENTS.md) before editing |

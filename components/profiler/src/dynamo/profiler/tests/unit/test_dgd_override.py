@@ -90,7 +90,7 @@ def _write_fake_cli(tmp_path: Path) -> Path:
 
 
 def test_default_profiler_dgd_templates_have_type_meta() -> None:
-    repository_root = Path(__file__).resolve().parents[6]
+    repository_root = Path(__file__).resolve().parents[7]
     template_paths = [
         repository_root / "examples" / "backends" / backend / "deploy" / filename
         for backend in ("vllm", "sglang", "trtllm")
