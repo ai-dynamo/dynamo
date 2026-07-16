@@ -534,6 +534,7 @@ impl MockEngine {
                                 endpoint: format!("tcp://127.0.0.1:{zmq_port}"),
                                 topic: String::new(),
                                 image_token_id: None,
+                                video_token_id: None,
                             });
                             match KvEventPublisher::new_with_local_indexer(
                                 comp.clone(),

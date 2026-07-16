@@ -343,6 +343,16 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
     return resolve_routing_image_token_id(config.model, model_dir)
 
 
+def _resolve_video_token_id(vllm_config: VllmConfig) -> Optional[int]:
+    """Model video placeholder token normalized in vLLM KV events."""
+    hf_config = vllm_config.model_config.hf_config
+    for field in ("video_token_id", "video_token_index"):
+        token_id = getattr(hf_config, field, None)
+        if token_id is not None:
+            return int(token_id)
+    return None
+
+
 def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
@@ -387,12 +397,12 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
-    # The image-placeholder token id the frontend substitutes pad_value over.
-    # Passed to the KV publisher so the router-side normalizer rewrites those
-    # runs in vLLM BlockStored events to the same canonical pad_value scheme.
-    # None (no mm-routing, model not in registry, text-only) leaves events
-    # unchanged — consistent with the frontend also skipping MM routing.
+    # Placeholder token ids the frontend substitutes pad_value over. Pass them
+    # to the KV publisher so the router-side normalizer rewrites image and
+    # video runs in vLLM BlockStored events to the same canonical scheme.
+    # Missing ids leave their modality unchanged.
     image_token_id = _resolve_image_token_id(config, vllm_config)
+    video_token_id = _resolve_video_token_id(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -419,6 +429,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
             image_token_id=image_token_id,
+            video_token_id=video_token_id,
         )
         kv_publishers.append(kv_publisher)
 

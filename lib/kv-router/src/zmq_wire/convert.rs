@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -21,6 +21,7 @@ pub fn convert_event(
     worker: WorkerWithDpRank,
     warning_count: &Arc<AtomicU32>,
     image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
 ) -> Option<PlacementEvent> {
     let storage_tier = match &raw {
         RawKvEvent::BlockStored { medium, .. } | RawKvEvent::BlockRemoved { medium, .. } => {
@@ -96,6 +97,7 @@ pub fn convert_event(
                         block_mm_infos.as_deref(),
                         is_eagle,
                         image_token_id,
+                        video_token_id,
                     ),
                 }),
                 dp_rank,
@@ -129,52 +131,237 @@ pub fn convert_event(
     ))
 }
 
-/// Rewrite each `image_token_id` run in `token_ids` to `pad_value(mm_hash)`,
-/// one mm_hash per run in order, so the recomputed `tokens_hash` matches the
-/// frontend's pad_value expansion. Exact when images are separated by a
-/// non-image token (true for Qwen2/2.5/3-VL); a run-vs-mm_object count mismatch
-/// (adjacent images, no separator) is logged below rather than silent.
-fn substitute_pad_values(token_ids: &[u32], image_token_id: u32, mm_objects: &[u64]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(token_ids.len());
-    // `obj_idx` advances once per completed run, so run N fills with
-    // mm_objects[N], clamped to the last object if runs outnumber mm_objects.
-    let mut obj_idx = 0usize;
-    let mut in_run = false;
-    let mut runs = 0usize;
-    // pad_value for the current run, computed once on entry and reused for the
-    // rest of the run (one mm_hash per run, so it's constant within a run).
-    let mut run_pad = 0u32;
-    for &t in token_ids {
-        if t == image_token_id {
-            if !in_run {
-                in_run = true;
-                runs += 1;
-                // Safety: the sole caller (`create_stored_block_from_parts`)
-                // only reaches here with a non-empty `mm_objects`, so `last()`
-                // is `Some`.
-                let mm_hash = mm_objects
-                    .get(obj_idx)
-                    .copied()
-                    .unwrap_or_else(|| *mm_objects.last().unwrap());
-                run_pad = crate::protocols::pad_value_for_mm_hash(mm_hash);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MmTokenKind {
+    Image,
+    Video,
+}
+
+fn mm_token_kind(
+    token_id: u32,
+    image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
+) -> Option<MmTokenKind> {
+    if image_token_id == Some(token_id) {
+        Some(MmTokenKind::Image)
+    } else if video_token_id == Some(token_id) {
+        Some(MmTokenKind::Video)
+    } else {
+        None
+    }
+}
+
+fn find_unique_object_mapping(
+    group_kinds: &[MmTokenKind],
+    mm_objects: &[u64],
+    inferred_object_kinds: &HashMap<u64, MmTokenKind>,
+) -> Option<Vec<u64>> {
+    fn visit(
+        group_kinds: &[MmTokenKind],
+        mm_objects: &[u64],
+        inferred_object_kinds: &HashMap<u64, MmTokenKind>,
+        group_index: usize,
+        object_start: usize,
+        current: &mut Vec<u64>,
+        solution: &mut Option<Vec<u64>>,
+        ambiguous: &mut bool,
+    ) {
+        if *ambiguous {
+            return;
+        }
+        if group_index == group_kinds.len() {
+            if solution.is_some() {
+                *ambiguous = true;
+            } else {
+                *solution = Some(current.clone());
             }
-            out.push(run_pad);
-        } else {
-            if in_run {
-                in_run = false;
-                obj_idx += 1;
+            return;
+        }
+
+        let remaining_groups = group_kinds.len() - group_index;
+        if mm_objects.len().saturating_sub(object_start) < remaining_groups {
+            return;
+        }
+        let last_candidate = mm_objects.len() - remaining_groups;
+        for object_index in object_start..=last_candidate {
+            let mm_hash = mm_objects[object_index];
+            if inferred_object_kinds.get(&mm_hash) != Some(&group_kinds[group_index]) {
+                continue;
             }
-            out.push(t);
+            current.push(mm_hash);
+            visit(
+                group_kinds,
+                mm_objects,
+                inferred_object_kinds,
+                group_index + 1,
+                object_index + 1,
+                current,
+                solution,
+                ambiguous,
+            );
+            current.pop();
+            if *ambiguous {
+                return;
+            }
         }
     }
-    if runs != mm_objects.len() {
-        tracing::debug!(
-            runs,
-            mm_objects = mm_objects.len(),
-            "image_token_id run count != mm_object count; pad_value assignment is best-effort by run order"
-        );
+
+    let mut solution = None;
+    let mut ambiguous = false;
+    visit(
+        group_kinds,
+        mm_objects,
+        inferred_object_kinds,
+        0,
+        0,
+        &mut Vec::with_capacity(group_kinds.len()),
+        &mut solution,
+        &mut ambiguous,
+    );
+    (!ambiguous).then_some(solution).flatten()
+}
+
+fn infer_mm_object_kinds(
+    token_ids: &[u32],
+    num_block_tokens: &[u64],
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+    is_eagle: Option<bool>,
+    image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
+) -> HashMap<u64, MmTokenKind> {
+    let Some(block_mm_infos) = block_mm_infos else {
+        return HashMap::new();
+    };
+    if image_token_id.is_some() && image_token_id == video_token_id {
+        return HashMap::new();
     }
-    out
+
+    let append = is_eagle.unwrap_or(false) as usize;
+    let mut inferred: HashMap<u64, Option<MmTokenKind>> = HashMap::new();
+    let mut token_offset = 0usize;
+    for (block_index, num_block_tokens) in num_block_tokens.iter().enumerate() {
+        let end = token_offset + append + *num_block_tokens as usize;
+        if end > token_ids.len() {
+            break;
+        }
+        let Some(info) = block_mm_infos.get(block_index).and_then(Option::as_ref) else {
+            token_offset += *num_block_tokens as usize;
+            continue;
+        };
+        if info.mm_objects.len() != 1 {
+            token_offset += *num_block_tokens as usize;
+            continue;
+        }
+
+        let mut observed_kind = None;
+        let mut mixed_kinds = false;
+        for &token_id in &token_ids[token_offset..end] {
+            let Some(kind) = mm_token_kind(token_id, image_token_id, video_token_id) else {
+                continue;
+            };
+            if observed_kind.is_some_and(|observed| observed != kind) {
+                mixed_kinds = true;
+                break;
+            }
+            observed_kind = Some(kind);
+        }
+        if !mixed_kinds && let Some(kind) = observed_kind {
+            let mm_hash = info.mm_objects[0].mm_hash;
+            inferred
+                .entry(mm_hash)
+                .and_modify(|existing| {
+                    if *existing != Some(kind) {
+                        *existing = None;
+                    }
+                })
+                .or_insert(Some(kind));
+        }
+        token_offset += *num_block_tokens as usize;
+    }
+
+    inferred
+        .into_iter()
+        .filter_map(|(mm_hash, kind)| kind.map(|kind| (mm_hash, kind)))
+        .collect()
+}
+
+/// Rewrite model placeholder runs to Dynamo's canonical `pad_value(mm_hash)`.
+/// Images contribute one run per object. A Qwen video can contribute several
+/// timestamp-separated runs, so consecutive video runs belong to one object.
+/// vLLM may attach the next MM object to a boundary block before its placeholder
+/// appears. In that case, use kinds inferred from unambiguous blocks in the same
+/// event only when they identify one ordered mapping. Otherwise, do not guess:
+/// the caller keeps the event's native MM hash path for that block.
+fn substitute_pad_values(
+    token_ids: &[u32],
+    image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
+    mm_objects: &[u64],
+    inferred_object_kinds: Option<&HashMap<u64, MmTokenKind>>,
+) -> Option<Vec<u32>> {
+    if image_token_id.is_some() && image_token_id == video_token_id {
+        return None;
+    }
+
+    let mut runs = Vec::new();
+    let mut token_index = 0usize;
+    while token_index < token_ids.len() {
+        let Some(kind) = mm_token_kind(token_ids[token_index], image_token_id, video_token_id)
+        else {
+            token_index += 1;
+            continue;
+        };
+        let start = token_index;
+        token_index += 1;
+        while token_index < token_ids.len()
+            && mm_token_kind(token_ids[token_index], image_token_id, video_token_id) == Some(kind)
+        {
+            token_index += 1;
+        }
+        runs.push((start, token_index, kind));
+    }
+
+    // Blocks containing only timestamp/structural tokens need no substitution.
+    if runs.is_empty() {
+        return Some(token_ids.to_vec());
+    }
+
+    let mut run_groups = Vec::with_capacity(runs.len());
+    let mut group_kinds = Vec::with_capacity(runs.len());
+    let mut group_count = 0usize;
+    let mut previous_kind = None;
+    for &(_, _, kind) in &runs {
+        let starts_new_object =
+            kind == MmTokenKind::Image || previous_kind != Some(MmTokenKind::Video);
+        if starts_new_object {
+            group_count += 1;
+            group_kinds.push(kind);
+        }
+        run_groups.push(group_count - 1);
+        previous_kind = Some(kind);
+    }
+
+    let group_hashes = if group_count == mm_objects.len() {
+        mm_objects.to_vec()
+    } else {
+        let mapping = find_unique_object_mapping(&group_kinds, mm_objects, inferred_object_kinds?);
+        let Some(mapping) = mapping else {
+            tracing::debug!(
+                inferred_objects = group_count,
+                event_objects = mm_objects.len(),
+                "multimodal placeholder runs cannot be mapped to event objects exactly; preserving native event hashing"
+            );
+            return None;
+        };
+        mapping
+    };
+
+    let mut out = token_ids.to_vec();
+    for ((start, end, _), group_index) in runs.into_iter().zip(run_groups) {
+        let pad = crate::protocols::pad_value_for_mm_hash(group_hashes[group_index]);
+        out[start..end].fill(pad);
+    }
+    Some(out)
 }
 
 #[derive(Default)]
@@ -184,6 +371,7 @@ pub struct StoredBlockOptions<'a> {
     pub mm_extra_info: Option<BlockExtraInfo>,
     pub is_eagle: Option<bool>,
     pub image_token_id: Option<u32>,
+    pub video_token_id: Option<u32>,
 }
 
 pub fn create_stored_block_from_parts(
@@ -192,49 +380,60 @@ pub fn create_stored_block_from_parts(
     token_ids: &[u32],
     options: StoredBlockOptions<'_>,
 ) -> KvCacheStoredBlockData {
+    create_stored_block_from_parts_with_kinds(kv_block_size, block_hash, token_ids, options, None)
+}
+
+fn create_stored_block_from_parts_with_kinds(
+    kv_block_size: u32,
+    block_hash: u64,
+    token_ids: &[u32],
+    options: StoredBlockOptions<'_>,
+    inferred_object_kinds: Option<&HashMap<u64, MmTokenKind>>,
+) -> KvCacheStoredBlockData {
     let StoredBlockOptions {
         lora_name,
         cache_namespace,
         mm_extra_info,
         is_eagle,
         image_token_id,
+        video_token_id,
     } = options;
 
-    // When the model has a routing image token and this block carries mm
-    // objects (vLLM events), normalize to the canonical pad_value scheme:
-    // substitute pad_value over the image_token_id runs and hash WITHOUT
-    // block_mm_infos, matching the frontend. sglang events carry no
-    // image_token_id tokens nor mm_extra_info, so they take the else branch
-    // unchanged.
-    let tokens_hash = match (image_token_id, mm_extra_info.as_ref()) {
-        (Some(img_tok), Some(info)) if !info.mm_objects.is_empty() => {
+    // When the model exposes routing placeholder tokens and this block carries
+    // MM objects (vLLM events), normalize to the canonical pad_value scheme and
+    // hash without block_mm_infos, matching the frontend. SGLang events carry
+    // neither model placeholders nor mm_extra_info, so they remain unchanged.
+    let normalized_tokens = match mm_extra_info.as_ref() {
+        Some(info)
+            if (image_token_id.is_some() || video_token_id.is_some())
+                && !info.mm_objects.is_empty() =>
+        {
             let mm_hashes: Vec<u64> = info.mm_objects.iter().map(|o| o.mm_hash).collect();
-            let substituted = substitute_pad_values(token_ids, img_tok, &mm_hashes);
-            compute_block_hash_for_seq(
-                &substituted,
-                kv_block_size,
-                BlockHashOptions {
-                    block_mm_infos: None,
-                    lora_name,
-                    cache_namespace,
-                    is_eagle,
-                },
-            )[0]
-        }
-        _ => {
-            let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
-            compute_block_hash_for_seq(
+            substitute_pad_values(
                 token_ids,
-                kv_block_size,
-                BlockHashOptions {
-                    block_mm_infos: block_mm_infos.as_deref(),
-                    lora_name,
-                    cache_namespace,
-                    is_eagle,
-                },
-            )[0]
+                image_token_id,
+                video_token_id,
+                &mm_hashes,
+                inferred_object_kinds,
+            )
         }
+        _ => None,
     };
+    let fallback_mm_infos = if normalized_tokens.is_none() {
+        mm_extra_info.as_ref().map(|info| vec![Some(info.clone())])
+    } else {
+        None
+    };
+    let tokens_hash = compute_block_hash_for_seq(
+        normalized_tokens.as_deref().unwrap_or(token_ids),
+        kv_block_size,
+        BlockHashOptions {
+            block_mm_infos: fallback_mm_infos.as_deref(),
+            lora_name,
+            cache_namespace,
+            is_eagle,
+        },
+    )[0];
 
     tracing::trace!(
         "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}, mm_extra_info={:?}",
@@ -263,11 +462,20 @@ pub fn create_stored_blocks(
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     is_eagle: Option<bool>,
     image_token_id: Option<u32>,
+    video_token_id: Option<u32>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
     let mut token_offset: usize = 0;
     let append = is_eagle.unwrap_or(false) as usize;
+    let inferred_object_kinds = infer_mm_object_kinds(
+        token_ids,
+        num_block_tokens,
+        block_mm_infos,
+        is_eagle,
+        image_token_id,
+        video_token_id,
+    );
 
     for (block_idx, (num_tokens_it, block_hash_it)) in
         num_block_tokens.iter().zip(block_hashes.iter()).enumerate()
@@ -300,7 +508,7 @@ pub fn create_stored_blocks(
             .and_then(|infos| infos.get(block_idx))
             .and_then(|opt| opt.clone());
 
-        blocks.push(create_stored_block_from_parts(
+        blocks.push(create_stored_block_from_parts_with_kinds(
             kv_block_size,
             *block_hash_it,
             tokens,
@@ -310,7 +518,9 @@ pub fn create_stored_blocks(
                 mm_extra_info,
                 is_eagle,
                 image_token_id,
+                video_token_id,
             },
+            Some(&inferred_object_kinds),
         ));
         token_offset += *num_tokens_it as usize;
     }
@@ -362,6 +572,192 @@ mod normalize_tests {
         assert_eq!(
             stored.tokens_hash, expected,
             "normalized vLLM event hash must match frontend pad_value hash"
+        );
+    }
+
+    #[test]
+    fn vllm_video_event_normalizes_to_frontend_pad_value_hash() {
+        let block_size = 4u32;
+        let video_token_id = 151656u32;
+        let mm_hash = 9_533_257_059_414_191_570u64;
+        let vllm_tokens = vec![10u32, 20, video_token_id, video_token_id];
+        let mm_info = BlockExtraInfo {
+            mm_objects: vec![BlockMmObjectInfo {
+                mm_hash,
+                offsets: vec![],
+            }],
+        };
+
+        let stored = create_stored_block_from_parts(
+            block_size,
+            0xabcd,
+            &vllm_tokens,
+            StoredBlockOptions {
+                mm_extra_info: Some(mm_info),
+                video_token_id: Some(video_token_id),
+                ..Default::default()
+            },
+        );
+        let pad = pad_value_for_mm_hash(mm_hash);
+        let expected = compute_block_hash_for_seq(
+            &[10u32, 20, pad, pad],
+            block_size,
+            BlockHashOptions::default(),
+        )[0];
+
+        assert_eq!(stored.tokens_hash, expected);
+    }
+
+    #[test]
+    fn timestamped_video_runs_share_one_hash_before_an_image() {
+        let image_token_id = 151655u32;
+        let video_token_id = 151656u32;
+        let video_hash = 41u64;
+        let image_hash = 42u64;
+        let tokens = [
+            video_token_id,
+            video_token_id,
+            7,
+            video_token_id,
+            video_token_id,
+            8,
+            image_token_id,
+            image_token_id,
+        ];
+
+        let normalized = substitute_pad_values(
+            &tokens,
+            Some(image_token_id),
+            Some(video_token_id),
+            &[video_hash, image_hash],
+            None,
+        )
+        .unwrap();
+
+        let video_pad = pad_value_for_mm_hash(video_hash);
+        let image_pad = pad_value_for_mm_hash(image_hash);
+        assert_eq!(
+            normalized,
+            [
+                video_pad, video_pad, 7, video_pad, video_pad, 8, image_pad, image_pad,
+            ]
+        );
+    }
+
+    #[test]
+    fn consecutive_video_objects_fail_closed_without_offsets() {
+        let video_token_id = 151656u32;
+        let tokens = [video_token_id, 7, video_token_id];
+
+        assert!(
+            substitute_pad_values(&tokens, None, Some(video_token_id), &[41, 42], None).is_none()
+        );
+    }
+
+    #[test]
+    fn image_run_object_mismatch_fails_closed() {
+        let image_token_id = 151655u32;
+
+        assert!(
+            substitute_pad_values(
+                &[image_token_id, 7, image_token_id],
+                Some(image_token_id),
+                None,
+                &[41],
+                None,
+            )
+            .is_none()
+        );
+        assert!(
+            substitute_pad_values(
+                &[image_token_id, image_token_id],
+                Some(image_token_id),
+                None,
+                &[41, 42],
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn mixed_boundary_uses_kind_inferred_from_neighboring_blocks() {
+        let block_size = 4u32;
+        let image_token_id = 151655u32;
+        let video_token_id = 151656u32;
+        let image_hash = 41u64;
+        let video_hash = 42u64;
+        let tokens = [
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            image_token_id,
+            7,
+            8,
+            9,
+            10,
+            video_token_id,
+            video_token_id,
+        ];
+        let block_mm_infos = [
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: image_hash,
+                    offsets: vec![],
+                }],
+            }),
+            Some(BlockExtraInfo {
+                mm_objects: vec![
+                    BlockMmObjectInfo {
+                        mm_hash: image_hash,
+                        offsets: vec![],
+                    },
+                    BlockMmObjectInfo {
+                        mm_hash: video_hash,
+                        offsets: vec![],
+                    },
+                ],
+            }),
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: video_hash,
+                    offsets: vec![],
+                }],
+            }),
+        ];
+
+        let stored = create_stored_blocks(
+            block_size,
+            &tokens,
+            &[4, 4, 4],
+            &[101, 102, 103],
+            None,
+            None,
+            &Arc::new(AtomicU32::new(0)),
+            Some(&block_mm_infos),
+            None,
+            Some(image_token_id),
+            Some(video_token_id),
+        );
+
+        let image_pad = pad_value_for_mm_hash(image_hash);
+        let video_pad = pad_value_for_mm_hash(video_hash);
+        let expected_tokens = [
+            image_pad, image_pad, image_pad, image_pad, image_pad, image_pad, 7, 8, 9, 10,
+            video_pad, video_pad,
+        ];
+        let expected_hashes =
+            compute_block_hash_for_seq(&expected_tokens, block_size, BlockHashOptions::default());
+
+        assert_eq!(stored.len(), 3);
+        assert_eq!(
+            stored
+                .iter()
+                .map(|block| block.tokens_hash)
+                .collect::<Vec<_>>(),
+            expected_hashes
         );
     }
 
