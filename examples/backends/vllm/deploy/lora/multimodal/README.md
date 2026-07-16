@@ -27,6 +27,7 @@ The DynamoGraphDeployment (DGD) manifest uses `nvidia.com/v1beta1`. `DynamoModel
 | File | Description |
 |------|-------------|
 | `agg_qwen_lora.yaml` | DynamoGraphDeployment for multimodal vLLM with LoRA support |
+| `agg_qwen_lora_xpu_dra.yaml` | Intel XPU DRA DynamoGraphDeployment for multimodal vLLM with LoRA support |
 | `minio-secret.yaml` | Kubernetes secret for MinIO credentials |
 | `sync-lora-job.yaml` | Job to download LoRA from HuggingFace and upload to MinIO |
 | `lora-model.yaml` | DynamoModel CRD for registering LoRA adapters |
@@ -175,6 +176,17 @@ yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then
 
 ```bash
 kubectl apply -f agg_qwen_lora_updated.yaml -n ${NAMESPACE}
+```
+
+### Deploy on Intel XPU with DRA
+
+To use `agg_qwen_lora_xpu_dra.yaml`, install Kubernetes DRA v1 and the Intel
+resource drivers for Kubernetes with the `gpu.intel.com` DeviceClass. Build and
+push the `vllm-runtime-xpu:my-tag` worker image before deployment. See the
+[Intel XPU Deployment Examples](../../xpu/README.md) for the image build commands.
+
+```bash
+kubectl apply -f agg_qwen_lora_xpu_dra.yaml -n ${NAMESPACE}
 ```
 
 ### Verify Deployment
