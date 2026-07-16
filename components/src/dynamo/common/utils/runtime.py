@@ -54,7 +54,8 @@ def create_runtime(
         discovery_backend: Discovery backend type (kubernetes, etcd, file, mem).
         request_plane: Request distribution method (nats, tcp).
         event_plane: Event publishing method (nats, zmq). When None, the Rust
-            runtime defaults to ZMQ for every discovery backend.
+            runtime auto-detects from the discovery backend (ZMQ for file/mem,
+            NATS for etcd/kubernetes).
         use_kv_events: Deprecated. NATS enablement is now determined automatically
             from the event-plane configuration. This parameter is accepted for
             backwards compatibility but will be removed in a future release.

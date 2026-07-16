@@ -24,7 +24,7 @@ CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.trtllm \
   --model-path <MODEL_PATH> \
   --tensor-parallel-size 2 \
   --enable-attention-dp \
-  --publish-kv-events
+  --publish-events-and-metrics
 
 # Frontend with KV routing
 python3 -m dynamo.frontend --router-mode kv

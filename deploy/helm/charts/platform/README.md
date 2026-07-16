@@ -94,7 +94,7 @@ Kubernetes: `>=1.30.0-0`
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | global.etcd.install | bool | `false` | Whether this chart should install the bundled etcd subchart. When true, deploys etcd and auto-configures the operator with its address. When false, etcd is not deployed. Use dynamo-operator.etcdAddr to point at an external instance if you are bringing your own etcd. |
-| global.nats.install | bool | `true` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. Defaults to true (since release 1.1.0) for deployments that explicitly select a NATS-backed event or request plane. The default Dynamo transports (ZMQ events and TCP requests) do not require NATS. |
+| global.nats.install | bool | `true` | Whether this chart should install the bundled NATS subchart. When true, deploys NATS and auto-configures the operator with its address. When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS. Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes). |
 | global.kai-scheduler.install | bool | `false` | Whether this chart should install the bundled kai-scheduler subchart. When true, deploys kai-scheduler and its CRDs. Integration is automatically enabled. NOTE: For production environments, it is recommended to install kai-scheduler separately. |
 | global.kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler integration (queue creation, schedulerName injection). Set to true when kai-scheduler is available in the cluster (installed externally). Automatically enabled when install=true. The operator uses this to decide whether to inject schedulerName and queue labels into pod templates. |
 | global.volcano-scheduler.enabled | bool | `false` | EXPERIMENTAL: Whether to enable Volcano scheduler integration for Grove PodCliqueSets. Set to true when Volcano is available in the cluster and Grove is configured with Volcano scheduler support. The operator uses this to inject schedulerName and map nvidia.com/volcano-queue to Grove's Volcano queue annotation. |
@@ -169,11 +169,6 @@ Kubernetes: `>=1.30.0-0`
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
 
 ### NATS Configuration
-
-The bundled NATS chart remains enabled by default for deployments that explicitly select NATS Core
-for the event plane, the legacy NATS request plane, or deprecated durable JetStream KV events. The
-default Dynamo transports are ZMQ for events and TCP for requests, so a basic DGD or DGDR does not
-require NATS. Set `global.nats.install=false` when none of those NATS-backed features are used.
 
 For detailed NATS configuration options beyond `global.nats.install`, please refer to the official NATS Helm chart documentation:
 **[NATS Helm Chart Documentation](https://github.com/nats-io/k8s/tree/main/helm/charts/nats)**

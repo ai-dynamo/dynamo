@@ -42,7 +42,7 @@ python3 -m dynamo.trtllm \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
   --enable-multimodal \
   "${TRTLLM_OVERRIDE_ARGS[@]}" \
-  --publish-kv-events \
+  --publish-events-and-metrics \
   --kv-block-size "$BLOCK_SIZE" &
 
 # MM Router Worker: registers with the real model name; does KV-aware routing internally.

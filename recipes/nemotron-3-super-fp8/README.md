@@ -108,10 +108,10 @@ To disable reasoning at request time, pass `"chat_template_kwargs": {"enable_thi
 
 ## Routing
 
-- **vLLM** and **SGLang** recipes use **approximate KV-aware routing** (`--router-mode kv --no-router-kv-events` on the frontend). The frontend uses prefix hashing to route requests to workers most likely to have relevant KV cache blocks, which helps workloads with shared system prompts or multi-turn conversations.
+- **vLLM** and **SGLang** recipes use **approximate KV-aware routing** (`--router-mode kv --no-kv-events` on the frontend). The frontend uses prefix hashing to route requests to workers most likely to have relevant KV cache blocks, which helps workloads with shared system prompts or multi-turn conversations.
 - The **TensorRT-LLM** disaggregated recipe uses **round-robin routing**. Nemotron-H on TRT-LLM still requires `enable_block_reuse: false`, so KV overlap routing does not provide a real cache-reuse benefit here and only adds misleading overlap bookkeeping.
 
-Approximate (hash-based) routing is used for the vLLM and SGLang variants because hybrid Mamba+Attention models do not yet have a reliable KV-event path in these recipes (`--kv-events-config` for vLLM/SGLang, `--publish-kv-events` for TRT-LLM).
+Approximate (hash-based) routing is used for the vLLM and SGLang variants because hybrid Mamba+Attention models do not yet have a reliable KV-event path in these recipes (`--kv-events-config` for vLLM/SGLang, `--publish-events-and-metrics` for TRT-LLM).
 
 ## Backend-Specific Notes
 

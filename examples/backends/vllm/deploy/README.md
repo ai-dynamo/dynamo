@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # vLLM Kubernetes Deployment Configurations
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying vLLM inference graphs using the **DynamoGraphDeployment** resource.
@@ -98,23 +93,11 @@ extraPodSpec:
       # Other model-specific arguments
 ```
 
-**Common vLLM settings:**
+**Common vLLM Flags:**
 - `--enable-prompt-embeds`: Enable prompt embeddings feature
 - `--enable-multimodal`: Enable multimodal (vision) support
 - `--disaggregation-mode prefill`: Prefill-only mode for disaggregated serving
 - `--kv-transfer-config '<json>'`: KV transfer backend configuration (e.g., `'{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`)
-- The event-driven router manifests linked below set `--stream-interval 20`. See the [vLLM recommended stream
-  interval](https://github.com/ai-dynamo/dynamo/blob/main/docs/backends/vllm/vllm-reference-guide.md#recommended-stream-interval)
-  for the host-efficiency and streaming-granularity tradeoffs.
-
-### KV-Routed DGD Requirements
-
-[`agg_router.yaml`](./agg_router.yaml) and [`disagg_router.yaml`](./disagg_router.yaml) are complete
-event-driven examples. They configure both the Frontend and the appropriate vLLM worker roles. See
-the [DynamoGraphDeploymentRequest routing matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/dgdr.md#routing)
-for the canonical Kubernetes arguments and override semantics. See the
-[Router Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/docs/components/router/README.md#quick-start)
-for approximate routing without worker events.
 
 ## Prerequisites
 

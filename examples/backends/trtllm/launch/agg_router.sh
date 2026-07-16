@@ -33,7 +33,7 @@ python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
-  --publish-kv-events \
+  --publish-events-and-metrics \
   "${TRTLLM_OVERRIDE_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

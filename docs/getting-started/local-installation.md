@@ -93,7 +93,7 @@ Dynamo components discover each other through a shared backend. Two options are 
 | Backend | When to Use | Setup |
 |---|---|---|
 | **File** | Single machine, local development | No setup -- pass `--discovery-backend file` to all components. The event plane automatically defaults to ZMQ (no NATS required). |
-| **etcd** | Multi-node, production | Requires a running etcd instance (default if no flag is specified). The event plane defaults to ZMQ; set `--event-plane nats` to opt into NATS Core. |
+| **etcd** | Multi-node, production | Requires a running etcd instance (default if no flag is specified). The event plane defaults to NATS. |
 
 This guide uses `--discovery-backend file`. For etcd setup, see [Service Discovery](../kubernetes/service-discovery.md).
 
@@ -152,19 +152,19 @@ for the correct configuration.
 **vLLM**
 
 ```bash
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
+  --kv-events-config '{"enable_kv_cache_events": false}'
 ```
 
 ### KV Events Configuration
 
-For dependency-free local development, leave KV event publishing disabled:
+For dependency-free local development, disable KV event publishing (avoids NATS):
 
-- **vLLM:** No flag needed (KV events disabled by default)
+- **vLLM:** Add `--kv-events-config '{"enable_kv_cache_events": false}'`
 - **SGLang:** No flag needed (KV events disabled by default)
 - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-For event-driven KV routing, see the [Router Quick Start](../components/router/README.md#quick-start)
-for the exact frontend and backend arguments and worker-role placement.
+KV events are disabled by default for all backends. For vLLM and SGLang, add backend-specific `--kv-events-config` only when you want KV event publishing enabled. For TensorRT-LLM, enable event publishing with `--publish-events-and-metrics`.
 
 ## Test Your Deployment
 

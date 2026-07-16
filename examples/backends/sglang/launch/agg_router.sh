@@ -63,7 +63,7 @@ print_launch_banner "Launching Aggregated + KV Routing (2 GPUs)" "$MODEL" "$HTTP
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 FRONTEND_ARGS=(--router-mode kv)
 if [ "$APPROX_MODE" = true ]; then
-    FRONTEND_ARGS+=(--no-router-kv-events)
+    FRONTEND_ARGS+=(--no-kv-events)
 fi
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &

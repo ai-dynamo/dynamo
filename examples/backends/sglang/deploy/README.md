@@ -1,8 +1,3 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
 # SGLang Kubernetes Deployment Configurations
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying SGLang inference graphs using the **DynamoGraphDeployment** resource.
@@ -142,26 +137,7 @@ kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 
 ## Model Configuration
 
-All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. You can pass any SGLang
-argument supported by `python -m dynamo.sglang`.
-
-**Common SGLang settings:**
-
-- `--model-path <model>`: Set the model to serve.
-- `--disaggregation-mode prefill|decode`: Select a disaggregated worker role.
-- `--disaggregation-transfer-backend nixl`: Transfer KV cache data through NIXL.
-- The event-driven router manifest linked below sets `--stream-interval 20`. See the [SGLang recommended stream
-  interval](https://github.com/ai-dynamo/dynamo/blob/main/docs/backends/sglang/sglang-reference-guide.md#recommended-stream-interval)
-  for the host-efficiency and streaming-granularity tradeoffs.
-
-### KV-Routed DGD Requirements
-
-[`agg_router.yaml`](./agg_router.yaml) is a complete event-driven example that configures both the
-Frontend and the SGLang worker. See the
-[DynamoGraphDeploymentRequest routing matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/dgdr.md#routing)
-for the canonical Kubernetes arguments, role placement, and override semantics. See the
-[Router Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/docs/components/router/README.md#quick-start)
-for approximate routing without worker events.
+All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you can use any sglang argument and configuration. Key parameters:
 
 ## Monitoring and Health
 

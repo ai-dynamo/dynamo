@@ -39,7 +39,7 @@ python3 -m dynamo.trtllm \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
   --enable-multimodal \
   "${TRTLLM_OVERRIDE_ARGS[@]}" \
-  --publish-kv-events &
+  --publish-events-and-metrics &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

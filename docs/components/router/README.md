@@ -36,7 +36,8 @@ workers:
    ```
 
 Do not pass `--kv-events-config` to vLLM decode-only workers. Use a unique ZMQ endpoint port for
-workers that share a network namespace. For TensorRT-LLM, pass `--publish-kv-events`. The
+workers that share a network namespace. `--kv-events-config` configures the engine-to-worker
+publisher; Dynamo's worker-to-router event transport is configured separately. The
 [vLLM](../../backends/vllm/vllm-reference-guide.md#kv-event-publication-for-kv-routing) and
 [SGLang](../../backends/sglang/sglang-reference-guide.md#kv-events) reference guides document
 backend defaults, role-specific behavior, and tuning.

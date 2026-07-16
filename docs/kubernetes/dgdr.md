@@ -355,7 +355,7 @@ Worker KV-event flags are backend-specific. For cross-backend behavior, see
 |---|---|---|
 | vLLM | [vLLM KV Events](../backends/vllm/vllm-reference-guide.md#kv-event-publication-for-kv-routing), [vLLM Examples](../backends/vllm/vllm-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'` on aggregated workers or disaggregated prefill workers; omit it from decode-only workers |
 | SGLang | [SGLang KV Events](../backends/sglang/sglang-reference-guide.md#kv-events), [SGLang Examples](../backends/sglang/sglang-examples.md#aggregated-serving-with-kv-routing) | `--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'` on aggregated workers or on both prefill and decode workers in disaggregated serving |
-| TRT-LLM | [TRT-LLM DP Rank Routing](../backends/trtllm/trtllm-dp-rank-routing.md#enabling-dp-rank-routing), [TRT-LLM Observability](../backends/trtllm/trtllm-observability.md) | `--publish-kv-events` |
+| TRT-LLM | [TRT-LLM DP Rank Routing](../backends/trtllm/trtllm-dp-rank-routing.md#enabling-dp-rank-routing), [TRT-LLM Observability](../backends/trtllm/trtllm-observability.md) | `--publish-events-and-metrics` |
 
 The router manifests pass `--stream-interval 20` to vLLM and SGLang workers as a host-efficiency
 starting point. This is tuning, not a KV-routing requirement. See the
@@ -363,10 +363,11 @@ starting point. This is tuning, not a KV-routing requirement. See the
 [SGLang](../backends/sglang/sglang-reference-guide.md#recommended-stream-interval) reference guides
 for the latency and streaming-granularity tradeoffs.
 
-ZMQ is the default Dynamo event plane for Kubernetes and every other discovery backend. Set
-`DYN_EVENT_PLANE=nats` to opt into NATS Core. vLLM and SGLang still emit raw engine events over
-local ZMQ; the Dynamo worker consumes those events and republishes normalized router events through
-the selected Dynamo event plane. For the transport model, see [Event Plane](../design-docs/event-plane.md).
+In Kubernetes deployments the Dynamo runtime normally uses Kubernetes
+discovery and the NATS event plane. Some backends, such as vLLM and SGLang,
+emit raw KV events over ZMQ; the Dynamo worker consumes those backend events
+and republishes router events through the Dynamo event plane. For the event
+plane model, see [Event Plane](../design-docs/event-plane.md).
 
 ### EPP and Gateway Routing
 

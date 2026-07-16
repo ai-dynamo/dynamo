@@ -86,7 +86,7 @@ pub struct DistributedRuntime {
     metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry,
 
     // Resolved event transport kind — set once at construction time from
-    // Resolved from DYN_EVENT_PLANE; returned by default_event_transport_kind().
+    // DYN_EVENT_PLANE + discovery backend; returned by default_event_transport_kind().
     event_transport_kind: crate::discovery::EventTransportKind,
 }
 
@@ -469,7 +469,7 @@ impl DistributedRuntime {
     /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
     /// Component, to allow it to publish to NATS. KV Router is the only user.
     ///
-    /// When NATS is not available (e.g., running in approximate mode with --no-router-kv-events),
+    /// When NATS is not available (e.g., running in approximate mode with --no-kv-events),
     /// this function returns Ok(()) silently since publishing is optional in that mode.
     pub async fn kv_router_nats_publish(
         &self,
@@ -486,7 +486,7 @@ impl DistributedRuntime {
         payload: bytes::Bytes,
     ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
-            // NATS not available - this is expected in approximate mode (--no-router-kv-events)
+            // NATS not available - this is expected in approximate mode (--no-kv-events)
             tracing::trace!("Skipping NATS publish (NATS not configured): {subject}");
             return Ok(());
         };
@@ -660,7 +660,7 @@ pub struct DistributedConfig {
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
     /// Resolved event transport kind — computed once at config time from
-    /// `DYN_EVENT_PLANE`, then stored on the runtime
+    /// `DYN_EVENT_PLANE` and the discovery backend, then stored on the runtime
     /// so callers always get the same answer regardless of which other services
     /// happen to be reachable.
     pub event_transport_kind: crate::discovery::EventTransportKind,
@@ -670,7 +670,7 @@ impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
         let request_plane = RequestPlaneMode::from_env();
 
-        // Determine the discovery backend before resolving the event transport.
+        // Determine the discovery backend first — we need it to compute the NATS default below.
         // Valid values for DYN_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
         let backend_str =
             std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "etcd".to_string());

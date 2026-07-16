@@ -24,7 +24,7 @@ spec:
           - "0.0"
           - --router-temperature
           - "0.0"
-          - --no-router-kv-events
+          - --no-kv-events
           command:
           - python3
           image: my-registry/tensorrtllm-runtime:my-tag

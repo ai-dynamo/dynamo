@@ -93,7 +93,7 @@ Dynamo 组件通过共享后端相互发现。可使用两个选项：
 | 后端 | 何时使用 | 设置 |
 |---|---|---|
 | **File** | 单机、本地开发 | 无需设置 -- 将 `--discovery-backend file` 传递给所有组件。事件平面会自动默认使用 ZMQ（无需 NATS）。 |
-| **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定 flag，则为默认值）。事件平面默认使用 ZMQ；设置 `--event-plane nats` 可显式启用 NATS Core。 |
+| **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面默认使用 NATS。 |
 
 本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](../../../../../docs/kubernetes/service-discovery.md)。
 
@@ -151,18 +151,19 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 **vLLM**
 
 ```bash
-python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file \
+  --kv-events-config '{"enable_kv_cache_events": false}'
 ```
 
 ### KV Events 配置
 
-对于无需依赖项的本地开发，请保持 KV event 发布为禁用状态：
+对于无需依赖项的本地开发，请禁用 KV event 发布（避免使用 NATS）：
 
-- **vLLM：** 无需 flag（默认禁用 KV events）
+- **vLLM：** 添加 `--kv-events-config '{"enable_kv_cache_events": false}'`
 - **SGLang：** 无需标志（默认禁用 KV events）
 - **TensorRT-LLM：** 无需标志（默认禁用 KV events）
 
-对于事件驱动的 KV routing，请参阅 [Router Quick Start](../../../../../docs/components/router/README.md#quick-start)，了解准确的 frontend 和 backend 参数以及 worker role 配置。
+所有后端默认都禁用 KV events。对于 vLLM 和 SGLang，仅当你想启用 KV event 发布时，才添加后端专用的 `--kv-events-config`。对于 TensorRT-LLM，请使用 `--publish-events-and-metrics` 启用事件发布。
 
 ## 测试你的部署
 

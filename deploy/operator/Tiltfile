@@ -40,7 +40,7 @@ load('ext://restart_process', 'docker_build_with_restart')
 # ---------------------------------------------------------------------------
 settings = {
     'namespace':            'dynamo-system',
-    'enable_nats':          True,       # optional NATS-backed transports
+    'enable_nats':          True,       # required for DGD/DGDR workloads
     'enable_etcd':          False,      # only if discoveryBackend is "etcd"
     'enable_kai_scheduler': False,      # GPU-aware scheduling for multi-node
     'enable_grove':         False,      # PodClique-based multi-node orchestration
@@ -206,7 +206,7 @@ local_resource(
 # Helm template → k8s_yaml
 #
 # Renders the production Helm chart (deploy/helm/charts/platform) with the
-# operator and optional infrastructure (including NATS by default). This gives you a
+# operator and required infrastructure (NATS by default). This gives you a
 # fully working cluster where you can apply DGDR/DGD resources and have them
 # reconcile into real workloads on your GPU nodes — while live-reloading the
 # controller binary on every code change.
@@ -222,7 +222,7 @@ def render_helm():
         helm_cmd, 'template', 'dynamo', HELM_CHART,
         '--namespace', NAMESPACE,
         '--set', 'dynamo-operator.enabled=true',
-        # Subcharts — NATS is on by default for explicitly selected NATS-backed transports
+        # Subcharts — NATS is on by default (workers need it)
         '--set', 'global.nats.install=%s' % str(ENABLE_NATS).lower(),
         '--set', 'global.etcd.install=%s' % str(ENABLE_ETCD).lower(),
         '--set', 'global.kai-scheduler.install=%s' % str(ENABLE_KAI_SCHEDULER).lower(),

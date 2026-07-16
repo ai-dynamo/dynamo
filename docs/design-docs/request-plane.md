@@ -9,7 +9,7 @@ title: Request Plane
 Dynamo supports two transport mechanisms for its request plane (the communication layer between services):
 
 - **TCP** (default): Direct TCP connection for optimal performance
-- **NATS** (legacy): Message broker-based request plane for existing deployments
+- **NATS**: Message broker-based request plane
 
 This guide explains how to configure and use request plane in your Dynamo deployment.
 
@@ -19,12 +19,8 @@ The request plane is the transport layer that handles communication between Dyna
 
 | Request Plane | Suitable For | Characteristics |
 |--------------|----------|-----------------|
-| **NATS** | Existing deployments that require the legacy brokered transport | Requires NATS infrastructure and uses JetStream queues |
+| **NATS** | Deployments that choose brokered request transport | Requires NATS infrastructure, provides pub/sub patterns, highest flexibility |
 | **TCP** | Low-latency direct communication | Direct connections, minimal overhead |
-
-> [!WARNING]
-> The NATS request plane is legacy. Use the default TCP request plane for new deployments. NATS Core
-> remains supported as an independent event-plane transport.
 
 ## Request Plane vs KV Event Plane
 
@@ -33,19 +29,14 @@ Dynamo has **two independent communication planes**:
 - **Request plane** (**`DYN_REQUEST_PLANE`**): how **RPC requests** flow between components (frontend → router → worker), via `tcp`, or `nats`.
 - **KV event plane** (**`DYN_EVENT_PLANE`**): how **KV cache events** (and optional router replica sync) are distributed for KV-aware routing, via `nats` or `zmq`.
 
-> [!NOTE]
-> The request and event planes are configured independently. ZMQ is the default event plane for
-> every discovery backend. Set `DYN_EVENT_PLANE=nats` to opt into NATS Core event transport. See the
-> [Router Quick Start](../components/router/README.md#quick-start) for backend KV event publication
-> arguments.
+**Note:** If you are using `tcp` request plane with KV events enabled on the router (the default router-side setting), the configured event plane is initialized independently. NATS-based event transport uses `NATS_SERVER` (default `nats://localhost:4222`), while ZMQ avoids external NATS infrastructure. SGLang requires explicit `--kv-events-config` and TRT-LLM requires `--publish-events-and-metrics` to publish events. For vLLM, KV events are currently auto-configured when prefix caching is active (deprecated — use `--kv-events-config` explicitly to prepare for a future release where all backends will default to off). To disable the router's KV event listener, use `--no-router-kv-events` on the frontend.
 
 Because they are independent, you can mix them.
 
 For example, a deployment with TCP request plane can use different KV event planes:
-- **ZMQ KV events (default)**: requests use TCP, and KV events use direct ZMQ pub/sub.
+- **JetStream KV events**: requests use TCP, KV routing still uses NATS JetStream + object store for persistence.
 - **NATS Core KV events (local indexer)**: requests use TCP, KV events use NATS Core pub/sub and persistence lives on workers.
-- **JetStream KV events (deprecated)**: requests use TCP, while KV routing uses NATS JetStream and object-store persistence.
-- **No KV events**: requests use TCP and KV routing predicts cache state from routing decisions.
+- **no KV events**: requests use TCP and KV routing runs without events (no NATS required, but no event-backed persistence).
 
 ## Configuration
 
@@ -89,13 +80,11 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.frontend --http-port=8000 &
 DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
-> [!NOTE]
-> By default, TCP uses an OS-assigned free port (port 0). If firewall rules require a fixed port, set
-> `DYN_TCP_RPC_PORT` explicitly.
+**Note:** By default, TCP uses an OS-assigned free port (port 0). This is ideal for environments where multiple services may run on the same machine or when you want to avoid port conflicts. If you need a specific port (e.g., for firewall rules), set `DYN_TCP_RPC_PORT` explicitly.
 
 **When to use TCP:**
 - Simple deployments with direct service-to-service communication (e.g. frontend to backend)
-- Minimal infrastructure requirements with the default ZMQ event plane
+- Minimal infrastructure requirements (NATS is initialized when the router listens for KV events; disable with `--no-router-kv-events`)
 - Low-latency requirements
 
 **TCP Configuration Options:**
@@ -110,10 +99,9 @@ Additional TCP-specific environment variables:
 - `DYN_TCP_CONNECT_TIMEOUT`: Connect timeout for TCP client (default: 3 seconds)
 - `DYN_TCP_CHANNEL_BUFFER`: Request channel buffer size for TCP client (default: 100)
 
-### Using NATS (Legacy)
+### Using NATS
 
-NATS provides durable JetStream queues for the legacy request plane. This setting does not select
-the event-plane transport.
+NATS provides durable jetstream messaging for request plane and can be used for KV events (and router replica sync).
 
 **Prerequisites:**
 - NATS server must be running and accessible
@@ -129,8 +117,9 @@ DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
 **When to use NATS:**
-- Existing deployments that already depend on the NATS request plane
-- Workloads that require its brokered request queue and cannot yet migrate to TCP
+- Production deployments with service discovery
+- Event-backed KV-aware routing when using NATS as the event transport. Note: ZMQ event transport and approximate mode (`--no-router-kv-events`) both provide KV routing without NATS, with approximate mode using predicted cache state.
+- Need for message replay and persistence features
 
 Limitations:
 - NATS does not support payloads beyond 16MB (use TCP for larger payloads)
@@ -139,8 +128,8 @@ Limitations:
 
 Here's a complete example showing how to launch a Dynamo deployment with different request planes:
 
-See the [request-plane launch example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_request_planes.sh)
-for a complete configuration that demonstrates launching Dynamo with TCP or NATS request planes.
+See [`examples/backends/vllm/launch/agg_request_planes.sh`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/agg_request_planes.sh) for a complete working example that demonstrates launching Dynamo with TCP or NATS request planes.
+
 
 ## Real-World Example
 

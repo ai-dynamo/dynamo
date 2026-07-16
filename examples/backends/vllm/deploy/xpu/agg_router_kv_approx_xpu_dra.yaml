@@ -3,7 +3,7 @@
 
 # XPU Aggregated Deployment with KV Router (No-KV-Events Mode)
 #
-# This example demonstrates KV-aware routing with the --no-router-kv-events flag.
+# This example demonstrates KV-aware routing with the --no-kv-events flag.
 # Instead of receiving KV events from workers, the router predicts cache state
 # locally based on routing decisions with TTL-based expiration and pruning.
 #
@@ -51,7 +51,7 @@ spec:
             - dynamo.frontend
             - --router-mode
             - kv
-            - --no-router-kv-events
+            - --no-kv-events
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker

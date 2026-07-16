@@ -13,10 +13,10 @@ BLOCK_SIZE=64
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Aggregated + Approximate KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT"
 
-# run frontend with KV router (--router-mode kv) in approximate mode (--no-router-kv-events)
+# run frontend with KV router (--router-mode kv) in approximate mode (--no-kv-events)
 python -m dynamo.frontend \
     --router-mode kv \
-    --no-router-kv-events &
+    --no-kv-events &
 
 # run workers
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag

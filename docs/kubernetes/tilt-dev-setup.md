@@ -93,7 +93,7 @@ skip_codegen: true
 # namespace: dynamo-system
 
 # Subchart toggles
-# enable_nats: true            # Optional NATS-backed transports (default: true)
+# enable_nats: true            # Required for DGD/DGDR workloads (default: true)
 # enable_etcd: false           # Only if discoveryBackend is "etcd"
 # enable_kai_scheduler: false  # GPU-aware scheduling for multi-node
 # enable_grove: false          # PodClique-based multi-node orchestration
@@ -112,7 +112,7 @@ skip_codegen: true
 | `registry` | string | `""` | Container registry prefix (e.g. `docker.io/myuser`). Also settable via `REGISTRY` env var, which takes precedence. |
 | `namespace` | string | `dynamo-system` | Namespace for the operator Deployment and related resources. |
 | `skip_codegen` | bool | `false` | Skip `make generate && make manifests` before applying CRDs. Set to `true` when you haven't changed API types. |
-| `enable_nats` | bool | `true` | Deploy the NATS subchart for configurations that explicitly select a NATS-backed event or request plane. Basic DGD/DGDR workloads use ZMQ events and TCP requests and do not require it. |
+| `enable_nats` | bool | `true` | Deploy NATS subchart. Required for DGD/DGDR workloads (workers use it for communication). |
 | `enable_etcd` | bool | `false` | Deploy etcd subchart. Only needed when `discoveryBackend` is `etcd`. |
 | `enable_kai_scheduler` | bool | `false` | Deploy kai-scheduler for GPU-aware scheduling in multi-node setups. |
 | `enable_grove` | bool | `false` | Deploy Grove for PodClique-based multi-node orchestration. |

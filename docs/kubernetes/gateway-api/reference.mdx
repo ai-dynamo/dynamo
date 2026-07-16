@@ -129,7 +129,7 @@ Backend examples:
 |---|---|
 | vLLM | Pass `--enable-prefix-caching` and `--kv-events-config '{"enable_kv_cache_events":true}'`. |
 | SGLang | Pass the backend's supported `--kv-events-config`. |
-| TensorRT-LLM | Pass `--publish-kv-events`. |
+| TensorRT-LLM | Pass `--publish-events-and-metrics`. |
 
 Set `DYN_KV_CACHE_BLOCK_SIZE` on the EPP only when discovery does not already provide the backend's
 block size. It must match the workers' `--block-size`. A mismatch changes the block hashes used for

@@ -29,7 +29,7 @@ spec:
             - "0.0"
             - --router-temperature
             - "0.0"
-            - --no-router-kv-events
+            - --no-kv-events
     Planner:
       envFromSecret: hf-token-secret
       componentType: planner

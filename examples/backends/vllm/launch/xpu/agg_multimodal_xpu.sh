@@ -52,8 +52,9 @@ done
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --multimodal "Launching Aggregated Multimodal Serving" "$MODEL_NAME" "$HTTP_PORT"
 
-# Keep the default TCP request plane for multimodal payloads. The legacy NATS
-# request plane has broker payload limits that base64 media can exceed.
+# Use TCP transport (instead of default NATS)
+# TCP is preferred for multimodal workloads because it overcomes:
+# - NATS default 1MB max payload limit (multimodal base64 images can exceed this)
 export DYN_REQUEST_PLANE=tcp
 
 # Start frontend with Rust OpenAIPreprocessor

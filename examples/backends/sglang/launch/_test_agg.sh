@@ -98,7 +98,7 @@ cat <<EOF
 
 Topology:
   - 2 SGLang workers (1 GPU each, tp=1) behind dynamo.frontend KV router
-  - frontend: --router-mode kv$([ "$APPROX_MODE" = true ] && echo " --no-router-kv-events" || echo "  (KV events ON)")
+  - frontend: --router-mode kv$([ "$APPROX_MODE" = true ] && echo " --no-kv-events" || echo "  (KV events ON)")
   - worker metrics: \$DYN_SYSTEM_PORT_WORKER1=\${DYN_SYSTEM_PORT_WORKER1:-8081}, \$DYN_SYSTEM_PORT_WORKER2=\${DYN_SYSTEM_PORT_WORKER2:-8082}
 
 Features enabled for full Grafana coverage:
@@ -115,7 +115,7 @@ EOF
 # Frontend with KV-aware routing
 FRONTEND_ARGS=(--router-mode kv)
 if [ "$APPROX_MODE" = true ]; then
-    FRONTEND_ARGS+=(--no-router-kv-events)
+    FRONTEND_ARGS+=(--no-kv-events)
 fi
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &

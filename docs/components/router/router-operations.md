@@ -30,7 +30,7 @@ When `--no-router-kv-events` is used, the router does not consume worker KV even
 
 Prefix cache recovery matters because stale or missing prefix state directly affects cache-hit routing decisions. Dynamo supports two recovery strategies.
 
-##### Event Plane with Local Indexer Mode
+##### NATS Core / Event Plane with Local Indexer Mode
 
 - Prefix state persists on workers. Events are fire-and-forget, but workers retain their local indexer state.
 - On startup, each router queries each worker's local indexer to rebuild prefix state.
@@ -41,12 +41,7 @@ For more on gap detection and replay, see [KV Event Replay — Dynamo vs vLLM](k
 
 ##### JetStream Mode
 
-> [!WARNING]
-> JetStream KV event persistence is deprecated. Use the default local-indexer event path for new
-> deployments.
-
-JetStream mode requires `--router-durable-kv-events` on the frontend, `--durable-kv-events` on
-workers, and `--event-plane nats` on every component.
+JetStream mode requires `--router-durable-kv-events` on both frontend and workers.
 
 - Prefix blocks are stored in NATS JetStream with 1-hour retention.
 - Snapshots are saved to NATS object store at configurable thresholds.
@@ -60,7 +55,7 @@ python -m dynamo.frontend \
     --router-durable-kv-events
 ```
 
-> [!NOTE]
+>[!Note]
 > If you need to start with a fresh state in JetStream mode, you have two options:
 > 1. Use a different namespace or component, which creates a new stream and NATS object store path.
 > 2. Launch a router with `--router-reset-states`, which purges the entire stream and radix snapshot. Only do this when launching the first router replica in a component, because it can bring existing replicas into an inconsistent state.
@@ -149,22 +144,15 @@ graph TD
 
 ## Additional Notes
 
-Request-plane transport is independent of KV event transport. The request plane
-(`DYN_REQUEST_PLANE` or `--request-plane`) controls how requests reach workers. ZMQ is the default
-event plane for every discovery backend. Set `--event-plane nats` to opt into NATS Core. The
-deprecated JetStream path additionally requires the durable frontend and worker flags described
-above. When using a NATS-based event plane, set `NATS_SERVER=nats://...` to override the default
-`localhost:4222`.
+Request-plane transport is independent of KV event transport. The request plane (`DYN_REQUEST_PLANE` or `--request-plane`) controls how requests reach workers. KV events use NATS in JetStream or NATS Core modes, or ZMQ when `--event-plane zmq` is set. With `--event-plane zmq` and `--discovery-backend file` or `mem`, the router can run without etcd or NATS. When using a NATS-based event plane, NATS is initialized automatically; set `NATS_SERVER=nats://...` to override the default `localhost:4222`.
 
 When `--router-kv-overlap-score-credit` is set to 0, no KV indexer is created and prefix matching is disabled. When `--no-router-kv-events` is set, a KV indexer is still created but no event subscriber is launched; the router predicts cache state from its own routing decisions with TTL-based expiration.
 
-Backend KV event publishing is independent of the frontend's `--no-router-kv-events` flag. The
-frontend flag controls whether the router consumes events; backend flags control whether workers
-publish them. If the router is not consuming events, workers that still publish will waste
-resources but cause no harm. See the [Router Quick Start](README.md#quick-start) for the exact
-backend arguments and worker-role placement. The [vLLM](../../backends/vllm/vllm-reference-guide.md#kv-event-publication-for-kv-routing)
-and [SGLang](../../backends/sglang/sglang-reference-guide.md#kv-events) reference guides document
-backend defaults and tuning.
+Backend KV event publishing is independent of the frontend's `--no-router-kv-events` flag. The frontend flag controls whether the router consumes events; backend flags control whether workers publish them. If the router is not consuming events, workers that still publish will waste resources but cause no harm.
+
+- **vLLM**: Pass `--kv-events-config '{"enable_kv_cache_events": false}'` to disable, or `'{"enable_kv_cache_events": true, "publisher": "zmq", "endpoint": "tcp://*:5557"}'` to enable.
+- **SGLang**: Pass `--kv-events-config` with a JSON config to enable, or omit it to keep publishing disabled.
+- **TRT-LLM**: Pass `--publish-events-and-metrics` to enable, or omit it to keep publishing disabled.
 
 The CLI arg `--router-ttl-secs` controls local cache prediction lifetime when the router operates without receiving events from workers. When workers are configured to publish KV events, the router relies on worker-side eviction events and this parameter is ignored.
 

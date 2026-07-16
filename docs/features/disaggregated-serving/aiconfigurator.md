@@ -616,10 +616,7 @@ aiconfigurator cli support \
 - Verify `volumeMounts` and `HF_HOME` are configured on workers
 
 **"Context stopped or killed" errors (disaggregated only)**:
-- Verify service discovery is available: the operator configures Kubernetes discovery, while
-  bare-metal deployments using etcd discovery require etcd.
-- Check the NIXL/UCX transport configuration and worker logs. NATS is not required for KV cache
-  transfer; it is required only when you explicitly select a NATS-backed request or event plane.
+- Deploy ETCD and NATS infrastructure (required for KV cache transfer)
 - See [Dynamo Kubernetes Guide](../../kubernetes/README.md) for platform setup
 
 ### Performance Issues
