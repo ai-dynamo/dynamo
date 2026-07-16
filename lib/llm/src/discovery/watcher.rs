@@ -1668,6 +1668,7 @@ impl ModelWatcher {
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
+                        router_config.kv_router_config.router_replica_sync,
                     )
                     .await
                     .context("build_preprocessed_routing")?,

@@ -26,7 +26,9 @@ use crate::{
         preprocessor::MultimodalData,
     },
     request_template::RequestTemplate,
-    session_affinity::SessionAffinityPushRouter,
+    session_affinity::{
+        AffinityCoordinator, SessionAffinityPushRouter, create_affinity_coordinator,
+    },
     types::{
         Annotated,
         openai::chat_completions::{
@@ -183,7 +185,7 @@ fn preprocessed_backend_engine(
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
-    session_affinity_ttl: Option<Duration>,
+    affinity: Option<AffinityCoordinator>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
@@ -192,15 +194,13 @@ fn preprocessed_backend_engine(
     validate_router_mode_for_lora(
         router_mode,
         model_manager.lora_filter().is_some(),
-        session_affinity_ttl.is_some(),
+        affinity.is_some(),
     )?;
 
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new(
-            router,
-            session_affinity_ttl,
-            true,
-        )?),
+        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
+            router, affinity, true,
+        )),
         RouterMode::Random | RouterMode::RoundRobin => match model_manager.lora_filter() {
             Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
                 router,
@@ -208,24 +208,26 @@ fn preprocessed_backend_engine(
                 model_manager.lora_load_estimator().clone(),
                 router_mode,
             )),
-            None => Arc::new(SessionAffinityPushRouter::new(
-                router,
-                session_affinity_ttl,
-                false,
-            )?),
+            None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
+                router, affinity, false,
+            )),
         },
         RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => Arc::new(SessionAffinityPushRouter::new(
-            router,
-            session_affinity_ttl,
-            router_mode.is_direct_routing(),
-        )?),
+        | RouterMode::DeviceAwareWeighted => {
+            Arc::new(SessionAffinityPushRouter::new_with_coordinator(
+                router,
+                affinity,
+                router_mode.is_direct_routing(),
+            ))
+        }
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new(router, chooser, session_affinity_ttl)?)
+            Arc::new(KvPushRouter::new_with_coordinator(
+                router, chooser, affinity,
+            ))
         }
     };
 
@@ -243,6 +245,7 @@ pub async fn build_preprocessed_routing(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    router_replica_sync: bool,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -257,6 +260,13 @@ pub async fn build_preprocessed_routing(
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
+
+    let affinity = create_affinity_coordinator(
+        session_affinity_ttl_secs.map(Duration::from_secs),
+        router_client.clone(),
+        router_replica_sync,
+    )
+    .await?;
 
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
         && matches!(router_mode, RouterMode::DeviceAwareWeighted)
@@ -297,13 +307,8 @@ pub async fn build_preprocessed_routing(
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
 
-    let backend_engine = preprocessed_backend_engine(
-        router,
-        router_mode,
-        chooser,
-        &model_manager,
-        session_affinity_ttl_secs.map(Duration::from_secs),
-    )?;
+    let backend_engine =
+        preprocessed_backend_engine(router, router_mode, chooser, &model_manager, affinity)?;
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,

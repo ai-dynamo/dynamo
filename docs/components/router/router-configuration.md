@@ -124,14 +124,34 @@ The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
 option to keep affinity disabled.
 
+Add `--router-replica-sync` to synchronize affinity bindings between router
+replicas through the Runtime event plane. Both flags are required: replica sync
+does not enable session affinity by itself. The origin publishes a binding after
+successful dispatch so concurrent requests can observe it, then publishes it again
+when the request lease ends so peer idle timers restart when the request becomes
+idle. The extra event fanout is an intentional tradeoff.
+
+Synchronization is advisory. Each replica owns its local idle TTL and uses the
+first live binding it observes. A matching update refreshes that local deadline,
+an expired binding can be replaced, and a conflicting live binding is ignored.
+Events use the same component scope as active-sequence synchronization, and the
+session-affinity subscriber additionally rejects targets outside its local worker
+set. Stronger cross-model or worker-role isolation is future work.
+
+Dropped, delayed, or reordered events do not affect request correctness, but can
+temporarily reduce affinity. In particular, a long request can outlive a peer's
+local TTL, and a dropped lease-completion update can leave peer deadlines out of
+sync until a later request republishes the binding.
+
 If the bound worker disappears, Dynamo invalidates the binding so a subsequent
 selection can bind an available worker. Router restart clears all bindings. Bindings
-are not shared between frontend replicas. In a multi-frontend deployment, configure
-the ingress or load balancer to consistently route a session to one frontend. Hash
-the raw session header received at ingress, not Dynamo's normalized internal
-`session_id`: canonical clients send `X-Dynamo-Session-ID`, while agent-native
-clients use the corresponding header listed in [Session IDs](../../agents/session-ids.md).
-Agent-native identity is normalized only after the request reaches the frontend.
+received from replicas are not authoritative storage. For strict affinity, configure
+the ingress or load balancer to consistently route a session to one frontend, or use
+an authoritative external binding store. When hashing at ingress, hash the raw
+session header rather than Dynamo's normalized internal `session_id`: canonical
+clients send `X-Dynamo-Session-ID`, while agent-native clients use the corresponding
+header listed in [Session IDs](../../agents/session-ids.md). Agent-native identity is
+normalized only after the request reaches the frontend.
 
 Direct mode still requires the phase-appropriate explicit worker ID on every
 affinity request. The stored binding validates that target but does not supply a
@@ -199,7 +219,7 @@ For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](
 - `--router-track-output-blocks`: **Experimental.** Enables tracking of output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in `nvext`). For the cost-model behavior, see [Decode Load Modeling](router-concepts.md#decode-load-modeling).
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
-- `--router-replica-sync`: Disabled by default. Enables NATS-based synchronization of local routing decisions between router replicas.
+- `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state and session-affinity bindings when affinity is also enabled.
 
 ## KV Indexer / Approx KV Indexer
 
