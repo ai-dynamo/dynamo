@@ -292,7 +292,7 @@ The chart title is the headline of the figure. It states what the chart proves, 
 
 If you cannot write a declarative one-line title, you do not yet know what the chart is for. Stop and figure it out before you ship.
 
-The flash-indexer canonical title is `"ACHIEVED VS. OFFERED THROUGHPUT  (HIGHER IS BETTER)"` — note the all-caps, the parenthetical that orients the reader's interpretation, and the comparison framing that telegraphs the takeaway.
+The flash-indexer canonical title is `"ACHIEVED VS. OFFERED THROUGHPUT  (HIGHER IS BETTER)"` — note the all-caps, the parenthetical that orients the reader's interpretation, and the comparison framing that telegraphs the takeaway. This is the "telegraphed takeaway" exception to the declarative-verb form above: the parenthetical carries what a bare "Achieved vs. Offered Throughput" would leave implicit.
 
 ## Rule 11: Title-Subtitle Stack
 
@@ -322,13 +322,13 @@ If you set both to `x=0.02`, they will NOT align — the subtitle will be indent
 
 **Conversion formula:**
 
-```
+```text
 paper_x = (title_x_container * figure_width - margin_l) / plot_width
 ```
 
 Worked example (`width=1240`, `margin_l=80`, plot width = 1240 - 80 - 40 = 1120, title at container `x=0.02`):
 
-```
+```text
 paper_x = (0.02 * 1240 - 80) / 1120
         = (24.8 - 80) / 1120
         = -55.2 / 1120
@@ -339,7 +339,7 @@ So the subtitle annotation gets `x=-0.049, xref="paper"` to line up under the ti
 
 **Vertical position formula.** Same pattern — title uses container coords, annotation uses paper coords. To place the subtitle top ~5 px below the title bottom:
 
-```
+```text
 title_top_px      = (1 - title_y_container) * figure_height
 title_bottom_px   = title_top_px + (title_font_size * 0.80)   # empirical bbox, weight 300
 subtitle_top_px   = title_bottom_px + 5
@@ -350,7 +350,7 @@ The `* 0.80` constant comes from measuring the rendered Helvetica Neue Light tit
 
 Worked example (`height=620`, `margin_t=130`, plot height = 420, title at container `y=0.96`, title font 42):
 
-```
+```text
 title_top      = 0.04 * 620 = 24.8
 title_bottom   = 24.8 + 33.6 = 58.4
 subtitle_top   = 58.4 + 5    = 63.4

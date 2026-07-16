@@ -156,7 +156,7 @@ When you can't grid-shape the layout (a true network or DAG), spawn the `create-
 
 ## Common Failure Modes
 
-The render-and-critique loop catches most issues. These six come up often enough across blogs to deserve naming explicitly — walk this list once before declaring a figure done:
+The render-and-critique loop catches most issues. These eight come up often enough across blogs to deserve naming explicitly — walk this list once before declaring a figure done:
 
 1. **Made-up numbers.** See "Anchor in Real Data." Memory sizes, latency numbers, throughput figures, percentages — every digit must come from a source of truth.
 2. **Wrong canonical reference.** Guessing the treatment without opening an actual exemplar or reading `design_tokens.yaml`. The cost of guessing is 5+ render iterations vs. 5 minutes of reading one canonical file.
@@ -171,7 +171,7 @@ The render-and-critique loop catches most issues. These six come up often enough
 
 Every blog post that needs figures gets the same directory shape:
 
-```
+```text
 docs/digest/<slug>/
 ├── README.md                    # The blog post itself
 ├── tools/
@@ -212,7 +212,7 @@ Every blog with figures has two required files in `tools/`:
 - D2 sources render with `d2 --layout tala` (or `--layout elk` for tree-shaped layouts) to a `*-raw.svg`, then post-process with a `*.py` injector.
 - HTML sources render via Playwright to PNG; the HTML stays in `tools/`, the PNG lands in `images/`. See [html-to-png.md](html-to-png.md).
 
-**The build must be reproducible from a fresh clone.** If you cannot rebuild every figure with `cd tools && ./build.sh`, the blog is broken.
+**The build regenerates deterministically from a fresh clone (renderer and font versions permitting).** If you cannot rebuild every figure with `cd tools && ./build.sh`, the blog is broken.
 
 ## Bootstrapping a New Blog
 
@@ -319,7 +319,7 @@ A figure is not done until all six items pass. Walk them in this order; do not s
 - [ ] **Renders cleanly at 2x.** PNG opens without artifacts at `rsvg-convert -z 2` (for SVG sources) or `scale=3` (for Plotly).
 - [ ] **Both SVG and PNG exist** in `images/`, named `fig-N-<kebab-name>.{svg,png}`.
 - [ ] **Listed in `tools/README.md`** with a one-line description in the figure inventory table.
-- [ ] **`build.sh` reproduces it.** Run it from a fresh shell; the figure regenerates byte-for-byte (or close to it).
+- [ ] **`build.sh` reproduces it.** Run it from a fresh shell; the figure regenerates deterministically (renderer and font versions permitting).
 - [ ] **Passes the seven non-negotiables.** Walked explicitly, item by item, in the chat.
 - [ ] **Single takeaway stated** in one declarative sentence. The agent has typed it out, not just thought it.
 

@@ -136,13 +136,13 @@ Single-file HTML. CSS variables mirror the canonical [`design_tokens.yaml`](../.
     <div class="grid">
       <div class="card">
         <div class="label">Naive Nested Map</div>
-        <div class="value mono">4M ops/s</div>
+        <div class="value mono">N ops/s</div>
         <p>Single-threaded, single-writer-single-reader. Simple, correct, slow.</p>
       </div>
       <div class="card accent">
         <div class="label">Concurrent Positional Indexer</div>
-        <div class="value mono">170M ops/s</div>
-        <p>Multi-writer multi-reader with positional jump search. 40x faster.</p>
+        <div class="value mono">M ops/s</div>
+        <p>Replace with measured values from the figure's source of truth.</p>
       </div>
     </div>
   </div>
@@ -157,6 +157,8 @@ The `.figure` element gets screenshotted. Anything outside it is ignored. Set it
 The recommended path. Full CSS support, deterministic, runs locally and in CI.
 
 Install: `pip install playwright && playwright install chromium`.
+
+Unpinned Playwright, Chromium, and system font versions affect exact pixel output; expect small anti-aliasing differences across environments.
 
 ```python
 from pathlib import Path
