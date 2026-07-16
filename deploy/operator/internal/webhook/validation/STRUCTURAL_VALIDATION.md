@@ -30,10 +30,11 @@ Keep this table current whenever a resource validator is migrated.
 | `DynamoModel` | Legacy | `dynamomodel.go` |
 | `DynamoCheckpoint` | Legacy specialized validation | `dynamocheckpoint_handler.go` |
 
-The DGD validator and its table-driven admission-chain tests in
-`dynamographdeployment_test.go` are the primary reference for a complete structural
-validator. Reusable API-type validation lives in `shared_v1beta1.go` and
-`shared_v1alpha1.go`.
+The DGD and DCD validators and their table-driven admission-chain tests in
+`dynamographdeployment_test.go` and `dynamocomponentdeployment_test.go` are the
+primary references for a complete structural validator. They share the CRD-backed
+test harness in `shared_test.go`. Reusable API-type validation lives in
+`shared_v1beta1.go` and `shared_v1alpha1.go`.
 
 ## Migration workflow
 
@@ -54,7 +55,8 @@ validator. Reusable API-type validation lives in `shared_v1beta1.go` and
 6. Preserve compatibility-version rules in a separate traversal across the
    conversion boundary. Prove conversion fidelity separately.
 7. Replace resource validation tests with one table-driven admission-chain test
-   that exercises schema and CEL admission before conversion and webhook validation.
+   that reuses the DGD/DCD harness from `shared_test.go` and exercises the real CRD
+   schema, CEL, production conversion, and public webhook handler in admission order.
 8. Remove the legacy path only after every inventoried rule has equivalent coverage,
    then update the migration-status table above.
 
@@ -206,10 +208,25 @@ A migration is complete only when:
 
 ## Tests
 
-- Keep one table-driven admission-chain test per resource. Run the request's
-  source schema and CEL validation first, convert only accepted requests, then
-  invoke the webhook. Group related rows inside that table with comments; do
-  not create parallel matrix tests for individual validation areas.
+- Reuse the shared DGD/DCD admission-chain harness in `shared_test.go`, including
+  `requestValidatorsFromCRD`, `admissionUnstructured`, and
+  `admissionSourceVersion`. If another resource or served version is unsupported,
+  extend those shared helpers instead of creating a resource-local schema/CEL
+  harness.
+- Keep one table-driven admission-chain test per resource. For every row, load the
+  generated CRD and run the request through the same effective admission order as
+  Kubernetes: source-version OpenAPI schema, source-version CEL, production
+  conversion to the webhook/storage version, and the public handler's
+  `ValidateCreate` or `ValidateUpdate` method.
+- A schema rejection is terminal and must not declare CEL or webhook expectations.
+  A CEL rejection is terminal and must not declare webhook expectations. Convert
+  and invoke the webhook only after both earlier stages accept the request.
+- Do not mock, restate, or hand-construct the CRD schema or CEL rules, and do not
+  call an internal structural validator as a substitute for the public handler.
+  The harness must test the generated CRD artifact and the production conversion
+  and handler boundaries used by real admission.
+- Group related rows inside the single admission-chain table with comments; do not
+  create parallel matrix tests for individual validation areas.
 - Add every schema-, CEL-, create-webhook, and update-webhook regression as a
   row in that table. Use a separate focused unit test only for an internal
   contract that the effective admission chain cannot reach, such as a fatal
