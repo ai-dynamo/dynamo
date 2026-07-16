@@ -26,6 +26,10 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 # Import-time skip: if the extension hasn't been built, all tests below
 # are skipped rather than crashing the collection phase.
+core = pytest.importorskip(
+    "dynamo._core",
+    reason="dynamo._core not built — run `maturin develop` first",
+)
 backend = pytest.importorskip(
     "dynamo._core.backend",
     reason="dynamo._core.backend not built — run `maturin develop` first",
@@ -117,6 +121,63 @@ def test_worker_config_accepts_parser_runtime_settings():
         default_thinking_mode="disabled",
         exclude_tools_when_tool_choice_none=False,
         enable_local_indexer=False,
+    )
+
+
+def test_worker_config_preserves_legacy_positional_argument_order():
+    """New optional fields must be appended after every existing argument."""
+    backend.WorkerConfig(
+        "dynamo",
+        "backend",
+        "generate",
+        "",
+        None,
+        core.ModelInput.Tokens,
+        "chat,completions",
+        None,
+        None,
+        None,
+        False,
+        False,
+    )
+
+
+@pytest.mark.unified
+def test_python_worker_config_preserves_legacy_positional_argument_order():
+    from dynamo.common.backend.worker import WorkerConfig
+
+    config = WorkerConfig(
+        "dynamo",
+        "backend",
+        "generate",
+        "",
+        None,
+        core.ModelInput.Tokens,
+        "chat,completions",
+        "etcd",
+        "tcp",
+        None,
+        False,
+        None,
+        None,
+        None,
+        False,
+        False,
+    )
+
+    assert config.exclude_tools_when_tool_choice_none is False
+    assert config.enable_local_indexer is False
+    assert config.default_thinking_mode is None
+
+
+def test_worker_config_accepts_media_configuration():
+    """Unified registration can advertise frontend media decoding."""
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    backend.WorkerConfig(
+        namespace="dynamo",
+        media_decoder=MediaDecoder(),
+        media_fetcher=MediaFetcher(),
     )
 
 

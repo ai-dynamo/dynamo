@@ -143,6 +143,16 @@ navigation:
                 path: kubernetes/dgdr.md
               - page: DGDR Examples
                 path: kubernetes/dgdr-examples.md
+          - section: Request Routing
+            contents:
+              - section: Gateway API Inference Extension
+                contents:
+                  - page: Overview
+                    path: kubernetes/gateway-api/README.mdx
+                  - page: Quickstart
+                    path: kubernetes/gateway-api/quickstart.mdx
+                  - page: Reference
+                    path: kubernetes/gateway-api/reference.mdx
           - section: Model Loading
             contents:
               - page: Model Caching
@@ -275,6 +285,8 @@ navigation:
                 path: observability/health-checks.md
               - page: Tracing
                 path: observability/tracing.md
+              - page: Forward Pass Metrics Tracing
+                path: observability/forward-pass-metrics-tracing.md
               - page: Logging
                 path: observability/logging.md
           - section: Inference Simulation
@@ -318,8 +330,16 @@ navigation:
                 path: features/multimodal/embedding-cache.md
               - page: Encoder Disaggregation
                 path: features/multimodal/encoder-disaggregation.md
+              - page: Custom Vision Encoders
+                path: features/multimodal/custom-vision-encoder.md
               - page: Multimodal KV Routing
                 path: features/multimodal/multimodal-kv-routing.md
+              - page: SGLang Multimodal
+                path: features/multimodal/multimodal-sglang.md
+              - page: TensorRT-LLM Multimodal
+                path: features/multimodal/multimodal-trtllm.md
+              - page: vLLM Multimodal
+                path: features/multimodal/multimodal-vllm.md
           - section: Diffusion
             slug: diffusion
             path: features/diffusion/README.md
@@ -469,8 +489,6 @@ navigation:
             contents:
               - page: LWS
                 path: kubernetes/lws.md
-              - page: Gateway API Inference Extension (GAIE)
-                path: kubernetes/inference-gateway.md
 
       # ==================== Design Docs ====================
       - section: Design Docs

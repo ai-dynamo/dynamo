@@ -415,6 +415,7 @@ mod tests {
             completed_requests: 1,
             output_signals: vec![OutputSignal {
                 uuid: request_id,
+                token_id: None,
                 completed: true,
                 rejected: false,
                 handoff_delay_ms: None,

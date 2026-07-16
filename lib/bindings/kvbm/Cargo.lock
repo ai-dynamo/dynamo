@@ -1540,9 +1540,12 @@ name = "dynamo-kv-router"
 version = "1.3.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
+ "crossbeam-queue",
  "dashmap",
  "derive_builder",
+ "dynamo-kv-hashing",
  "dynamo-runtime",
  "dynamo-tokens",
  "flume",
@@ -1556,6 +1559,7 @@ dependencies = [
  "seqlock",
  "serde",
  "serde_yaml",
+ "slotmap",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -1569,7 +1573,6 @@ dependencies = [
 name = "dynamo-llm"
 version = "1.3.0"
 dependencies = [
- "aho-corasick",
  "aligned-vec",
  "anyhow",
  "async-nats",
@@ -1621,6 +1624,9 @@ dependencies = [
  "object_store",
  "offset-allocator",
  "oneshot",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
  "parking_lot",
  "prometheus",
  "prost 0.13.5",
@@ -1705,11 +1711,15 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "2.1.2"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2577dd23a85f6108a628580e2f7f0ec7c149c21d2fe280210e4be7752e6dee03"
+checksum = "c18f8f6a2d325675a65beb0718940124a011e5ea25ee827df19028b965296a6c"
 dependencies = [
+ "aho-corasick",
  "anyhow",
+ "async-stream",
+ "dynamo-protocols",
+ "futures",
  "num-traits",
  "openai-harmony",
  "regex",
@@ -1723,9 +1733,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers-v2"
-version = "0.1.10"
+version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94ed5c413c09fd40cfb214a1e8cdcc8c7f536186f3bc5e433accfe24721b927c"
+checksum = "b5a8fca0f27b610454cd33858b5eb01c78c24d3ace7af2728d0723713775a939"
 dependencies = [
  "anyhow",
  "dynamo-parsers",
@@ -1739,9 +1749,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "2.0.0"
+version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81297abfd63194518877deca17a6d001ec84d4f157e8e401006f416d5c6bbc09"
+checksum = "3d1da866e573424e374c83d64dbf7807547054ebadcd85ddb2f9f67db06bf386"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -1756,9 +1766,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "1.3.4"
+version = "1.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc6658e06cd0dda37d493ac84d70cb33ea89fbe91056b152174351f7502fb46a"
+checksum = "3472f4ee978f581bac985c4f5ebad55a9b1b4ccb025ed3e9df708efa56e83bfa"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1854,9 +1864,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.3.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "801685a07cfbc87d5e3f3ed55b920707b67f31dd660c62d1b3532a651fc9d013"
+checksum = "61fb9c031ea19d99d1faf8ff304fe666eb2dbd4666fcb416af3f08ae88f5be80"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2251,15 +2261,6 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
-name = "fsevent-sys"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "futures"
@@ -4066,7 +4067,6 @@ checksum = "6205bd8bb1e454ad2e27422015fb5e4f2bcc7e08fa8f27058670d208324a4d2d"
 dependencies = [
  "bitflags 2.12.1",
  "filetime",
- "fsevent-sys",
  "inotify",
  "kqueue",
  "libc",

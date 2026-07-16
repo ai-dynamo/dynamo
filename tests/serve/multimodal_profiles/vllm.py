@@ -1,13 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import pytest
 
+from dynamo.common.utils.paths import WORKSPACE_DIR
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
     TopologyConfig,
     make_audio_payload,
+    make_custom_encoder_payload,
     make_image_payload,
     make_image_payload_b64,
     make_image_payload_cached_tokens,
@@ -40,6 +44,8 @@ _LLAVA_EXPECTED_COLORS = [
 VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",
     "agg_video": "agg_multimodal.sh",
+    "agg_unified": "agg_multimodal.sh",
+    "agg_unified_video": "agg_multimodal.sh",
     # Aggregated MM-aware router. Default uses the Rust frontend with the
     # `mm-routing` feature; the `_chat_processor` variant uses the vLLM
     # Python preprocessor (`--dyn-chat-processor=vllm`) to enable the
@@ -53,6 +59,11 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
+    "p_d_unified": "disagg_multimodal_p_d.sh",
+    # CustomEncoder: a custom in-process vision encoder on a text-only LM
+    # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
+    # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
+    "agg_custom": "agg_custom.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -100,11 +111,71 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
-            # Pre_merge gater for the MM-routing path. Fine-grained
-            # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
-            # (post_merge).
-            "agg_router": TopologyConfig(
+            "agg_unified": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=9.6,
+                requested_vllm_kv_cache_bytes=922_354_000,
+                tests=[
+                    MmCase(
+                        suffix="image",
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                    ),
+                    MmCase(
+                        suffix="embedding_cache",
+                        payload=make_image_payload(
+                            ["green"],
+                            repeat_count=2,
+                            expected_log=[
+                                r"DynamoMultimodalEmbeddingCacheConnector "
+                                r"initialized: capacity_gb=1\.00"
+                            ],
+                        ),
+                        extra_script_args=[
+                            "--unified",
+                            "--multimodal-embedding-cache-capacity-gb",
+                            "1",
+                        ],
+                    ),
+                    MmCase(
+                        suffix="shm_transfer",
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                        env={
+                            "DYN_CHAT_PROCESSOR": "vllm",
+                            "DYNAMO_MM_TRANSFER": "shm",
+                        },
+                    ),
+                    MmCase(
+                        suffix="nixl_transfer",
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                        marks=[pytest.mark.post_merge],
+                        env={
+                            "DYN_CHAT_PROCESSOR": "vllm",
+                            "DYNAMO_MM_TRANSFER": "nixl",
+                        },
+                    ),
+                ],
+            ),
+            "agg_unified_video": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=600,
+                delayed_start=60,
+                profiled_vram_gib=8.2,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                tests=[
+                    MmCase(
+                        payload=make_video_payload(["red", "static", "still"]),
+                        extra_script_args=["--unified"],
+                    )
+                ],
+            ),
+            # Post_merge MM-routing coverage for the Qwen3-VL family — the
+            # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
                 requested_vllm_kv_cache_bytes=536_870_912,
@@ -122,7 +193,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
             # (Python preprocessor) instead of the Rust MM-routing path. Kept
-            # on post_merge — the Rust-frontend variant above (`agg_router`) is
+            # on post_merge — the Rust-frontend variant of Qwen3.5-0.8B is
             # the pre_merge gate; adding chat_processor doubles the GPU0
             # queue time at 4-worker scale without catching distinct bugs
             # (both paths share the kv_router downstream).
@@ -187,6 +258,19 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 profiled_vram_gib=15.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
                 tests=[MmCase(payload=make_image_payload(["green"]))],
+            ),
+            "p_d_unified": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=300,
+                single_gpu=True,
+                profiled_vram_gib=15.7,
+                requested_vllm_kv_cache_bytes=1_714_881_000,
+                tests=[
+                    MmCase(
+                        payload=make_image_payload(["green"]),
+                        extra_script_args=["--unified"],
+                    )
+                ],
             ),
         },
     ),
@@ -261,18 +345,38 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=920_126_000,  # 2x safety over min=460_062_720
                 tests=[
                     # HTTP-URL color test on hybrid Mamba/full-attention VL.
-                    # post_merge — qwen3-vl-2b carries the pre_merge baseline.
                     MmCase(payload=make_image_payload(["green"])),
-                    # Inline-base64 + --frontend-decoding (NIXL RDMA path) on
-                    # the hybrid Mamba/full-attention VL. post_merge for the
-                    # same NIXL-stub reason as qwen3-vl-2b's frontend_decoding
-                    # cases — see that topology for the rationale.
+                    # Inline-base64 + --frontend-decoding (NIXL RDMA path).
+                    # post_merge for the NIXL-stub reason — local pre-merge
+                    # builds outside Docker ship a NIXL stub that errors on
+                    # the runtime cudaMemcpy backend; CI post_merge runs in a
+                    # container with real NIXL.
                     MmCase(
                         suffix="b64_frontend_decoding",
                         payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
                         marks=[pytest.mark.post_merge],
                     ),
+                ],
+            ),
+            # qwen3_5 hybrid GDN: routing block_size ~544 (Mamba page-aligned),
+            # hit-rate ceiling (N-1)/N. Filler 120 → ~6 blocks → ceiling ≈0.83;
+            # threshold 0.7 fires on real degradation, tolerates variance.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=8.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
+                env={"SINGLE_GPU": "true"},
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.7,
+                            prompt_filler_repeats=120,
+                        )
+                    )
                 ],
             ),
         },
@@ -502,6 +606,39 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         )
                     )
                 ],
+            ),
+        },
+    ),
+    # CustomEncoder coverage. NOTE: Qwen2.5-1.5B-Instruct is a TEXT-ONLY LM —
+    # it sits in the multimodal profiles because the in-process CustomEncoder
+    # *plugin* (a custom vision encoder) gives it the image->embeds serving
+    # path; the multimodality comes from the encoder, not the model. The
+    # `agg_custom` topology launches examples/custom_encoder/launch/agg_custom.sh
+    # (hence the `directory` override) with the example HitchhikersVisionEncoder,
+    # which fakes an image as a fixed phrase so the spliced prompt answers "42".
+    MultimodalModelProfile(
+        name="Qwen/Qwen2.5-1.5B-Instruct",
+        short_name="custom-encoder",
+        topologies={
+            "agg_custom": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=300,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    # The single-GPU test container exposes its GPU at device 0,
+                    # so pin the worker there.
+                    "DYN_WORKER_GPU": "0",
+                    "DYN_ENCODER_CLASS": (
+                        "examples.custom_encoder.hitchhikers_vision_encoder."
+                        "HitchhikersVisionEncoder"
+                    ),
+                    "DYN_CUSTOM_JINJA_TEMPLATE": os.path.join(
+                        WORKSPACE_DIR,
+                        "examples/custom_encoder/templates/qwen_vl.jinja",
+                    ),
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[MmCase(payload=make_custom_encoder_payload())],
             ),
         },
     ),

@@ -279,6 +279,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	serviceReplicaStatus := &nvidiacomv1beta1.ComponentReplicaStatus{
 		ComponentKind:     nvidiacomv1beta1.ComponentKindDeployment,
 		ComponentNames:    []string{deployment.Name},
+		RuntimeNamespace:  dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment),
 		Replicas:          deployment.Status.Replicas,
 		UpdatedReplicas:   deployment.Status.UpdatedReplicas,
 		ReadyReplicas:     &deployment.Status.ReadyReplicas,
@@ -379,6 +380,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 	}
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
+	lwsReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment)
 	if IsLeaderWorkerSetReady(lwsObj) {
 		return ComponentReconcileResult{
 			modified:             anyModified,
@@ -540,11 +542,6 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 
 	if err != nil {
 		return nil, errors.Wrap(err, "generateWorkerPodTemplateSpec: failed to check LWS worker main container")
-	}
-
-	resources := dynamo.GetMainContainerResources(&opt.dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec)
-	if gpu, ok := resources.Limits[corev1.ResourceName("nvidia.com/gpu")]; !ok || gpu.IsZero() {
-		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for LWS worker pod")
 	}
 
 	return workerPodTemplateSpec, nil

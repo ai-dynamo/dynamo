@@ -4,6 +4,8 @@
 """Dynamo runtime configuration ArgGroup."""
 
 import argparse
+import logging
+import os
 from typing import List, Optional
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
@@ -12,6 +14,10 @@ from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.common.utils.output_modalities import OutputModality
+
+logger = logging.getLogger(__name__)
+_FPM_TRACE_VALUES = {"1", "0", "true", "false", "on", "off", "yes", "no"}
+_fpm_trace_invalid_warning_emitted = False
 
 
 class DynamoRuntimeConfig(ConfigBase):
@@ -22,6 +28,7 @@ class DynamoRuntimeConfig(ConfigBase):
     discovery_backend: str
     request_plane: str
     event_plane: Optional[str] = None
+    fpm_trace: bool = False
     connector: list[str]
     enable_local_indexer: bool
     durable_kv_events: bool
@@ -52,6 +59,29 @@ class DynamoRuntimeConfig(ConfigBase):
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
+
+        # The Rust FPM sink reads this setting from the process environment.
+        # Canonicalize the resolved CLI/env value before the runtime or backend
+        # child processes are created so --fpm-trace and --no-fpm-trace apply to
+        # both the Python instrumentation and the Rust persistence layer.
+        if self.fpm_trace or "DYN_FPM_TRACE" in os.environ:
+            raw_fpm_trace = os.environ.get("DYN_FPM_TRACE")
+            if (
+                raw_fpm_trace is not None
+                and raw_fpm_trace.strip().lower() not in _FPM_TRACE_VALUES
+                and not self.fpm_trace
+                and "DYN_FORWARDPASS_METRIC_PORT" not in os.environ
+            ):
+                global _fpm_trace_invalid_warning_emitted
+                if not _fpm_trace_invalid_warning_emitted:
+                    _fpm_trace_invalid_warning_emitted = True
+                    logger.warning(
+                        "Invalid DYN_FPM_TRACE value %r; expected one of 1/0, "
+                        "true/false, on/off, or yes/no. FPM tracing is disabled "
+                        "for this worker.",
+                        raw_fpm_trace,
+                    )
+            os.environ["DYN_FPM_TRACE"] = "1" if self.fpm_trace else "0"
 
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
@@ -127,6 +157,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             "all discovery backends. Set to 'nats' to use a NATS-based event plane.",
             choices=["nats", "zmq"],
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--fpm-trace",
+            env_var="DYN_FPM_TRACE",
+            default=False,
+            help="Persist backend forward-pass metrics to rotating gzip JSONL trace files. Also enables the backend FPM instrumentation required to produce those records.",
+        )
         add_argument(
             g,
             flag_name="--connector",
@@ -168,7 +205,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=None,
             choices=["enabled", "disabled"],
             help="Deployment-level default thinking mode for chat templates. "
-            "Client request thinking/chat_template_args values override this default.",
+            "Client request thinking, reasoning_effort, chat_template_args, or "
+            "chat_template_kwargs values override this default.",
         )
         # NOTE: This flag also exists in FrontendArgGroup (frontend_args.py).
         # Both definitions are needed: this one controls the Rust-native chat

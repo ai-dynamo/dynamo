@@ -99,7 +99,7 @@ OPERATOR_VERSION = settings.get('operator_version', _read_chart_app_version())
 # ---------------------------------------------------------------------------
 OPERATOR_DIR = os.getcwd()                                     # deploy/operator
 HELM_CHART   = os.path.join(OPERATOR_DIR, '..', 'helm', 'charts', 'platform')  # deploy/helm/charts/platform
-CRD_DIR      = os.path.join(HELM_CHART, 'components', 'operator', 'crds')
+CRD_DIR      = os.path.join(OPERATOR_DIR, 'config', 'crd', 'bases')
 
 # ---------------------------------------------------------------------------
 # Local tool binaries — ensure kubectl and helm are downloaded via `make`
@@ -119,10 +119,13 @@ IMG      = (REGISTRY + '/' + IMG_NAME) if REGISTRY else IMG_NAME
 IMG_REF  = IMG + ':' + IMG_TAG
 
 # ---------------------------------------------------------------------------
-# Compile the manager binary locally (much faster than building in Docker)
+# Compile operator binaries locally (much faster than building in Docker)
 # ---------------------------------------------------------------------------
 def compile_manager():
-    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tilt_bin/manager ./cmd/main.go'
+    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOWORK=off go build -o tilt_bin/manager ./cmd/main.go'
+
+def compile_dgd_override_tool():
+    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOWORK=off go build -o tilt_bin/dgd-apply-overrides ./cmd/dgd-apply-overrides'
 
 local_resource(
     'manager-build',
@@ -135,6 +138,19 @@ local_resource(
         'go.sum',
     ],
     ignore=['**/zz_generated.deepcopy.go'],
+    labels=['operator'],
+)
+
+local_resource(
+    'dgd-override-tool-build',
+    compile_dgd_override_tool(),
+    deps=[
+        'api/',
+        'cmd/dgd-apply-overrides/',
+        'internal/dgdoverride/',
+        'go.mod',
+        'go.sum',
+    ],
     labels=['operator'],
 )
 
@@ -217,7 +233,6 @@ def render_helm():
         '--set', 'dynamo-operator.controllerManager.manager.image.pullPolicy=IfNotPresent',
         # We apply CRDs ourselves in the local_resource above
         '--set', 'dynamo-operator.upgradeCRD=false',
-        '--skip-crds',
     ]
 
     # Wire in imagePullSecrets when a pull secret is configured
@@ -267,7 +282,7 @@ local(kubectl_cmd + ' create namespace %s || true' % NAMESPACE, quiet=True)
 k8s_yaml(render_helm())
 
 # ---------------------------------------------------------------------------
-# Docker image — minimal container with just the compiled binary
+# Docker image — minimal container with the compiled operator binaries
 # ---------------------------------------------------------------------------
 DOCKERFILE = '''
 FROM alpine:3.20 AS base
@@ -276,16 +291,24 @@ FROM base
 WORKDIR /
 COPY ./tilt_bin/manager /manager
 COPY ./tilt_bin/manager /workspace/manager
+COPY ./tilt_bin/dgd-apply-overrides /dgd-apply-overrides
 ENTRYPOINT ["/manager"]
 '''
+
+operator_entrypoint = [
+    '/manager',
+    '--config=/etc/dynamo-operator/config.yaml',
+    '--operator-version=' + OPERATOR_VERSION,
+    '--operator-image=' + IMG_REF,
+    '--operator-image-pull-policy=IfNotPresent',
+]
 
 docker_build_with_restart(
     IMG_REF,
     context='.',
     dockerfile_contents=DOCKERFILE,
-    entrypoint=['/manager', '--config=/etc/dynamo-operator/config.yaml',
-                '--operator-version=' + OPERATOR_VERSION],
-    only=['./tilt_bin/manager'],
+    entrypoint=operator_entrypoint,
+    only=['./tilt_bin/manager', './tilt_bin/dgd-apply-overrides'],
     live_update=[
         sync('./tilt_bin/manager', '/manager'),
     ],
@@ -303,7 +326,12 @@ k8s_resource(
     new_name='operator',
     labels=['operator'],
     port_forwards=['8081:8081'],  # health endpoint
-    resource_deps=['crds', 'manager-build', 'helm-dep-build'],
+    resource_deps=[
+        'crds',
+        'manager-build',
+        'dgd-override-tool-build',
+        'helm-dep-build',
+    ],
 )
 
 # Group subchart workloads in the Tilt UI

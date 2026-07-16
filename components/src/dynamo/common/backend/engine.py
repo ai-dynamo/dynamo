@@ -61,6 +61,7 @@ class GenerateRequest(TypedDict, total=False):
     sampling_options: dict[str, Any]
     stop_conditions: dict[str, Any]
     output_options: dict[str, Any]
+    require_reasoning: bool
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
     multi_modal_data: dict[str, Any]
@@ -95,7 +96,7 @@ class GenerateChunk(TypedDict, total=False):
     token_ids: Required[list[int]]
     index: Required[int]
     finish_reason: str
-    completion_usage: dict[str, int]
+    completion_usage: dict[str, Any]
     disaggregated_params: dict[str, Any]
     encoder_result: dict[str, Any]
     log_probs: list[float]

@@ -4,7 +4,6 @@
 """Unit tests for profiler config_modifiers/protocol helpers."""
 
 import copy
-import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -22,10 +21,7 @@ try:
     from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
         PickedParallelConfig,
     )
-    from dynamo.profiler.utils.config_modifiers.protocol import (
-        BaseConfigModifier,
-        apply_dgd_overrides,
-    )
+    from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
     from dynamo.profiler.utils.defaults import EngineType, SearchStrategy
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
@@ -40,6 +36,128 @@ except ImportError:
 def dgdr_name_env(monkeypatch):
     """Set DGDR_NAME so _validate_dgd_service_name_lengths runs in tests."""
     monkeypatch.setenv("DGDR_NAME", "test-dgdr")
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+@pytest.mark.parametrize("mode", ["agg", "disagg"])
+def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
+    dgd_config = CONFIG_MODIFIERS[backend].build_dgd_config(
+        mode=mode,
+        model_name="test/model",
+        image=f"example/{backend}:test",
+    )
+
+    assert dgd_config["apiVersion"] in {
+        "nvidia.com/v1alpha1",
+        "nvidia.com/v1beta1",
+    }
+    assert dgd_config["kind"] == "DynamoGraphDeployment"
+
+
+def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
+    """AIC tuning args must not remove Dynamo's vLLM disaggregation contract."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=["--tensor-parallel-size", "2"],
+        decode_cli_args=["--tensor-parallel-size", "4"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill = next(
+        service
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode = next(
+        service
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+    prefill_args = prefill["extraPodSpec"]["mainContainer"]["args"]
+    decode_args = decode["extraPodSpec"]["mainContainer"]["args"]
+
+    assert prefill_args[prefill_args.index("--tensor-parallel-size") + 1] == "2"
+    assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
+    assert (
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1]
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+    )
+    assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "4"
+    assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+    assert "--kv-transfer-config" not in decode_args
+
+
+def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
+    """An explicit connector remains authoritative while worker roles are canonical."""
+    custom_kv_config = (
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both",'
+        '"kv_buffer_device":"cpu"}'
+    )
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=[
+            "--disaggregation-mode=decode",
+            f"--kv-transfer-config '{custom_kv_config}'",
+        ],
+        decode_cli_args=["--disaggregation-mode", "prefill"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+
+    assert prefill_args.count("--disaggregation-mode") == 1
+    assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
+    assert prefill_args.count("--kv-transfer-config") == 1
+    assert (
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1] == custom_kv_config
+    )
+    assert decode_args.count("--disaggregation-mode") == 1
+    assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+
+
+def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
+    """Canonical worker roles must replace deprecated vLLM role flags."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="test/model",
+        image="example/vllm:test",
+        prefill_cli_args=["--is-prefill-worker", "--is-decode-worker"],
+        decode_cli_args=["--is-prefill-worker", "--is-decode-worker"],
+    )
+
+    services = dgd_config["spec"]["services"]
+    prefill_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "prefill"
+    )
+    decode_args = next(
+        service["extraPodSpec"]["mainContainer"]["args"]
+        for service in services.values()
+        if service.get("subComponentType") == "decode"
+    )
+
+    for args, expected_mode in ((prefill_args, "prefill"), (decode_args, "decode")):
+        assert "--is-prefill-worker" not in args
+        assert "--is-decode-worker" not in args
+        assert args.count("--disaggregation-mode") == 1
+        assert args[args.index("--disaggregation-mode") + 1] == expected_mode
 
 
 def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
@@ -323,189 +441,8 @@ def test_build_dgd_config_multinode_parses_shell_joined_parallelism_args() -> No
     assert decode_service["multinode"] == {"nodeCount": 4}
 
 
-def test_apply_dgd_overrides_strips_envelope() -> None:
-    """Envelope fields are stripped; nested payload keys are deep-merged."""
-    dgd_config = {
-        "apiVersion": "dynamo.ai/v1alpha1",
-        "kind": "DynamoGraphDeployment",
-        "metadata": {"name": "my-deployment", "namespace": "default"},
-        "spec": {
-            "services": {
-                "Frontend": {"replicas": 1},
-            }
-        },
-    }
-    overrides = {
-        # Envelope fields — must be stripped entirely.
-        "apiVersion": "dynamo.ai/v1beta1",
-        "kind": "SomethingElse",
-        # metadata identity keys must be stripped; labels/annotations kept.
-        "metadata": {
-            "name": "injected-name",
-            "namespace": "injected-ns",
-            "uid": "abc-123",
-            "resourceVersion": "999",
-            "labels": {"team": "infra"},
-            "annotations": {"note": "perf-run"},
-        },
-        # Regular payload key — must be deep-merged.
-        "spec": {
-            "services": {
-                "Frontend": {"replicas": 3},
-            }
-        },
-    }
-
-    result = apply_dgd_overrides(dgd_config, overrides)
-
-    # apiVersion and kind must not be changed.
-    assert result["apiVersion"] == "dynamo.ai/v1alpha1"
-    assert result["kind"] == "DynamoGraphDeployment"
-
-    # Identity metadata keys must not be overwritten.
-    assert result["metadata"]["name"] == "my-deployment"
-    assert result["metadata"]["namespace"] == "default"
-    assert "uid" not in result["metadata"]
-    assert "resourceVersion" not in result["metadata"]
-
-    # Safe metadata keys must be merged in.
-    assert result["metadata"]["labels"] == {"team": "infra"}
-    assert result["metadata"]["annotations"] == {"note": "perf-run"}
-
-    # Regular spec overrides must be applied.
-    assert result["spec"]["services"]["Frontend"]["replicas"] == 3
-
-    # Original dicts must not be mutated.
-    assert dgd_config["apiVersion"] == "dynamo.ai/v1alpha1"
-    assert dgd_config["spec"]["services"]["Frontend"]["replicas"] == 1
-
-
-def test_apply_dgd_overrides_no_metadata_in_overrides() -> None:
-    """When overrides contain no metadata key, existing metadata is untouched."""
-    dgd_config = {
-        "apiVersion": "dynamo.ai/v1alpha1",
-        "kind": "DynamoGraphDeployment",
-        "metadata": {"name": "svc", "namespace": "ns"},
-        "spec": {"services": {"Backend": {"replicas": 2}}},
-    }
-    overrides = {"spec": {"services": {"Backend": {"replicas": 5}}}}
-
-    result = apply_dgd_overrides(dgd_config, overrides)
-
-    assert result["metadata"] == {"name": "svc", "namespace": "ns"}
-    assert result["spec"]["services"]["Backend"]["replicas"] == 5
-
-
-def test_apply_dgd_overrides_metadata_only_identity_keys_dropped_entirely() -> None:
-    """If metadata override contains only identity keys, nothing is merged into metadata."""
-    dgd_config = {
-        "apiVersion": "dynamo.ai/v1alpha1",
-        "kind": "DynamoGraphDeployment",
-        "metadata": {"name": "svc"},
-        "spec": {},
-    }
-    overrides = {
-        "metadata": {"name": "other", "namespace": "other-ns", "uid": "x"},
-    }
-
-    result = apply_dgd_overrides(dgd_config, overrides)
-
-    # Only original metadata should remain — no extra keys added.
-    assert result["metadata"] == {"name": "svc"}
-
-
-def test_apply_dgd_overrides_extrapodspec_tolerations() -> None:
-    """extraPodSpec.tolerations from overrides are merged into existing services.
-
-    Regression test for TC-5.2a: interpolation DGDs were deployed without
-    tolerations because apply_dgd_overrides was called after run_interpolation.
-    This test verifies the merge logic itself is correct.
-    """
-    toleration = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
-    dgd_config = {
-        "spec": {
-            "services": {
-                "VllmDecodeWorker": {
-                    "componentType": "worker",
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "image": "my-image",
-                            "args": ["--model", "Qwen3-32B"],
-                        }
-                    },
-                    "replicas": 1,
-                },
-                "Frontend": {
-                    "extraPodSpec": {},
-                },
-            }
-        }
-    }
-    overrides = {
-        "apiVersion": "nvidia.com/v1alpha1",
-        "kind": "DynamoGraphDeployment",
-        "metadata": {"name": "placeholder"},
-        "spec": {
-            "services": {
-                "VllmDecodeWorker": {"extraPodSpec": {"tolerations": [toleration]}},
-                "Frontend": {"extraPodSpec": {"tolerations": [toleration]}},
-            }
-        },
-    }
-
-    result = apply_dgd_overrides(dgd_config, overrides)
-
-    # Tolerations must be present on both services.
-    decode_eps = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
-    assert decode_eps["tolerations"] == [toleration]
-    # mainContainer must be preserved (not overwritten).
-    assert decode_eps["mainContainer"]["image"] == "my-image"
-
-    frontend_eps = result["spec"]["services"]["Frontend"]["extraPodSpec"]
-    assert frontend_eps["tolerations"] == [toleration]
-
-    # Original must not be mutated.
-    assert (
-        "tolerations"
-        not in dgd_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
-    )
-
-
-def test_apply_dgd_overrides_missing_service_skipped_with_warning(caplog) -> None:
-    """Overrides for services absent from the DGD are skipped with a warning."""
-    dgd_config = {
-        "spec": {
-            "services": {
-                "Frontend": {"replicas": 1},
-            }
-        }
-    }
-    overrides = {
-        "spec": {
-            "services": {
-                "Frontend": {"replicas": 2},
-                "NonExistentWorker": {
-                    "extraPodSpec": {"tolerations": [{"key": "foo"}]}
-                },
-            }
-        }
-    }
-
-    with caplog.at_level(
-        logging.WARNING, logger="dynamo.profiler.utils.config_modifiers.protocol"
-    ):
-        result = apply_dgd_overrides(dgd_config, overrides)
-
-    assert result["spec"]["services"]["Frontend"]["replicas"] == 2
-    assert "NonExistentWorker" not in result["spec"]["services"]
-    assert any(
-        "NonExistentWorker" in r.getMessage() and r.levelno == logging.WARNING
-        for r in caplog.records
-    ), "Expected a WARNING mentioning 'NonExistentWorker'"
-
-
 # ---------------------------------------------------------------------------
-# Orchestration-level test: run_profile applies overrides before interpolation
+# Orchestration-level test: each generated DGD receives the override once
 # ---------------------------------------------------------------------------
 
 _TOLERATION = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"}
@@ -535,18 +472,28 @@ _OVERRIDE_DGD = {
 }
 
 
-async def test_run_profile_applies_dgd_overrides_before_interpolation(
-    tmp_path, caplog
-) -> None:
-    """run_profile must apply DGD overrides to dgd_config before run_interpolation.
-
-    Regression guard for TC-5.2a: without the fix, interpolation pods were
-    deployed without extraPodSpec.tolerations, causing them to stay Pending on
-    GPU nodes with nvidia.com/gpu:NoSchedule taints.
-    """
+async def test_run_profile_applies_override_once_to_each_consumed_dgd(tmp_path) -> None:
+    """Interpolation and final output each receive one independently merged DGD."""
     from dynamo.profiler.profile_sla import run_profile
 
     base_dgd = copy.deepcopy(_BASE_DGD)
+    override_inputs: list[dict] = []
+
+    def _fake_apply_dgd_overrides(dgd_config, overrides):
+        override_inputs.append(copy.deepcopy(dgd_config))
+        result = copy.deepcopy(dgd_config)
+        services = result["spec"]["services"]
+        for name, service_override in overrides["spec"]["services"].items():
+            if name not in services:
+                continue
+            services[name].setdefault("extraPodSpec", {}).update(
+                service_override["extraPodSpec"]
+            )
+        services["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"]["args"].append(
+            "--override-applied"
+        )
+        return result
+
     dgdr = DynamoGraphDeploymentRequestSpec(
         model="test/model",
         overrides=OverridesSpec(dgd=_OVERRIDE_DGD),
@@ -608,21 +555,23 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
             new=_fake_interpolation,
         ),
         patch(
+            "dynamo.profiler.utils.dgd_materialization.apply_dgd_overrides",
+            side_effect=_fake_apply_dgd_overrides,
+        ),
+        patch(
             "dynamo.profiler.profile_sla.assemble_final_config",
             return_value=copy.deepcopy(base_dgd),
-        ),
-        patch("dynamo.profiler.profile_sla._write_final_output", return_value=True),
+        ) as assemble_final,
+        patch(
+            "dynamo.profiler.profile_sla._write_final_output", return_value=True
+        ) as write_final,
         patch("dynamo.profiler.profile_sla.write_profiler_status"),
         patch(
             "dynamo.profiler.profile_sla.cleanup_remaining_deployments",
             new=AsyncMock(),
         ),
     ):
-        with caplog.at_level(
-            logging.WARNING,
-            logger="dynamo.profiler.utils.config_modifiers.protocol",
-        ):
-            await run_profile(dgdr, ops)
+        await run_profile(dgdr, ops)
 
     assert interpolation_kwargs, "run_interpolation was never called"
     disagg_config = interpolation_kwargs["disagg_config"]
@@ -633,17 +582,27 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
 
     # mainContainer must be preserved (not overwritten by the tolerations merge).
     assert eps["mainContainer"]["image"] == "my-image"
+    assert eps["mainContainer"]["args"].count("--override-applied") == 1
 
     # GhostService (absent from base DGD) must be silently skipped.
     assert "GhostService" not in disagg_config["spec"]["services"]
 
-    # apply_dgd_overrides must emit a WARNING about the skipped service.
-    assert any(
-        "GhostService" in r.getMessage() and r.levelno == logging.WARNING
-        for r in caplog.records
-    ), "Expected a WARNING mentioning the skipped 'GhostService'"
+    # The final assembly receives the clean picked DGD, not the interpolation copy.
+    assert assemble_final.call_args.args[2] == base_dgd
+    assert len(override_inputs) == 2
+    for override_input in override_inputs:
+        args = override_input["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+            "mainContainer"
+        ]["args"]
+        assert "--override-applied" not in args
 
-    # apply_dgd_overrides must not mutate its input.
+    final_config = write_final.call_args.args[1]
+    final_args = final_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert final_args.count("--override-applied") == 1
+
+    # Neither merge mutates the clean picked DGD.
     assert (
         "tolerations"
         not in base_dgd["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
@@ -746,6 +705,114 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
         assert (
             model_path in flat_args
         ), f"Worker '{svc_name}' should use PVC model path '{model_path}'. args={args}"
+        assert args[args.index("--served-model-name") + 1] == model_name
+
+
+@pytest.mark.parametrize(
+    "backend,model_arg",
+    [("vllm", "--model"), ("sglang", "--model-path"), ("trtllm", "--model-path")],
+)
+def test_update_model_from_pvc_canonicalizes_duplicate_model_args(
+    backend, model_arg
+) -> None:
+    """PVC model updates leave exactly one logical name and runtime path."""
+    modifier = CONFIG_MODIFIERS[backend]
+    model_name = "Qwen/Qwen3-32B"
+    mount_path = "/opt/model-cache"
+    model_path = f"{mount_path}/qwen3-32b"
+    dgd_config = modifier.build_dgd_config(
+        mode="agg",
+        model_name="stale/model",
+        image=f"example/{backend}:test",
+        agg_cli_args=[],
+        agg_replicas=1,
+        agg_gpus=1,
+    )
+
+    services = dgd_config["spec"]["services"]
+    worker = next(
+        service
+        for name, service in services.items()
+        if name not in BaseConfigModifier._NON_WORKER_SERVICES
+    )
+    worker_args = worker["extraPodSpec"]["mainContainer"]["args"]
+    worker_args.extend(
+        [
+            f"{model_arg}=/stale/equal-form",
+            model_arg,
+            "/stale/split-form",
+            "--served-model-name=stale-equal",
+            "--served-model-name",
+            "stale-split",
+        ]
+    )
+
+    frontend_container = services["Frontend"]["extraPodSpec"]["mainContainer"]
+    frontend_container["args"] = frontend_container.get("args") or []
+    frontend_args = frontend_container["args"]
+    frontend_args.extend(
+        [
+            "--model-name=stale-equal",
+            "--model-name",
+            "stale-split",
+            "--model-path=/stale/equal-form",
+            "--model-path",
+            "/stale/split-form",
+        ]
+    )
+
+    result = modifier.update_model_from_pvc(
+        dgd_config,
+        model_name=model_name,
+        pvc_name="model-cache",
+        pvc_mount_path=mount_path,
+        pvc_path="qwen3-32b",
+    )
+
+    result_services = result["spec"]["services"]
+    result_worker = next(
+        service
+        for name, service in result_services.items()
+        if name not in BaseConfigModifier._NON_WORKER_SERVICES
+    )
+    result_worker_args = result_worker["extraPodSpec"]["mainContainer"]["args"]
+    assert [
+        arg
+        for arg in result_worker_args
+        if arg == model_arg or arg.startswith(f"{model_arg}=")
+    ] == [model_arg]
+    assert result_worker_args[result_worker_args.index(model_arg) + 1] == model_path
+    assert [
+        arg
+        for arg in result_worker_args
+        if arg == "--served-model-name" or arg.startswith("--served-model-name=")
+    ] == ["--served-model-name"]
+    assert (
+        result_worker_args[result_worker_args.index("--served-model-name") + 1]
+        == model_name
+    )
+
+    result_frontend_args = result_services["Frontend"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ]
+    assert [
+        arg
+        for arg in result_frontend_args
+        if arg == "--model-name" or arg.startswith("--model-name=")
+    ] == ["--model-name"]
+    assert [
+        arg
+        for arg in result_frontend_args
+        if arg == "--model-path" or arg.startswith("--model-path=")
+    ] == ["--model-path"]
+    assert (
+        result_frontend_args[result_frontend_args.index("--model-name") + 1]
+        == model_name
+    )
+    assert (
+        result_frontend_args[result_frontend_args.index("--model-path") + 1]
+        == model_path
+    )
 
 
 def test_build_dgd_config_pvc_without_model_path_sets_hf_home() -> None:
@@ -810,3 +877,479 @@ def test_build_dgd_config_pvc_with_model_path_no_hf_home() -> None:
         assert (
             len(hf_homes) == 0
         ), f"HF_HOME should not be set on {svc_name} when model_path is a PVC subpath"
+
+
+# -----------------------------------------------------------------------------
+# auto_inject_trust_remote_code / model_has_auto_map
+# -----------------------------------------------------------------------------
+
+
+def _make_dgd_with_workers(*worker_names: str) -> dict:
+    """Build a minimal DGD dict with the given worker services + a Frontend."""
+    services: dict = {
+        "Frontend": {
+            "extraPodSpec": {
+                "mainContainer": {"args": ["--http-port", "8000"]},
+            },
+        },
+    }
+    for name in worker_names:
+        services[name] = {
+            "extraPodSpec": {
+                "mainContainer": {"args": ["--model", "some/model", "--tp", "1"]},
+            },
+        }
+    return {"spec": {"services": services}}
+
+
+def test_model_has_auto_map_local_dir_with_auto_map(tmp_path) -> None:
+    import json as _json
+
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    cfg = {
+        "model_type": "nemotron_h",
+        "auto_map": {
+            "AutoConfig": "configuration_nemotron_h.NemotronHConfig",
+            "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM",
+        },
+    }
+    (tmp_path / "config.json").write_text(_json.dumps(cfg))
+    assert model_has_auto_map(tmp_path) is True
+
+
+def test_model_has_auto_map_local_dir_without_auto_map(tmp_path) -> None:
+    import json as _json
+
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    (tmp_path / "config.json").write_text(_json.dumps({"model_type": "llama"}))
+    assert model_has_auto_map(tmp_path) is False
+
+
+def test_model_has_auto_map_local_dir_missing_config_returns_false(tmp_path) -> None:
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    assert model_has_auto_map(tmp_path) is False
+
+
+def test_materialize_dgd_injects_trust_remote_code_for_vllm() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    decode_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert decode_args[-1] == "--trust-remote-code"
+    # Original args preserved.
+    assert decode_args[:-1] == ["--model", "some/model", "--tp", "1"]
+    # Frontend untouched.
+    assert "--trust-remote-code" not in (
+        result["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+    )
+
+
+def test_materialize_dgd_injects_trust_remote_code_for_sglang() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("SglangDecodeWorker", "SglangPrefillWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="sglang",
+            model_name_or_path="some/model",
+        )
+
+    for svc in ("SglangDecodeWorker", "SglangPrefillWorker"):
+        args = result["spec"]["services"][svc]["extraPodSpec"]["mainContainer"]["args"]
+        assert args.count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_skips_trust_when_no_auto_map() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=False,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert "--trust-remote-code" not in args
+
+
+def test_materialize_dgd_fails_closed_for_mutable_remote_ref() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=False,
+    ):
+        with pytest.raises(
+            RuntimeError, match="Refusing to auto-inject --trust-remote-code"
+        ):
+            materialize_dgd(
+                cfg,
+                purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+                runtime_backend="vllm",
+                model_name_or_path="some/model",
+            )
+
+
+def test_materialize_dgd_skips_trust_for_trtllm() -> None:
+    """TRT-LLM uses a YAML field, not the CLI flag."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("TRTLLMDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="trtllm",
+            model_name_or_path="some/model",
+        )
+
+    args = result["spec"]["services"]["TRTLLMDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert "--trust-remote-code" not in args
+
+
+def test_materialize_dgd_remote_ref_with_explicit_override_skips_error() -> None:
+    """When the user already set --trust-remote-code via overrides, the
+    mutable-remote-ref error must not fire — the manual escape hatch works."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    # Simulate user override having already appended the flag.
+    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ].append("--trust-remote-code")
+
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=False,
+    ):
+        # Should NOT raise RuntimeError because the flag is already present.
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/remote-model",
+        )
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_trust_injection_is_idempotent() -> None:
+    """Running materialize_dgd twice must not duplicate the flag."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+        result2 = materialize_dgd(
+            result,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    args = result2["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_respects_existing_trust_flag() -> None:
+    """An explicit --trust-remote-code already in args must not be duplicated."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]["mainContainer"][
+        "args"
+    ].append("--trust-remote-code")
+
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args.count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_excludes_frontend_and_planner() -> None:
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = _make_dgd_with_workers("VllmDecodeWorker")
+    cfg["spec"]["services"]["Planner"] = {
+        "extraPodSpec": {"mainContainer": {"args": ["--interval", "30"]}},
+    }
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    assert "--trust-remote-code" not in (
+        result["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"]["args"]
+    )
+    assert "--trust-remote-code" not in (
+        result["spec"]["services"]["Planner"]["extraPodSpec"]["mainContainer"]["args"]
+    )
+
+
+def test_materialize_dgd_shell_form_worker() -> None:
+    """Shell-form workers (command=['sh','-c'], args=['<single string>']) must
+    have the flag appended inside the string, not as a second list element."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    cfg = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [
+                                "python3 -m vllm.entrypoints.openai.api_server "
+                                "--model some/model --tp 1"
+                            ],
+                        },
+                    },
+                },
+            }
+        }
+    }
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    # Must still be a single-element list (shell form preserved).
+    assert isinstance(result_args, list) and len(result_args) == 1
+    assert result_args[0].endswith("--trust-remote-code")
+
+    # Idempotency: materializing again must not duplicate the flag.
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result2 = materialize_dgd(
+            result,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result2_args = result2["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert len(result2_args) == 1
+    assert result2_args[0].count("--trust-remote-code") == 1
+
+
+def test_materialize_dgd_shell_form_preserves_syntax() -> None:
+    """Shell-form args with shell operators (&&, |, etc.) must not be
+    corrupted by shlex round-tripping."""
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
+
+    original_cmd = (
+        "export FOO=bar && python3 -m vllm.entrypoints.openai.api_server "
+        "--model some/model --tp 1"
+    )
+    cfg = {
+        "spec": {
+            "services": {
+                "VllmDecodeWorker": {
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [original_cmd],
+                        },
+                    },
+                },
+            }
+        }
+    }
+    with patch(
+        "dynamo.profiler.utils.dgd_materialization.model_has_auto_map",
+        return_value=True,
+    ), patch(
+        "dynamo.profiler.utils.dgd_materialization.model_ref_allows_implicit_trust_remote_code",
+        return_value=True,
+    ):
+        result = materialize_dgd(
+            cfg,
+            purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+            runtime_backend="vllm",
+            model_name_or_path="some/model",
+        )
+
+    result_args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert len(result_args) == 1
+    # The original shell syntax (&&, export) must be preserved verbatim.
+    assert result_args[0] == original_cmd + " --trust-remote-code"
+
+
+def test_model_has_auto_map_returns_true_on_unexpected_error() -> None:
+    """Unexpected errors (network, auth) must return True (conservative default)
+    rather than silently returning False and risking a missed injection."""
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    with patch(
+        "dynamo.profiler.utils.model_info.hf_hub_download",
+        side_effect=OSError("simulated network failure"),
+    ):
+        result = model_has_auto_map("some/hf-model")
+
+    assert result is True
+
+
+def test_model_has_auto_map_returns_false_for_repo_not_found() -> None:
+    """RepositoryNotFoundError means the model doesn't exist — no custom code.
+    The detection uses type(e).__name__ so no huggingface_hub import is needed."""
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    class RepositoryNotFoundError(Exception):
+        pass
+
+    with patch(
+        "dynamo.profiler.utils.model_info.hf_hub_download",
+        side_effect=RepositoryNotFoundError("404"),
+    ):
+        result = model_has_auto_map("nonexistent/model")
+
+    assert result is False
+
+
+def test_model_has_auto_map_returns_false_for_malformed_json(tmp_path) -> None:
+    """Malformed config.json must return False (can't parse, assume no auto_map)."""
+    from dynamo.profiler.utils.model_info import model_has_auto_map
+
+    (tmp_path / "config.json").write_text("{this is not valid json}")
+    result = model_has_auto_map(tmp_path)
+    assert result is False

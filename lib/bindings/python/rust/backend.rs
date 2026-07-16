@@ -44,6 +44,7 @@ use crate::ModelInput;
 use crate::context::Context as PyContext;
 use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
+use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
 
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
@@ -305,7 +306,6 @@ impl WorkerConfig {
         custom_jinja_template = None,
         tool_call_parser = None,
         reasoning_parser = None,
-        default_thinking_mode = None,
         exclude_tools_when_tool_choice_none = true,
         enable_local_indexer = true,
         enable_kv_routing = true,
@@ -317,6 +317,9 @@ impl WorkerConfig {
         structural_tag_scope = "auto".to_string(),
         structural_tag_schema = "auto".to_string(),
         route_to_encoder = false,
+        media_decoder = None,
+        media_fetcher = None,
+        default_thinking_mode = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -331,7 +334,6 @@ impl WorkerConfig {
         custom_jinja_template: Option<String>,
         tool_call_parser: Option<String>,
         reasoning_parser: Option<String>,
-        default_thinking_mode: Option<String>,
         exclude_tools_when_tool_choice_none: bool,
         enable_local_indexer: bool,
         enable_kv_routing: bool,
@@ -343,6 +345,9 @@ impl WorkerConfig {
         structural_tag_scope: String,
         structural_tag_schema: String,
         route_to_encoder: bool,
+        media_decoder: Option<MediaDecoder>,
+        media_fetcher: Option<MediaFetcher>,
+        default_thinking_mode: Option<String>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -421,6 +426,8 @@ impl WorkerConfig {
                 structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
                 route_to_encoder,
+                media_decoder: media_decoder.map(|decoder| decoder.inner),
+                media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
         })
     }

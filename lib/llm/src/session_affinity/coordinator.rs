@@ -112,6 +112,11 @@ impl AffinityCoordinator {
             waiter_observed: Arc::new(Notify::new()),
         });
         Self::spawn_reaper(&inner);
+        tracing::info!(
+            ttl_secs = ttl.as_secs(),
+            max_entries,
+            "session affinity enabled"
+        );
         Ok(Self { inner })
     }
 
@@ -152,7 +157,7 @@ impl AffinityCoordinator {
     }
 
     #[cfg(test)]
-    pub async fn acquire(
+    pub(crate) async fn acquire(
         &self,
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
@@ -160,7 +165,7 @@ impl AffinityCoordinator {
         self.acquire_inner(session_id, requested_target, None).await
     }
 
-    pub async fn acquire_with_context(
+    pub(crate) async fn acquire_with_context(
         &self,
         session_id: &SessionAffinityId,
         requested_target: Option<AffinityTarget>,
@@ -184,6 +189,10 @@ impl AffinityCoordinator {
             match self.inner.entries.entry(session_id.clone()) {
                 Entry::Vacant(entry) => {
                     self.reserve_entry()?;
+                    tracing::debug!(
+                        session_id = %session_id,
+                        "session affinity miss: new session, pinning after worker selection"
+                    );
                     return Ok(AffinityAcquire::Initialize(entry.insert_initializing(
                         &self.inner,
                         session_id,
@@ -219,6 +228,10 @@ impl AffinityCoordinator {
                         active_leases,
                         idle_deadline,
                     } if *active_leases == 0 && *idle_deadline <= now => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            "session affinity miss: pin expired (idle past TTL), re-selecting worker"
+                        );
                         let revision = self.inner.next_revision.fetch_add(1, Ordering::Relaxed);
                         let notify = Arc::new(Notify::new());
                         *entry.get_mut() = AffinityEntry::Initializing {
@@ -242,6 +255,13 @@ impl AffinityCoordinator {
                         ..
                     } => {
                         validate_bound_target(&session_id, *target, requested_target)?;
+                        tracing::debug!(
+                            session_id = %session_id,
+                            worker_id = target.worker_id,
+                            dp_rank = ?target.dp_rank,
+                            active_leases = *active_leases + 1,
+                            "session affinity hit: reusing pinned worker"
+                        );
                         *active_leases += 1;
                         let lease = AffinityLease {
                             coordinator: Arc::downgrade(&self.inner),
@@ -281,6 +301,13 @@ impl AffinityCoordinator {
             return Ok(None);
         }
         validate_bound_target(session_id.as_str(), *target, requested_target)?;
+        tracing::debug!(
+            session_id = %session_id.as_str(),
+            worker_id = target.worker_id,
+            dp_rank = ?target.dp_rank,
+            "session affinity hit: reusing pinned worker"
+        );
+
         Ok(Some(*target))
     }
 
@@ -380,7 +407,7 @@ impl<'a> VacantEntryExt for dashmap::mapref::entry::VacantEntry<'a, String, Affi
     }
 }
 
-pub enum AffinityAcquire {
+pub(crate) enum AffinityAcquire {
     Initialize(AffinityInitialization),
     Bound {
         target: AffinityTarget,
@@ -389,14 +416,14 @@ pub enum AffinityAcquire {
 }
 
 impl AffinityAcquire {
-    pub fn target(&self) -> Option<AffinityTarget> {
+    pub(crate) fn target(&self) -> Option<AffinityTarget> {
         match self {
             Self::Initialize(_) => None,
             Self::Bound { target, .. } => Some(*target),
         }
     }
 
-    pub fn into_stream(
+    pub(crate) fn into_stream(
         self,
         selected_target: AffinityTarget,
         stream: ManyOut<LlmResponse>,
@@ -416,14 +443,14 @@ impl AffinityAcquire {
         }
     }
 
-    pub fn invalidate(self) {
+    pub(crate) fn invalidate(self) {
         if let Self::Bound { mut lease, .. } = self {
             lease.invalidate();
         }
     }
 }
 
-pub struct AffinityInitialization {
+pub(crate) struct AffinityInitialization {
     coordinator: Weak<AffinityCoordinatorInner>,
     session_id: String,
     revision: u64,
@@ -433,7 +460,7 @@ pub struct AffinityInitialization {
 }
 
 impl AffinityInitialization {
-    pub fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, Error> {
+    pub(crate) fn commit(mut self, target: AffinityTarget) -> Result<AffinityLease, Error> {
         validate_bound_target(&self.session_id, target, self.requested_target)?;
         let Some(inner) = self.coordinator.upgrade() else {
             return Err(anyhow::anyhow!("session affinity coordinator dropped"));
@@ -488,7 +515,7 @@ impl Drop for AffinityInitialization {
     }
 }
 
-pub struct AffinityLease {
+pub(crate) struct AffinityLease {
     coordinator: Weak<AffinityCoordinatorInner>,
     session_id: String,
     revision: u64,
@@ -496,7 +523,7 @@ pub struct AffinityLease {
 }
 
 impl AffinityLease {
-    pub fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
+    pub(crate) fn into_stream(self, stream: ManyOut<LlmResponse>) -> ManyOut<LlmResponse> {
         let context = stream.context();
         ResponseStream::new(
             Box::pin(AffinityTrackedStream {

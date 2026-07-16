@@ -9,7 +9,12 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 DEFAULT_THINKING_MODE_RUNTIME_KEY = "default_thinking_mode"
-THINKING_CONTROL_KEYS = ("thinking", "enable_thinking", "thinking_mode")
+THINKING_CONTROL_KEYS = (
+    "thinking",
+    "enable_thinking",
+    "thinking_mode",
+    "reasoning_effort",
+)
 
 
 def runtime_default_thinking_mode(runtime_config: dict[str, Any] | None) -> str | None:

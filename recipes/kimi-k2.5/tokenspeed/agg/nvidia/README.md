@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # [Experimental] Kimi-K2.5 nvidia/Kimi-K2.5-NVFP4 — TokenSpeed Aggregated Deployment on Kubernetes
 
 > **Text only:** the NVFP4 export of Kimi-K2.5 ships without vision-tower weights. The
@@ -38,7 +43,7 @@ There is **no public `nvcr.io/nvidia/ai-dynamo/tokenspeed-runtime` image** at th
 this recipe was written; TokenSpeed integration in Dynamo is still in flight. This
 directory ships a [`Dockerfile`](Dockerfile) that builds a Dynamo+TokenSpeed image
 on top of `docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0` (the upstream
-TokenSpeed runtime base, pinned by tag for reproducibility).
+TokenSpeed runtime base, pinned by digest for reproducibility).
 
 The lightseek runner image is the **runtime base only** — it ships CUDA 13, PyTorch
 2.11, and mooncake, but not the TokenSpeed engine itself (the engine is not yet
@@ -64,19 +69,27 @@ docker build \
   .
 ```
 
-The Dockerfile defaults `BASE_IMAGE` to a pinned public TokenSpeed runtime tag:
+The Dockerfile defaults `BASE_IMAGE` to a public TokenSpeed runtime tag pinned to
+an immutable digest:
 
 ```
-docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0
+docker.io/lightseekorg/tokenspeed-runner:cu130-torch-2.11.0@sha256:516a14ed701184d224e8e8700b41b8e116a687ac4c3481e13020ed5fd49e7061
 ```
 
-This tag is CUDA-13-based (matches B200's CUDA 13.x driver) and ships PyTorch 2.11.0.
+This image is CUDA-13-based (matches B200's CUDA 13.x driver) and ships PyTorch 2.11.0.
 Sibling tags on the same repo: `cu130`, `cu129-torch-2.11.0`, `cu129`, `latest`. To
 target a different runtime, override the build arg:
 
 ```bash
 --build-arg BASE_IMAGE=docker.io/lightseekorg/tokenspeed-runner:cu129-torch-2.11.0
 ```
+
+TokenSpeed is pinned to commit `886baafaa30f95d9a9e1b781c5906b0a89a64e98` by
+default. Override `TOKENSPEED_GIT_REF` to test another branch, tag, or commit. The
+build reads TokenSpeed's pinned `flashinfer-python` version and installs the matching
+JIT cache before compiling the TokenSpeed kernel. When overriding the base image for
+a different CUDA release, also set `FLASHINFER_WHEEL_INDEX` to that release's
+FlashInfer wheel index.
 
 The Dockerfile has two reachable targets:
 

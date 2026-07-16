@@ -45,7 +45,6 @@ class FrontendRouterProcess(ManagedProcess):
         frontend_port: int,
         namespace: str,
         store_backend: str = "etcd",
-        enforce_disagg: bool = False,
         blocks_threshold: float | str | None = None,
         tokens_threshold: int | str | None = None,
         tokens_threshold_frac: float | str | None = None,
@@ -58,6 +57,7 @@ class FrontendRouterProcess(ManagedProcess):
         serve_indexer: bool = False,
         use_remote_indexer: bool = False,
         event_plane: str | None = None,
+        session_affinity_ttl_secs: int | None = None,
     ):
         command = [
             sys.executable,
@@ -75,9 +75,6 @@ class FrontendRouterProcess(ManagedProcess):
 
         if router_mode == "kv":
             command.extend(["--kv-cache-block-size", str(block_size)])
-
-        if enforce_disagg:
-            command.append("--enforce-disagg")
 
         if blocks_threshold is not None:
             command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
@@ -101,6 +98,11 @@ class FrontendRouterProcess(ManagedProcess):
 
         if use_remote_indexer:
             command.append("--use-remote-indexer")
+
+        if session_affinity_ttl_secs is not None:
+            command.extend(
+                ["--router-session-affinity-ttl-secs", str(session_affinity_ttl_secs)]
+            )
 
         if router_aic_config is not None:
             command.extend(
@@ -146,7 +148,7 @@ class FrontendRouterProcess(ManagedProcess):
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
-            display_name=f"dynamo-frontend-{router_mode}",
+            display_name=f"dynamo-frontend-{router_mode}-{frontend_port}",
         )
         self.port = frontend_port
         self.router_mode = router_mode

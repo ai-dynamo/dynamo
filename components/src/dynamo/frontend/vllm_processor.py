@@ -88,6 +88,63 @@ def _runtime_config_context_length(mdc: ModelDeploymentCard) -> int | None:
     return context_length
 
 
+def _mm_feature_modality(feature: Any) -> str:
+    return getattr(feature, "modality", None) or "image"
+
+
+def _serialize_mm_placeholder(mm_position: Any) -> tuple[int, int] | dict[str, Any]:
+    placeholder = (mm_position.offset, mm_position.length)
+    is_embed = getattr(mm_position, "is_embed", None)
+    if is_embed is None:
+        return placeholder
+
+    if hasattr(is_embed, "detach"):
+        is_embed = is_embed.detach().cpu().tolist()
+
+    return {
+        "offset": mm_position.offset,
+        "length": mm_position.length,
+        "is_embed": [bool(value) for value in is_embed],
+    }
+
+
+def _group_mm_feature_metadata(
+    mm_features: list[Any],
+) -> tuple[
+    list[str],
+    list[tuple[int, int] | dict[str, Any]],
+    dict[str, list[str]],
+    dict[str, list[tuple[int, int] | dict[str, Any]]],
+]:
+    flat_hashes: list[str] = []
+    flat_placeholders: list[tuple[int, int] | dict[str, Any]] = []
+    hashes_by_modality: dict[str, list[str]] = {}
+    placeholders_by_modality: dict[str, list[tuple[int, int] | dict[str, Any]]] = {}
+
+    for feature in mm_features:
+        mm_hash = getattr(feature, "mm_hash", None)
+        if not mm_hash:
+            continue
+        modality = _mm_feature_modality(feature)
+        placeholder = _serialize_mm_placeholder(feature.mm_position)
+        hashes_by_modality.setdefault(modality, []).append(mm_hash)
+        placeholders_by_modality.setdefault(modality, []).append(placeholder)
+
+    # Legacy flat fields are image-only.
+    if set(hashes_by_modality) == {"image"}:
+        flat_hashes = hashes_by_modality["image"]
+        flat_placeholders = placeholders_by_modality["image"]
+
+    return flat_hashes, flat_placeholders, hashes_by_modality, placeholders_by_modality
+
+
+def _single_transfer_modality(mm_features: list[Any]) -> str | None:
+    modalities = {_mm_feature_modality(feature) for feature in mm_features}
+    if len(modalities) != 1:
+        return None
+    return next(iter(modalities))
+
+
 def _build_reasoning_parser_metadata(
     reasoning_parser_class: type[ReasoningParser] | None,
     tokenizer: TokenizerLike,
@@ -209,18 +266,22 @@ class VllmProcessor:
                 vllm_preproc.mm_features,
                 prompt_token_ids=list(vllm_preproc.prompt_token_ids),
             )
-            # Forward mm_hashes to backend for hash consistency — the backend
-            # will use these directly instead of recomputing.
-            mm_hashes_list = [f.mm_hash for f in vllm_preproc.mm_features]
-            mm_placeholders_list = [
-                (f.mm_position.offset, f.mm_position.length)
-                for f in vllm_preproc.mm_features
-            ]
-            # Transport mm_hashes and mm_placeholders to backend via extra_args.
+            (
+                mm_hashes_list,
+                mm_placeholders_list,
+                mm_hashes_by_modality,
+                mm_placeholders_by_modality,
+            ) = _group_mm_feature_metadata(vllm_preproc.mm_features)
             if "extra_args" not in dynamo_preproc:
                 dynamo_preproc["extra_args"] = {}
             dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
             dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
+            dynamo_preproc["extra_args"][
+                "mm_hashes_by_modality"
+            ] = mm_hashes_by_modality
+            dynamo_preproc["extra_args"][
+                "mm_placeholders_by_modality"
+            ] = mm_placeholders_by_modality
             # Forward the expanded prompt_token_ids (with image placeholders)
             # so the backend can use them in the pre-rendered MultiModalInput.
             dynamo_preproc["extra_args"]["expanded_token_ids"] = list(
@@ -247,7 +308,7 @@ class VllmProcessor:
                         "[mm-routing]   feature[%d]: modality=%s, hash=%s..., "
                         "offset=%d, length=%d",
                         i,
-                        f.modality,
+                        _mm_feature_modality(f),
                         f.mm_hash[:16] if f.mm_hash else "None",
                         f.mm_position.offset,
                         f.mm_position.length,
@@ -265,17 +326,28 @@ class VllmProcessor:
                 )
             else:
                 try:
-                    if self._sender is None:
-                        self._sender = (
-                            MmKwargsShmSender()
-                            if self.use_shm_transfer
-                            else MmKwargsNixlSender()
-                        )
-                    # NVTX annotation is owned by MmKwargsSender.prepare via
-                    # the subclass's _nvtx_label/_nvtx_color class attrs.
-                    extra_update, cleanup_items = await self._sender.prepare(
-                        vllm_preproc.mm_features, modality="image"
+                    transfer_modality = _single_transfer_modality(
+                        vllm_preproc.mm_features
                     )
+                    if transfer_modality is None:
+                        extra_update = None
+                        logger.debug(
+                            "[mm-routing] mixed modalities; backend will run "
+                            "HF processor"
+                        )
+                    else:
+                        if self._sender is None:
+                            self._sender = (
+                                MmKwargsShmSender()
+                                if self.use_shm_transfer
+                                else MmKwargsNixlSender()
+                            )
+                        # NVTX annotation is owned by MmKwargsSender.prepare via
+                        # the subclass's _nvtx_label/_nvtx_color class attrs.
+                        extra_update, cleanup_items = await self._sender.prepare(
+                            vllm_preproc.mm_features,
+                            modality=transfer_modality,
+                        )
                     if extra_update is not None:
                         dynamo_preproc["extra_args"].update(extra_update)
                         nixl_transferred = True
@@ -599,9 +671,14 @@ class VllmProcessor:
                 output_request_ids[output_idx] = child_request_id
                 registered_request_ids.append(child_request_id)
 
-        # llm_metrics totals; Rust postprocessor is bypassed on this path.
+        # Rust postprocessor is bypassed on this path, so emit the multimodal
+        # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        _mm_counts = extract_mm_urls(request.get("messages") or []) or {}
+        image_count = len(_mm_counts.get("image_url", []))
+        video_count = len(_mm_counts.get("video_url", []))
+        audio_count = len(_mm_counts.get("audio_url", []))
 
         try:
             _inject_routing_metadata(dynamo_preproc, dynamo_preproc, mm_routing_info)
@@ -729,6 +806,13 @@ class VllmProcessor:
                     "output_tokens": cumulative_output_tokens,
                     "chunk_tokens": chunk_tokens,
                 }
+                # Include nonzero counts on every frame (text-only carries nothing).
+                if image_count:
+                    metrics["image_count"] = image_count
+                if video_count:
+                    metrics["video_count"] = video_count
+                if audio_count:
+                    metrics["audio_count"] = audio_count
                 envelope["event"] = "llm_metrics"
                 envelope["comment"] = [json.dumps(metrics)]
 
@@ -845,7 +929,7 @@ class EngineFactory:
         # vLLM's renderer skips its AutoProcessor fallback when tools are present,
         # so tool calls crash unless tokenizer.chat_template is set; load from disk.
         if tokenizer.chat_template is None:
-            tokenizer.chat_template = resolve_chat_template(local_dir)
+            tokenizer.chat_template = resolve_chat_template(local_dir, backend="vllm")
 
         # --chat-template overrides; load_chat_template accepts either a file path
         # or an inline Jinja template string.

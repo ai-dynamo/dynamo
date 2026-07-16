@@ -28,6 +28,7 @@ from dynamo.runtime import DistributedRuntime
 
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
+MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 
 
@@ -55,7 +56,7 @@ class MockHttpEngine:
 
     async def generate(self, request: Dict, context) -> AsyncGenerator[Dict, None]:
         """
-        Raises HttpError if message contains 'error', otherwise streams a mock response.
+        Raises the requested exception, otherwise streams a mock response.
         """
         user_message = ""
         for message in request.get("messages", []):
@@ -71,8 +72,10 @@ class MockHttpEngine:
             raise HttpError(code=400, message=MSG_CONTAINS_ERROR)
         elif MSG_CONTAINS_STATUS_ERROR.lower() in user_message.lower():
             raise _StatusLikeError(status=415, message=MSG_CONTAINS_STATUS_ERROR)
+        elif MSG_CONTAINS_INVALID_ARGUMENT.lower() in user_message.lower():
+            raise ValueError(MSG_CONTAINS_INVALID_ARGUMENT)
         elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
-            raise ValueError("Simulated internal error")
+            raise RuntimeError("Simulated internal error")
 
         # Stream a mock response
         created = int(time.time())
@@ -176,38 +179,52 @@ async def test_chat_completion_success(http_server):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "msg_to_code",
+    ("trigger", "status", "expected_message", "expected_type"),
     [
-        (MSG_CONTAINS_ERROR, 400),
-        (MSG_CONTAINS_STATUS_ERROR, 415),
-        (MSG_CONTAINS_INTERNAL_ERROR, 500),
+        (MSG_CONTAINS_ERROR, 400, MSG_CONTAINS_ERROR, "Bad Request"),
+        (
+            MSG_CONTAINS_STATUS_ERROR,
+            415,
+            MSG_CONTAINS_STATUS_ERROR,
+            "Unsupported Media Type",
+        ),
+        (
+            MSG_CONTAINS_INVALID_ARGUMENT,
+            400,
+            f"ValueError: {MSG_CONTAINS_INVALID_ARGUMENT}",
+            "Bad Request",
+        ),
+        (
+            MSG_CONTAINS_INTERNAL_ERROR,
+            500,
+            "Internal server error",
+            "Internal Server Error",
+        ),
     ],
 )
 @pytest.mark.forked
-async def test_chat_completion_http_error(http_server, msg_to_code: tuple[str, int]):
-    """Tests that an HttpError is raised when the message contains 'error'."""
+async def test_chat_completion_http_error(
+    http_server,
+    trigger: str,
+    status: int,
+    expected_message: str,
+    expected_type: str,
+):
+    """Tests that backend exceptions map to the expected HTTP responses."""
     base_url, model_name = http_server
     url = f"{base_url}/v1/chat/completions"
     data = {
         "model": model_name,
-        "messages": [{"role": "user", "content": msg_to_code[0]}],
+        "messages": [{"role": "user", "content": trigger}],
     }
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=10)
     ) as session:
         async with session.post(url, json=data) as response:
-            assert response.status == msg_to_code[1]
+            assert response.status == status
             error_json = await response.json()
-            if msg_to_code[0] == MSG_CONTAINS_ERROR:
-                # 4xx HTTP protocol contract: backend message is forwarded
-                # to the client so callers can react to validation errors.
-                assert MSG_CONTAINS_ERROR in str(error_json)
-            elif msg_to_code[0] == MSG_CONTAINS_STATUS_ERROR:
-                # Same 4xx contract via the duck-typed `.status` path.
-                assert MSG_CONTAINS_STATUS_ERROR in str(error_json)
-            elif msg_to_code[0] == MSG_CONTAINS_INTERNAL_ERROR:
-                # 5xx is sanitized: the client receives a static message
-                # and never the raw backend error text; the underlying
-                # detail is logged server-side.
-                assert "simulated internal error" not in str(error_json).lower()
-                assert "internal server error" in str(error_json).lower()
+            assert error_json == {
+                "message": expected_message,
+                "type": expected_type,
+                "code": status,
+            }

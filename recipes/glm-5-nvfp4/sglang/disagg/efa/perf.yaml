@@ -60,7 +60,9 @@ spec:
         - -c
         - |
           set -eu
-          apt-get update && apt-get install -y --no-install-recommends curl jq git && apt-get clean
+          # aiperf>=0.8.0 depends on crick, which has no Linux aarch64 wheel.
+          # GB200 benchmark pods need build tools to compile it from source.
+          apt-get update && apt-get install -y --no-install-recommends curl jq git build-essential && apt-get clean
           # torch is needed for the GLM-5 tokenizer's auto_map; install CPU-only
           # to save image size and download time (~200MB vs ~2.5GB for the GPU
           # build). Install separately because pytorch's wheel index does not
@@ -69,7 +71,7 @@ spec:
           # GLM-5 NVFP4 tokenizer uses the `TokenizersBackend` auto-tokenizer
           # class introduced in transformers 5.x — pin to match the runtime
           # image (see `pip show transformers` inside the sglang decode pod).
-          pip install aiperf==0.6.0 transformers==5.3.0 tokenizers==0.22.2
+          pip install aiperf==0.10.0 transformers==5.3.0 tokenizers==0.22.2
 
           # Pre-save tokenizer to a flat directory once, then point aiperf at
           # that path. Avoids each of aiperf's N record-processor subprocesses

@@ -202,7 +202,7 @@ impl DefaultWorkerSelector {
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
-        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        let adjusted_prefill_blocks = raw_prefill_blocks - overlap_credit_blocks;
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
@@ -362,6 +362,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 .routing_constraints
                 .preferred_taint_multiplier(config.taints())
             {
+                // NOTE: This multiplicative bias assumes a non-negative score. Negative
+                // overlap scores expose its pre-existing sign sensitivity; keep it for now.
                 Some(multiplier) => base_score * multiplier,
                 None => base_score,
             }
@@ -524,6 +526,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -691,6 +694,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -834,6 +838,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -884,6 +889,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -952,6 +958,7 @@ mod tests {
                 priority_jump: 0.0,
                 strict_priority: 0,
                 policy_class: None,
+                session_id: None,
                 expected_output_tokens: None,
                 pinned_worker: None,
                 allowed_worker_ids: None,
@@ -1018,6 +1025,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1080,6 +1088,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1158,6 +1167,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1227,6 +1237,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1246,7 +1257,68 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_logit_preserves_prefill_accounting_edges() {
+    fn test_overlap_credit_above_one_can_prefer_colocated_worker() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let block_size = 16u32;
+        let warm_worker = WorkerWithDpRank::from_worker_id(0);
+        let cold_worker = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (warm_worker.worker_id, SimpleWorkerConfig::default()),
+            (cold_worker.worker_id, SimpleWorkerConfig::default()),
+        ]);
+
+        let mut request = base_request(64);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(warm_worker, 4);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(warm_worker, 64);
+        request.worker_loads.insert(
+            warm_worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 5,
+                ..Default::default()
+            },
+        );
+
+        let normal_credit = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let amplified_credit = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.5,
+                ..Default::default()
+            }),
+            "test",
+        );
+
+        assert_eq!(
+            normal_credit
+                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .unwrap()
+                .worker,
+            cold_worker
+        );
+        assert_eq!(
+            amplified_credit
+                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .unwrap()
+                .worker,
+            warm_worker
+        );
+    }
+
+    #[test]
+    fn test_worker_logit_does_not_clamp_negative_prefill_cost() {
         let worker = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(64);
         request.overlap.effective_cached_tokens.insert(worker, 96);
@@ -1275,7 +1347,7 @@ mod tests {
         request.track_prefill_tokens = false;
         assert_eq!(
             selector.worker_logit(&request, worker, 16, 0, weights, "test"),
-            5.0
+            -7.0
         );
     }
 
@@ -1386,6 +1458,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1440,6 +1513,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

@@ -16,6 +16,7 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
+use super::queue_admission::PolicyClassAdmissionStrategies;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
@@ -111,6 +112,7 @@ where
             worker_type,
             monitor_worker_configs,
         )
+        .expect("synthetic policy profile does not require admission strategies")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -128,7 +130,61 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
+        Self::new_with_policy_profile_and_admission_strategies(
+            slots,
+            workers_with_configs,
+            profile,
+            block_size,
+            selector,
+            prefill_load_estimator,
+            overlap_scores_refresh,
+            overloaded_worker_provider,
+            recheck_interval,
+            track_prefill_tokens_default,
+            cancellation_token,
+            worker_type,
+            monitor_worker_configs,
+            PolicyClassAdmissionStrategies::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_policy_profile_and_admission_strategies(
+        slots: Arc<ActiveSequencesMultiWorker<P>>,
+        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+        profile: PolicyProfile,
+        block_size: u32,
+        selector: Sel,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        overlap_scores_refresh: Option<Arc<RF>>,
+        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        recheck_interval: Duration,
+        track_prefill_tokens_default: bool,
+        cancellation_token: CancellationToken,
+        worker_type: &'static str,
+        monitor_worker_configs: bool,
+        admission_strategies: PolicyClassAdmissionStrategies,
+    ) -> Result<Self, KvSchedulerError> {
+        let periodic_recheck_interval = admission_strategies
+            .values()
+            .filter_map(|strategy| strategy.reconcile_interval())
+            .fold(recheck_interval, Duration::min);
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile_and_admission_strategies(
+                Arc::clone(&slots),
+                workers_with_configs.clone(),
+                profile,
+                block_size,
+                selector,
+                prefill_load_estimator,
+                overlap_scores_refresh,
+                overloaded_worker_provider,
+                recheck_interval,
+                admission_strategies,
+            )?,
+        );
+
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
             let mut monitor_rx = workers_with_configs.clone();
@@ -166,16 +222,6 @@ where
             });
         }
 
-        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
-            Arc::clone(&slots),
-            workers_with_configs,
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-        ));
         let (queue_updates, _) = watch::channel(());
         let queue_remote_updates = Arc::clone(&queue);
         let queue_periodic_updates = Arc::clone(&queue);
@@ -205,7 +251,7 @@ where
         });
 
         tokio::spawn(async move {
-            let mut recheck_interval = tokio::time::interval(recheck_interval);
+            let mut recheck_interval = tokio::time::interval(periodic_recheck_interval);
             tracing::trace!("LocalScheduler periodic queue update task started");
 
             loop {
@@ -215,19 +261,19 @@ where
                         break;
                     }
                     _ = recheck_interval.tick() => {
-                        queue_periodic_updates.update().await;
+                        queue_periodic_updates.periodic_reconcile().await;
                     }
                 }
             }
         });
 
-        Self {
+        Ok(Self {
             slots,
             queue,
             queue_updates,
             track_prefill_tokens_default,
             worker_type,
-        }
+        })
     }
 
     pub async fn schedule_request(
@@ -235,6 +281,9 @@ where
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let cancellation_guard = self
+            .queue
+            .cancellation_guard(request.mode.admission_request_id());
         let track_prefill_tokens = request
             .router_config_override
             .as_ref()
@@ -254,6 +303,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id,
             overlap,
             shared_cache_hits,
         } = request;
@@ -271,19 +321,32 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id,
             overlap,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
             resp_tx: Some(resp_tx),
         };
 
-        self.queue
-            .enqueue_with_block_hashes(request, block_hashes)
+        let mut cancellation_guard = self
+            .queue
+            .enqueue_with_block_hashes_and_lease(request, block_hashes, cancellation_guard)
             .await;
 
-        resp_rx
+        let mut response = resp_rx
             .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        match &mut response {
+            Ok(response) if response.request_progress.is_some() => {
+                response.admission_lease = cancellation_guard.take().map(|lease| *lease);
+            }
+            Ok(_) | Err(_) => {
+                if let Some(guard) = cancellation_guard.as_mut() {
+                    guard.disarm();
+                }
+            }
+        }
+        response
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -415,6 +478,7 @@ where
             priority_jump,
             strict_priority,
             policy_class,
+            session_id: None,
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -431,17 +495,41 @@ where
         self.slots.add_request(req, Instant::now())
     }
 
+    /// Book a request only when its worker is already registered, so a request
+    /// racing worker removal cannot lazily recreate the removed worker/rank.
+    pub async fn add_request_if_registered(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<(), SequenceError> {
+        self.slots.add_request_if_registered(req, Instant::now())
+    }
+
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
+        let request_id = request_id.to_string();
+        let worker = self.slots.request_worker(&request_id);
         self.slots
-            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
-        self.queue.update().await;
+            .mark_prefill_completed(&request_id, Instant::now())?;
+        match worker {
+            Some(worker) => self.queue.update_worker(worker).await,
+            None => self.queue.update().await,
+        }
         Ok(())
     }
 
+    /// Legacy slot cleanup. Admission-managed requests use their `AdmissionLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.slots.free(&request_id.to_string(), Instant::now())?;
-        self.queue.update().await;
+        let request_id = request_id.to_string();
+        let worker = self.slots.request_worker(&request_id);
+        self.slots.free(&request_id, Instant::now())?;
+        match worker {
+            Some(worker) => self.queue.update_worker(worker).await,
+            None => self.queue.update().await,
+        }
         Ok(())
+    }
+
+    pub async fn mark_dispatched(&self, request_id: &str) {
+        self.queue.dispatched(request_id).await;
     }
 
     pub fn pending_count(&self) -> usize {
@@ -548,7 +636,7 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
-    ) -> Self {
+    ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile(
             slots,
             workers_with_configs,
@@ -672,14 +760,18 @@ where
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tokio::sync::{mpsc, watch};
 
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-    use crate::scheduling::PrefillLoadEstimator;
     use crate::scheduling::selector::DefaultWorkerSelector;
+    use crate::scheduling::{
+        AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionRequest,
+        PolicyClassAdmissionStrategy, PrefillLoadEstimator, WorkerPlacement,
+    };
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 
@@ -791,6 +883,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             overlap: OverlapSignals::default(),
             shared_cache_hits: None,
         }
@@ -1335,6 +1428,161 @@ mod tests {
 
         scheduler.free("req-1").await.unwrap();
         assert!(scheduler.get_active_lora_counts().is_empty());
+
+        cancel_token.cancel();
+    }
+
+    struct AbortCountingStrategy(Arc<AtomicUsize>);
+
+    impl PolicyClassAdmissionStrategy for AbortCountingStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Ready(WorkerPlacement::Any)
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            if matches!(event, AdmissionEvent::Aborted { .. }) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            Vec::new()
+        }
+    }
+
+    struct DeferredAbortCountingStrategy(Arc<AtomicUsize>);
+
+    impl PolicyClassAdmissionStrategy for DeferredAbortCountingStrategy {
+        fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
+            AdmissionDecision::Defer
+        }
+
+        fn on_event(&mut self, event: AdmissionEvent) -> Vec<AdmissionAction> {
+            if matches!(event, AdmissionEvent::Aborted { .. }) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn admission_lease_aborts_once() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            64,
+            HashMap::from([(0, (0, 1))]),
+            false,
+            0,
+            "test",
+        ));
+        let (_cfg_tx, cfg_rx) = watch::channel(workers);
+        let aborted = Arc::new(AtomicUsize::new(0));
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert(
+            "default".to_owned(),
+            Box::new(AbortCountingStrategy(Arc::clone(&aborted))),
+        );
+        let cancel_token = CancellationToken::new();
+        let scheduler = LocalScheduler::new_with_policy_profile_and_admission_strategies(
+            Arc::clone(&slots),
+            cfg_rx,
+            PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+            64,
+            DefaultWorkerSelector::new(None, "test"),
+            None,
+            None::<Arc<NoopOverlapScoresRefresh>>,
+            None,
+            Duration::from_secs(60),
+            true,
+            cancel_token.clone(),
+            "test",
+            false,
+            strategies,
+        )
+        .unwrap();
+        let mut response = scheduler
+            .schedule_request(request(ScheduleMode::TrackedWithAdmission {
+                request_id: "req-1".to_owned(),
+            }))
+            .await
+            .unwrap();
+        assert!(response.admission_lease.is_some());
+        drop(response.admission_lease.take());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while aborted.load(Ordering::Relaxed) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("admission lease did not report abort");
+        assert_eq!(aborted.load(Ordering::Relaxed), 1);
+        slots.assert_completely_drained(Instant::now());
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_schedule_aborts_admission_without_reconcile() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            64,
+            HashMap::from([(0, (0, 1))]),
+            false,
+            0,
+            "test",
+        ));
+        let (_cfg_tx, cfg_rx) = watch::channel(workers);
+        let aborted = Arc::new(AtomicUsize::new(0));
+        let mut strategies = PolicyClassAdmissionStrategies::new();
+        strategies.insert(
+            "default".to_owned(),
+            Box::new(DeferredAbortCountingStrategy(Arc::clone(&aborted))),
+        );
+        let cancel_token = CancellationToken::new();
+        let scheduler = Arc::new(
+            LocalScheduler::new_with_policy_profile_and_admission_strategies(
+                slots,
+                cfg_rx,
+                PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
+                64,
+                DefaultWorkerSelector::new(None, "test"),
+                None,
+                None::<Arc<NoopOverlapScoresRefresh>>,
+                None,
+                Duration::from_secs(60),
+                true,
+                cancel_token.clone(),
+                "test",
+                false,
+                strategies,
+            )
+            .unwrap(),
+        );
+        let scheduling = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                scheduler
+                    .schedule_request(request(ScheduleMode::TrackedWithAdmission {
+                        request_id: "cancelled-pending".to_owned(),
+                    }))
+                    .await
+            })
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while scheduler.pending_count() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("request did not enter the pending queue");
+        scheduling.abort();
+        let _ = scheduling.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while aborted.load(Ordering::Relaxed) != 1 || scheduler.pending_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the selection future did not abort admission");
 
         cancel_token.cancel();
     }

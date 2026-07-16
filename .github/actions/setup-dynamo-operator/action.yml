@@ -19,9 +19,9 @@ inputs:
     required: false
     default: ''
   operator_tag:
-    description: 'Operator image tag (default: main-operator)'
+    description: 'Operator image tag. Required when registry is set.'
     required: false
-    default: 'main-operator'
+    default: ''
   hf_token:
     description: 'HuggingFace token for model access'
     required: false
@@ -340,11 +340,20 @@ runs:
 
         IMAGE_ARGS=()
         if [ -n "${REGISTRY}" ]; then
+          if [ -z "${OPERATOR_TAG}" ]; then
+            echo "::error::operator_tag is required when registry is set"
+            exit 1
+          fi
           OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
           echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
+          # Automated CI passes a commit-scoped tag so the chart, CRDs,
+          # and manager binary stay in sync. Manual workflows may still pass a
+          # mutable tag, so force a registry lookup on every pod start. The chart
+          # applies this policy to both the manager and crd-apply init container.
           IMAGE_ARGS+=(
             --set dynamo-operator.controllerManager.manager.image.repository="${OPERATOR_REPO}"
             --set dynamo-operator.controllerManager.manager.image.tag="${OPERATOR_TAG}"
+            --set dynamo-operator.controllerManager.manager.image.pullPolicy=Always
           )
         else
           echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
@@ -386,13 +395,22 @@ runs:
       shell: bash
       run: |
         echo "::group::Wait for Dynamo operator CRDs inside vCluster"
-        # CRDs live in the chart's crds/ directory so Helm installs them before any pod
-        # starts. Waiting for Established is independent of vCluster syncer pod-Ready
-        # latency, which is unreliable on some clusters (e.g. AWS with LimitRange QoS mismatch).
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+        # The crd-apply init container installs CRDs asynchronously after Helm returns.
+        # Poll for the resource because a condition wait fails if it does not exist yet.
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+        CRD=dynamographdeployments.nvidia.com
+        end=$((SECONDS + 1800))
+        until kubectl --kubeconfig="${VKUBECONFIG}" get "crd/${CRD}" >/dev/null 2>&1; do
+          if [ $SECONDS -ge $end ]; then
+            echo "::error::CRD ${CRD} was not created after 1800s"
+            exit 1
+          fi
+          sleep 5
+        done
+        kubectl --kubeconfig="${VKUBECONFIG}" \
           wait --for=condition=established \
-          crd/dynamographdeployments.nvidia.com \
-          --timeout=1800s
+          "crd/${CRD}" \
+          --timeout=120s
         echo "::endgroup::"
 
     - name: Wait for operator pod to be ready
@@ -430,6 +448,105 @@ runs:
           wait --for=condition=established \
           crd/dynamographdeployments.nvidia.com \
           --timeout=120s
+
+    - name: Verify operator image and admission webhooks
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        set -euo pipefail
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+
+        OPERATOR_POD=$(kubectl get pods -n "${NAMESPACE}" -o name \
+          | grep 'dynamo-platform-dynamo-operator-controller-manager' \
+          | head -1 || true)
+        if [ -z "${OPERATOR_POD}" ]; then
+          echo "::error::Ready operator pod disappeared before verification"
+          exit 1
+        fi
+
+        echo "::group::Resolved operator image identity"
+        kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" \
+          -o jsonpath='{range .status.initContainerStatuses[*]}initContainer={.name} image={.image} imageID={.imageID}{"\n"}{end}{range .status.containerStatuses[*]}container={.name} image={.image} imageID={.imageID}{"\n"}{end}'
+        echo "::endgroup::"
+
+        echo "::group::DynamoGraphDeployment admission smoke tests"
+        smoke_v1alpha1() {
+          kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
+            create --namespace=default --dry-run=server \
+            -o json \
+            -f - <<'EOF'
+        apiVersion: nvidia.com/v1alpha1
+        kind: DynamoGraphDeployment
+        metadata:
+          name: ci-webhook-smoke-v1alpha1
+        spec:
+          services:
+            Smoke:
+              componentType: worker
+              replicas: 0
+        EOF
+        }
+
+        smoke_v1beta1() {
+          kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
+            create --namespace=default --dry-run=server \
+            -o json \
+            -f - <<'EOF'
+        apiVersion: nvidia.com/v1beta1
+        kind: DynamoGraphDeployment
+        metadata:
+          name: ci-webhook-smoke-v1beta1
+        spec:
+          components:
+          - name: Smoke
+            type: worker
+            replicas: 0
+        EOF
+        }
+
+        run_admission_smoke_test() {
+          local version="$1"
+          local output
+          local origin_version
+          local deadline=$((SECONDS + 120))
+          local attempt=1
+          shift
+
+          while true; do
+            if output=$("$@" 2>&1); then
+              origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${output}" | tail -1)
+              if [ -z "${origin_version}" ]; then
+                echo "::error::${version} request succeeded without the operator origin-version mutation"
+                printf '%s\n' "${output}" >&2
+                return 1
+              fi
+              echo "${version} admission succeeded (operator origin version: ${origin_version})"
+              return 0
+            fi
+
+            if ! grep -Eiq \
+              'no endpoints available|connection refused|connection reset by peer|TLS handshake timeout|service .* not found|unexpected EOF|^EOF$' \
+              <<<"${output}"; then
+              printf '%s\n' "${output}" >&2
+              return 1
+            fi
+
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::${version} admission smoke test did not become reachable within 120s"
+              printf '%s\n' "${output}" >&2
+              return 1
+            fi
+
+            echo "::warning::${version} admission endpoint not ready (attempt ${attempt}); retrying in 2s"
+            attempt=$((attempt + 1))
+            sleep 2
+          done
+        }
+
+        run_admission_smoke_test v1alpha1 smoke_v1alpha1
+        run_admission_smoke_test v1beta1 smoke_v1beta1
+        echo "::endgroup::"
 
     - name: Debug deployment failure
       if: failure()

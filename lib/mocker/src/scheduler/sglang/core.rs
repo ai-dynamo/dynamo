@@ -85,19 +85,24 @@ impl SglangCore {
         Self::new_internal(args, 0, 0, None, KvEventPublishers::default())
     }
 
-    pub(crate) fn new_with_worker_id(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        Self::new_internal(args, 0, worker_id, None, KvEventPublishers::default())
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
+        Self::new_with_worker_rank(args, worker_id, 0, worker_id, true)
     }
 
-    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
-        let (buffer, sink) = capture_router_event_sink(worker_id);
-        Self::new_internal(
-            args,
-            0,
-            worker_id,
-            Some(buffer),
-            KvEventPublishers::new(Some(sink), None),
-        )
+    pub(crate) fn new_with_worker_rank(
+        args: MockEngineArgs,
+        worker_id: WorkerId,
+        dp_rank: u32,
+        seed_offset: u64,
+        capture_kv_events: bool,
+    ) -> Self {
+        let (buffer, publishers) = if capture_kv_events {
+            let (buffer, sink) = capture_router_event_sink(worker_id);
+            (Some(buffer), KvEventPublishers::new(Some(sink), None))
+        } else {
+            (None, KvEventPublishers::default())
+        };
+        Self::new_internal(args, dp_rank, seed_offset, buffer, publishers)
     }
 
     pub(super) fn new_with_sink(
@@ -111,7 +116,7 @@ impl SglangCore {
     fn new_internal(
         args: MockEngineArgs,
         dp_rank: u32,
-        worker_id: WorkerId,
+        seed_offset: u64,
         kv_event_buffer: Option<CapturedRouterEventBuffer>,
         kv_event_publishers: KvEventPublishers,
     ) -> Self {
@@ -122,7 +127,7 @@ impl SglangCore {
             let rates =
                 normalize_conditional_accept_rates(nextn, args.aic_nextn_accept_rates.as_deref())
                     .expect("normalized MTP acceptance rates");
-            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(worker_id))
+            SpeculativeDecodeSampler::new(rates, args.aic_mtp_seed.wrapping_add(seed_offset))
         });
 
         Self {
@@ -600,16 +605,8 @@ impl SglangCore {
         let prefill_fpm = admit.prefill_fpm;
 
         let batch_size = admit.can_run.len();
-        let mean_isl = if batch_size > 0 {
-            admit.total_isl / batch_size
-        } else {
-            0
-        };
-        let mean_prefix = if batch_size > 0 {
-            admit.total_prefix / batch_size
-        } else {
-            0
-        };
+        let mean_isl = admit.total_isl.checked_div(batch_size).unwrap_or(0);
+        let mean_prefix = admit.total_prefix.checked_div(batch_size).unwrap_or(0);
         let prefill_time =
             simulate_prefill_duration(batch_size, mean_isl, mean_prefix, &self.config, true);
 

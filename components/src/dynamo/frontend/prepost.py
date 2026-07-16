@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -20,7 +21,7 @@ from vllm.renderers import ChatParams
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
-from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import make_async
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 
@@ -43,15 +44,17 @@ class PreprocessResult:
     prompt_token_ids: list[int]
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, AsyncMicrobatchTokenizer] = {}
+_ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
 
 
-def _get_async_tokenizer(tokenizer: TokenizerLike) -> AsyncMicrobatchTokenizer:
+def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
     key = id(tokenizer)
     async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
     if async_tokenizer is None:
-        async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
+        async_tokenizer = make_async(
+            tokenizer, executor=ThreadPoolExecutor(max_workers=1)
+        )
         _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
     return async_tokenizer
 
@@ -137,10 +140,17 @@ def _prepare_request(
         else None
     )
     chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
+    # reasoning_effort is a request-level thinking control. Put an explicit
+    # value into the kwargs before applying the deployment
+    # default so the two cannot produce contradictory template controls.
+    if request_for_sampling.reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
     chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
         chat_template_kwargs,
         default_thinking_mode,
-        request_has_root_thinking=(isinstance(request, dict) and "thinking" in request),
+        request_has_root_thinking=(
+            isinstance(request, dict) and request.get("thinking") is not None
+        ),
     )
     chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
 
@@ -330,6 +340,44 @@ class StreamingPostProcessor:
             and self.request_for_sampling.tool_choice != "none"
         )
 
+    def _tool_parser_terminal_markers(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        parser_engine = getattr(self.tool_parser, "_parser_engine", None)
+        parser_engine_config = getattr(parser_engine, "parser_engine_config", None)
+        terminals = getattr(parser_engine_config, "terminals", None)
+        if not isinstance(terminals, dict):
+            return ()
+
+        markers: list[str] = []
+        for name in names:
+            marker = terminals.get(name)
+            if isinstance(marker, str) and marker:
+                markers.append(marker)
+        return tuple(markers)
+
+    def _tool_start_markers(self) -> tuple[str, ...]:
+        markers = [
+            getattr(self.tool_parser, "tool_call_start_token", None),
+            # MistralToolParser names its [TOOL_CALLS] marker bot_token.
+            getattr(self.tool_parser, "bot_token", None),
+            *self._tool_parser_terminal_markers(("TOOL_START", "FUNC_PREFIX")),
+        ]
+        return tuple(
+            dict.fromkeys(
+                marker for marker in markers if isinstance(marker, str) and marker
+            )
+        )
+
+    def _tool_end_markers(self) -> tuple[str, ...]:
+        markers = [
+            getattr(self.tool_parser, "tool_call_end_token", None),
+            *self._tool_parser_terminal_markers(("TOOL_END", "FUNC_END")),
+        ]
+        return tuple(
+            dict.fromkeys(
+                marker for marker in markers if isinstance(marker, str) and marker
+            )
+        )
+
     @staticmethod
     def _compose_delta_message(
         reasoning: str | None, content: str | None
@@ -517,9 +565,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            tool_call_end = getattr(self.tool_parser, "tool_call_end_token", None)
             buffer_complete = (
-                tool_call_end and tool_call_end in self._tool_text_buffer
+                any(
+                    marker in self._tool_text_buffer
+                    for marker in self._tool_end_markers()
+                )
             ) or output.finish_reason
             if buffer_complete:
                 buffered_text = self._tool_text_buffer
@@ -558,10 +608,10 @@ class StreamingPostProcessor:
                 current_text = ""
                 current_token_ids = []
 
-                tool_call_start = getattr(
-                    self.tool_parser, "tool_call_start_token", None
-                )
-                if post_content and tool_call_start and tool_call_start in post_content:
+                tool_start_markers = self._tool_start_markers()
+                if post_content and any(
+                    marker in post_content for marker in tool_start_markers
+                ):
                     # Tool call markup present — buffer for non-streaming
                     # extraction (streaming parser can't handle the combined
                     # reasoning-end + tool-start in a single chunk).

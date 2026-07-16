@@ -1,18 +1,37 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use super::super::entrypoints::{
     run_concurrency_collect, run_concurrency_workload_collect, run_trace_collect,
     run_trace_workload_collect,
 };
+use super::super::planner_hook::PlannerTickDecision;
 use super::*;
 use crate::common::protocols::{
     EngineType, KvTransferTimingMode, MockEngineArgs, SglangArgs, WorkerType,
 };
 use crate::loadgen::{SessionTrace, Trace, TurnTrace};
 use crate::replay::TraceSimulationReport;
+
+struct CaptureOnceHook {
+    at_ms: f64,
+    captured: Rc<RefCell<Option<PlannerTickMetrics>>>,
+}
+
+impl PlannerHook for CaptureOnceHook {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(self.at_ms)
+    }
+
+    fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
+        *self.captured.borrow_mut() = Some(metrics);
+        Ok(PlannerTickDecision::default())
+    }
+}
 
 fn staged_args(worker_type: WorkerType, speedup_ratio: f64) -> MockEngineArgs {
     MockEngineArgs::builder()
@@ -265,6 +284,52 @@ fn request(
         dp_rank: 0,
         arrival_timestamp_ms: Some(arrival_ms),
         ..Default::default()
+    }
+}
+
+#[test]
+fn planner_tick_emits_idle_fpm_for_both_disagg_pools() {
+    let mut config = disagg_config();
+    config.num_prefill_workers = 1;
+    config.num_decode_workers = 1;
+    let pending = crate::replay::normalize_trace_requests(
+        vec![request(9_301, 64, 1, 0.0), request(9_302, 64, 1, 3_000.0)],
+        1.0,
+    )
+    .unwrap();
+    let captured = Rc::new(RefCell::new(None));
+    let hook = CaptureOnceHook {
+        at_ms: 2_000.0,
+        captured: Rc::clone(&captured),
+    };
+
+    DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        pending,
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap()
+    .with_planner_hook(Box::new(hook))
+    .run()
+    .unwrap();
+
+    let metrics = captured
+        .borrow_mut()
+        .take()
+        .expect("planner tick must fire");
+    assert_eq!(metrics.now_ms, 2_000.0);
+    for snapshots in [&metrics.prefill_fpm, &metrics.decode_fpm] {
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].0, 0);
+        assert_eq!(snapshots[0].1.dp_rank, 0);
+        assert_eq!(snapshots[0].1.wall_time_secs, 0.0);
+        assert_eq!(snapshots[0].1.num_prefill_requests, 0);
+        assert_eq!(snapshots[0].1.num_decode_requests, 0);
+        assert_eq!(snapshots[0].1.num_queued_prefill, 0);
+        assert_eq!(snapshots[0].1.num_queued_decode, 0);
     }
 }
 
@@ -1213,6 +1278,27 @@ fn test_advance_to_moves_clock_across_idle_gap() {
     assert_eq!(runtime.now_ms(), 500.0);
     let stats = runtime.drain_traffic();
     assert!((stats.duration_s - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn test_disagg_traffic_uses_context_capped_output_length() {
+    let mut config = disagg_config();
+    config.prefill_args.max_model_len = Some(8);
+    config.decode_args.max_model_len = Some(8);
+    let mut runtime = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        VecDeque::from([request(1, 7, 4, 0.0)]),
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
+
+    assert!(runtime.advance_to(1000.0).unwrap());
+    let stats = runtime.drain_traffic();
+    assert_eq!(stats.num_req, 1);
+    assert_eq!(stats.avg_osl, 1.0);
 }
 
 /// Setting `max_sim_time_ms` causes `run()` to break before scheduled
