@@ -40,7 +40,7 @@ spec:
             readOnly: true
   - name: VllmPrefillWorker
     type: prefill
-    replicas: 4
+    replicas: 2
     podTemplate:
       spec:
         volumes:
@@ -161,7 +161,7 @@ spec:
           effect: NoSchedule
   - name: VllmDecodeWorker
     type: decode
-    replicas: 2
+    replicas: 1
     podTemplate:
       spec:
         volumes:

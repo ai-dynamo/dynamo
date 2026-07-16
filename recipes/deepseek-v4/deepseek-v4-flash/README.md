@@ -53,7 +53,7 @@ Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature. Agen
 | Variant | Concurrency | User tok/s | System tok/s/GPU |
 |---|---:|---:|---:|
 | [`agg-b200-agentic`](vllm/agg-b200-agentic/deploy.yaml) | 38 | 50.6 | 362.1 |
-| [`disagg-b200-agentic`](vllm/disagg-b200-agentic/deploy.yaml) | 320 | 50.0 | 388.3 |
+| [`disagg-b200-agentic`](vllm/disagg-b200-agentic/deploy.yaml) | 128 | 50.35 | 409.9 |
 | [`agg-h200-agentic`](vllm/agg-h200-agentic/deploy.yaml) | 16 | 50.7 | 145.4 |
 | [`disagg-h200-agentic`](vllm/disagg-h200-agentic/deploy.yaml) | 128 | 51.8 | 201.9 |
 
@@ -66,7 +66,7 @@ Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature. Agen
 | [`agg-h200-agentic`](vllm/agg-h200-agentic/deploy.yaml) | 16 | 58.9 | 222.0 |
 | [`disagg-h200-agentic`](vllm/disagg-h200-agentic/deploy.yaml) | 416 | 51.8 | 513.6 |
 
-³ Measured at the **1P1D** prefill:decode ratio (optimal for this decode-heavy workload); the shipped `disagg-b200-agentic` deploy.yaml is **4P2D** (agentic-tuned; → 577 tok/s/GPU here) — same config, only the replica count differs.
+³ Measured at the **1P1D** prefill:decode ratio (optimal for this decode-heavy workload); the shipped `disagg-b200-agentic` deploy.yaml is **2P1D** (agentic-tuned) — same config, only the replica count differs. To reproduce this custom-workload number, set `VllmPrefillWorker`/`VllmDecodeWorker` replicas to 1P1D.
 
 **AGG figures are single-replica floor-picks.** Deploy AGG as independent single-replica DGDs for linear scaling — KV-routed *multi*-replica AGG does **not** improve per-GPU throughput ([Known limitations](../README.md#known-limitations)).
 
@@ -75,7 +75,7 @@ Floor-picks (max system tok/s/GPU at user_p50 ≥ 50), default temperature. Agen
 1. **Dynamo Platform installed** — see the [Kubernetes Deployment Guide](../../../docs/kubernetes/README.md).
 2. **GPU cluster** of the matching arch. Each worker pod requests **4 GPUs**; totals per variant:
    - **AGG** (`agg-b200-agentic` / `agg-h200-agentic`): **4 GPUs on one node** (x86_64).
-   - **DisAgg B200** (`disagg-b200-agentic`, 4P2D): **24 B200** — (4 prefill + 2 decode) pods × 4 GPUs, across **multiple nodes**; needs the [per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+   - **DisAgg B200** (`disagg-b200-agentic`, 2P1D): **12 B200** — (2 prefill + 1 decode) pods × 4 GPUs, across **multiple nodes**; needs the [per-rank NIC mapping](../README.md#per-rank-nic-mapping-b200--h200-disaggregated).
    - **DisAgg H200** (`disagg-h200-agentic`, 4P3D): **28 H200** — (4 prefill + 3 decode) pods × 4 GPUs, across **multiple nodes**; same NIC mapping.
    - **GB200 Day-0 variants**: 4 GB200 GPUs (single NVL4 tray, arm64). Nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule` (the manifests carry the matching `nodeSelector` + `toleration`).
 3. **HuggingFace token** with access to `deepseek-ai/DeepSeek-V4-Flash`.

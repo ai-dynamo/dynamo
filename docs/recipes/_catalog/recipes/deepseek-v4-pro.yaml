@@ -42,7 +42,7 @@ targets:
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
     available: false
-    summary: Floor-pick c28 = 77.31 system tok/s/GPU @ user 51.3 (1P1D, +6% over AGG) measured on a v0.24 build; pending GA-image confirmation.
+    summary: Floor-pick c28 = 77.31 system tok/s/GPU @ user 51.3 (1P1D, +6% over AGG).
 - id: agg-b200-agentic
   recommended: false
   hardware:
@@ -69,7 +69,7 @@ targets:
     asset: recipes/deepseek-v4/perf/perf.yaml
   expected_performance:
     available: false
-    summary: Floor-pick c13 = 72.79 system tok/s/GPU @ user 51.3 measured on a v0.24 build; pending GA-image confirmation.
+    summary: Floor-pick c13 = 72.79 system tok/s/GPU @ user 51.3.
 - id: agg-h200-agentic
   recommended: false
   hardware:
@@ -128,7 +128,7 @@ related_benchmarks: []
 maintainer: null
 gaps:
 - 'STAGED follow-up: image is pre-GA (nvstaging vllm-runtime 1.3.0-rc.4); flip status to `validated` and repin to the nvcr.io/nvidia GA v1.3.0 image at release.'
-- Expected Performance floor-picks were measured on a v0.24 build, not the shipped RC/GA image; omitted (available:false) until confirmed on the GA image.
+- Expected Performance floor-picks were measured on a pre-GA build, not the shipped RC/GA image; omitted (available:false) until confirmed on the GA image.
 - 'H200 targets are secondary/best-effort on the public FP8 checkpoint, capped at max_model_len 86016 (HBM); cannot serve the full 1M context the B200 recipes handle.'
 - maintainer unknown
 - Day-0 / GB200 (vLLM + SGLang) variants (experimental, dev images, ComputeDomain/MNNVL) are intentionally excluded from this customer page.
