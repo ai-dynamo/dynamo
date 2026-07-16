@@ -924,6 +924,8 @@ def _assert_disaggregated_engine_generate_spans_exported(collector) -> None:
 @pytest.mark.e2e
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(3.7)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(470)
 @pytest.mark.nightly
 @pytest.mark.unified
