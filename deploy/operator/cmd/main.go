@@ -309,23 +309,36 @@ func main() {
 	setupLog.Info("Initializing observability metrics")
 	observability.InitMetrics()
 
-	// Set up webhook certificate management.
-	// A direct (non-cached) client is needed because the manager's cache isn't started yet.
-	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: crdScheme})
+	gates, err := features.New(mainCtx, mgr, operatorCfg)
 	if err != nil {
-		setupLog.Error(err, "unable to create direct client for cert management")
+		setupLog.Error(err, "unable to resolve operator feature gates")
 		os.Exit(1)
 	}
-	certMgr, err := internalcert.NewCertManager(directClient, &operatorCfg.Server.Webhook)
-	if err != nil {
-		setupLog.Error(err, "unable to create cert manager")
-		os.Exit(1)
+	runtimeConfig.Gate = gates
+
+	var operatorPrincipal string
+	if sa, ns := os.Getenv("POD_SERVICE_ACCOUNT"), os.Getenv("POD_NAMESPACE"); sa != "" && ns != "" {
+		operatorPrincipal = fmt.Sprintf("system:serviceaccount:%s:%s", ns, sa)
 	}
-	// Auto mode runs one synchronous certificate refresh with the direct client,
-	// then registers the cert-controller with the not-yet-started manager.
-	if err = certMgr.SetupAndRunOnce(mainCtx, mgr); err != nil {
-		setupLog.Error(err, "failed to setup webhook certificate management")
-		os.Exit(1)
+
+	// Only the cluster-wide operator owns webhook certificates.
+	var directClient client.Client
+	var certMgr *internalcert.CertManager
+	if isClusterWide {
+		directClient, err = client.New(mgr.GetConfig(), client.Options{Scheme: crdScheme})
+		if err != nil {
+			setupLog.Error(err, "unable to create direct client for cert management")
+			os.Exit(1)
+		}
+		certMgr, err = internalcert.NewCertManager(directClient, &operatorCfg.Server.Webhook)
+		if err != nil {
+			setupLog.Error(err, "unable to create cert manager")
+			os.Exit(1)
+		}
+		if err = certMgr.SetupAndRunOnce(mainCtx, mgr); err != nil {
+			setupLog.Error(err, "failed to setup webhook certificate management")
+			os.Exit(1)
+		}
 	}
 
 	// Initialize namespace scope mechanism
@@ -345,6 +358,8 @@ func main() {
 			operatorVersion,
 			operatorCfg.Namespace.Scope.LeaseDuration.Duration,
 			operatorCfg.Namespace.Scope.LeaseRenewInterval.Duration,
+			gates,
+			operatorPrincipal,
 		)
 		if err != nil {
 			setupLog.Error(err, "unable to create namespace scope marker lease manager")
@@ -411,13 +426,6 @@ func main() {
 		setupLog.Error(err, "unable to register resource counter")
 		os.Exit(1)
 	}
-
-	gates, err := features.New(mainCtx, mgr, operatorCfg)
-	if err != nil {
-		setupLog.Error(err, "unable to resolve operator feature gates")
-		os.Exit(1)
-	}
-	runtimeConfig.Gate = gates
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
 	// refresh whenever a secret is created/deleted/updated
@@ -526,44 +534,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion, gates); err != nil {
-		setupLog.Error(err, "failed to register webhooks")
-		os.Exit(1)
-	}
-
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
-	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
-	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
-	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
-	if err != nil {
-		setupLog.Error(err, "unable to create CA bundle injector")
-		os.Exit(1)
-	}
-	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if isClusterWide {
-			err = caInjector.InjectAll(mainCtx)
-		} else {
-			err = caInjector.InjectAdmission(mainCtx)
-		}
-		if err != nil {
-			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+	if isClusterWide {
+		internalwebhook.SetExcludedNamespaces(nil)
+		internalwebhook.SetFeatureResolver(features.NewResolver(gates, leaseWatcher.AdmissionGateSnapshot))
+		internalwebhook.SetNamespaceOperatorPrincipalResolver(leaseWatcher.OperatorPrincipal)
+		if err := registerWebhookHandlers(mgr, operatorCfg, operatorVersion, operatorPrincipal, gates); err != nil {
+			setupLog.Error(err, "failed to register webhooks")
 			os.Exit(1)
 		}
-	} else if isClusterWide {
-		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
-		// blocks startup instead of running with unauthenticated conversion.
-		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
+
+		caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
+		if err != nil {
+			setupLog.Error(err, "unable to create CA bundle injector")
+			os.Exit(1)
+		}
+		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+			if err := caInjector.InjectAll(mainCtx); err != nil {
+				setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+				os.Exit(1)
+			}
+		} else if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
 			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
 			os.Exit(1)
 		}
-	}
 
-	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
-	// synchronously. Secret API updates are not enough because kubelet projects
-	// them into already-running pods asynchronously.
-	if err := certMgr.WaitForMountedCertificate(mainCtx); err != nil {
-		setupLog.Error(err, "failed waiting for mounted webhook TLS certificate")
-		os.Exit(1)
+		if err := certMgr.WaitForMountedCertificate(mainCtx); err != nil {
+			setupLog.Error(err, "failed waiting for mounted webhook TLS certificate")
+			os.Exit(1)
+		}
 	}
 
 	// Kubernetes propagates webhook configuration asynchronously, especially
@@ -696,27 +694,11 @@ func registerControllers(
 func registerWebhookHandlers(
 	mgr ctrl.Manager,
 	operatorCfg *configv1alpha1.OperatorConfiguration,
-	runtimeConfig *commonController.RuntimeConfig,
 	operatorVersion string,
+	operatorPrincipal string,
 	gate features.Gate,
 ) error {
 	isClusterWide := operatorCfg.Namespace.Restricted == ""
-	if isClusterWide {
-		setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
-		internalwebhook.SetExcludedNamespaces(runtimeConfig.ExcludedNamespaces)
-	} else {
-		setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
-			"restrictedNamespace", operatorCfg.Namespace.Restricted)
-		internalwebhook.SetExcludedNamespaces(nil)
-	}
-
-	var operatorPrincipal string
-	if sa, ns := os.Getenv("POD_SERVICE_ACCOUNT"), os.Getenv("POD_NAMESPACE"); sa != "" && ns != "" {
-		operatorPrincipal = fmt.Sprintf("system:serviceaccount:%s:%s", ns, sa)
-		setupLog.Info("Detected operator principal from downward API", "principal", operatorPrincipal)
-	} else {
-		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
-	}
 
 	// Temporary internal gate for GMS + Snapshot.
 	if gate.Enabled(features.GMSSnapshot) {

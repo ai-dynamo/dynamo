@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/go-logr/logr"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	"k8s.io/client-go/informers"
@@ -89,6 +90,33 @@ func (lw *LeaseWatcher) Contains(namespace string) bool {
 	}
 
 	return true
+}
+
+// AdmissionGateSnapshot returns the active namespaced operator's serialized gates.
+func (lw *LeaseWatcher) AdmissionGateSnapshot(namespace string) (string, bool) {
+	return lw.leaseAnnotation(namespace, features.LeaseAnnotation)
+}
+
+// OperatorPrincipal returns the active namespaced operator's Kubernetes username.
+func (lw *LeaseWatcher) OperatorPrincipal(namespace string) (string, bool) {
+	principal, found := lw.leaseAnnotation(namespace, OperatorPrincipalAnnotation)
+	return principal, found && principal != ""
+}
+
+func (lw *LeaseWatcher) leaseAnnotation(namespace, name string) (string, bool) {
+	if !lw.Contains(namespace) {
+		return "", false
+	}
+	value, exists := lw.excludedNamespaces.Load(namespace)
+	if !exists {
+		return "", false
+	}
+	lease, ok := value.(*coordinationv1.Lease)
+	if !ok || lease.Annotations == nil {
+		return "", false
+	}
+	annotation, found := lease.Annotations[name]
+	return annotation, found
 }
 
 // Start starts watching for namespace scope marker leases

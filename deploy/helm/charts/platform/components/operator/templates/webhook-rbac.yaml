@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- if not .Values.namespaceRestriction.enabled }}
 ---
 # Role to manage the webhook certificate secret (create placeholder, read, update)
 apiVersion: rbac.authorization.k8s.io/v1
@@ -117,3 +118,4 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "dynamo-operator.fullname" . }}-controller-manager
   namespace: {{ .Release.Namespace }}
+{{- end }}
