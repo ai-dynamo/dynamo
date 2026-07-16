@@ -53,6 +53,9 @@ class MockSamplingParams:
     best_of: int = 1
     ignore_eos: bool = False
     guided_decoding: object | None = None
+    max_tokens: int | None = None
+    min_tokens: int | None = None
+    stop_token_ids: list[int] | None = None
 
     def __post_init__(self):
         """Called after dataclass initialization (including via replace())."""
@@ -467,6 +470,7 @@ class TestDeferredAbortGuard:
     def _make_handler(self) -> HandlerBase:
         config = MagicMock()
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     @pytest.mark.asyncio
@@ -588,6 +592,7 @@ class TestMultimodalGuard:
         config = MagicMock()
         config.multimodal_processor = multimodal_processor
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     async def _prepare(self, handler, request, epd_metadata=None):
@@ -644,6 +649,7 @@ class TestPrefillPromptMetadata:
         config = MagicMock()
         config.multimodal_processor = MagicMock()
         config.shutdown_event = None
+        config.conversation_affinity = False
         return _ConcreteHandler(config)
 
     def _pack_metadata(self, request, processed_input, prompt, prompt_token_ids):
@@ -714,6 +720,7 @@ class TestDisaggRequestId:
         config = MagicMock()
         config.shutdown_event = None
         config.disagg_machine_id = machine_id
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.disaggregation_mode = DisaggregationMode.PREFILL
         return handler
@@ -797,6 +804,7 @@ class TestHealthCheckPriority:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
@@ -950,6 +958,47 @@ class TestHealthCheckPriority:
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["cache_salt"] == "tenant-a"
 
+    @pytest.mark.asyncio
+    async def test_prefill_skips_generation_stop_conditions(self):
+        handler = self._make_handler()
+        handler.disaggregation_mode = DisaggregationMode.PREFILL
+        handler.disagg_machine_id = 0
+        handler.default_sampling_params = MockSamplingParams(stop_token_ids=[300])
+        generation_result = MagicMock()
+
+        async def empty_aiter(_self):
+            for _ in ():
+                yield
+
+        generation_result.__aiter__ = empty_aiter
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {
+                "max_tokens": 10,
+                "min_tokens": 8,
+                "ignore_eos": True,
+                "stop_token_ids_hidden": [100],
+                "stop_token_ids_visible": [200],
+            },
+            "sampling_options": {},
+        }
+
+        chunks = [
+            c async for c in handler.generate_locally(request, self._make_context())
+        ]
+        assert chunks == []
+
+        handler.engine.llm.generate_async.assert_called_once()
+        _, kwargs = handler.engine.llm.generate_async.call_args
+        sampling_params = kwargs["sampling_params"]
+        assert sampling_params.max_tokens == 1
+        assert sampling_params.min_tokens is None
+        assert sampling_params.ignore_eos is False
+        assert sampling_params.stop_token_ids == [300]
+        assert kwargs["streaming"] is False
+
 
 class TestDefaultMaxTokens:
     """Unit tests for HandlerBase._default_max_tokens (omitted max_tokens sizing)."""
@@ -1084,6 +1133,7 @@ class TestConversationAffinity:
         config = MagicMock()
         config.shutdown_event = None
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
         handler = _ConcreteHandler(config)
         handler.publisher = None
         handler.multimodal_processor = None
@@ -1238,5 +1288,71 @@ class TestConversationAffinity:
         }
         with pytest.raises(RuntimeError, match="ConversationParams API"):
             async for _ in handler.generate_locally(request, self._make_context()):
+                pass
+        handler.engine.llm.generate_async.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_override_suppresses_dp_rank_and_forwards_conversation_params(
+        self, monkeypatch
+    ):
+        """DYN_ENGINE_CONV_AFFINITY override=True + engine detection disabled →
+        dp_rank suppressed, conversation_params forwarded on first request."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            True,
+        )
+        monkeypatch.setattr(
+            "dynamo.trtllm.conversation_affinity.ConversationParams",
+            _FakeConversationParams,
+        )
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.engine_conversation_affinity_enabled",
+            lambda _: False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        # Reset to None so lazy init runs on first request and folds in the override.
+        handler._conversation_affinity = None
+        handler._engine_conversation_affinity_override = True
+        kwargs = await self._drive(
+            handler,
+            {
+                "token_ids": [1, 2, 3],
+                "stop_conditions": {"max_tokens": 10},
+                "sampling_options": {"temperature": 0.7},
+                "routing": {"dp_rank": 3},
+                "agent_context": {"session_id": "run-99:agent-0"},
+            },
+        )
+        # Override must suppress the router rank just like auto-detection does.
+        assert kwargs["scheduling_params"] is None
+        conv_params = kwargs["conversation_params"]
+        assert conv_params is not None
+        assert conv_params.conversation_id == "run-99:agent-0"
+
+    @pytest.mark.asyncio
+    async def test_override_raises_when_conversation_params_api_missing(
+        self, monkeypatch
+    ):
+        """DYN_ENGINE_CONV_AFFINITY=true on a build without ConversationParams →
+        RuntimeError on first request during lazy init."""
+        monkeypatch.setattr(
+            "dynamo.trtllm.request_handlers.handler_base.CONVERSATION_PARAMS_AVAILABLE",
+            False,
+        )
+        handler = self._make_handler(conversation_affinity=False)
+        # Reset to None so lazy init runs and hits the guard.
+        handler._conversation_affinity = None
+        handler._engine_conversation_affinity_override = True
+        handler.engine.llm.generate_async = MagicMock()
+
+        with pytest.raises(RuntimeError, match="DYN_ENGINE_CONV_AFFINITY"):
+            async for _ in handler.generate_locally(
+                {
+                    "token_ids": [1, 2, 3],
+                    "stop_conditions": {"max_tokens": 10},
+                    "sampling_options": {"temperature": 0.7},
+                },
+                self._make_context(),
+            ):
                 pass
         handler.engine.llm.generate_async.assert_not_called()
