@@ -139,6 +139,11 @@ RUN --mount=type=cache,target=/var/cache/dnf,sharing=locked \
         cmake \
         ninja-build \
         clang-devel \
+{% if framework == "dynamo" and target in ("planner", "runtime", "dev", "local-dev", "wheel_builder") %}
+        # Required to materialize AIConfigurator performance data before
+        # building the pinned aiconfigurator-core source revision.
+        git-lfs \
+{% endif %}
         # Install GCC toolset 14 (CUDA compatible, max version 14)
         gcc-toolset-14-gcc \
         gcc-toolset-14-gcc-c++ \
@@ -486,6 +491,32 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     /tmp/use-sccache.sh show-stats "AWS SDK C++"
 {% endif %}
 
+{% if framework == "dynamo" and target in ("planner", "runtime", "dev", "local-dev", "wheel_builder") %}
+######################################
+##### aic_core_wheel_builder #########
+######################################
+# The split core package exists on AIConfigurator main but is not published yet.
+# Build it once in the Rust-enabled stage so the slim planner builder does not
+# need a Rust toolchain or a source checkout.
+
+FROM wheel_builder_base AS aic_core_wheel_builder
+
+ARG AICONFIGURATOR_CORE_REF
+RUN --mount=type=cache,id=aic-core-cargo-registry,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,id=aic-core-cargo-git,target=/root/.cargo/git,sharing=shared \
+    --mount=type=cache,id=aic-core-uv,target=/root/.cache/uv,sharing=shared \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    GIT_LFS_SKIP_SMUDGE=1 git clone --filter=blob:none --no-checkout \
+        https://github.com/ai-dynamo/aiconfigurator.git /tmp/aiconfigurator && \
+    cd /tmp/aiconfigurator && \
+    git lfs install --local && \
+    GIT_LFS_SKIP_SMUDGE=1 git checkout "${AICONFIGURATOR_CORE_REF}" && \
+    git lfs pull && \
+    git lfs fsck && \
+    source ${VIRTUAL_ENV}/bin/activate && \
+    uv build --wheel --out-dir /opt/aiconfigurator/dist aic-core
+{% endif %}
+
 
 ##################################
 ##### runtime_wheel_builder ######
@@ -599,6 +630,13 @@ RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
 
 # Dev/local-dev skip the full COPY lib/ above, so copy gpu_memory_service source explicitly for the wheel build below
 COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
+{% endif %}
+
+{% if framework == "dynamo" and target in ("planner", "runtime", "dev", "local-dev", "wheel_builder") %}
+# Add the Python core wheel built from the same AIC revision used by the Rust
+# dependency. Downstream images install this local artifact instead of resolving
+# the currently unpublished project from the package index.
+COPY --from=aic_core_wheel_builder /opt/aiconfigurator/dist/*.whl /opt/dynamo/dist/
 {% endif %}
 
 # Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)

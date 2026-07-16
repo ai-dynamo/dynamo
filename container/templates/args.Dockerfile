@@ -20,6 +20,7 @@ ARG DEVICE={{ device }}
 
 # Python/CUDA configuration
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}
+ARG AICONFIGURATOR_CORE_REF={{ context.dynamo.aiconfigurator_core_ref }}
 {% if device == "cuda" -%}
 ARG CUDA_VERSION={{ cuda_version }}
 ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
