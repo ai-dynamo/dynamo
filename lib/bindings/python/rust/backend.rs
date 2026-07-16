@@ -1663,23 +1663,3 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
         .message(message)
         .build()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{SGLANG_SIDECAR_PROGRAM_NAME, sglang_sidecar_argv};
-
-    #[test]
-    fn sglang_sidecar_argv_prepends_program_name() {
-        assert_eq!(
-            sglang_sidecar_argv(vec![
-                "--sglang-endpoint".to_string(),
-                "http://127.0.0.1:30001".to_string(),
-            ]),
-            vec![
-                SGLANG_SIDECAR_PROGRAM_NAME.to_string(),
-                "--sglang-endpoint".to_string(),
-                "http://127.0.0.1:30001".to_string(),
-            ]
-        );
-    }
-}

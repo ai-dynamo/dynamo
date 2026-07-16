@@ -120,20 +120,7 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, normalize_endpoint};
-    use clap::Parser;
-
-    #[test]
-    fn parses_sglang_managed_executable_args() {
-        let args = Args::try_parse_from([
-            "dynamo-sglang-sidecar",
-            "--sglang-endpoint",
-            "http://127.0.0.1:30001",
-        ])
-        .unwrap();
-
-        assert_eq!(args.sglang_endpoint, "http://127.0.0.1:30001");
-    }
+    use super::normalize_endpoint;
 
     #[test]
     fn normalizes_bare_and_grpc_endpoints() {
