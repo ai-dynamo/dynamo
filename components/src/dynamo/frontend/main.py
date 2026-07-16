@@ -52,7 +52,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
-FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend_routes"
+FRONTEND_ROUTE_ENTRYPOINT_GROUP = "dynamo.frontend.routes"
 
 
 def setup_engine_factory(
@@ -131,8 +131,57 @@ def _normalize_frontend_routes(
     return routes
 
 
+def _resolve_frontend_route_provider(extension_name: str, entry_points: list) -> Any:
+    """Resolve a ``--frontend-route-extension`` value to its provider callable.
+
+    A registered entry-point name (in the ``dynamo.frontend.routes`` group)
+    takes precedence. If the value is not a registered name and is unambiguously
+    a ``module:function`` path (contains ``:``), it is imported directly. Gating
+    the fallback on ``:`` keeps a mistyped name from silently turning into an
+    import attempt, and still surfaces the ``Available: ...`` list otherwise.
+    """
+    matches = [ep for ep in entry_points if ep.name == extension_name]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous frontend route extension '{extension_name}' in entry point "
+            f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'"
+        )
+    if matches:
+        return matches[0].load()
+
+    if ":" in extension_name:
+        module_path, _, attr = extension_name.partition(":")
+        try:
+            obj: Any = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise ValueError(
+                f"Could not import module '{module_path}' for frontend route "
+                f"extension '{extension_name}'"
+            ) from exc
+        try:
+            for part in attr.split("."):
+                obj = getattr(obj, part)
+        except AttributeError as exc:
+            raise ValueError(
+                f"Module '{module_path}' has no attribute '{attr}' for frontend "
+                f"route extension '{extension_name}'"
+            ) from exc
+        return obj
+
+    available = ", ".join(sorted(ep.name for ep in entry_points)) or "<none>"
+    raise ValueError(
+        f"Unknown frontend route extension '{extension_name}' in entry point "
+        f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'. Available: {available}. "
+        f"Pass a registered name or a 'module:function' path."
+    )
+
+
 def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendRoute]:
-    """Load trusted frontend route extensions by entry point name."""
+    """Load trusted frontend route extensions.
+
+    Each value is either a name registered under the ``dynamo.frontend.routes``
+    entry-point group (preferred) or a direct ``module:function`` path.
+    """
 
     if not extension_names:
         return []
@@ -145,22 +194,10 @@ def load_frontend_route_extensions(extension_names: list[str]) -> list[FrontendR
     entry_points = _frontend_route_extension_entry_points()
     routes: list[FrontendRoute] = []
     for extension_name in unique_names:
-        matches = [ep for ep in entry_points if ep.name == extension_name]
-        if not matches:
-            available = ", ".join(sorted(ep.name for ep in entry_points)) or "<none>"
-            raise ValueError(
-                f"Unknown frontend route extension '{extension_name}' in entry point "
-                f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'. Available: {available}"
-            )
-        if len(matches) > 1:
-            raise ValueError(
-                f"Ambiguous frontend route extension '{extension_name}' in entry point "
-                f"group '{FRONTEND_ROUTE_ENTRYPOINT_GROUP}'"
-            )
-        provider = matches[0].load()
+        provider = _resolve_frontend_route_provider(extension_name, entry_points)
         if not callable(provider):
             raise TypeError(
-                f"Frontend route extension '{extension_name}' entry point must load a callable"
+                f"Frontend route extension '{extension_name}' must resolve to a callable"
             )
         routes.extend(_normalize_frontend_routes(extension_name, provider()))
 

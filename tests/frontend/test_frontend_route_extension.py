@@ -8,9 +8,12 @@ pointing at a custom route provider, then calls the custom route and validates
 the response. No worker or model is needed — extension routes are served by the
 frontend independently of the inference path.
 
-The provider is registered by writing a throwaway ``.dist-info`` onto the
-subprocess ``PYTHONPATH`` (rather than installing a package), so the test is
-self-contained and leaves the shipped ``ai-dynamo`` metadata untouched.
+Both selector forms are exercised:
+
+* a **registered entry-point name** (via a throwaway ``.dist-info`` on the
+  subprocess ``PYTHONPATH``, so the test installs nothing and leaves the shipped
+  ``ai-dynamo`` metadata untouched), and
+* a direct **``module:function``** path.
 """
 
 from __future__ import annotations
@@ -36,38 +39,48 @@ pytestmark = [
     pytest.mark.gpu_0,
 ]
 
-EXTENSION_NAME = "test-route-extension"
+ENTRY_POINT_NAME = "test-route-extension"
 PROVIDER_TARGET = "tests.frontend.route_extension_provider:routes"
 # tests/frontend/test_frontend_route_extension.py -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _register_provider_entry_point(tmp_path: Path) -> str:
-    """Write a throwaway ``.dist-info`` that registers the provider under the
-    ``dynamo.frontend_routes`` group, and return a ``PYTHONPATH`` that exposes
-    both the entry point and the provider module to the frontend subprocess."""
+def _pythonpath(*parts: str) -> str:
+    entries = [p for p in parts if p]
+    if os.environ.get("PYTHONPATH"):
+        entries.append(os.environ["PYTHONPATH"])
+    return os.pathsep.join(entries)
+
+
+def _register_entry_point(tmp_path: Path) -> None:
+    """Write a throwaway ``.dist-info`` registering the provider under the
+    ``dynamo.frontend.routes`` group, without installing a package."""
     dist_info = tmp_path / "route_ext_test-0.0.0.dist-info"
     dist_info.mkdir()
     (dist_info / "METADATA").write_text(
         "Metadata-Version: 2.1\nName: route-ext-test\nVersion: 0.0.0\n"
     )
     (dist_info / "entry_points.txt").write_text(
-        f"[dynamo.frontend_routes]\n{EXTENSION_NAME} = {PROVIDER_TARGET}\n"
+        f"[dynamo.frontend.routes]\n{ENTRY_POINT_NAME} = {PROVIDER_TARGET}\n"
     )
-    parts = [str(tmp_path), str(REPO_ROOT)]
-    if os.environ.get("PYTHONPATH"):
-        parts.append(os.environ["PYTHONPATH"])
-    return os.pathsep.join(parts)
 
 
 @pytest.mark.timeout(120)
-def test_frontend_route_extension_serves_custom_route(request, tmp_path):
-    pythonpath = _register_provider_entry_point(tmp_path)
+@pytest.mark.parametrize("selector", ["entry_point", "module_path"])
+def test_frontend_route_extension_serves_custom_route(request, tmp_path, selector):
+    if selector == "entry_point":
+        _register_entry_point(tmp_path)
+        extension = ENTRY_POINT_NAME
+        pythonpath = _pythonpath(str(tmp_path), str(REPO_ROOT))
+    else:
+        # module:function path — no packaging, just an importable module.
+        extension = PROVIDER_TARGET
+        pythonpath = _pythonpath(str(REPO_ROOT))
 
     with DynamoFrontendProcess(
         request,
         frontend_port=0,
-        extra_args=["--frontend-route-extension", EXTENSION_NAME],
+        extra_args=["--frontend-route-extension", extension],
         extra_env={
             "PYTHONPATH": pythonpath,
             # In-process discovery: the frontend boots standalone (no etcd/NATS/

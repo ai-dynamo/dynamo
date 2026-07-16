@@ -3,7 +3,7 @@
 
 """A minimal frontend route provider for the route-extension e2e test.
 
-The e2e test registers this provider under the ``dynamo.frontend_routes``
+The e2e test registers this provider under the ``dynamo.frontend.routes``
 entry-point group (via a throwaway ``.dist-info`` on ``PYTHONPATH``, so no real
 package install is required) and launches::
 

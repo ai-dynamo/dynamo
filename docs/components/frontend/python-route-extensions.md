@@ -6,7 +6,7 @@ title: Python Route Extensions
 
 Python route extensions let an external package register additional HTTP routes on the Dynamo frontend, served on the same port as the OpenAI-compatible API — without a custom binary or a from-source build.
 
-Extensions are **opt-in by name**: the frontend only loads a provider you explicitly select on the command line, and only from providers registered under the `dynamo.frontend_routes` entry-point group. They add routes; they cannot change or override the built-in inference routes (a duplicate method+path is rejected at startup).
+Extensions are **opt-in**: the frontend only loads a provider you explicitly select on the command line. A selection is either a **name** registered under the `dynamo.frontend.routes` entry-point group (preferred for packaged plugins) or a direct **`module:function`** path (handy for quick/ad-hoc use). Extensions add routes; they cannot change or override the built-in inference routes (a duplicate method+path is rejected at startup).
 
 ## Minimal example
 
@@ -25,11 +25,11 @@ def hello_world_routes():
     return [FrontendRoute("GET", "/hello_world", _hello)]
 ```
 
-**2. Register it as an entry point** under the `dynamo.frontend_routes` group. The entry-point name (here `hello-world`) is what you pass on the command line.
+**2. Register it as an entry point** under the `dynamo.frontend.routes` group. The entry-point name (here `hello-world`) is what you pass on the command line.
 
 ```toml
 # pyproject.toml
-[project.entry-points."dynamo.frontend_routes"]
+[project.entry-points."dynamo.frontend.routes"]
 hello-world = "hello_routes:hello_world_routes"
 ```
 
@@ -52,6 +52,16 @@ python -m dynamo.frontend --frontend-route-extension hello-world
 curl localhost:8000/hello_world
 # {"message":"hello world!"}
 ```
+
+## Quick / ad-hoc: `module:function`
+
+For development or a one-off deployment where packaging a plugin is overkill, pass a `module:function` path directly instead of a registered name — no `pyproject.toml` or install required, as long as the module is importable (e.g. on `PYTHONPATH`):
+
+```bash
+python -m dynamo.frontend --frontend-route-extension hello_routes:hello_world_routes
+```
+
+A registered entry-point name always takes precedence; the path fallback only applies when the value is not a registered name and contains `:`.
 
 ## Handler contract
 

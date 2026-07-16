@@ -354,8 +354,10 @@ class FrontendArgGroup(ArgGroup):
             dest="frontend_route_extensions",
             action="append",
             help=(
-                "Trusted frontend route extension entry point name. May be repeated. "
-                "DYN_FRONTEND_ROUTE_EXTENSIONS accepts whitespace-separated names."
+                "Trusted frontend route extension: a name registered under the "
+                "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
+                "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
+                "whitespace-separated values."
             ),
         )
 
