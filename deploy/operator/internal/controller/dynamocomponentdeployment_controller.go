@@ -1077,6 +1077,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			podSpec.ServiceAccountName = DefaultServiceAccountName
 		}
 	}
+	if err := dynamo.ValidateRenderedPodSpecContainerNames(podSpec); err != nil {
+		return nil, errors.Wrapf(err, "invalid rendered pod spec for component %q role %q", dynamo.GetDCDComponentName(dcd), role)
+	}
 
 	return &corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{

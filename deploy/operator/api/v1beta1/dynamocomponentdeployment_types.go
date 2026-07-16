@@ -312,8 +312,14 @@ func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 // IsReady reports whether the component status signals `Available=True`.
 func (s *DynamoComponentDeploymentStatus) IsReady() (bool, string) {
 	for _, condition := range s.Conditions {
-		if condition.Type == DynamoComponentDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
+		if condition.Type != DynamoComponentDeploymentConditionTypeAvailable {
+			continue
+		}
+		if condition.Status == metav1.ConditionTrue {
 			return true, ""
+		}
+		if condition.Message != "" {
+			return false, condition.Message
 		}
 	}
 	return false, "Component deployment not ready - Available condition not true"

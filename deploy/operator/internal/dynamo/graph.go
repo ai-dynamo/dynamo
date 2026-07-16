@@ -2240,6 +2240,9 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 			return nil, fmt.Errorf("failed to inject checkpoint config for role %s: %w", p.r.Name, err)
 		}
 	}
+	if err := ValidateRenderedPodSpecContainerNames(podSpec); err != nil {
+		return nil, fmt.Errorf("invalid rendered pod spec for component %q role %q: %w", p.componentName, p.r.Role, err)
+	}
 
 	// MinAvailable serves two purposes for Grove PCLQ:
 	// 1. It defines the minimum number of pods that are guaranteed to be gang scheduled.

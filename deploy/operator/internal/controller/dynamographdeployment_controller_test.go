@@ -4189,6 +4189,51 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 			},
 		},
 		{
+			name: "single service - DCD render failure is propagated",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ServiceName:     "frontend",
+						DynamoNamespace: ptr.To("default"),
+						ComponentType:   string(commonconsts.ComponentTypeFrontend),
+						Replicas:        ptr.To(int32(2)),
+					},
+				},
+			},
+			existingDCDs: []client.Object{
+				betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dgd-frontend",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						BackendFramework: "vllm",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "frontend",
+							Replicas:    ptr.To(int32(2)),
+						},
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:    v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status:  metav1.ConditionFalse,
+								Reason:  "Reconciling",
+								Message: `Failed to reconcile DynamoComponentDeployment: invalid rendered pod spec: container name "prepare" is used by both spec.containers[0] and spec.initContainers[0]`,
+							},
+						},
+					},
+				}),
+			},
+			wantReconcileResult: ReconcileResult{
+				State:           v1beta1.DGDStatePending,
+				Reason:          "some_resources_are_not_ready",
+				Message:         `Resources not ready: test-dgd-frontend: Failed to reconcile DynamoComponentDeployment: invalid rendered pod spec: container name "prepare" is used by both spec.containers[0] and spec.initContainers[0]`,
+				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{},
+			},
+		},
+		{
 			name: "multiple services - all DCDs ready",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
