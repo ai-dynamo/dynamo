@@ -295,7 +295,13 @@ class SyntheticBinaryCmafBackend:
             created=created_ts,
             status="in_progress",
             progress=0,
-            data=[VideoData(url=CMAF_METADATA_TAG, b64_json=metadata_b64)],
+            data=[
+                VideoData(
+                    output_format="mp4",
+                    url=CMAF_METADATA_TAG,
+                    b64_json=metadata_b64,
+                )
+            ],
         ).model_dump()
 
         yield NvVideosResponse(
@@ -304,7 +310,13 @@ class SyntheticBinaryCmafBackend:
             created=created_ts,
             status="in_progress",
             progress=1,
-            data=[VideoData(url=CMAF_INIT_TAG, b64_json=init_b64)],
+            data=[
+                VideoData(
+                    output_format="mp4",
+                    url=CMAF_INIT_TAG,
+                    b64_json=init_b64,
+                )
+            ],
         ).model_dump()
 
         for index, segment in enumerate(segments):
@@ -319,6 +331,7 @@ class SyntheticBinaryCmafBackend:
                 progress=progress,
                 data=[
                     VideoData(
+                        output_format="mp4",
                         url=f"{CMAF_SEGMENT_PREFIX}{segment.index}",
                         b64_json=payload_b64,
                     )
