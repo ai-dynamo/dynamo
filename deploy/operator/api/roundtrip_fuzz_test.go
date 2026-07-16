@@ -216,12 +216,28 @@ func dynamoFuzzerFuncs(_ runtimeserializer.CodecFactory) []any {
 		fuzzAlphaDGDRStatus,
 		fuzzBetaDGDRSpec,
 		fuzzBetaDGDRStatus,
-		// PlacementStatus (v1alpha1 + v1beta1): keep the fuzz filler from
-		// drawing random bits for this pointer field. Placement conversion
-		// is exercised by TestDGD_RoundTrip_Status; excluding it here keeps
-		// the fuzz RNG stream stable across schema growth on DGDStatus.
-		func(p *v1beta1.PlacementStatus, _ randfill.Continue) {},
-		func(p *v1alpha1.PlacementStatus, _ randfill.Continue) {},
+		// PlacementStatus (v1alpha1 + v1beta1): pick admissible values so the
+		// round-trip fuzzer exercises Placement without producing shapes the CRD
+		// schema rejects. State draws from the enum; Score draws either nil or a
+		// value inside the [0, 1] bounds enforced by the CRD.
+		func(p *v1beta1.PlacementStatus, c randfill.Continue) {
+			p.State = oneOf(c,
+				v1beta1.PlacementScoreStateReported,
+				v1beta1.PlacementScoreStatePartial,
+				v1beta1.PlacementScoreStateUnsupported,
+				v1beta1.PlacementScoreStateUnknown,
+			)
+			p.Score = oneOfPtr(c, 0.0, 0.25, 0.5, 0.75, 1.0)
+		},
+		func(p *v1alpha1.PlacementStatus, c randfill.Continue) {
+			p.State = oneOf(c,
+				v1alpha1.PlacementScoreStateReported,
+				v1alpha1.PlacementScoreStatePartial,
+				v1alpha1.PlacementScoreStateUnsupported,
+				v1alpha1.PlacementScoreStateUnknown,
+			)
+			p.Score = oneOfPtr(c, 0.0, 0.25, 0.5, 0.75, 1.0)
+		},
 		// v1beta1 Components: the listMapKey marker requires name
 		// to be non-empty and unique; MaxItems caps the length at 25.
 		// Enforce both so the input is admissible.
@@ -349,6 +365,17 @@ func newRoundTripFiller(seed int64) *randfill.Filler {
 
 func oneOf[T any](c randfill.Continue, values ...T) T {
 	return values[c.Intn(len(values))]
+}
+
+// oneOfPtr returns nil roughly half the time; otherwise a pointer to one of
+// values. Useful for optional API fields that must either be unset or draw
+// from a constrained value set.
+func oneOfPtr[T any](c randfill.Continue, values ...T) *T {
+	if c.Bool() {
+		return nil
+	}
+	v := oneOf(c, values...)
+	return &v
 }
 
 func fuzzJSONValue(c randfill.Continue, depth int) any {
