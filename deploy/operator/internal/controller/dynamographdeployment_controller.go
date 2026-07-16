@@ -296,11 +296,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
 
-	// Compute DGD-level placement score from the Grove PodCliqueSet when on
-	// the Grove pathway. Score is sourced from scheduler PodGang statuses and
-	// is purely informational — it does not affect readiness.
-	r.updatePlacementStatus(ctx, dynamoDeployment)
-
 	// Override state based on rolling update status if a rolling update is in progress
 	if dynamoDeployment.Status.RollingUpdate != nil {
 		switch dynamoDeployment.Status.RollingUpdate.Phase {
@@ -707,39 +702,6 @@ func (r *DynamoGraphDeploymentReconciler) getExistingGrovePodCliqueSet(ctx conte
 		return nil, nil
 	}
 	return pcs, nil
-}
-
-// updatePlacementStatus writes the placement status on every reconcile so
-// status is never left stale. Per the placement-score DEP, every backend must
-// set Placement.State after the first reconciliation:
-//   - non-Grove pathways report Unsupported (no placement score source),
-//   - Grove read failures report Unknown (indeterminate; may recover),
-//   - otherwise the aggregator's classification is written through.
-//
-// In every non-Reported/Partial branch Placement.Score is cleared so a value
-// from a previous reconcile cannot linger.
-func (r *DynamoGraphDeploymentReconciler) updatePlacementStatus(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-	if !r.isGrovePathway(dgd) {
-		dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{
-			State: nvidiacomv1beta1.PlacementScoreStateUnsupported,
-		}
-		return
-	}
-
-	pcs, pcsErr := r.getExistingGrovePodCliqueSet(ctx, dgd)
-	if pcsErr != nil {
-		log.FromContext(ctx).V(1).Info("Failed to get PodCliqueSet for placement score", "error", pcsErr)
-		dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{
-			State: nvidiacomv1beta1.PlacementScoreStateUnknown,
-		}
-		return
-	}
-
-	score, state := dynamo.AggregatePlacementScore(pcs)
-	dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{
-		Score: score,
-		State: state,
-	}
 }
 
 func restartAnnotationsFromPodCliqueSet(pcs *grovev1alpha1.PodCliqueSet) map[string]string {

@@ -2818,6 +2818,11 @@ PlacementStatus groups DGD-level scheduler placement fields under a single
 status object so future placement signals (e.g. scheduler contract version,
 last-report timestamp, per-unit reports) can be added without a schema break.
 
+The score source is an open question in DEP #10064 (Grove mirror, typed Grove
+scheduler API, or unstructured provider). Until a source is selected and
+implemented, the DGD controller does not write this field; the schema and
+conversion are landed here so downstream consumers can rely on the shape.
+
 
 
 _Appears in:_
