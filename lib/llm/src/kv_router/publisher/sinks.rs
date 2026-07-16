@@ -9,6 +9,7 @@ use anyhow::Result;
 use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, StorageTier};
+use dynamo_runtime::discovery::EventTransportKind;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::transports::nats::NatsQueue;
 
@@ -16,10 +17,86 @@ use crate::kv_router::KV_EVENT_SUBJECT;
 
 pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
 
-impl RouterEventSink for EventPlanePublisher {
-    fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
-        self.0.publish(event)
+pub(super) const MAX_ZMQ_KV_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
+
+pub(super) trait RouterEventBatchSink: Send + Sync {
+    fn publish_events(&self, events: &[RouterEvent]) -> impl Future<Output = Result<()>> + Send;
+}
+
+impl<P: RouterEventSink + Send + Sync> RouterEventBatchSink for P {
+    async fn publish_events(&self, events: &[RouterEvent]) -> Result<()> {
+        let mut first_error = None;
+        for event in events {
+            if let Err(error) = self.publish_event(event).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
+}
+
+impl RouterEventBatchSink for EventPlanePublisher {
+    async fn publish_events(&self, events: &[RouterEvent]) -> Result<()> {
+        match self.0.transport_kind() {
+            // NATS Core retains its existing singleton RouterEvent payload.
+            EventTransportKind::Nats => {
+                let mut first_error = None;
+                for event in events {
+                    if let Err(error) = self.0.publish(event).await
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                }
+                first_error.map_or(Ok(()), Err)
+            }
+            // ZMQ peers must run the same version: its payload is Vec<RouterEvent>.
+            EventTransportKind::Zmq => {
+                let mut first_error = None;
+                for payload in encode_zmq_event_batches(events, MAX_ZMQ_KV_EVENT_PAYLOAD_BYTES)? {
+                    if let Err(error) = self.0.publish_bytes(payload).await
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                }
+                first_error.map_or(Ok(()), Err)
+            }
+        }
+    }
+}
+
+/// Encode an ordered event list into size-bounded ZMQ payloads.
+///
+/// A single event larger than `max_payload_bytes` is emitted intact because the
+/// wire format cannot split an event. All other payloads stay within the limit.
+pub(super) fn encode_zmq_event_batches(
+    events: &[RouterEvent],
+    max_payload_bytes: usize,
+) -> Result<Vec<Vec<u8>>> {
+    if events.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut encoded = Vec::new();
+    let mut pending = vec![events];
+
+    while let Some(batch) = pending.pop() {
+        let payload = rmp_serde::to_vec_named(batch)?;
+        if payload.len() <= max_payload_bytes || batch.len() == 1 {
+            encoded.push(payload);
+            continue;
+        }
+
+        let midpoint = batch.len() / 2;
+        // LIFO worklist: push the latter half first to preserve event order.
+        pending.push(&batch[midpoint..]);
+        pending.push(&batch[..midpoint]);
+    }
+
+    Ok(encoded)
 }
 
 pub(super) struct JetStreamPublisher(pub(super) NatsQueue);
@@ -30,12 +107,12 @@ impl RouterEventSink for JetStreamPublisher {
     }
 }
 
-pub(super) async fn emit<P: RouterEventSink>(
-    publisher: &P,
+pub(super) async fn emit(
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
     storage_tier: StorageTier,
     event: KvCacheEvent,
+    output: &mut Vec<RouterEvent>,
 ) {
     let router_event = RouterEvent::with_storage_tier(worker_id, event, storage_tier);
     if let Some(indexer) = local_indexer
@@ -43,7 +120,5 @@ pub(super) async fn emit<P: RouterEventSink>(
     {
         tracing::warn!(worker_id, error = %e, "Failed to apply event to local indexer");
     }
-    if let Err(e) = publisher.publish_event(&router_event).await {
-        tracing::error!(worker_id, error = %e, "Failed to publish event");
-    }
+    output.push(router_event);
 }

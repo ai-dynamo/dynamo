@@ -10,9 +10,12 @@ use dynamo_kv_router::{
     protocols::{KV_EVENT_SUBJECT, RouterEvent},
 };
 use dynamo_runtime::{
-    component::Component, discovery::EventTransportKind, prelude::*,
-    transports::event_plane::EventSubscriber,
+    component::Component,
+    discovery::EventTransportKind,
+    prelude::*,
+    transports::event_plane::{EventEnvelope, EventSubscriber, TypedEventSubscriber},
 };
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Start a simplified background task for event consumption using the event plane.
@@ -38,10 +41,9 @@ async fn start_kv_router_background_event_plane(
     // This ensures no events are lost between the initial dump fetch and the
     // subscription becoming active — the tree state at fetch time is guaranteed
     // to be a subset of what the subscription will deliver.
-    let mut subscriber =
+    let subscriber =
         EventSubscriber::for_component_with_transport(&component, KV_EVENT_SUBJECT, transport_kind)
-            .await?
-            .typed::<RouterEvent>();
+            .await?;
 
     // Brief delay to let the subscription fully establish with the NATS server
     // before recovery fetches the initial dump from workers.
@@ -81,46 +83,103 @@ async fn start_kv_router_background_event_plane(
     }
 
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = cancellation_token.cancelled() => {
-                    tracing::debug!("KV Router event plane background task received cancellation signal");
-                    break;
-                }
-
-                // Handle event consumption from event plane subscription
-                Some(result) = subscriber.next() => {
-                    let (envelope, event) = match result {
-                        Ok((envelope, event)) => (envelope, event),
-                        Err(e) => {
-                            tracing::warn!("Failed to receive RouterEvent from event plane: {e:?}");
-                            continue;
-                        }
-                    };
-
-                    tracing::trace!(
-                        "Received event from publisher {} (seq {})",
-                        envelope.publisher_id,
-                        envelope.sequence
-                    );
-
-                    tracing::trace!(
-                        "Forwarding live event to recovery coordinator for worker {} dp_rank {} event_id {}",
-                        event.worker_id,
-                        event.event.dp_rank,
-                        event.event.event_id
-                    );
-                    worker_query_client.handle_live_event(event).await;
-                }
+        let subscriber = match transport_kind {
+            EventTransportKind::Nats => {
+                RouterEventSubscriber::Singleton(subscriber.typed::<RouterEvent>())
             }
-        }
-
-        tracing::debug!("KV Router event plane background task exiting");
+            EventTransportKind::Zmq => {
+                RouterEventSubscriber::Batch(subscriber.typed::<Vec<RouterEvent>>())
+            }
+        };
+        consume_events(subscriber, worker_query_client, cancellation_token).await;
     });
 
     Ok(())
+}
+
+enum RouterEventSubscriber {
+    Singleton(TypedEventSubscriber<RouterEvent>),
+    Batch(TypedEventSubscriber<Vec<RouterEvent>>),
+}
+
+enum RouterEventPayload {
+    Singleton(RouterEvent),
+    Batch(Vec<RouterEvent>),
+}
+
+impl RouterEventSubscriber {
+    async fn next(&mut self) -> Option<Result<(EventEnvelope, RouterEventPayload)>> {
+        match self {
+            Self::Singleton(subscriber) => subscriber.next().await.map(|result| {
+                result.map(|(envelope, event)| (envelope, RouterEventPayload::Singleton(event)))
+            }),
+            Self::Batch(subscriber) => subscriber.next().await.map(|result| {
+                result.map(|(envelope, events)| (envelope, RouterEventPayload::Batch(events)))
+            }),
+        }
+    }
+}
+
+async fn consume_events(
+    mut subscriber: RouterEventSubscriber,
+    worker_query_client: Arc<WorkerQueryClient>,
+    cancellation_token: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            biased;
+
+            _ = cancellation_token.cancelled() => {
+                tracing::debug!("KV Router event plane background task received cancellation signal");
+                break;
+            }
+
+            Some(result) = subscriber.next() => {
+                let (envelope, payload) = match result {
+                    Ok((envelope, payload)) => (envelope, payload),
+                    Err(e) => {
+                        tracing::warn!("Failed to receive RouterEvent payload from event plane: {e:?}");
+                        continue;
+                    }
+                };
+
+                tracing::trace!(
+                    event_count = match &payload {
+                        RouterEventPayload::Singleton(_) => 1,
+                        RouterEventPayload::Batch(events) => events.len(),
+                    },
+                    "Received event payload from publisher {} (seq {})",
+                    envelope.publisher_id,
+                    envelope.sequence
+                );
+                match payload {
+                    RouterEventPayload::Singleton(event) => {
+                        forward_live_event(&worker_query_client, event).await;
+                    }
+                    RouterEventPayload::Batch(events) => {
+                        for event in events {
+                            if cancellation_token.is_cancelled() {
+                                break;
+                            }
+                            forward_live_event(&worker_query_client, event).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::debug!("KV Router event plane background task exiting");
+}
+
+async fn forward_live_event(worker_query_client: &Arc<WorkerQueryClient>, event: RouterEvent) {
+    tracing::trace!(
+        "Forwarding live event to recovery coordinator for worker {} dp_rank {} event_id {}",
+        event.worker_id,
+        event.event.dp_rank,
+        event.event.event_id
+    );
+    worker_query_client.handle_live_event(event).await;
 }
 
 /// Helper to decide which subscriber (JetStream or Event Plane) to start based on config

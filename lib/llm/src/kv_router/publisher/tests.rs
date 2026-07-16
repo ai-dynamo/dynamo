@@ -1983,23 +1983,33 @@ mod event_processor_tests {
     #[derive(Debug, Clone)]
     struct MockPublisher {
         events: Arc<Mutex<Vec<RouterEvent>>>,
+        batches: Arc<Mutex<Vec<Vec<RouterEvent>>>>,
     }
 
     impl MockPublisher {
         fn new() -> Self {
             Self {
                 events: Arc::new(Mutex::new(Vec::new())),
+                batches: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         fn get_events(&self) -> Vec<RouterEvent> {
             self.events.lock().unwrap().clone()
         }
+
+        fn get_batches(&self) -> Vec<Vec<RouterEvent>> {
+            self.batches.lock().unwrap().clone()
+        }
     }
 
-    impl RouterEventSink for MockPublisher {
-        fn publish_event(&self, event: &RouterEvent) -> impl Future<Output = Result<()>> + Send {
-            self.events.lock().unwrap().push(event.clone());
+    impl super::super::sinks::RouterEventBatchSink for MockPublisher {
+        fn publish_events(
+            &self,
+            events: &[RouterEvent],
+        ) -> impl Future<Output = Result<()>> + Send {
+            self.events.lock().unwrap().extend_from_slice(events);
+            self.batches.lock().unwrap().push(events.to_vec());
             async { Ok(()) }
         }
     }
@@ -2182,6 +2192,8 @@ mod event_processor_tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 4, 5, 6]
         );
+        assert_eq!(publisher.get_batches().len(), 1);
+        assert_eq!(publisher.get_batches()[0], events);
     }
 
     #[tokio::test]
@@ -2205,6 +2217,7 @@ mod event_processor_tests {
 
         let events = publisher.get_events();
         assert_eq!(events.len(), 2);
+        assert_eq!(publisher.get_batches().len(), 2);
         assert!(events.iter().all(|event| {
             matches!(&event.event.data, KvCacheEventData::Removed(data) if data.block_hashes.len() == 1)
         }));
@@ -3483,5 +3496,120 @@ mod event_processor_tests {
         } else {
             panic!("Expected Stored event");
         }
+    }
+}
+
+#[cfg(test)]
+mod zmq_event_batch_tests {
+    use super::*;
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, RouterEvent,
+    };
+
+    use super::super::sinks::{
+        MAX_ZMQ_KV_EVENT_PAYLOAD_BYTES, RouterEventBatchSink, encode_zmq_event_batches,
+    };
+
+    fn router_event(event_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            7,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(event_id + 100)],
+                }),
+                dp_rank: (event_id % 2) as u32,
+            },
+        )
+    }
+
+    #[test]
+    fn zmq_batch_encoding_matches_named_msgpack_and_roundtrips() {
+        let events = vec![router_event(1), router_event(2), router_event(3)];
+        let expected = rmp_serde::to_vec_named(&events).unwrap();
+
+        let encoded = encode_zmq_event_batches(&events, expected.len()).unwrap();
+
+        assert_eq!(encoded, vec![expected]);
+        assert_eq!(
+            rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded[0]).unwrap(),
+            events
+        );
+    }
+
+    #[test]
+    fn zmq_batch_encoding_splits_at_event_boundaries_in_order() {
+        let events = (0..7).map(router_event).collect::<Vec<_>>();
+
+        let encoded = encode_zmq_event_batches(&events, 1).unwrap();
+        let decoded = encoded
+            .iter()
+            .flat_map(|payload| rmp_serde::from_slice::<Vec<RouterEvent>>(payload).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(encoded.len(), events.len());
+        assert_eq!(decoded, events);
+    }
+
+    #[test]
+    fn zmq_batch_encoding_enforces_one_mib_payload_cap() {
+        let events = (0..20_000).map(router_event).collect::<Vec<_>>();
+
+        let encoded = encode_zmq_event_batches(&events, MAX_ZMQ_KV_EVENT_PAYLOAD_BYTES).unwrap();
+        let decoded = encoded
+            .iter()
+            .flat_map(|payload| {
+                assert!(payload.len() <= MAX_ZMQ_KV_EVENT_PAYLOAD_BYTES);
+                rmp_serde::from_slice::<Vec<RouterEvent>>(payload).unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(encoded.len() > 1);
+        assert_eq!(decoded, events);
+    }
+
+    #[test]
+    fn zmq_batch_encoding_allows_one_oversized_event() {
+        let event = router_event(1);
+        let encoded = encode_zmq_event_batches(std::slice::from_ref(&event), 1).unwrap();
+
+        assert_eq!(encoded.len(), 1);
+        assert!(encoded[0].len() > 1);
+        assert_eq!(
+            rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded[0]).unwrap(),
+            vec![event]
+        );
+    }
+
+    #[test]
+    fn zmq_batch_encoding_skips_empty_batches() {
+        assert!(encode_zmq_event_batches(&[], 1024).unwrap().is_empty());
+    }
+
+    #[derive(Clone, Default)]
+    struct SingletonSink {
+        events: Arc<std::sync::Mutex<Vec<RouterEvent>>>,
+    }
+
+    impl RouterEventSink for SingletonSink {
+        fn publish_event(
+            &self,
+            event: &RouterEvent,
+        ) -> impl Future<Output = anyhow::Result<()>> + Send {
+            self.events.lock().unwrap().push(event.clone());
+            async { Ok(()) }
+        }
+    }
+
+    #[tokio::test]
+    async fn non_zmq_batch_sink_preserves_singleton_publication() {
+        let sink = SingletonSink::default();
+        let events = vec![router_event(1), router_event(2), router_event(3)];
+
+        RouterEventBatchSink::publish_events(&sink, &events)
+            .await
+            .unwrap();
+
+        assert_eq!(*sink.events.lock().unwrap(), events);
     }
 }
