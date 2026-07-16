@@ -40,6 +40,9 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_ro_connect_timeout_ms,
     torch_device,
 )
+from gpu_memory_service.integrations.vllm.logging_config import (
+    configure_gms_worker_logging,
+)
 from gpu_memory_service.integrations.vllm.model_loader import (
     abort_pending_gms_write,
     get_imported_weights_bytes,
@@ -54,6 +57,10 @@ from gpu_memory_service.integrations.vllm.patches import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Make gpu_memory_service INFO/DEBUG visible in the vLLM worker subprocess, where
+# vLLM's logging config would otherwise drop them (see logging_config docstring).
+configure_gms_worker_logging()
 
 # Trigger model loader registration and utility patches on import
 register_gms_loader()
@@ -244,7 +251,6 @@ class GMSWorker(Worker):
             )
         )
         logger.info(msg)
-        print(msg, flush=True)
 
         return int(projected_available)
 
