@@ -78,8 +78,7 @@ packages:
   # generator), so it is intentionally NOT duplicated here.
 
   # LGPL media stack — built --disable-gpl in wheel_builder (h264_nvenc + libvpx)
-  # and copied into vllm/sglang runtime (container/templates/vllm_runtime.Dockerfile
-  # + sglang_runtime.Dockerfile). Replaces the purged GPL apt ffmpeg.
+  # and copied into the vLLM runtime. SGLang intentionally contains no FFmpeg.
   - name: ffmpeg
     version: "8.1"
     license: LGPL-2.1-or-later
@@ -87,8 +86,6 @@ packages:
     images:
       - vllm-runtime
       - vllm-runtime-efa
-      - sglang-runtime
-      - sglang-runtime-efa
 
   - name: libvpx
     # VP8/VP9 codec library, ffmpeg's only non-NVIDIA encoder dependency.
@@ -98,8 +95,6 @@ packages:
     images:
       - vllm-runtime
       - vllm-runtime-efa
-      - sglang-runtime
-      - sglang-runtime-efa
 
   # UCX — Unified Communication X, built from source in wheel_builder and used by
   # the NIXL transport. Installed to /usr/local (no dpkg metadata).

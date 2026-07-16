@@ -288,7 +288,12 @@ RUN mkdir -p /tmp/native-sources
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Always build FFmpeg so libs are available for Rust checks in CI.
+# Build FFmpeg for frameworks that retain media encode/decode support. SGLang
+# deliberately omits it: its Inkling image/audio path uses Pillow and
+# soundfile/torchaudio, and the SGLang runtime must not contain H.264, H.265, or
+# AAC implementations.
+{% if framework != "sglang" %}
+# Build FFmpeg so libs are available for Rust checks in CI.
 # We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
 # code can encode video without the GPL-licensed binary shipped by imageio-ffmpeg.
 # Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
@@ -356,6 +361,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     mkdir -p /usr/local/src/ffmpeg && \
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
+{% endif %}
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -503,7 +509,9 @@ COPY components/ /opt/dynamo/components/
 
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
+{% if framework != "sglang" %}
 ARG ENABLE_MEDIA_FFMPEG
+{% endif %}
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
@@ -520,12 +528,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+{% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist && \
+{% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+{% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text
