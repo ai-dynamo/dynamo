@@ -1,6 +1,6 @@
 # TML Inkling Recipes
 
-Recipes for **thinkingmachines/Inkling-NVFP4**, served as `inkling-model`.
+Recipes for **thinkingmachines/Inkling-NVFP4**.
 
 ## Configurations
 
@@ -84,7 +84,7 @@ kubectl port-forward svc/tml-inkling-sglang-agg-frontend 8000:8000 -n ${NAMESPAC
 curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "inkling-model",
+    "model": "thinkingmachines/Inkling-NVFP4",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
     "max_tokens": 64
   }'
