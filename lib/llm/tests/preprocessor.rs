@@ -688,6 +688,70 @@ mod cached_multimodal_uuid {
     }
 
     #[tokio::test]
+    async fn accepts_deprecated_nested_image_uuid() {
+        let messages = r#"[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "https://example.com/first.png",
+                            "uuid": "92b888ad-e64a-478f-b688-5091e16544e3"
+                        }
+                    }
+                ]
+            }
+        ]"#;
+        let request = Request::from(messages, None, None, "test-model".to_string());
+
+        let (preprocessed, _, _) = make_preprocessor()
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            preprocessed.multi_modal_uuids.as_ref().unwrap()["image_url"],
+            vec![Some("92b888ad-e64a-478f-b688-5091e16544e3".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_audio_and_video_cache_uuids() {
+        for messages in [
+            r#"[{
+                "role": "user",
+                "content": [{
+                    "type": "video_url",
+                    "video_url": {"url": "https://example.com/video.mp4"},
+                    "uuid": "cached-video"
+                }]
+            }]"#,
+            r#"[{
+                "role": "user",
+                "content": [{
+                    "type": "audio_url",
+                    "audio_url": {
+                        "url": "https://example.com/audio.wav",
+                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3"
+                    }
+                }]
+            }]"#,
+        ] {
+            let request = Request::from(messages, None, None, "test-model".to_string());
+            let error = make_preprocessor()
+                .preprocess_request(&request, None)
+                .await
+                .expect_err("audio and video cache UUIDs must be rejected");
+
+            assert!(
+                format!("{error:#}").contains("supported only for image_url parts with vLLM"),
+                "unexpected error: {error:#}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn rejects_media_part_without_url_or_uuid() {
         let messages = r#"[
             {

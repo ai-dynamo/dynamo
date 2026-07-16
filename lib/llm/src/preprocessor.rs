@@ -1244,6 +1244,7 @@ impl OpenAIPreprocessor {
         }
     }
 
+    #[allow(deprecated)]
     pub async fn gather_multi_modal_data<
         R: OAIChatLikeRequest + MediaRequestExt + NvExtProvider,
     >(
@@ -1311,21 +1312,50 @@ impl OpenAIPreprocessor {
             };
             for content_part in content_parts.iter() {
                 let (type_str, url, uuid) = match content_part {
-                    ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => (
-                        "image_url",
-                        part.image_url.as_ref().and_then(|media| media.url.clone()),
-                        part.uuid.clone(),
-                    ),
-                    ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => (
-                        "video_url",
-                        part.video_url.as_ref().and_then(|media| media.url.clone()),
-                        part.uuid.clone(),
-                    ),
-                    ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => (
-                        "audio_url",
-                        part.audio_url.as_ref().and_then(|media| media.url.clone()),
-                        part.uuid.clone(),
-                    ),
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(part) => {
+                        let legacy_uuid = part
+                            .image_url
+                            .as_ref()
+                            .and_then(|media| media.uuid.as_ref())
+                            .map(ToString::to_string);
+                        (
+                            "image_url",
+                            part.image_url.as_ref().map(|media| media.url.clone()),
+                            part.uuid.clone().or(legacy_uuid),
+                        )
+                    }
+                    ChatCompletionRequestUserMessageContentPart::VideoUrl(part) => {
+                        let has_legacy_uuid = part
+                            .video_url
+                            .as_ref()
+                            .is_some_and(|media| media.uuid.is_some());
+                        if part.uuid.is_some() || has_legacy_uuid {
+                            bail!(
+                                "multimodal cache UUIDs are currently supported only for image_url parts with vLLM"
+                            );
+                        }
+                        (
+                            "video_url",
+                            part.video_url.as_ref().map(|media| media.url.clone()),
+                            None,
+                        )
+                    }
+                    ChatCompletionRequestUserMessageContentPart::AudioUrl(part) => {
+                        let has_legacy_uuid = part
+                            .audio_url
+                            .as_ref()
+                            .is_some_and(|media| media.uuid.is_some());
+                        if part.uuid.is_some() || has_legacy_uuid {
+                            bail!(
+                                "multimodal cache UUIDs are currently supported only for image_url parts with vLLM"
+                            );
+                        }
+                        (
+                            "audio_url",
+                            part.audio_url.as_ref().map(|media| media.url.clone()),
+                            None,
+                        )
+                    }
                     _ => continue,
                 };
 
@@ -1341,10 +1371,12 @@ impl OpenAIPreprocessor {
                 let modality = type_str.to_string();
                 let slot_idx = media_map.entry(modality.clone()).or_default().len();
                 any_user_uuid |= uuid.is_some();
-                uuid_map
-                    .entry(modality.clone())
-                    .or_default()
-                    .push(uuid.clone());
+                if type_str == "image_url" {
+                    uuid_map
+                        .entry(modality.clone())
+                        .or_default()
+                        .push(uuid.clone());
+                }
 
                 match (url, uuid) {
                     (Some(url), _) => {

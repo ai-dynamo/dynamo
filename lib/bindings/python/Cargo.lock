@@ -2363,7 +2363,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "2.0.2"
-source = "git+https://github.com/furionw/frontend-crates.git?rev=31cd250192dbca6b3005bec8170e6f95d2bc0abf#31cd250192dbca6b3005bec8170e6f95d2bc0abf"
+source = "git+https://github.com/furionw/frontend-crates.git?rev=522a09c319772e3e8c4250f9afd917e7a460f2cc#522a09c319772e3e8c4250f9afd917e7a460f2cc"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2373,6 +2373,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -264,7 +264,7 @@ async def test_audio_in_video_preserves_order_and_merges_standalone_audio():
 @pytest.mark.parametrize(
     ("video_item", "audio_error", "message"),
     [
-        ({"Decoded": {"shape": [2, 4, 4, 3]}}, None, "URL-based"),
+        ({"Decoded": {"shape": [2, 4, 4, 3]}}, None, "non-URL video item"),
         (
             {"Url": "https://example.com/silent.mp4"},
             RuntimeError("no audio stream"),
@@ -284,84 +284,6 @@ async def test_audio_in_video_rejects_unusable_audio(video_item, audio_error, me
             "request-audio-error",
             None,
             {"use_audio_in_video": True},
-        )
-
-
-@pytest.mark.asyncio
-async def test_audio_in_video_rejects_uuid_only_standalone_audio():
-    processor = _processor()
-    processor.video_loader.load_video_batch.return_value = [object()]
-    processor.audio_loader.load_audio_batch.return_value = [None]
-
-    with pytest.raises(ValueError, match="UUID-only standalone audio"):
-        await processor.extract_multimodal_data(
-            {
-                "multi_modal_data": {
-                    "video_url": [{"Url": "https://example.com/video.mp4"}],
-                    "audio_url": [{"UuidOnly": "cached-audio"}],
-                }
-            },
-            "request-video-cached-audio",
-            None,
-            {"use_audio_in_video": True},
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("request_key", "result_key", "loader_name"),
-    [
-        ("video_url", "video", "video_loader"),
-        ("audio_url", "audio", "audio_loader"),
-    ],
-)
-async def test_uuid_only_video_audio_use_modality_level_none(
-    request_key,
-    result_key,
-    loader_name,
-):
-    processor = _processor()
-    loader = getattr(processor, loader_name)
-    getattr(loader, f"load_{result_key}_batch").return_value = [None]
-
-    result = await processor.extract_multimodal_data(
-        {"multi_modal_data": {request_key: [{"UuidOnly": "cached-key"}]}},
-        "request-uuid-only",
-        None,
-    )
-
-    assert result == {result_key: None}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("request_key", "result_key", "loader_name"),
-    [
-        ("video_url", "video", "video_loader"),
-        ("audio_url", "audio", "audio_loader"),
-    ],
-)
-async def test_mixed_media_and_uuid_only_video_audio_are_rejected(
-    request_key,
-    result_key,
-    loader_name,
-):
-    processor = _processor()
-    loader = getattr(processor, loader_name)
-    getattr(loader, f"load_{result_key}_batch").return_value = [object(), None]
-
-    with pytest.raises(ValueError, match=f"Mixed .* UUID-only {result_key}"):
-        await processor.extract_multimodal_data(
-            {
-                "multi_modal_data": {
-                    request_key: [
-                        {"Url": "https://example.com/media"},
-                        {"UuidOnly": "cached-key"},
-                    ]
-                }
-            },
-            "request-mixed-uuid",
-            None,
         )
 
 
@@ -402,54 +324,30 @@ def test_build_tokens_prompt_prefers_opaque_user_uuids_without_padding():
     assert prompt["multi_modal_uuids"] == {"image": ["sku-image-a", "sku-image-b"]}
 
 
-def test_build_tokens_prompt_normalizes_all_user_uuid_modalities():
+@pytest.mark.parametrize(
+    "unsupported_uuids",
+    [
+        {"video_url": ["video-key"]},
+        {"audio_url": "audio-key"},
+    ],
+)
+def test_build_tokens_prompt_rejects_user_audio_video_uuids(
+    unsupported_uuids: dict[str, object],
+) -> None:
     processor = _processor(unified_vision_chunk=True)
 
-    prompt = processor.build_tokens_prompt(
-        {
-            "token_ids": [1, 2, 3],
-            "multi_modal_uuids": {
-                "image_url": ["image-key"],
-                "video_url": ["video-key"],
-                "audio_url": ["audio-key"],
+    with pytest.raises(ValueError, match="supported only for images"):
+        processor.build_tokens_prompt(
+            {
+                "token_ids": [1, 2, 3],
+                "multi_modal_uuids": {
+                    "image_url": ["image-key"],
+                    **unsupported_uuids,
+                },
             },
-        },
-        {"vision_chunk": [None], "video": [None], "audio": [None]},
-        None,
-    )
-
-    assert prompt["multi_modal_uuids"] == {
-        "vision_chunk": ["image-key"],
-        "video": ["video-key"],
-        "audio": ["audio-key"],
-    }
-
-
-def test_build_tokens_prompt_aligns_video_derived_audio_uuid_slots():
-    processor = _processor()
-    standalone_audio = object()
-    video_audio = object()
-
-    prompt = processor.build_tokens_prompt(
-        {
-            "token_ids": [1, 2, 3],
-            "multi_modal_data": {
-                "video_url": [{"Url": "https://example.com/video.mp4"}],
-                "audio_url": [{"Url": "https://example.com/audio.wav"}],
-            },
-            "multi_modal_uuids": {
-                "video_url": ["video-key"],
-                "audio_url": [None],
-            },
-        },
-        {"video": object(), "audio": [standalone_audio, video_audio]},
-        {"use_audio_in_video": True},
-    )
-
-    assert prompt["multi_modal_uuids"] == {
-        "video": ["video-key"],
-        "audio": [None, None],
-    }
+            {"vision_chunk": [None], "video": [None], "audio": [None]},
+            None,
+        )
 
 
 def test_build_tokens_prompt_preserves_grouped_forwarded_hashes():

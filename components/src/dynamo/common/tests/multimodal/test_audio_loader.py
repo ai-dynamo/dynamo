@@ -136,27 +136,3 @@ async def test_load_audio_batch_reads_decoded_variant(monkeypatch):
         decoded_item,
         return_metadata=True,
     )
-
-
-@pytest.mark.asyncio
-async def test_uuid_only_audio_slots_preserve_batch_alignment():
-    loader = AudioLoader()
-    first = (np.zeros(8, dtype=np.float32), 16000.0)
-    second = (np.ones(8, dtype=np.float32), 44100.0)
-    loader.load_audio = AsyncMock(  # type: ignore[method-assign]
-        side_effect=[first, second]
-    )
-
-    audios = await loader.load_audio_batch(
-        [
-            {"Url": "https://example.com/first.wav"},
-            {"UuidOnly": "cached-audio"},
-            {"Url": "https://example.com/second.wav"},
-        ]
-    )
-
-    assert audios[0] is not None
-    assert audios[1] is None
-    assert audios[2] is not None
-    np.testing.assert_array_equal(audios[0][0], first[0])
-    np.testing.assert_array_equal(audios[2][0], second[0])

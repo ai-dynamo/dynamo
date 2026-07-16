@@ -208,6 +208,28 @@ async def _build_engine_inputs(
     return await renderer.process_for_engine_async(prompt_inputs, time.time())
 
 
+def _normalize_vllm_image_parts(messages: list[Any]) -> None:
+    """Normalize image parts before vLLM validates and renders them."""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            if not isinstance(image_url, dict):
+                continue
+            if image_url.get("detail") is None:
+                image_url["detail"] = "auto"
+            # Older Dynamo clients nested a UUID inside image_url. Lift it into
+            # vLLM's canonical content-part field before the vLLM parser sees it.
+            if part.get("uuid") is None and image_url.get("uuid") is not None:
+                part["uuid"] = image_url["uuid"]
+
+
 class VllmProcessor:
     def __init__(
         self,
@@ -407,22 +429,12 @@ class VllmProcessor:
     ) -> AsyncGenerator[dict[str, Any], None]:
         request_id = random_uuid()
 
-        # vLLM's Pydantic model requires image_url.detail to be 'auto'/'low'/'high'.
-        # The Rust HTTP layer accepts None/missing, so normalize before validation.
         messages = request.get("messages") or []
-        for msg in messages:
-            if not isinstance(msg, dict):
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "image_url":
-                    img_url = part.get("image_url")
-                    if isinstance(img_url, dict) and img_url.get("detail") is None:
-                        img_url["detail"] = "auto"
+        _normalize_vllm_image_parts(messages)
+        # Validate cache-UUID modality support before vLLM downloads or
+        # processes media. Dynamo currently exposes vLLM cache UUIDs for
+        # images only.
+        mm_data, mm_uuids = extract_mm_urls(messages)
 
         # Images are fetched by vLLM's renderer via DynamoMediaConnector,
         # which wraps our ImageLoader (LRU cache + in-flight dedup).
@@ -568,7 +580,6 @@ class VllmProcessor:
         # Parse user cache identities before building routing metadata. Opaque
         # UUIDs deliberately suppress multimodal exact routing while retaining
         # vLLM's feature metadata for backend cache reuse and tensor transfer.
-        mm_data, mm_uuids = extract_mm_urls(request.get("messages") or [])
         if mm_uuids:
             dynamo_preproc["multi_modal_uuids"] = mm_uuids
 

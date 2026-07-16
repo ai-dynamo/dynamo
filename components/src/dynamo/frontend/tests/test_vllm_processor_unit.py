@@ -568,6 +568,32 @@ async def test_build_engine_inputs_preserves_multimodal_uuids(
     }
 
 
+def test_normalize_vllm_image_parts_lifts_deprecated_nested_uuid(
+    vllm_processor_module,
+) -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/image.png",
+                        "detail": None,
+                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3",
+                    },
+                }
+            ],
+        }
+    ]
+
+    vllm_processor_module._normalize_vllm_image_parts(messages)
+
+    part = messages[0]["content"][0]
+    assert part["uuid"] == "92b888ad-e64a-478f-b688-5091e16544e3"
+    assert part["image_url"]["detail"] == "auto"
+
+
 class _FakeOutputProcessor:
     def __init__(self):
         self.request_states = {}

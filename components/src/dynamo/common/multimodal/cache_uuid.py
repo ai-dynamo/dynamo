@@ -13,6 +13,6 @@ def reject_unsupported_multimodal_uuids(
         return
 
     raise ValueError(
-        "Multimodal UUID caching is currently supported only by the vLLM "
+        "Image UUID caching is currently supported only by the vLLM "
         f"backend; {backend} does not support the `uuid` field"
     )

@@ -168,6 +168,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 
 /// Convert user-role content blocks into chat completion messages.
 /// Tool results become separate Tool messages; text/image blocks become user messages.
+#[allow(deprecated)]
 fn convert_user_blocks(
     blocks: &[AnthropicContentBlock],
     messages: &mut Vec<ChatCompletionRequestMessage>,
@@ -199,8 +200,9 @@ fn convert_user_blocks(
                 content_parts.push(ChatCompletionRequestUserMessageContentPart::ImageUrl(
                     ChatCompletionRequestMessageContentPartImage {
                         image_url: Some(ImageUrl {
-                            url: Some(url),
+                            url,
                             detail: None,
+                            uuid: None,
                         }),
                         uuid: None,
                     },
@@ -1913,7 +1915,12 @@ mod tests {
                     // Second part: image with data URI
                     match &parts[1] {
                         ChatCompletionRequestUserMessageContentPart::ImageUrl(img) => {
-                            let url_str = img.image_url.url.to_string();
+                            let url_str = img
+                                .image_url
+                                .as_ref()
+                                .expect("converted image must contain a URL")
+                                .url
+                                .to_string();
                             assert!(
                                 url_str.starts_with("data:image/png;base64,"),
                                 "expected data URI, got: {url_str}"

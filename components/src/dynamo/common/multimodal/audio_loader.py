@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 # Constants for multimodal data variants
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
-UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 
 
 def _create_nixl_connector() -> Any:
@@ -171,7 +170,7 @@ class AudioLoader:
     async def load_audio_batch(
         self,
         audio_mm_items: List[Dict[str, Any]],
-    ) -> List[tuple[np.ndarray, float] | None]:
+    ) -> List[tuple[np.ndarray, float]]:
         """Load a batch of audio files from multimodal data items.
 
         Supports two paths:
@@ -183,42 +182,31 @@ class AudioLoader:
             List of (waveform, sample_rate) tuples.
         """
         audio_futures: List[Awaitable[tuple[np.ndarray, float]]] = []
-        slot_to_future_idx: list[int | None] = []
 
         for idx, item in enumerate(audio_mm_items):
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
-                slot_to_future_idx.append(len(audio_futures))
                 audio_futures.append(self.load_audio(url))
                 logger.debug("Preparing to load audio from URL: %s...", url[:80])
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
                     metadata = item[DECODED_VARIANT_KEY]
-                    slot_to_future_idx.append(len(audio_futures))
                     audio_futures.append(self._load_decoded_audio(metadata))
                 else:
                     raise ValueError(
                         "Received decoded audio data but enable_frontend_decoding=False. "
                         "Enable frontend decoding to transfer decoded audio via NIXL."
                     )
-            elif isinstance(item, dict) and UUID_ONLY_VARIANT_KEY in item:
-                slot_to_future_idx.append(None)
             else:
                 raise ValueError(
                     f"Invalid audio multimodal item at index {idx}. "
-                    "Expected dict with 'Url', 'Decoded', or 'UuidOnly' key."
+                    "Expected dict with 'Url' or 'Decoded' key."
                 )
 
         results = await asyncio.gather(*audio_futures, return_exceptions=True)
-        loaded_audio: list[tuple[np.ndarray, float] | None] = []
+        loaded_audio: list[tuple[np.ndarray, float]] = []
         collective_exceptions: list[str] = []
-        for media_item, future_idx in zip(
-            audio_mm_items, slot_to_future_idx, strict=True
-        ):
-            if future_idx is None:
-                loaded_audio.append(None)
-                continue
-            result = results[future_idx]
+        for media_item, result in zip(audio_mm_items, results, strict=True):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
                     raise result

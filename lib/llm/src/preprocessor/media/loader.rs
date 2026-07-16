@@ -473,10 +473,7 @@ impl MediaLoader {
             // cache to stay correct; in practice it's None on the common
             // path so the hit rate is unaffected.
             if media_io_kwargs.is_none()
-                && let Some(url) = image_part
-                    .image_url
-                    .as_ref()
-                    .and_then(|media| media.url.as_ref())
+                && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
             {
                 let key = Self::cache_key(url.as_str());
                 if let Some(hit) = cache.lock().get(&key) {
@@ -498,7 +495,7 @@ impl MediaLoader {
                 let url = image_part
                     .image_url
                     .as_ref()
-                    .and_then(|media| media.url.as_ref())
+                    .map(|media| &media.url)
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "Cannot decode an image content part without a URL; UUID-only parts must be resolved by the backend cache"
@@ -529,11 +526,9 @@ impl MediaLoader {
                     let url = video_part
                         .video_url
                         .as_ref()
-                        .and_then(|media| media.url.as_ref())
+                        .map(|media| &media.url)
                         .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Cannot decode a video content part without a URL; UUID-only parts must be resolved by the backend cache"
-                            )
+                            anyhow::anyhow!("Cannot decode a video content part without a URL")
                         })?;
                     self.media_fetcher
                         .check_if_url_allowed_with_dns(url)
@@ -563,10 +558,7 @@ impl MediaLoader {
         if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
             (self.cache.as_ref(), oai_content_part)
             && media_io_kwargs.is_none()
-            && let Some(url) = image_part
-                .image_url
-                .as_ref()
-                .and_then(|media| media.url.as_ref())
+            && let Some(url) = image_part.image_url.as_ref().map(|media| &media.url)
         {
             let key = Self::cache_key(url.as_str());
             let bytes = descriptor_bytes(&rdma_descriptor);

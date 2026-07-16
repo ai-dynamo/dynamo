@@ -100,11 +100,13 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 def extract_mm_urls(
     messages: list[dict[str, Any]],
 ) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None,]:
-    """Extract aligned multimodal data and cache UUIDs from chat messages.
+    """Extract media and vLLM image processor-cache UUIDs from chat messages.
 
-    URL-backed parts become ``Url`` variants. Parts with no URL and an opaque
-    top-level ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
-    processor cache. UUID lists preserve modality-local slot order::
+    URL-backed parts become ``Url`` variants. Image parts with no URL and an
+    opaque ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
+    processor cache. The deprecated nested image UUID remains accepted, while
+    cache UUIDs on audio and video are rejected. Image UUID lists preserve
+    slot order::
 
         ({"image_url": [{"Url": "https://..."}, {"UuidOnly": "image-1"}]},
          {"image_url": ["image-1", "image-1"]})
@@ -129,13 +131,24 @@ def extract_mm_urls(
             if part_type not in _MEDIA_CONTENT_TYPES:
                 continue
 
-            uuid_value = part.get("uuid")
-            if uuid_value is not None and (
-                not isinstance(uuid_value, str) or not uuid_value
-            ):
-                raise ValueError(f"{part_type} uuid must be a non-empty string")
-
             media_value = part.get(part_type)
+            top_level_uuid = part.get("uuid")
+            nested_uuid = (
+                media_value.get("uuid") if isinstance(media_value, dict) else None
+            )
+            for uuid_value in (top_level_uuid, nested_uuid):
+                if uuid_value is not None and (
+                    not isinstance(uuid_value, str) or not uuid_value
+                ):
+                    raise ValueError(f"{part_type} uuid must be a non-empty string")
+
+            uuid_value = top_level_uuid if top_level_uuid is not None else nested_uuid
+            if uuid_value is not None and part_type != "image_url":
+                raise ValueError(
+                    "multimodal cache UUIDs are currently supported only for "
+                    "image_url parts with vLLM"
+                )
+
             url = media_value.get("url") if isinstance(media_value, dict) else None
             if isinstance(url, str) and url:
                 mm_data.setdefault(part_type, []).append({"Url": url})
@@ -146,8 +159,9 @@ def extract_mm_urls(
                     f"{part_type} part must contain a non-empty URL or uuid"
                 )
 
-            mm_uuids.setdefault(part_type, []).append(uuid_value)
-            any_uuid |= uuid_value is not None
+            if part_type == "image_url":
+                mm_uuids.setdefault(part_type, []).append(uuid_value)
+                any_uuid |= uuid_value is not None
 
     return mm_data or None, mm_uuids if any_uuid else None
 

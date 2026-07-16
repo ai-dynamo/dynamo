@@ -121,4 +121,4 @@ strip = false
 
 [patch.crates-io]
 # Temporary until ai-dynamo/frontend-crates#119 is released.
-dynamo-protocols = { git = "https://github.com/furionw/frontend-crates.git", rev = "31cd250192dbca6b3005bec8170e6f95d2bc0abf" }
+dynamo-protocols = { git = "https://github.com/furionw/frontend-crates.git", rev = "522a09c319772e3e8c4250f9afd917e7a460f2cc" }

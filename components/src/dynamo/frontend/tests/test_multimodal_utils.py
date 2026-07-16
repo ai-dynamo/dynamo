@@ -212,6 +212,41 @@ def test_extracts_url_and_uuid_only_slots_with_alignment():
     )
 
 
+def test_accepts_deprecated_nested_image_uuid() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.com/a.png",
+                        "uuid": "92b888ad-e64a-478f-b688-5091e16544e3",
+                    },
+                }
+            ],
+        }
+    ]
+
+    assert extract_mm_urls(messages) == (
+        {"image_url": [{"Url": "https://example.com/a.png"}]},
+        {"image_url": ["92b888ad-e64a-478f-b688-5091e16544e3"]},
+    )
+
+
+@pytest.mark.parametrize("part_type", ["audio_url", "video_url"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_rejects_audio_video_cache_uuids(part_type: str, nested: bool) -> None:
+    media = {"url": "https://example.com/media", "uuid": "cached-media"}
+    part = {"type": part_type, part_type: media}
+    if not nested:
+        media.pop("uuid")
+        part["uuid"] = "cached-media"
+
+    with pytest.raises(ValueError, match="supported only for image_url.*vLLM"):
+        extract_mm_urls([{"role": "user", "content": [part]}])
+
+
 @pytest.mark.parametrize(
     "part",
     [
