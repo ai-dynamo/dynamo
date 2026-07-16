@@ -42,7 +42,7 @@ async function main() {
     lines.push('| – | No events to show | |');
   } else {
     for (const e of selected) {
-      const date = e.start.toDateString();
+      const date = e.start.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
       const addUrl = buildAddToCalendarURL(e);
       const label = `[${e.summary}](${addUrl})`;
       const location = formatLocation(e.location);

@@ -24,7 +24,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 ![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
 
-| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/digest/index.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** |
+| **[Docs](https://docs.nvidia.com/dynamo/)** | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/9178)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Digest](docs/digest/index.mdx)** | **[Design Proposals](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+label%3A%22dep%3Adraft%22%2C%22dep%3Aproposed%22%2C%22dep%3Aapproved%22%2C%22dep%3Aimplementing%22%2C%22dep%3Acompleted%22%2C%22dep%3Adeferred%22%2C%22dep%3Asuperseeded%22)** | **[How to Contribute](#community-and-contributing)** |
 
 <!-- The SVG badge uses systemLanguage so it only draws for Simplified Chinese/China browser language preferences. -->
 <p align="left">
@@ -40,7 +40,7 @@ Stay up to date with Dynamo demos, meetups, and release walkthroughs.
 <!-- EVENTS:START -->
 | Date | Event |
 |------|-------|
-| – | No upcoming events |
+| Wed Jul 16, 2026 | Test to see if this appears |
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
