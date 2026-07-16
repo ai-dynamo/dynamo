@@ -12,7 +12,7 @@ Dynamo + vLLM deployment profiles for the agentic workload. This set covers
 
 |                          | B200 aggregated agentic                     | B200 disaggregated agentic                   |
 | ------------------------ | ------------------------------------------- | -------------------------------------------- |
-| **GPU** (per worker)     | 1x B200                                     | 1x B200 prefill + 1x B200 decode             |
+| **GPU**                  | 1x B200                                     | 1x B200 prefill + 2x B200 decode (3x total)  |
 | **Mode**                 | Aggregated                                  | Prefill/decode disaggregated (1P2D)          |
 | **Framework**            | vLLM                                        | vLLM                                         |
 | **Precision**            | NVFP4 + FP8 KV                              | NVFP4 + FP8 KV                               |
@@ -48,6 +48,20 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token" \
   -n ${NAMESPACE}
 ```
+
+> [!NOTE]
+> The deploy manifests pull the runtime image from `nvcr.io/nvstaging/ai-dynamo`
+> and do not set `imagePullSecrets`, so the target namespace must already have
+> nvcr/NGC pull access. If the cluster does not inject a default pull secret,
+> create one and attach it to the namespace's default service account:
+>
+> ```bash
+> kubectl create secret docker-registry nvcr-imagepullsecret \
+>   --docker-server=nvcr.io --docker-username='$oauthtoken' \
+>   --docker-password="<your-NGC-API-key>" -n ${NAMESPACE}
+> kubectl patch serviceaccount default -n ${NAMESPACE} \
+>   -p '{"imagePullSecrets":[{"name":"nvcr-imagepullsecret"}]}'
+> ```
 
 ### 2. Create storage
 
