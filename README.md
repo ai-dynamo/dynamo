@@ -35,8 +35,6 @@ limitations under the License.
 
 ## Community Events
 
-Stay up to date with Dynamo demos, meetups, and release walkthroughs.
-
 <!-- EVENTS:START -->
 | Date | Event |
 |------|-------|
