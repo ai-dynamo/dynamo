@@ -195,7 +195,8 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
             default=None,
             help=(
-                "Enable router-local session affinity with this idle TTL in seconds. "
+                "Enable session affinity with this router-local idle TTL in seconds. "
+                "Bindings synchronize across router replicas on a best-effort basis. "
                 "Affinity is disabled when this option is omitted. "
                 "This is independent of KV prediction TTL settings."
             ),

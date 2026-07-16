@@ -6,11 +6,13 @@
 package validation
 
 import (
+	"context"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,7 +20,6 @@ import (
 )
 
 func TestValidateDynamoCheckpointGMSSnapshotRejectsUnpreparedTemplate(t *testing.T) {
-	t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
 			GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{Enabled: true},
@@ -32,14 +33,14 @@ func TestValidateDynamoCheckpointGMSSnapshotRejectsUnpreparedTemplate(t *testing
 		},
 	}
 
-	err := validateDynamoCheckpointGMSSnapshot(ckpt)
+	ctx := features.WithGate(context.Background(), features.Gates{GMSSnapshot: true})
+	err := validateDynamoCheckpointGMSSnapshot(ctx, ckpt)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "gpuMemoryService is metadata-only")
 	assert.Contains(t, err.Error(), "missing pod resource claim")
 }
 
 func TestValidateDynamoCheckpointGMSSnapshotAllowsPreparedTemplate(t *testing.T) {
-	t.Setenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar, "1")
 	claimTemplateName := "checkpoint-test-worker-gpu"
 	clientContainer := func(name string) corev1.Container {
 		return corev1.Container{
@@ -84,5 +85,6 @@ func TestValidateDynamoCheckpointGMSSnapshotAllowsPreparedTemplate(t *testing.T)
 		},
 	}
 
-	require.NoError(t, validateDynamoCheckpointGMSSnapshot(ckpt))
+	ctx := features.WithGate(context.Background(), features.Gates{GMSSnapshot: true})
+	require.NoError(t, validateDynamoCheckpointGMSSnapshot(ctx, ckpt))
 }
