@@ -32,6 +32,7 @@ from dynamo.planner.core.types import PlannerEffects, ScalingDecision
 from dynamo.planner.errors import (
     DynamoGraphDeploymentNotFoundError,
     ModelNameNotFoundError,
+    PlannerError,
 )
 
 pytestmark = [
@@ -362,6 +363,61 @@ class TestApplyPowerAnnotations:
         connector.get_component_pods.assert_called_once()
         mock_kube_api.patch_pod_annotation.assert_not_called()
         mock_kube_api.remove_pod_annotation.assert_not_called()
+        assert planner._disabled_power_removal_latched is True
+
+    @pytest.mark.asyncio
+    async def test_resolution_failure_does_not_latch_cleanup(
+        self, connector, mock_kube_api
+    ):
+        """A component-resolution failure must not be mistaken for a clean sweep.
+
+        get_component_pods(strict=True) raises on resolution failure so the
+        removal path returns without latching; otherwise a renamed/invalid
+        component would permanently disable cleanup and strand stale caps.
+        """
+        connector.get_component_pods = Mock(
+            side_effect=PlannerError("could not resolve decode component")
+        )
+
+        planner = _bare_planner(
+            connector,
+            _power_config(enable=False),
+            require_prefill=False,
+            require_decode=True,
+        )
+        planner._disabled_power_removal_latched = False
+
+        await planner._apply_power_annotations()
+
+        # strict=True was requested so the failure is not masked as an empty list.
+        assert connector.get_component_pods.call_args.kwargs["strict"] is True
+        mock_kube_api.remove_pod_annotation.assert_not_called()
+        assert planner._disabled_power_removal_latched is False
+
+    @pytest.mark.asyncio
+    async def test_disabled_latches_off_after_clean_removal_sweep(
+        self, connector, mock_kube_api
+    ):
+        """After a clean disabled sweep, steady state must not re-list pods."""
+        pod = _mock_pod("worker-0")
+        connector.get_component_pods = Mock(return_value=[pod])
+
+        planner = _bare_planner(
+            connector,
+            _power_config(enable=False),
+            require_prefill=False,
+            require_decode=True,
+        )
+        planner._last_power_annotation_sweep_s = 0.0
+        planner._disabled_power_removal_latched = False
+        planner.config.power_annotation_interval_seconds = 60.0
+
+        await planner._apply_power_annotations()
+        assert planner._disabled_power_removal_latched is True
+
+        connector.get_component_pods.reset_mock()
+        assert not planner._should_sweep_power_annotations(5000.0, PlannerEffects())
+        connector.get_component_pods.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_advisory_mode_skips_patch(self, connector, mock_kube_api):
@@ -667,6 +723,19 @@ class TestGetComponentPodsLabelSelector:
             result = connector.get_component_pods(SubComponentType.PREFILL)
         assert result == []
         assert any("could not resolve" in r.message.lower() for r in caplog.records)
+
+    def test_strict_mode_raises_on_resolution_failure(self, connector, mock_kube_api):
+        """strict=True must re-raise resolution failures instead of returning []."""
+        deployment = {
+            "metadata": {"name": "test-dgd"},
+            "spec": {"components": []},
+        }
+        mock_kube_api.get_graph_deployment.return_value = deployment
+
+        with pytest.raises(PlannerError):
+            connector.get_component_pods(SubComponentType.PREFILL, strict=True)
+
+        mock_kube_api.list_pods_by_label.assert_not_called()
 
     def test_reuses_passed_deployment_without_refetch(self, connector, mock_kube_api):
         """When given a deployment, get_component_pods must not GET it again."""
@@ -1049,6 +1118,7 @@ def _throttle_planner(config, p_workers=2, d_workers=2):
     planner.config = config
     planner._last_power_annotation_sweep_s = 0.0
     planner._force_power_annotations_until_s = 0.0
+    planner._disabled_power_removal_latched = False
     # Orchestrator-only path: current worker counts come from the cached tick
     # input (``_last_worker_counts``), the single source ``_current_worker_counts``
     # reads. The legacy PSM fallback was removed, so ``_state_machine`` is left
@@ -1125,13 +1195,13 @@ class TestPowerAnnotationSweepThrottle:
         scale_up = PlannerEffects(scale_to=ScalingDecision(num_prefill=4))
         assert not planner._should_sweep_power_annotations(5000.0, scale_up)
 
-    def test_disabled_sweeps_on_throttle_for_removal(self):
-        """Disabled mode still sweeps on the normal throttle to remove stale annotations."""
+    def test_disabled_sweeps_on_throttle_until_latched(self):
+        """Disabled mode sweeps on throttle until a clean removal pass latches off."""
         planner = _throttle_planner(_throttle_config(interval=60.0, enable=False))
-        # First call with elapsed time — throttle fires so the removal sweep runs.
         assert planner._should_sweep_power_annotations(5000.0, PlannerEffects())
-        # Within the interval — throttled, no unnecessary removal attempt.
         assert not planner._should_sweep_power_annotations(5030.0, PlannerEffects())
+        planner._disabled_power_removal_latched = True
+        assert not planner._should_sweep_power_annotations(5061.0, PlannerEffects())
 
     def test_disabled_scale_up_does_not_open_force_window(self):
         """A scale-up decision must not extend the force window when disabled."""

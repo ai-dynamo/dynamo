@@ -100,10 +100,11 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-# See namespace-restricted Role above for rationale (including why
-# `watch` is omitted); same verbs apply cluster-wide so the planner can
-# patch annotations on workload pods in the namespace its DGD is
-# deployed to.
+# See the namespace-restricted Role above for rationale (including why
+# `watch` is omitted). NOTE: as a ClusterRole these verbs apply cluster-wide
+# when bound via a ClusterRoleBinding — not only in the DGD's namespace.
+# Scope the binding (or use namespaceRestriction) if namespace isolation is
+# required.
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "list", "patch"]

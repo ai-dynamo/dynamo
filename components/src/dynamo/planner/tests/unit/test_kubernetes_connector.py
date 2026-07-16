@@ -1089,14 +1089,10 @@ def test_get_gpu_counts_service_not_found_raises_error(
     assert "decode GPU count" in str(exc_info.value)
 
 
-def test_get_gpu_counts_multinode_multiplies_node_count(
+def test_get_gpu_counts_multinode_per_pod_not_replica_total(
     kubernetes_connector, mock_kube_api
 ):
-    """get_gpu_counts must multiply per-pod GPUs by multinode.nodeCount.
-
-    The operator CRD defines total GPUs per replica as nodeCount × container
-    GPU request.  A 4-node decode component with 8 GPUs per pod must report 32.
-    """
+    """get_gpu_counts stores per-pod GPU request for budget/perf-model paths."""
     multinode_decode = {
         "name": "decode-worker",
         "type": "decode",
@@ -1121,8 +1117,42 @@ def test_get_gpu_counts_multinode_multiplies_node_count(
 
     prefill_gpu, decode_gpu = kubernetes_connector.get_gpu_counts()
 
-    assert prefill_gpu == 2  # single-node: 2 GPUs × 1 node
-    assert decode_gpu == 32  # multinode: 8 GPUs × 4 nodes
+    assert prefill_gpu == 2
+    assert decode_gpu == 8
+
+
+def test_replica_gpu_counts_for_power_projection_multinode(
+    kubernetes_connector, mock_kube_api
+):
+    """Power projection multiplies per-pod GPUs by multinode.nodeCount."""
+    multinode_decode = {
+        "name": "decode-worker",
+        "type": "decode",
+        "replicas": 1,
+        "multinode": {"nodeCount": 4},
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "resources": {"limits": {"nvidia.com/gpu": "8"}},
+                    }
+                ]
+            }
+        },
+    }
+    mock_deployment = _deployment(
+        _component("prefill-worker", "prefill", replicas=1, gpu=2),
+        multinode_decode,
+    )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    prefill_gpu, decode_gpu = (
+        kubernetes_connector.get_replica_gpu_counts_for_power_projection()
+    )
+
+    assert prefill_gpu == 2
+    assert decode_gpu == 32
 
 
 # Tests for get_actual_worker_counts

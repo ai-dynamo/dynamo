@@ -619,3 +619,34 @@ def test_get_service_replica_status_available_replicas_zero(k8s_api, mock_custom
     # availableReplicas=0 should be used (not readyReplicas)
     assert count == 0
     assert is_stable is True
+
+
+def test_list_pods_by_label_pagination_resource_version_only_on_first_page(
+    mock_custom_api, mock_config, mock_namespace
+):
+    """Continuation pages must not pass resource_version alongside _continue."""
+    mock_core_api = MagicMock()
+    with patch(
+        "dynamo.planner.connectors.kubernetes_api.client.CoreV1Api",
+        return_value=mock_core_api,
+    ):
+        api = KubernetesAPI()
+
+    page1 = MagicMock()
+    page1.items = [MagicMock()]
+    page1.metadata._continue = "token-abc"
+    page2 = MagicMock()
+    page2.items = [MagicMock()]
+    page2.metadata._continue = None
+    mock_core_api.list_namespaced_pod.side_effect = [page1, page2]
+
+    pods = api.list_pods_by_label("app=test")
+
+    assert len(pods) == 2
+    assert mock_core_api.list_namespaced_pod.call_count == 2
+    first_kwargs = mock_core_api.list_namespaced_pod.call_args_list[0].kwargs
+    second_kwargs = mock_core_api.list_namespaced_pod.call_args_list[1].kwargs
+    assert first_kwargs["resource_version"] == "0"
+    assert "_continue" not in first_kwargs
+    assert second_kwargs["_continue"] == "token-abc"
+    assert "resource_version" not in second_kwargs

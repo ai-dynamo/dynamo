@@ -29,6 +29,7 @@ from dynamo.planner.core.types import (
     TickInput,
     WorkerCounts,
 )
+from dynamo.planner.errors import DeploymentValidationError
 from dynamo.planner.monitoring.planner_metrics import PREFIX, PlannerPrometheusMetrics
 
 pytestmark = [
@@ -47,12 +48,11 @@ def _make_planner(prometheus_enabled: bool = True) -> NativePlannerBase:
     is toggled post-init as an enabled/disabled gate for the methods under
     test; the actual port value is never used for I/O.
     """
-    with patch(
-        "dynamo.planner.core.base.PlannerPrometheusMetrics"
-    ) as mock_metrics, patch("dynamo.planner.core.base.start_http_server"), patch(
-        "dynamo.planner.connectors.kubernetes.KubernetesAPI"
-    ), patch.dict(
-        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+    with (
+        patch("dynamo.planner.core.base.PlannerPrometheusMetrics") as mock_metrics,
+        patch("dynamo.planner.core.base.start_http_server"),
+        patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"),
+        patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}),
     ):
         mock_metrics.return_value = Mock()
         config = PlannerConfig.model_construct(
@@ -325,12 +325,11 @@ def _make_planner_with_port(
     ``start_http_server`` is still patched to avoid binding a real port.
     """
     port = 9091 if prometheus_enabled else 0
-    with patch(
-        "dynamo.planner.core.base.PlannerPrometheusMetrics"
-    ) as mock_metrics, patch("dynamo.planner.core.base.start_http_server"), patch(
-        "dynamo.planner.connectors.kubernetes.KubernetesAPI"
-    ), patch.dict(
-        os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}
+    with (
+        patch("dynamo.planner.core.base.PlannerPrometheusMetrics") as mock_metrics,
+        patch("dynamo.planner.core.base.start_http_server"),
+        patch("dynamo.planner.connectors.kubernetes.KubernetesAPI"),
+        patch.dict(os.environ, {"DYN_PARENT_DGD_K8S_NAME": "test-graph"}),
     ):
         mock_metrics.return_value = Mock()
         config = PlannerConfig.model_construct(
@@ -397,9 +396,10 @@ class TestPlannerPrometheusMetricsHasSlaTargetGauges:
 
     def test_metrics_object_has_sla_target_gauge_attributes(self):
         """Instance attributes sla_target_ttft_ms and sla_target_itl_ms must exist."""
-        with patch(
-            "dynamo.planner.monitoring.planner_metrics.Gauge"
-        ) as mock_gauge, patch("dynamo.planner.monitoring.planner_metrics.Enum"):
+        with (
+            patch("dynamo.planner.monitoring.planner_metrics.Gauge") as mock_gauge,
+            patch("dynamo.planner.monitoring.planner_metrics.Enum"),
+        ):
             mock_gauge.return_value = MagicMock()
             metrics = PlannerPrometheusMetrics()
 
@@ -417,3 +417,124 @@ class TestPlannerPrometheusMetricsHasSlaTargetGauges:
         assert (
             f"{PREFIX}_sla_target_itl_ms" in registered_names
         ), f"Expected Gauge name '{PREFIX}_sla_target_itl_ms' not registered"
+
+
+def _power_planner(
+    prefill_num_gpu=2,
+    decode_num_gpu=4,
+    total_gpu_power_limit=10000.0,
+    prefill_cap=300.0,
+    decode_cap=250.0,
+):
+    """A power-aware planner wired for _publish_power_budget_metrics tests."""
+    planner = _make_planner(prometheus_enabled=True)
+    planner.config.enable_power_awareness = True
+    planner.config.total_gpu_power_limit = total_gpu_power_limit
+    planner.config.prefill_engine_gpu_power_limit = prefill_cap
+    planner.config.decode_engine_gpu_power_limit = decode_cap
+    planner.config.prefill_engine_num_gpu = prefill_num_gpu
+    planner.config.decode_engine_num_gpu = decode_num_gpu
+    # NativePlannerBase defaults these to False; disagg exercises both roles.
+    planner.require_prefill = True
+    planner.require_decode = True
+    # Component names are normally resolved in _async_init (not run here).
+    planner._prefill_k8s_name = "VllmPrefillWorker"
+    planner._decode_k8s_name = "VllmDecodeWorker"
+    return planner
+
+
+class TestPublishPowerBudgetMetrics:
+    """_publish_power_budget_metrics must read the per-replica GPU totals from
+    the init-time cache and perform NO apiserver I/O on the tick loop."""
+
+    def test_publish_uses_cached_counts_without_apiserver_call(self):
+        """Cached replica totals feed the projection; the connector is untouched."""
+        planner = _power_planner()
+        # Simulate a 4-node decode replica resolved once at init (8 GPUs × 4).
+        planner._power_projection_gpu_counts = (2, 32)
+        planner.connector.get_replica_gpu_counts_for_power_projection = Mock()
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        # No blocking apiserver GET on the loop.
+        planner.connector.get_replica_gpu_counts_for_power_projection.assert_not_called()
+        # projected = 1*300*2 + 1*250*32 = 600 + 8000 = 8600
+        pm.power_projected_watts.set.assert_called_once_with(8600.0)
+        pm.power_budget_total_watts.set.assert_called_once_with(10000.0)
+        pm.power_budget_utilization.set.assert_called_once_with(0.86)
+
+    def test_publish_falls_back_to_per_pod_when_cache_unset(self):
+        """With no cache resolved, per-pod config counts are used (never None)."""
+        planner = _power_planner(prefill_num_gpu=2, decode_num_gpu=4)
+        planner._power_projection_gpu_counts = None
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        # projected = 1*300*2 + 1*250*4 = 600 + 1000 = 1600
+        pm.power_projected_watts.set.assert_called_once_with(1600.0)
+
+    def test_publish_skipped_when_power_awareness_disabled(self):
+        """Disabled power awareness publishes nothing (and touches no connector)."""
+        planner = _power_planner()
+        planner.config.enable_power_awareness = False
+        planner._power_projection_gpu_counts = (2, 32)
+        planner.connector.get_replica_gpu_counts_for_power_projection = Mock()
+        pm = planner.prometheus_metrics
+
+        planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        pm.power_projected_watts.set.assert_not_called()
+        planner.connector.get_replica_gpu_counts_for_power_projection.assert_not_called()
+
+    def test_zero_gpu_warning_fires_once(self):
+        """The zero/partial projection warning is emitted at most once."""
+        planner = _power_planner(prefill_num_gpu=0, decode_num_gpu=0)
+        planner._power_projection_gpu_counts = (0, 0)
+
+        with patch("dynamo.planner.core.base.logger") as mock_logger:
+            planner._publish_power_budget_metrics(num_p=1, num_d=1)
+            planner._publish_power_budget_metrics(num_p=1, num_d=1)
+
+        assert mock_logger.warning.call_count == 1
+        assert planner._power_projected_zero_warned is True
+
+
+class TestResolvePowerProjectionGpuCounts:
+    """_resolve_power_projection_gpu_counts caches per-replica totals once and
+    falls back to per-pod counts (not a per-tick unit flip) on failure."""
+
+    def test_caches_replica_total_from_connector(self):
+        """A successful resolve stores the replica-total tuple."""
+        planner = _power_planner()
+        planner.connector.get_replica_gpu_counts_for_power_projection = Mock(
+            return_value=(2, 32)
+        )
+
+        planner._resolve_power_projection_gpu_counts()
+
+        assert planner._power_projection_gpu_counts == (2, 32)
+
+    def test_falls_back_to_per_pod_counts_on_operational_error(self):
+        """An operational resolution failure is logged; per-pod counts are cached."""
+        planner = _power_planner(prefill_num_gpu=2, decode_num_gpu=4)
+        planner.connector.get_replica_gpu_counts_for_power_projection = Mock(
+            side_effect=DeploymentValidationError(["decode GPU count unavailable"])
+        )
+
+        with patch("dynamo.planner.core.base.logger") as mock_logger:
+            planner._resolve_power_projection_gpu_counts()
+
+        assert planner._power_projection_gpu_counts == (2, 4)
+        mock_logger.warning.assert_called_once()
+
+    def test_unexpected_error_propagates(self):
+        """Programming errors must abort init, not become a silent fallback."""
+        planner = _power_planner()
+        planner.connector.get_replica_gpu_counts_for_power_projection = Mock(
+            side_effect=RuntimeError("implementation bug")
+        )
+
+        with pytest.raises(RuntimeError, match="implementation bug"):
+            planner._resolve_power_projection_gpu_counts()

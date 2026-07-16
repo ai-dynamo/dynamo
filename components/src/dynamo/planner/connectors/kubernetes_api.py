@@ -347,13 +347,18 @@ class KubernetesAPI:
                 # returns all matching objects in one response and _continue
                 # is never set, making the loop a no-op.
                 "limit": 500,
-                # Serve from the apiserver watch cache instead of forcing a
-                # quorum etcd read. A few hundred ms of cache staleness is
-                # acceptable for annotation reconciliation.
-                "resource_version": "0",
             }
             if _continue:
+                # A continue token already encodes the resourceVersion of the
+                # first page. Passing resource_version alongside it is invalid
+                # (the apiserver rejects continue + an explicit resourceVersion),
+                # so only the first page opts into the cache read below.
                 kwargs["_continue"] = _continue
+            else:
+                # First page only: serve from the apiserver watch cache instead
+                # of forcing a quorum etcd read. A few hundred ms of cache
+                # staleness is acceptable for annotation reconciliation.
+                kwargs["resource_version"] = "0"
             resp = self.core_api.list_namespaced_pod(**kwargs)
             items.extend(resp.items)
             _continue = (resp.metadata or {}) and resp.metadata._continue

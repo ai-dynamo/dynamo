@@ -18,6 +18,8 @@ import logging
 import os
 from typing import Optional
 
+import httpx
+
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.kubernetes_api import (
@@ -360,6 +362,55 @@ class KubernetesConnector(PlannerConnector):
                     SubComponentType.PREFILL,
                     component_name=prefill_component_name,
                 )
+                prefill_gpu_count = prefill_service.get_gpu_count()
+            except (PlannerError, ValueError) as e:
+                errors.append(f"Failed to get prefill GPU count: {e}")
+
+        if require_decode:
+            try:
+                decode_service = get_component_from_type_or_name(
+                    deployment,
+                    SubComponentType.DECODE,
+                    component_name=decode_component_name,
+                )
+                decode_gpu_count = decode_service.get_gpu_count()
+            except (PlannerError, ValueError) as e:
+                errors.append(f"Failed to get decode GPU count: {e}")
+
+        if errors:
+            raise DeploymentValidationError(errors)
+
+        return prefill_gpu_count, decode_gpu_count
+
+    def get_replica_gpu_counts_for_power_projection(
+        self,
+        deployment: Optional[dict] = None,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> tuple[int, int]:
+        """Return per-replica GPU totals for power projection (per-pod × nodeCount).
+
+        ``get_gpu_counts`` stores per-pod GPU request in config for budget and
+        perf-model paths. Power budget gauges need the replica-wide total for
+        multinode components, so this helper multiplies by ``multinode.nodeCount``
+        without changing shared config semantics.
+        """
+        if deployment is None:
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+
+        prefill_gpu_count = 0
+        decode_gpu_count = 0
+        errors = []
+
+        if require_prefill:
+            try:
+                prefill_service = get_component_from_type_or_name(
+                    deployment,
+                    SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
+                )
                 prefill_gpu_count = prefill_service.get_total_gpu_count()
             except (PlannerError, ValueError) as e:
                 errors.append(f"Failed to get prefill GPU count: {e}")
@@ -385,6 +436,7 @@ class KubernetesConnector(PlannerConnector):
         sub_component_type: SubComponentType,
         deployment: Optional[dict] = None,
         component_name: Optional[str] = None,
+        strict: bool = False,
     ) -> list:
         """Return the list of Pod objects for the given sub-component (prefill/decode).
 
@@ -407,6 +459,14 @@ class KubernetesConnector(PlannerConnector):
         generic worker is unique, the resolver carries the actual DGD component
         name rather than depending on a backend hard-coded agg name. Ignored
         when the role matches by type (disagg).
+
+        ``strict`` controls how a component-resolution failure is reported.
+        The default (``False``) swallows the failure and returns ``[]`` so a
+        best-effort annotation sweep stays non-fatal. Callers that must
+        distinguish "resolved, zero pods" from "could not resolve" — e.g. the
+        disabled-mode removal sweep, which latches off after a genuinely clean
+        pass — pass ``strict=True`` to re-raise the resolution error instead of
+        masking it as an empty list.
         """
         if deployment is None:
             deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
@@ -417,6 +477,10 @@ class KubernetesConnector(PlannerConnector):
         except (PlannerError, ValueError) as e:
             # A role legitimately absent from the DGD and a genuine resolution
             # failure (invalid/renamed component, schema drift) both land here.
+            if strict:
+                # The caller needs to tell a clean sweep from a failed lookup,
+                # so surface the error rather than returning a misleading [].
+                raise
             # Returning [] keeps the sweep non-fatal, but log so an unexpected
             # "0 pods annotated" is diagnosable instead of silent.
             logger.warning(
@@ -503,14 +567,6 @@ class KubernetesConnector(PlannerConnector):
         Per-pod timeout is 5 s (frontend is in-cluster; long timeouts mask
         saturation events).
         """
-        try:
-            import httpx
-        except ImportError as exc:
-            raise RuntimeError(
-                "httpx is required for admission-control POST support. "
-                "Install it with: pip install httpx"
-            ) from exc
-
         if not pod.status or not pod.status.pod_ip:
             raise ValueError(
                 f"Pod {pod.metadata.name} has no pod IP; cannot POST /busy_threshold"
@@ -527,9 +583,9 @@ class KubernetesConnector(PlannerConnector):
         if active_prefill_tokens_threshold is not None:
             body["active_prefill_tokens_threshold"] = active_prefill_tokens_threshold
         if active_prefill_tokens_threshold_frac is not None:
-            body[
-                "active_prefill_tokens_threshold_frac"
-            ] = active_prefill_tokens_threshold_frac
+            body["active_prefill_tokens_threshold_frac"] = (
+                active_prefill_tokens_threshold_frac
+            )
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.post(url, json=body)
