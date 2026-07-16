@@ -350,7 +350,7 @@ def render_mdx(*, entry: dict[str, Any], parsed: ParsedDep) -> str:
     fm_lines.append("---")
 
     # ---------------- generated-marker comment ---------------- #
-    marker = textwrap.dedent(f"""
+    marker_body = f"""
         {{/*
           GENERATED FILE — DO NOT EDIT.
 
@@ -365,7 +365,8 @@ def render_mdx(*, entry: dict[str, Any], parsed: ParsedDep) -> str:
           Manifest entry: fern/scripts/deps.json
           Slug:           {slug}
         */}}
-        """).strip()
+        """
+    marker = textwrap.dedent(marker_body).strip()
 
     # ---------------- imports ---------------- #
     imports = (

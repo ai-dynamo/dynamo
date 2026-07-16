@@ -287,42 +287,35 @@ class SlugValidationTests(unittest.TestCase):
         sync_deps.load_manifest(tmp_path)
 
     def test_accepts_plain_slug(self):
-
         with tempfile.TemporaryDirectory() as td:
             self._load("dep-nova-synced", Path(td))  # must not raise
 
     def test_accepts_alphanumeric_and_underscore(self):
-
         with tempfile.TemporaryDirectory() as td:
             self._load("dep_v1_2_synced", Path(td))  # must not raise
 
     def test_rejects_parent_traversal(self):
-
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit) as ctx:
                 self._load("../../etc/passwd", Path(td))
             self.assertIn("output", str(ctx.exception).lower())
 
     def test_rejects_slash_in_slug(self):
-
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
                 self._load("nova/other", Path(td))
 
     def test_rejects_absolute_path(self):
-
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
                 self._load("/tmp/pwn", Path(td))
 
     def test_rejects_empty_string(self):
-
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
                 self._load("", Path(td))
 
     def test_rejects_null_byte(self):
-
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(SystemExit):
                 self._load("nova\x00.mdx", Path(td))
