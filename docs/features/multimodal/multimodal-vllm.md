@@ -107,6 +107,8 @@ curl http://localhost:8000/v1/chat/completions \
 vLLM can cache processed image, video, and audio inputs under a client-provided
 opaque UUID. This extension is specific to vLLM; it is not part of the OpenAI
 chat completions schema and is not supported by Dynamo's other backends.
+Dynamo's SGLang and TensorRT-LLM backends reject requests containing this
+`uuid` field rather than silently ignoring unsupported cache semantics.
 
 To enable the cache, pass a nonzero `--mm-processor-cache-gb` value to the vLLM
 worker. Populate an entry by adding `uuid` beside the media field:

@@ -318,6 +318,15 @@ class TestMultimodalGuard:
     def test_text_only_request_bypasses_guard(self):
         raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
 
+    def test_rejects_multimodal_cache_uuid(self):
+        with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+            raise_if_unextracted_multimodal(
+                {
+                    "token_ids": [10, 20, 30],
+                    "multi_modal_uuids": {"image_url": ["cached-image"]},
+                }
+            )
+
 
 def test_build_logprob_kwargs_allows_chosen_token_logprobs(monkeypatch):
     monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)

@@ -20,6 +20,7 @@ from sglang.srt.parser.conversation import chat_template_exists
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
@@ -325,10 +326,12 @@ def _build_dynamo_preproc(
 
     # Forward multimodal URLs so the backend handler can load the media.
     mm_data, mm_uuids = extract_mm_urls(request.get("messages", []))
+    try:
+        reject_unsupported_multimodal_uuids(mm_uuids, backend="SGLang")
+    except ValueError as exc:
+        raise PreprocessError(str(exc)) from exc
     if mm_data:
         preproc["multi_modal_data"] = mm_data
-    if mm_uuids:
-        preproc["multi_modal_uuids"] = mm_uuids
 
     nvext = request.get("nvext") or {}
     nvext_passthrough = {

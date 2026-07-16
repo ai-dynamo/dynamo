@@ -626,6 +626,18 @@ class TestMultimodalGuard:
         assert result == [10, 20, 30]
 
     @pytest.mark.asyncio
+    async def test_rejects_multimodal_cache_uuid(self):
+        handler = self._make_handler(multimodal_processor=MagicMock())
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"UuidOnly": "cached-image"}]},
+            "multi_modal_uuids": {"image_url": ["cached-image"]},
+        }
+
+        with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+            await self._prepare(handler, request)
+
+    @pytest.mark.asyncio
     async def test_decode_with_prefill_metadata_bypasses_guard(self):
         handler = self._make_handler(multimodal_processor=None)
         handler.disaggregation_mode = DisaggregationMode.DECODE

@@ -65,6 +65,18 @@ def test_extract_media_urls_supports_mixed_image_and_video():
     assert video_urls == ["https://example.com/clip.mp4"]
 
 
+def test_extract_media_urls_rejects_multimodal_cache_uuid():
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+
+    with pytest.raises(ValueError, match="supported only by the vLLM backend"):
+        handler._extract_media_urls(
+            {
+                "multi_modal_data": {"image_url": [{"UuidOnly": "cached-image"}]},
+                "multi_modal_uuids": {"image_url": ["cached-image"]},
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_build_mm_items_routes_video_to_video_data():
     embeddings = torch.arange(24, dtype=torch.float16).reshape(6, 4)

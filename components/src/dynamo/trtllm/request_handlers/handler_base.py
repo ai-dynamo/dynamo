@@ -37,6 +37,7 @@ from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -789,6 +790,10 @@ class HandlerBase(BaseGenerativeHandler):
         Returns:
             Processed input for TRT-LLM (dict with prompt/token_ids, or raw token_ids)
         """
+        reject_unsupported_multimodal_uuids(
+            request.get("multi_modal_uuids"), backend="TensorRT-LLM"
+        )
+
         # DECODE mode: Use prefill metadata to skip re-processing multimodal content
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         has_prefill_metadata = epd_metadata and (
