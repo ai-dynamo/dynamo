@@ -121,6 +121,25 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
         Ok(())
     }
 
+    /// Insert one logical hash and report every physical bucket's value before
+    /// the successful mutation. A bucket written more than once is reported in
+    /// write order, allowing publication-window tracking to retain its first
+    /// pre-mutation image without observing rolled-back insertions.
+    pub(super) fn insert_with_originals(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        rng: &mut u64,
+        scratch: &mut CuckooInsertionScratch,
+        mut on_touched: impl FnMut(usize, PackedBucket),
+    ) -> Result<(), KvCacheEventError> {
+        self.insert_inner(hash, rng, scratch)?;
+        for &(bucket, before) in &scratch.touched {
+            on_touched(bucket, before);
+        }
+        scratch.clear();
+        Ok(())
+    }
+
     fn insert_inner(
         &self,
         hash: ExternalSequenceBlockHash,
@@ -198,6 +217,25 @@ impl<'a, S: CuckooBucketStore> CuckooMutator<'a, S> {
             };
             self.store.store_bucket(bucket, before.with_slot(slot, 0));
             on_touched(bucket);
+            return Ok(());
+        }
+
+        Err(KvCacheEventError::IndexerInvariantViolation)
+    }
+
+    pub(super) fn remove_with_original(
+        &self,
+        hash: ExternalSequenceBlockHash,
+        mut on_touched: impl FnMut(usize, PackedBucket),
+    ) -> Result<(), KvCacheEventError> {
+        let probe = self.addressing.prepare(hash.0);
+        for bucket in [probe.bucket_a, probe.bucket_b] {
+            let before = self.store.load_bucket(bucket);
+            let Some(slot) = before.first(probe.fingerprint) else {
+                continue;
+            };
+            self.store.store_bucket(bucket, before.with_slot(slot, 0));
+            on_touched(bucket, before);
             return Ok(());
         }
 

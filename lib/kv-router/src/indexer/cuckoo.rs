@@ -3,6 +3,7 @@
 
 mod addressing;
 mod bucket;
+mod dc;
 mod event_indexer;
 mod mutator;
 mod relay;
@@ -11,6 +12,10 @@ mod search;
 #[cfg(test)]
 mod tests;
 
+pub use dc::{
+    DcCkfAggregationStats, DcCkfBucketImage, DcCkfDelta, DcCkfEventOutcome, DcCkfFormatIdentity,
+    DcCkfMemoryStats, DcCkfPublicationStats, DcCkfSnapshot, DcCkfState, DcCkfStats,
+};
 pub use event_indexer::EventTransposedCkfIndexer;
 pub use relay::{
     CkfBucketImage, CkfDeltaBatch, CkfEventOutcome, CkfFormatIdentity, CkfMemorySnapshot,

@@ -86,10 +86,11 @@ hf-hub = { workspace = true }
 ipnet = { workspace = true }
 lru = { workspace = true }
 moka = { workspace = true }
-rand = { workspace = true }
 oneshot = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
+rand = { workspace = true }
+rustc-hash = "2.1.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"

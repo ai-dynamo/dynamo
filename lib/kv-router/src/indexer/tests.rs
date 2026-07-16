@@ -3173,10 +3173,24 @@ mod local_indexer_tests {
         indexer.shutdown();
         dump_tx.closed().await;
 
-        let _ = indexer.get_events_in_id_range(None, None).await;
-        let _ = indexer.get_events_in_id_range(None, None).await;
+        let first = indexer.get_events_in_id_range(None, None).await;
+        let second = indexer.get_events_in_id_range(None, None).await;
 
         assert_eq!(indexer.dump_build_count(), 2);
+        assert!(matches!(
+            first,
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            second,
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

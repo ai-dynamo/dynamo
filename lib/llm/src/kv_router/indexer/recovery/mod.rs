@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod subscriber;
+mod target;
 mod worker_query;
 mod worker_query_endpoint;
 mod worker_query_state;
 mod worker_query_transport;
 
-pub(crate) use subscriber::start_subscriber;
+pub(crate) use subscriber::{start_kv_dc_relay_subscriber, start_subscriber};
+pub(crate) use target::{IndexerRecoveryTarget, RecoveryTarget};
+pub(crate) use worker_query::WorkerQueryClient;
 pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;

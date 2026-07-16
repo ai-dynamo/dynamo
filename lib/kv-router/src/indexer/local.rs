@@ -476,9 +476,9 @@ impl LocalKvIndexer {
                             tracing::warn!("Recovery cache build task failed: {error}");
                             self.recovery_cache.clear_build_if_current(generation).await;
                             notify.notify_waiters();
-                            return WorkerKvQueryResponse::TreeDump {
-                                events: Vec::new(),
+                            return WorkerKvQueryResponse::TreeDumpFailed {
                                 last_event_id,
+                                message: format!("recovery dump task failed: {error}"),
                             };
                         }
                     }
@@ -607,9 +607,9 @@ impl LocalKvIndexer {
             Err(error) => {
                 tracing::warn!("Failed to build recovery dump: {error}");
                 FreshDumpOutput {
-                    response: WorkerKvQueryResponse::TreeDump {
-                        events: Vec::new(),
+                    response: WorkerKvQueryResponse::TreeDumpFailed {
                         last_event_id,
+                        message: error.to_string(),
                     },
                     snapshot: None,
                 }

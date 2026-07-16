@@ -101,6 +101,10 @@ pub enum WorkerKvQueryResponse {
         events: Vec<RouterEvent>,
         last_event_id: u64,
     },
+    /// The exact tree dump could not be produced. This is distinct from an
+    /// authoritative empty tree so recovery can apply its explicit fail-open
+    /// reset policy without mistaking an indexer failure for exact state.
+    TreeDumpFailed { last_event_id: u64, message: String },
     /// Requested range is newer than available data
     TooNew {
         requested_start: Option<u64>,
