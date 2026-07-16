@@ -740,6 +740,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         WorkerWithDpRank::new(3, 0),
         &warning_count,
         None,
+        None,
     );
 
     match placement_event.unwrap().event.data {
@@ -823,6 +824,7 @@ fn cpu_event_with_placeholder_payload_is_dropped_safely() {
         WorkerWithDpRank::new(7, 0),
         &warning_count,
         None,
+        None,
     )
     .unwrap();
 
@@ -852,6 +854,7 @@ fn cpu_event_with_full_payload_is_indexable() {
         4,
         WorkerWithDpRank::new(7, 0),
         &warning_count,
+        None,
         None,
     )
     .unwrap();
