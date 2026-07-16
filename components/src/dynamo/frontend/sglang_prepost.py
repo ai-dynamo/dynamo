@@ -356,6 +356,94 @@ def _should_use_deepseek_v4_encoding(
     )
 
 
+def _normalize_inkling_hint(value: Any) -> str:
+    return str(value or "").lower().replace("-", "").replace("_", "")
+
+
+def _should_use_inkling_encoding(
+    request: dict[str, Any],
+    *,
+    tokenizer,
+    tool_call_parser_name: str | None,
+    reasoning_parser_name: str | None,
+) -> bool:
+    tokenizer_init_kwargs = getattr(tokenizer, "init_kwargs", None)
+    if not isinstance(tokenizer_init_kwargs, dict):
+        tokenizer_init_kwargs = {}
+
+    hints = (
+        request.get("model"),
+        tool_call_parser_name,
+        reasoning_parser_name,
+        getattr(tokenizer, "name_or_path", None),
+        getattr(tokenizer, "_name_or_path", None),
+        getattr(tokenizer, "tokenizer_file", None),
+        tokenizer_init_kwargs.get("name_or_path"),
+        tokenizer_init_kwargs.get("_name_or_path"),
+        tokenizer_init_kwargs.get("tokenizer_file"),
+        type(tokenizer).__name__,
+    )
+
+    return any("inkling" in _normalize_inkling_hint(value) for value in hints)
+
+
+def _render_inkling_prompt_token_ids(
+    request: dict[str, Any],
+    *,
+    messages: list[dict[str, Any]],
+    tokenizer,
+    template_tools: list[dict[str, Any]] | None,
+) -> list[int]:
+    try:
+        from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
+        from sglang.srt.parser.inkling_renderer import render_inkling_messages
+        from sglang.srt.parser.inkling_tokenizer import InklingTokenizer
+    except ImportError as exc:
+        raise ValueError(
+            "Inkling preprocessing requires an SGLang build containing "
+            "the native Inkling renderer and tokenizer."
+        ) from exc
+
+    parse_reasoning_effort = getattr(
+        OpenAIServingChat,
+        "_parse_inkling_reasoning_effort",
+        None,
+    )
+    get_default_reasoning_effort = getattr(
+        OpenAIServingChat,
+        "_get_inkling_default_reasoning_effort",
+        None,
+    )
+    if not callable(parse_reasoning_effort) or not callable(
+        get_default_reasoning_effort
+    ):
+        raise ValueError(
+            "The installed SGLang build does not expose the Inkling "
+            "reasoning-effort helpers required by Dynamo."
+        )
+
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is None:
+        chat_template_kwargs = (
+            request.get("chat_template_kwargs")
+            or request.get("chat_template_args")
+            or {}
+        )
+        reasoning_effort = chat_template_kwargs.get("reasoning_effort")
+
+    reasoning_effort = parse_reasoning_effort(reasoning_effort)
+    if reasoning_effort is None:
+        reasoning_effort = get_default_reasoning_effort()
+
+    return render_inkling_messages(
+        messages,
+        InklingTokenizer(tokenizer=tokenizer),
+        add_generation_prompt=False,
+        tools=template_tools,
+        reasoning_effort=reasoning_effort,
+    )
+
+
 def _filter_template_tools(
     request: dict[str, Any],
     *,
@@ -750,7 +838,19 @@ def preprocess_chat_request(
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
     )
 
-    if _should_use_deepseek_v4_encoding(
+    if _should_use_inkling_encoding(
+        request,
+        tokenizer=tokenizer,
+        tool_call_parser_name=tool_call_parser_name,
+        reasoning_parser_name=reasoning_parser_name,
+    ):
+        prompt_token_ids = _render_inkling_prompt_token_ids(
+            request,
+            messages=messages,
+            tokenizer=tokenizer,
+            template_tools=template_tools,
+        )
+    elif _should_use_deepseek_v4_encoding(
         request,
         tokenizer=tokenizer,
         tool_call_parser_name=tool_call_parser_name,
@@ -788,8 +888,8 @@ def preprocess_chat_request(
             tokenizer.apply_chat_template(template_messages, **template_kwargs)
         )
 
-    # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder
-    # while still sharing the existing Dynamo parser/guided-decoding behavior.
+    # Build parsers after rendering, so model-specific encoders can still share
+    # the existing Dynamo parser/guided-decoding behavior.
     tool_call_parser, reasoning_parser = create_parsers(
         request,
         tool_call_parser_name=tool_call_parser_name,
@@ -950,9 +1050,10 @@ class SglangStreamingPostProcessor:
             tool_call_parser_name
         )
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
-        # Preserve special tokens when a tool call parser is active so
-        # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
-        self._skip_special_tokens = tool_call_parser is None
+        # Preserve delimiter tokens whenever either parser needs to see them.
+        self._skip_special_tokens = (
+            tool_call_parser is None and reasoning_parser is None
+        )
         self._is_json_array_parser = isinstance(tool_call_parser, JsonArrayParser)
         # Required/named guided output may be either bare JSON or
         # reasoning followed by JSON. Delay only the ambiguous bracket-leading
