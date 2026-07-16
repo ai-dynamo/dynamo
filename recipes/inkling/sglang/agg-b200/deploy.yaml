@@ -20,7 +20,7 @@ spec:
             - name: nvcr-imagepullsecret
           containers:
             - name: main
-              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1-rc.0
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
               command:
                 - python3
               args:
@@ -72,7 +72,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1-rc.0
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
               workingDir: /workspace/examples/backends/sglang
               command:
                 - python3
