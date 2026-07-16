@@ -89,6 +89,10 @@ spec:
                 - --model=nvidia/Qwen3.5-122B-A10B-NVFP4
                 - --served-model-name=Qwen/Qwen3.5-122B-A10B
                 - --trust-remote-code
+                - --dyn-tool-call-parser
+                - qwen3_coder
+                - --dyn-reasoning-parser
+                - qwen3
                 - --tensor-parallel-size=1
                 - --quantization=modelopt_fp4
                 - --kv-cache-dtype=fp8
@@ -211,6 +215,10 @@ spec:
                 - --model=nvidia/Qwen3.5-122B-A10B-NVFP4
                 - --served-model-name=Qwen/Qwen3.5-122B-A10B
                 - --trust-remote-code
+                - --dyn-tool-call-parser
+                - qwen3_coder
+                - --dyn-reasoning-parser
+                - qwen3
                 - --tensor-parallel-size=1
                 - --quantization=modelopt_fp4
                 - --kv-cache-dtype=fp8
