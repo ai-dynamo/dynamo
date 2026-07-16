@@ -51,6 +51,26 @@ logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
+# Default soft limit on most Linux distros is 1024, which can be exhausted by the
+# frontend's TCP listener under high concurrency (see the accept() loop in
+# lib/runtime/src/pipeline/network/tcp/server.rs), causing accept() to fail with
+# EMFILE. Raise it at startup, bounded by whatever hard limit the environment allows.
+FRONTEND_FD_LIMIT_TARGET = 8192
+
+
+def _raise_fd_limit(target: int = FRONTEND_FD_LIMIT_TARGET) -> None:
+    """Raise the process's soft RLIMIT_NOFILE toward `target`, bounded by the
+    hard limit. No-op if the soft limit is already >= target."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    new_soft = min(target, hard)
+    if new_soft > soft:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+        logger.info(
+            f"Raised RLIMIT_NOFILE soft limit {soft} -> {new_soft} (hard={hard})"
+        )
+
 
 def setup_engine_factory(
     config: FrontendConfig,
@@ -318,6 +338,7 @@ async def graceful_shutdown(runtime: DistributedRuntime) -> None:
 
 def main() -> None:
     """Entry point for the Dynamo frontend CLI."""
+    _raise_fd_limit()
     uvloop.run(async_main())
 
 
