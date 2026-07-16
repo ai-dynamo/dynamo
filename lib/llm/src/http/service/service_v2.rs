@@ -542,6 +542,9 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
+    /// OpenAI-compatible Batch API placeholders. Disabled by default until
+    /// batch storage and job lifecycle support are implemented; when enabled,
+    /// the placeholder handlers return 501.
     #[builder(default = "false")]
     enable_batch_endpoints: bool,
 

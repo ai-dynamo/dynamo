@@ -579,7 +579,11 @@ async fn wait_for_service_ready(port: u16) {
 #[tokio::test]
 async fn test_batch_api_skeleton_routes_return_not_implemented() {
     let (listener, port) = bind_random_port().await;
-    let service = HttpService::builder().port(port).build().unwrap();
+    let service = HttpService::builder()
+        .port(port)
+        .enable_batch_endpoints(true)
+        .build()
+        .unwrap();
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
