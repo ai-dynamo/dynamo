@@ -16,7 +16,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0.dev2026071601
     prefill:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -24,7 +24,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0.dev2026071601
           workingDir: /workspace
           command:
           - python3
@@ -48,7 +48,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0.dev2026071601
           workingDir: /workspace
           command:
           - python3

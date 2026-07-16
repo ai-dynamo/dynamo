@@ -172,7 +172,7 @@ spec:
         enabled: true
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0.dev2026071601
           args:
             - --model
             - Qwen/Qwen3-0.6B
@@ -207,7 +207,7 @@ spec:
         enabled: true
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0.dev2026071601
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3

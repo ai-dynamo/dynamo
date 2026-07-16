@@ -35,7 +35,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: my-registry/tensorrtllm-runtime:my-tag
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0.dev2026071601
               imagePullPolicy: IfNotPresent
     - name: TRTLLMWorker
       type: worker
@@ -68,7 +68,7 @@ spec:
                 type: CharDevice
           containers:
             - name: main
-              image: my-registry/tensorrtllm-placeholder:my-tag
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-placeholder:1.3.0.dev2026071601
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:

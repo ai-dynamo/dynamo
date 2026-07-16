@@ -71,13 +71,13 @@ Dynamo no longer builds TensorRT-LLM itself. If you need a custom TRT-LLM build 
    - **Python 3.12** in the system Python (`/usr/local/lib/python3.12/dist-packages/...`) — the `LD_PRELOAD` and `NIXL_PLUGIN_DIR` paths in the runtime Dockerfile are hardcoded to 3.12. If your custom build switches to a different Python minor version, edit those env vars in [`container/templates/trtllm_runtime.Dockerfile`](../../../container/templates/trtllm_runtime.Dockerfile) and re-render.
    - `tensorrt_llm` installed into system site-packages (not a venv), matching upstream layout.
    - `libnixl.so` present at `/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so` and plugins under `nixl/plugins/`.
-2. Tag it locally, e.g. `my-registry/tensorrt-llm:<commit-sha>` (use the source commit you built so the tag carries provenance — pasting a literal `:custom` makes the image untraceable later).
+2. Tag it locally, e.g. `nvcr.io/nvidia/ai-dynamo/tensorrt-llm:<commit-sha>` (use the source commit you built so the tag carries provenance — pasting a literal `:custom` makes the image untraceable later).
 3. Render and build the Dynamo image against your custom base:
 
    ```bash
    python container/render.py --framework=trtllm --target=runtime --output-short-filename --cuda-version=13.1
    docker build \
-     --build-arg RUNTIME_IMAGE=my-registry/tensorrt-llm \
+     --build-arg RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrt-llm \
      --build-arg RUNTIME_IMAGE_TAG=<commit-sha> \
      -t dynamo:trtllm-<commit-sha> -f container/rendered.Dockerfile .
    ```

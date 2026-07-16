@@ -28,7 +28,7 @@ spec:
       extraPodSpec:
         mainContainer:
           # Update tag to match VllmDecodeWorker image below
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0.dev2026071601
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -74,7 +74,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0.dev2026071601
           imagePullPolicy: Always
           workingDir: /workspace/examples/backends/vllm
           volumeMounts:

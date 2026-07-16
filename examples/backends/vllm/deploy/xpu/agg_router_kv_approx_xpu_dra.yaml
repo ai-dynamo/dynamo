@@ -15,7 +15,7 @@
 # Requirements:
 # - Intel XPU with DRA (Dynamic Resource Allocation) driver installed
 # - Dynamo Operator with v1alpha1 support
-# - XPU-specific vLLM image (nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag)
+# - XPU-specific vLLM image (nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:1.3.0.dev2026071601)
 
 apiVersion: resource.k8s.io/v1
 kind: ResourceClaimTemplate
@@ -42,7 +42,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0.dev2026071601
           imagePullPolicy: IfNotPresent
           command:
             - python3
@@ -73,7 +73,7 @@ spec:
         #     - 44   # render group
         #     - 991  # video group
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:1.3.0.dev2026071601
           imagePullPolicy: IfNotPresent
           resources:
             claims:
