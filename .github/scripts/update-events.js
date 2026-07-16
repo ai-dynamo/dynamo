@@ -18,8 +18,8 @@ function formatLocation(location) {
   try {
     const parsed = new URL(location);
     const host = parsed.hostname.replace(/^www\./, '');
-    if (/^(lu\.ma|luma\.com)$/i.test(host)) return `[Luma](<${safeUrl(location)}>)`;
-    if (ALLOWED_ONLINE_HOSTS.some(h => host === h || host.endsWith(`.${h}`))) return `[Online](<${safeUrl(location)}>)`;
+    if (/^(lu\.ma|luma\.com)$/i.test(host)) return `[Luma](${safeUrl(location)})`;
+    if (ALLOWED_ONLINE_HOSTS.some(h => host === h || host.endsWith(`.${h}`))) return `[Online](${safeUrl(location)})`;
   } catch (_) {}
   const parts = location.split(',').map(s => s.trim());
   const city = parts.length >= 3 ? parts[parts.length - 3] : parts[0];

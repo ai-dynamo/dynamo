@@ -39,7 +39,7 @@ limitations under the License.
 | 📅 Date | 🎤 Event | 📍 Location |
 |:--------|:---------|:------------|
 | Thu, Jul 16, 2026 | **[vllm meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=vllm+meetup&dates=20260716T210000Z%2F20260716T220000Z&location=Austin%2C+TX%2C+USA)** | Austin |
-| Thu, Jul 30, 2026 | **[Dynamo Afterhours](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours)** | [Luma](<https://luma.com/JulyDynamoAfterHours>) |
+| Thu, Jul 30, 2026 | **[Dynamo Afterhours](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours)** | [Luma](https://luma.com/JulyDynamoAfterHours) |
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
