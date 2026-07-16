@@ -280,15 +280,27 @@ class GMSWorker(Worker):
             # suppresses, so scratch engagement is invisible in engine logs. Emit
             # one visible summary (logger + print, matching the accounting message
             # above) so operators and failover harnesses can confirm the KV was
-            # scratch-aliased rather than fully backed.
-            n_scratch, logical_bytes = scratch_mgr.scratch_summary()
+            # scratch-aliased (VA-reserved, physically cheap) rather than fully backed.
+            n_scratch, virtual_bytes, physical_bytes = scratch_mgr.scratch_summary()
             msg = (
-                f"[GMS] Scratch-KV engaged: {n_scratch} aliased mappings, "
-                f"{logical_bytes / (1 << 30):.2f} GiB logical KV reserved "
+                f"[GMS] Scratch-KV engaged: {n_scratch} allocations, "
+                f"{virtual_bytes / (1 << 30):.2f} GiB virtual reserved, "
+                f"{physical_bytes / (1 << 30):.2f} GiB physical backing "
                 f"on device {device}"
             )
             logger.info(msg)
             print(msg, flush=True)
+            # Fail closed: if the model has a KV cache but nothing was routed
+            # through scratch, the shadow has fully backed its KV — defeating
+            # colocation and risking ~2x KV OOM at scale. Surface it loudly
+            # instead of silently degrading.
+            if n_scratch == 0 and kv_cache_config.kv_cache_groups:
+                raise RuntimeError(
+                    "[GMS] Scratch-KV enabled but no KV allocation was routed "
+                    "through scratch; the shadow would fully back its KV cache. "
+                    "Check that initialize_kv_cache allocates under "
+                    "gms_use_mem_pool."
+                )
         elif self.vllm_config.model_config.enable_sleep_mode:
             get_or_create_gms_client_memory_manager(
                 socket,
