@@ -20,7 +20,7 @@ pub(crate) use entrypoints::{
     generate_trace_worker_artifacts, generate_trace_worker_artifacts_with_visibility,
     simulate_agentic_trace_workload, simulate_concurrency, simulate_concurrency_disagg,
     simulate_concurrency_workload, simulate_concurrency_workload_accumulating_deltas,
-    simulate_concurrency_workload_disagg, simulate_trace, simulate_trace_disagg,
-    simulate_trace_workload, simulate_trace_workload_accumulating_deltas,
-    simulate_trace_workload_disagg,
+    simulate_concurrency_workload_disagg, simulate_session_affinity_workload_with_options,
+    simulate_trace, simulate_trace_disagg, simulate_trace_workload,
+    simulate_trace_workload_accumulating_deltas, simulate_trace_workload_disagg,
 };

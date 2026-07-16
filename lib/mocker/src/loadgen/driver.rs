@@ -247,9 +247,19 @@ pub struct WorkloadDriver {
     sessions: Vec<SessionRuntime>,
     in_flight: FxHashMap<Uuid, InFlightTurn>,
     ready_sessions: BinaryHeap<ReadySession>,
+    deterministic_request_ids: bool,
 }
 
 impl WorkloadDriver {
+    /// Make emitted request UUIDs a pure function of `(session_index, turn_index)`.
+    ///
+    /// Session-routing A/B replay uses this so request-scoped selector tie-breaking is stable
+    /// across policy runs without deriving the UUID from the session identifier itself.
+    pub(crate) fn with_deterministic_request_ids(mut self) -> Self {
+        self.deterministic_request_ids = true;
+        self
+    }
+
     pub(crate) fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
         Self::new(
             trace,
@@ -374,6 +384,7 @@ impl WorkloadDriver {
             sessions,
             in_flight: FxHashMap::default(),
             ready_sessions,
+            deterministic_request_ids: false,
         })
     }
 
@@ -477,6 +488,7 @@ impl WorkloadDriver {
             sessions,
             in_flight: FxHashMap::default(),
             ready_sessions,
+            deterministic_request_ids: false,
         };
         if let SchedulingPolicy::Concurrency(state) = &mut driver.policy {
             state.activate_pending(&mut driver.sessions, &mut driver.ready_sessions, 0.0);
@@ -527,7 +539,13 @@ impl WorkloadDriver {
             let scheduled_ready_at_ms = session
                 .next_ready_at_ms
                 .expect("ready session must have a timestamp");
-            let request_uuid = Uuid::new_v4();
+            let request_uuid = if self.deterministic_request_ids {
+                let session_index = session_index as u128;
+                let turn_index = turn_index as u128;
+                Uuid::from_u128((session_index << 64 | turn_index).wrapping_add(1))
+            } else {
+                Uuid::new_v4()
+            };
             let turn = &session.turns[turn_index];
             let arrival_timestamp_ms = self.policy.arrival_timestamp_ms(scheduled_ready_at_ms);
             let (request_tokens, replay_hashes) = match self.prompt_mode {
@@ -835,6 +853,31 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn deterministic_request_ids_are_stable_and_unique_per_trace_position() {
+        let mut left = WorkloadDriver::new_trace(two_session_trace(), 1)
+            .unwrap()
+            .with_deterministic_request_ids();
+        let mut right = WorkloadDriver::new_trace(two_session_trace(), 1)
+            .unwrap()
+            .with_deterministic_request_ids();
+
+        let left_ids = left
+            .pop_ready(0.0, usize::MAX)
+            .into_iter()
+            .map(|turn| turn.request_uuid)
+            .collect::<Vec<_>>();
+        let right_ids = right
+            .pop_ready(0.0, usize::MAX)
+            .into_iter()
+            .map(|turn| turn.request_uuid)
+            .collect::<Vec<_>>();
+
+        assert_eq!(left_ids, right_ids);
+        assert_eq!(left_ids.len(), 2);
+        assert_ne!(left_ids[0], left_ids[1]);
     }
 
     /// A: 2 turns (turn-1 has a 5ms think-time). B, C: 1 turn each. Used for the cap>1

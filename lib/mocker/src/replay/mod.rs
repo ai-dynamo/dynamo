@@ -8,6 +8,9 @@ pub(crate) mod offline;
 mod online;
 mod planner_handle;
 mod router_shared;
+mod session_affinity;
+#[cfg(test)]
+mod session_affinity_tests;
 mod validate;
 
 use std::collections::VecDeque;
@@ -27,6 +30,7 @@ pub use collector::{
     TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
     TraceSimulationReport, TraceThroughputStats,
 };
+pub use session_affinity::{ReplayKvObservationMode, ReplaySessionAffinityMode};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
     RoundRobin,
@@ -80,7 +84,8 @@ pub use entrypoints::{
     simulate_concurrency_workload_with_router_mode_and_options,
     simulate_loaded_trace_disagg_with_router_mode_and_options,
     simulate_loaded_trace_live_with_router_mode,
-    simulate_loaded_trace_with_router_mode_and_options, simulate_trace_file,
+    simulate_loaded_trace_with_router_mode_and_options, simulate_session_affinity_workload,
+    simulate_session_affinity_workload_with_options, simulate_trace_file,
     simulate_trace_file_disagg_with_router_mode,
     simulate_trace_file_disagg_with_router_mode_and_format, simulate_trace_file_with_router_mode,
     simulate_trace_file_with_router_mode_and_format, simulate_trace_live_file,

@@ -89,6 +89,7 @@ fn softmax_sample_with_sample(
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
     pub worker_type: &'static str,
+    deterministic_ties: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -100,11 +101,156 @@ struct LogitWeights {
 }
 
 impl DefaultWorkerSelector {
+    const DETERMINISTIC_TIE_DOMAIN: &'static [u8] = b"dynamo-selector-request-tie-v1";
+
     pub fn new(kv_router_config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self {
             kv_router_config: kv_router_config.unwrap_or_default(),
             worker_type,
+            deterministic_ties: false,
         }
+    }
+
+    /// Use a deterministic per-request target hash instead of randomized reservoir sampling to
+    /// resolve exact minimum-cost ties. Offline replay enables this so paired A/B results are both
+    /// reproducible and distributed; live routing keeps randomized tie distribution by default.
+    /// The hash deliberately uses request identity, never session identity, so it does not grant
+    /// the KV-only replay baseline implicit conversation affinity.
+    pub fn with_deterministic_ties(mut self) -> Self {
+        self.deterministic_ties = true;
+        self
+    }
+
+    fn deterministic_tie_score(request: &SchedulingRequest, worker: WorkerWithDpRank) -> u64 {
+        let worker_id = worker.worker_id.to_le_bytes();
+        crate::rendezvous::score(
+            Self::DETERMINISTIC_TIE_DOMAIN,
+            request.mode.request_id().unwrap_or_default().as_bytes(),
+            &worker_id,
+            worker.dp_rank,
+        )
+    }
+
+    fn logit_weights(&self, request: &SchedulingRequest) -> LogitWeights {
+        LogitWeights {
+            overlap_score_credit: request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.overlap_score_credit)
+                .unwrap_or(self.kv_router_config.overlap_score_credit),
+            overlap_score_credit_decay: self.kv_router_config.overlap_score_credit_decay,
+            prefill_load_scale: request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.prefill_load_scale)
+                .unwrap_or(self.kv_router_config.prefill_load_scale),
+            shared_cache_multiplier: request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.shared_cache_multiplier)
+                .unwrap_or(self.kv_router_config.shared_cache_multiplier),
+        }
+    }
+
+    fn min_active_prefill_tokens<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        weights: LogitWeights,
+    ) -> usize {
+        if !request.track_prefill_tokens || weights.overlap_score_credit_decay <= 0.0 {
+            return 0;
+        }
+
+        let mut minimum = usize::MAX;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
+        });
+        debug_assert_ne!(minimum, usize::MAX);
+        minimum
+    }
+
+    fn worker_score<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        worker: WorkerWithDpRank,
+        block_size: u32,
+        min_active_prefill_tokens: usize,
+        weights: LogitWeights,
+    ) -> f64 {
+        let base_score = self.worker_logit(
+            request,
+            worker,
+            block_size,
+            min_active_prefill_tokens,
+            weights,
+            "Formula",
+        );
+        let Some(config) = workers.get(&worker.worker_id) else {
+            return base_score;
+        };
+        match request
+            .routing_constraints
+            .preferred_taint_multiplier(config.taints())
+        {
+            Some(multiplier) => base_score * multiplier,
+            None => base_score,
+        }
+    }
+
+    /// Return the preferred worker's deterministic selector-cost regret, in blocks, relative to
+    /// the least-cost eligible worker for the same request snapshot.
+    ///
+    /// `None` means the preferred worker is not eligible. This method deliberately evaluates the
+    /// cost function rather than temperature sampling, so callers can use a stable regret budget
+    /// before deciding whether to apply a soft preference as an exact placement constraint.
+    pub fn cost_regret_for_worker<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        block_size: u32,
+        preferred_worker: WorkerWithDpRank,
+    ) -> Result<Option<f64>, KvSchedulerError> {
+        eligibility.validate_pinned_worker_allowed()?;
+        if !eligibility.has_eligible_worker(
+            workers
+                .iter()
+                .map(|(&worker_id, config)| (worker_id, config)),
+        ) {
+            if eligibility.has_eligible_worker_ignoring_overload(
+                workers
+                    .iter()
+                    .map(|(&worker_id, config)| (worker_id, config)),
+            ) {
+                return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+            }
+            return Err(KvSchedulerError::NoEndpoints);
+        }
+
+        let weights = self.logit_weights(request);
+        let min_active_prefill_tokens =
+            self.min_active_prefill_tokens(workers, request, eligibility, weights);
+        let mut best_cost = f64::INFINITY;
+        let mut preferred_cost = None;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+            let cost = self.worker_score(
+                workers,
+                request,
+                worker,
+                block_size,
+                min_active_prefill_tokens,
+                weights,
+            );
+            best_cost = best_cost.min(cost);
+            if worker == preferred_worker {
+                preferred_cost = Some(cost);
+            }
+        });
+
+        Ok(preferred_cost.map(|cost| (cost - best_cost).max(0.0)))
     }
 
     fn worker_logit(
@@ -271,24 +417,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         let request_blocks = request.request_blocks(block_size);
 
-        let weights = LogitWeights {
-            overlap_score_credit: request
-                .router_config_override
-                .as_ref()
-                .and_then(|cfg| cfg.overlap_score_credit)
-                .unwrap_or(self.kv_router_config.overlap_score_credit),
-            overlap_score_credit_decay: self.kv_router_config.overlap_score_credit_decay,
-            prefill_load_scale: request
-                .router_config_override
-                .as_ref()
-                .and_then(|cfg| cfg.prefill_load_scale)
-                .unwrap_or(self.kv_router_config.prefill_load_scale),
-            shared_cache_multiplier: request
-                .router_config_override
-                .as_ref()
-                .and_then(|cfg| cfg.shared_cache_multiplier)
-                .unwrap_or(self.kv_router_config.shared_cache_multiplier),
-        };
+        let weights = self.logit_weights(request);
 
         if let Some(worker) = pinned_worker {
             match eligibility.validate_worker_rank(workers, worker) {
@@ -336,42 +465,22 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.kv_router_config.router_temperature);
         let min_active_prefill_tokens =
-            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
-                let mut minimum = usize::MAX;
-                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                    minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
-                });
-                debug_assert_ne!(minimum, usize::MAX);
-                minimum
-            } else {
-                0
-            };
+            self.min_active_prefill_tokens(workers, request, eligibility, weights);
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let base_score = self.worker_logit(
+            self.worker_score(
+                workers,
                 request,
                 worker,
                 block_size,
                 min_active_prefill_tokens,
                 weights,
-                "Formula",
-            );
-            let Some(config) = workers.get(&worker.worker_id) else {
-                return base_score;
-            };
-            match request
-                .routing_constraints
-                .preferred_taint_multiplier(config.taints())
-            {
-                // NOTE: This multiplicative bias assumes a non-negative score. Negative
-                // overlap scores expose its pre-existing sign sensitivity; keep it for now.
-                Some(multiplier) => base_score * multiplier,
-                None => base_score,
-            }
+            )
         };
 
         let (best_worker, best_logit) = if temperature == 0.0 {
             let mut best_worker = None;
             let mut best_logit = f64::INFINITY;
+            let mut best_tie_score = 0_u64;
             let mut tie_count = 0usize;
             let mut rng = rand::rng();
             eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
@@ -379,14 +488,31 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 if score < best_logit {
                     best_worker = Some(worker);
                     best_logit = score;
+                    best_tie_score = if self.deterministic_ties {
+                        Self::deterministic_tie_score(request, worker)
+                    } else {
+                        0
+                    };
                     tie_count = 1;
                     return;
                 }
 
                 if score == best_logit {
                     tie_count += 1;
-                    // Reservoir sampling keeps tied minima uniform without collecting workers.
-                    if rng.random_range(0..tie_count) == 0 {
+                    let choose = if self.deterministic_ties {
+                        let tie_score = Self::deterministic_tie_score(request, worker);
+                        let choose = tie_score > best_tie_score
+                            || (tie_score == best_tie_score
+                                && best_worker.is_none_or(|best| worker < best));
+                        if choose {
+                            best_tie_score = tie_score;
+                        }
+                        choose
+                    } else {
+                        // Reservoir sampling keeps tied live-router minima uniformly spread.
+                        rng.random_range(0..tie_count) == 0
+                    };
+                    if choose {
                         best_worker = Some(worker);
                     }
                 }
@@ -724,6 +850,42 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_tie_breaking_is_reproducible_and_distributed_by_request() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        )
+        .with_deterministic_ties();
+        let workers = HashMap::from([
+            (30, SimpleWorkerConfig::default()),
+            (10, SimpleWorkerConfig::default()),
+            (20, SimpleWorkerConfig::default()),
+        ]);
+
+        let mut selected_workers = HashSet::new();
+        for idx in 0..100 {
+            let mut request = base_request(16);
+            request.mode = ScheduleMode::QueryOnly {
+                request_id: Some(format!("request-{idx}")),
+            };
+            let first = selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap();
+            let second = selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap();
+            assert_eq!(first.worker, second.worker);
+            selected_workers.insert(first.worker);
+        }
+        assert_eq!(selected_workers.len(), workers.len());
+    }
+
+    #[test]
     fn test_overloaded_high_overlap_worker_is_skipped() {
         use crate::test_utils::SimpleWorkerConfig;
 
@@ -758,6 +920,57 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);
+    }
+
+    #[test]
+    fn cost_regret_combines_kv_overlap_and_decode_load() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                prefill_load_scale: 1.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let mut request = base_request(64);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .extend([(worker0, 4.0), (worker1, 2.0)]);
+        request
+            .overlap
+            .effective_cached_tokens
+            .extend([(worker0, 64), (worker1, 32)]);
+        request.worker_loads.insert(
+            worker1,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 3,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            selector
+                .cost_regret_for_worker(&workers, &request, request.eligibility(), 16, worker1,)
+                .unwrap(),
+            Some(5.0),
+            "two uncached blocks plus three decode blocks should cost five blocks"
+        );
+        assert_eq!(
+            selector
+                .cost_regret_for_worker(&workers, &request, request.eligibility(), 16, worker0,)
+                .unwrap(),
+            Some(0.0),
+        );
     }
 
     #[test]

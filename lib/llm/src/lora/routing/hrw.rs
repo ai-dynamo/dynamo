@@ -12,17 +12,7 @@ pub struct RendezvousHasher;
 impl RendezvousHasher {
     /// Compute hash score for a (lora_name, worker) pair using HRW hashing with blake3
     pub fn compute_score(lora_name: &str, worker: WorkerWithDpRank) -> u64 {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(lora_name.as_bytes());
-        hasher.update(&worker.worker_id.to_le_bytes());
-        hasher.update(&worker.dp_rank.to_le_bytes());
-        let hash = hasher.finalize();
-
-        // Extract first 8 bytes as u64
-        let hash_bytes = hash.as_bytes();
-        let mut bytes_array = [0u8; 8];
-        bytes_array.copy_from_slice(&hash_bytes[..8]);
-        u64::from_le_bytes(bytes_array)
+        dynamo_kv_router::rendezvous::legacy_worker_score(lora_name, worker)
     }
 
     /// Rank workers by their hash scores for a given LoRA

@@ -111,7 +111,7 @@ pub(super) fn replay_slots(
 }
 
 pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector {
-    DefaultWorkerSelector::new(Some(config.clone()), "replay")
+    DefaultWorkerSelector::new(Some(config.clone()), "replay").with_deterministic_ties()
 }
 
 pub(crate) fn replay_router_config(

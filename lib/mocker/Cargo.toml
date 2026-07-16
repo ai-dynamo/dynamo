@@ -41,6 +41,7 @@ derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 futures = { workspace = true }
 indicatif = "0.18"
+lru = { workspace = true }
 rand = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }

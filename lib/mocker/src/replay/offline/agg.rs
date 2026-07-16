@@ -28,7 +28,7 @@ use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArg
 use crate::loadgen::{ReplayRequestHashes, WorkloadDriver};
 use crate::replay::{
     ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayTerminalStatus, SlaThresholds,
-    TraceCollector,
+    TraceCollector, session_affinity::ReplaySessionSimulationOptions,
 };
 use anyhow::bail;
 use dynamo_kv_router::config::KvRouterConfig;
@@ -120,6 +120,7 @@ impl AggRuntime {
             AdmissionQueue::new_requests(pending, mode),
             num_workers,
             router_mode,
+            ReplaySessionSimulationOptions::default(),
         )
     }
 
@@ -140,6 +141,27 @@ impl AggRuntime {
             AdmissionQueue::new_workload(driver, mode),
             num_workers,
             router_mode,
+            ReplaySessionSimulationOptions::default(),
+        )
+    }
+
+    pub(in crate::replay) fn new_workload_with_session_affinity(
+        args: &MockEngineArgs,
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        driver: WorkloadDriver,
+        num_workers: usize,
+        mode: ReplayMode,
+        session_options: ReplaySessionSimulationOptions,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_source(
+            args,
+            router_config,
+            prefill_load_estimator,
+            AdmissionQueue::new_workload(driver, mode),
+            num_workers,
+            ReplayRouterMode::KvRouter,
+            session_options,
         )
     }
 
@@ -151,17 +173,22 @@ impl AggRuntime {
         admission: AdmissionQueue,
         num_workers: usize,
         router_mode: ReplayRouterMode,
+        session_options: ReplaySessionSimulationOptions,
     ) -> anyhow::Result<Self> {
         let args = args.clone().normalized()?;
         let progress = ReplayProgress::new(admission.total_requests(), "offline replay");
         let router = match router_mode {
             ReplayRouterMode::RoundRobin => None,
-            ReplayRouterMode::KvRouter => Some(OfflineReplayRouter::new(
-                &args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-            )?),
+            ReplayRouterMode::KvRouter => Some(
+                OfflineReplayRouter::new_with_session_affinity_and_observation(
+                    &args,
+                    router_config,
+                    prefill_load_estimator,
+                    num_workers,
+                    session_options.affinity_mode,
+                    session_options.kv_observation_mode,
+                )?,
+            ),
         };
         let capture_kv_events = router.is_some();
         let mut engine = EngineComponent::new_ranked(
