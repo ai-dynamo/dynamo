@@ -5,6 +5,7 @@ const ICS_URL = 'https://calendar.google.com/calendar/ical/c_c2448d2efb09eac2dde
 
 function formatLocation(location) {
   if (!location) return '–';
+  if (/luma\.com/i.test(location)) return `[Luma](${location})`;
   if (/^https?:\/\//.test(location)) return `[Online](${location})`;
   const parts = location.split(',').map(s => s.trim());
   const city = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
