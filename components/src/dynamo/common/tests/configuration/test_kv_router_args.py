@@ -379,6 +379,7 @@ def test_frontend_rejection_thresholds_default_to_none(
         "active_prefill_tokens_threshold": None,
         "active_prefill_tokens_threshold_frac": None,
         "session_affinity_ttl_secs": None,
+        "session_affinity_replica_sync": False,
     }
     assert "busy-worker rejection disabled" in caplog.text
 
@@ -507,6 +508,7 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
         "session_affinity_ttl_secs": None,
+        "session_affinity_replica_sync": False,
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
@@ -641,12 +643,14 @@ def test_rejection_threshold_validation_rejects_invalid_values(
 
 def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_REPLICA_SYNC", raising=False)
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
     config = FrontendConfig.from_cli_args(parser.parse_args([]))
     config.validate()
     assert config.session_affinity_ttl_secs is None
     assert config.router_kwargs()["session_affinity_ttl_secs"] is None
+    assert config.router_kwargs()["session_affinity_replica_sync"] is False
 
     monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", "600")
     parser = argparse.ArgumentParser()
@@ -663,6 +667,68 @@ def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     )
     config.validate()
     assert config.session_affinity_ttl_secs == 900
+
+
+@pytest.mark.parametrize(
+    ("environment", "args"),
+    [
+        (False, ["--router-session-affinity-replica-sync"]),
+        (True, []),
+    ],
+    ids=["cli", "environment"],
+)
+def test_session_affinity_replica_sync_flows_outside_kv_config(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: bool,
+    args: list[str],
+) -> None:
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_REPLICA_SYNC", raising=False)
+    if environment:
+        monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_REPLICA_SYNC", "true")
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "random",
+                "--router-session-affinity-ttl-secs",
+                "300",
+                *args,
+            ]
+        )
+    )
+    config.validate()
+
+    assert config.router_kwargs()["session_affinity_replica_sync"] is True
+    assert config.kv_router_kwargs()["router_replica_sync"] is False
+
+
+def test_session_affinity_replica_sync_requires_ttl() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-replica-sync"])
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="router-session-affinity-replica-sync.*router-session-affinity-ttl-secs",
+    ):
+        config.validate()
+
+
+def test_active_sequence_replica_sync_stays_in_kv_config() -> None:
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-mode", "random", "--router-replica-sync"])
+    )
+    config.validate()
+
+    assert config.kv_router_kwargs()["router_replica_sync"] is True
+    assert config.router_kwargs()["session_affinity_replica_sync"] is False
 
 
 @pytest.mark.parametrize("ttl", [0, 31_536_001])

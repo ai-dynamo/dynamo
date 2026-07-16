@@ -35,6 +35,7 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
     "session_affinity_ttl_secs",
+    "session_affinity_replica_sync",
 )
 
 _ENFORCE_DISAGG_DEPRECATION = (
@@ -69,6 +70,7 @@ class RouterConfigBase(ConfigBase):
     min_initial_workers: int
     enforce_disagg: bool
     session_affinity_ttl_secs: Optional[int]
+    session_affinity_replica_sync: bool
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
@@ -196,12 +198,25 @@ class RouterArgGroup(ArgGroup):
             default=None,
             help=(
                 "Enable session affinity with this router-local idle TTL in seconds. "
-                "Add --router-replica-sync for best-effort binding synchronization. "
+                "Add --router-session-affinity-replica-sync for best-effort binding "
+                "synchronization. "
                 "Affinity is disabled when this option is omitted. "
                 "This is independent of KV prediction TTL settings."
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-session-affinity-replica-sync",
+            env_var="DYN_ROUTER_SESSION_AFFINITY_REPLICA_SYNC",
+            default=False,
+            dest="session_affinity_replica_sync",
+            help=(
+                "Enable best-effort session-affinity binding synchronization through "
+                "the Runtime event plane. Requires "
+                "--router-session-affinity-ttl-secs."
+            ),
         )
         add_negatable_bool_argument(
             g,

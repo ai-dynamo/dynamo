@@ -56,6 +56,7 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_replica_sync: bool,
         model_name: String,
         namespace: String,
         is_eagle: bool,
@@ -94,6 +95,7 @@ impl PrefillRouter {
                         kv_cache_block_size,
                         kv_router_config,
                         router_clone.prefill_load_estimator.clone(),
+                        session_affinity_replica_sync,
                         worker_monitor.as_ref(),
                     ).await {
                         tracing::error!(error = %e, "Failed to activate prefill router");
@@ -116,11 +118,9 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        session_affinity_replica_sync: bool,
         worker_monitor: Option<&crate::discovery::KvWorkerMonitor>,
     ) -> Result<()> {
-        let router_replica_sync = kv_router_config
-            .as_ref()
-            .is_some_and(|config| config.router_replica_sync);
         tracing::info!(
             router_mode = ?self.router_mode,
             "Activating prefill router"
@@ -155,7 +155,7 @@ impl PrefillRouter {
             let affinity = create_affinity_coordinator(
                 self.session_affinity_ttl,
                 client.clone(),
-                router_replica_sync,
+                session_affinity_replica_sync,
             )
             .await?;
 
@@ -180,7 +180,7 @@ impl PrefillRouter {
             let affinity = create_affinity_coordinator(
                 self.session_affinity_ttl,
                 client.clone(),
-                router_replica_sync,
+                session_affinity_replica_sync,
             )
             .await?;
 

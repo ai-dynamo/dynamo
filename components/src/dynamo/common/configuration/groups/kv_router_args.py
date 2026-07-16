@@ -288,9 +288,8 @@ class KvRouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_REPLICA_SYNC",
             default=False,
             help=(
-                "Enable best-effort replica synchronization through the Runtime event plane. "
-                "KV routers synchronize active-sequence state. When session affinity is "
-                "enabled, all router modes also synchronize affinity bindings."
+                "KV Router: Enable best-effort active-sequence synchronization through "
+                "the Runtime event plane."
             ),
         )
         add_negatable_bool_argument(

@@ -245,7 +245,7 @@ pub async fn build_preprocessed_routing(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
-    router_replica_sync: bool,
+    session_affinity_replica_sync: bool,
 ) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
@@ -255,6 +255,10 @@ pub async fn build_preprocessed_routing(
         model_manager.lora_filter().is_some(),
         session_affinity_ttl_secs.is_some(),
     )?;
+    anyhow::ensure!(
+        !session_affinity_replica_sync || session_affinity_ttl_secs.is_some(),
+        "session affinity replica sync requires a session affinity TTL"
+    );
 
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
@@ -264,7 +268,7 @@ pub async fn build_preprocessed_routing(
     let affinity = create_affinity_coordinator(
         session_affinity_ttl_secs.map(Duration::from_secs),
         router_client.clone(),
-        router_replica_sync,
+        session_affinity_replica_sync,
     )
     .await?;
 

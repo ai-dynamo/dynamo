@@ -58,7 +58,7 @@ class FrontendRouterProcess(ManagedProcess):
         use_remote_indexer: bool = False,
         event_plane: str | None = None,
         session_affinity_ttl_secs: int | None = None,
-        router_replica_sync: bool = False,
+        session_affinity_replica_sync: bool = False,
     ):
         command = [
             sys.executable,
@@ -105,8 +105,8 @@ class FrontendRouterProcess(ManagedProcess):
                 ["--router-session-affinity-ttl-secs", str(session_affinity_ttl_secs)]
             )
 
-        if router_replica_sync:
-            command.append("--router-replica-sync")
+        if session_affinity_replica_sync:
+            command.append("--router-session-affinity-replica-sync")
 
         if router_aic_config is not None:
             command.extend(

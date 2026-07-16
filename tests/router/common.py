@@ -540,7 +540,7 @@ def _test_session_affinity(
             min_initial_workers=engine_workers.num_workers,
             event_plane="nats",
             session_affinity_ttl_secs=300,
-            router_replica_sync=True,
+            session_affinity_replica_sync=True,
         ),
         FrontendRouterProcess(
             request,
@@ -552,7 +552,7 @@ def _test_session_affinity(
             min_initial_workers=engine_workers.num_workers,
             event_plane="nats",
             session_affinity_ttl_secs=300,
-            router_replica_sync=True,
+            session_affinity_replica_sync=True,
         ),
     ):
         urls = [f"http://localhost:{port}/v1/chat/completions" for port in router_ports]
