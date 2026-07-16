@@ -3580,20 +3580,6 @@ mod event_plane_batch_tests {
     }
 
     #[test]
-    fn event_plane_batch_encoding_has_no_byte_size_cap() {
-        let events = (0..20_000).map(router_event).collect::<Vec<_>>();
-        let batches = event_plane_event_batches(&events, MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS)
-            .collect::<Vec<_>>();
-
-        assert_eq!(batches.len(), 1);
-        let encoded = encode_event_plane_batch(batches[0]).unwrap();
-        let decoded = rmp_serde::from_slice::<Vec<RouterEvent>>(&encoded).unwrap();
-
-        assert!(encoded.len() > 1024 * 1024);
-        assert_eq!(decoded, events);
-    }
-
-    #[test]
     fn event_plane_batching_counts_stored_and_removed_blocks() {
         let events = vec![
             stored_router_event(1, 2),

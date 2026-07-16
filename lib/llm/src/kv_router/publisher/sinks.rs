@@ -16,7 +16,7 @@ use crate::kv_router::KV_EVENT_SUBJECT;
 
 pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
 
-pub(super) const MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS: usize = 32_768;
+pub(super) const MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS: usize = 8_192;
 
 pub(super) trait RouterEventBatchSink: Send + Sync {
     fn publish_events(&self, events: &[RouterEvent]) -> impl Future<Output = Result<()>> + Send;
