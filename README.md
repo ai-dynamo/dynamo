@@ -284,7 +284,7 @@ Stay up to date with Dynamo demos, meetups, and release walkthroughs.
 | – | No upcoming events |
 <!-- EVENTS:END -->
 
-> Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=YOUR_CALENDAR_ID).
+> Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
 
 ## Reference
 
