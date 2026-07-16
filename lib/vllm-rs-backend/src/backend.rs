@@ -81,6 +81,10 @@ fn default_engine_ready_timeout_secs() -> u64 {
     600
 }
 
+fn engine_max_num_seqs(max_num_seqs: Option<u64>, data_parallel_size: u32) -> Option<u64> {
+    max_num_seqs.map(|capacity| capacity.saturating_mul(u64::from(data_parallel_size.max(1))))
+}
+
 /// Dynamo backend implementation backed by a managed Python vLLM engine-core.
 ///
 /// The backend consumes tokenized [`PreprocessedRequest`] values produced by
@@ -316,6 +320,10 @@ impl LLMEngine for VllmBackend {
                 kv_cache_block_size: self.extra.block_size,
                 total_kv_blocks,
                 max_num_seqs: self.extra.max_num_seqs,
+                engine_max_num_seqs: engine_max_num_seqs(
+                    self.extra.max_num_seqs,
+                    data_parallel_size,
+                ),
                 max_num_batched_tokens: self.extra.max_num_batched_tokens,
                 data_parallel_size: Some(data_parallel_size),
                 // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
@@ -599,7 +607,14 @@ impl ExtraEngineArgs {
 mod tests {
     use dynamo_backend_common::ModelInput;
 
-    use super::VllmBackend;
+    use super::{VllmBackend, engine_max_num_seqs};
+
+    #[test]
+    fn local_capacity_multiplies_explicit_per_rank_limit_by_dp_size() {
+        assert_eq!(engine_max_num_seqs(Some(128), 2), Some(256));
+        assert_eq!(engine_max_num_seqs(None, 2), None);
+        assert_eq!(engine_max_num_seqs(Some(u64::MAX), 2), Some(u64::MAX));
+    }
 
     #[test]
     fn from_args_auto_forwards_python_flags_without_separator() {

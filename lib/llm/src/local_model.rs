@@ -644,6 +644,16 @@ impl LocalModel {
             &self.card,
             model_suffix,
         )?;
+
+        if lora_info.is_none()
+            && let Some(engine_max_num_seqs) = self.runtime_config.worker_pool_engine_max_num_seqs()
+        {
+            endpoint
+                .drt()
+                .network_manager()
+                .server_with_engine_max_num_seqs(Some(engine_max_num_seqs))
+                .await?;
+        }
         let _instance = discovery.register(spec).await?;
 
         Ok(())

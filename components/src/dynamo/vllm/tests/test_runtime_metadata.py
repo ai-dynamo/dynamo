@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.capacity import (
+    engine_max_num_seqs,
+    get_metrics_model_name,
+    get_spec_decode_runtime_data,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -13,6 +17,14 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.parametrize(
+    "max_num_seqs, local_dp_size, expected",
+    [(8, 1, 8), (8, 3, 24), (8, 0, 8), (None, 2, None), (0, 2, None), (True, 2, None)],
+)
+def test_engine_max_num_seqs_normalizes_dp_scope(max_num_seqs, local_dp_size, expected):
+    assert engine_max_num_seqs(max_num_seqs, local_dp_size) == expected
 
 
 def test_spec_decode_runtime_data_uses_vllm_speculative_config():

@@ -68,7 +68,7 @@ from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
 )
-from dynamo.vllm.capacity import per_rank_kv_blocks
+from dynamo.vllm.capacity import engine_max_num_seqs, per_rank_kv_blocks
 from dynamo.vllm.kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
@@ -402,6 +402,9 @@ class VllmLLMEngine(LLMEngine):
                 kv_cache_block_size=block_size,
                 total_kv_blocks=per_rank_num_gpu_blocks,
                 max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+                engine_max_num_seqs=engine_max_num_seqs(
+                    vllm_config.scheduler_config.max_num_seqs, self._dp_range[1]
+                ),
                 max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
                 # Router needs the rank range to enumerate per-rank load.
                 data_parallel_start_rank=self._dp_range[0],

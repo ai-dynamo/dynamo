@@ -33,16 +33,8 @@ use tracing::Instrument;
 const DEFAULT_WORKER_POOL_SIZE: usize = 10000;
 
 /// Default work queue size for TCP request handling
-/// this is 4X the worker pool size to handle burst traffic
-const DEFAULT_WORK_QUEUE_SIZE: usize = 40000;
-
-/// Get worker pool size from environment or use default
-fn get_worker_pool_size() -> usize {
-    std::env::var("DYN_TCP_WORKER_POOL_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_WORKER_POOL_SIZE)
-}
+/// this is a small overflow queue to handle burst traffic
+const DEFAULT_WORK_QUEUE_SIZE: usize = 16;
 
 /// Get work queue size from environment or use default
 fn get_work_queue_size() -> usize {
@@ -64,14 +56,15 @@ const DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT: usize = 16;
 ///
 /// * `DYN_ENGINE_REQUEST_LIMIT` set → pool = engine limit (N), queue = Q
 ///   (default 16). Hard cap N+Q.
-/// * unset → large defaults (10000 / 40000), so rejection only triggers under
-///   extreme saturation.
+/// * otherwise `DYN_TCP_WORKER_POOL_SIZE` set → explicit pool and TCP queue.
+/// * otherwise a reported `engine_max_num_seqs` sizes the pool at 1.5x.
+/// * otherwise the pool falls back to 10000. The TCP queue defaults to 16.
 struct SizingConfig {
     pool_size: usize,
     queue_size: usize,
 }
 
-fn resolve_sizing() -> SizingConfig {
+fn resolve_sizing(engine_max_num_seqs: Option<usize>) -> SizingConfig {
     match std::env::var("DYN_ENGINE_REQUEST_LIMIT")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -90,10 +83,25 @@ fn resolve_sizing() -> SizingConfig {
                 queue_size: queue_limit.saturating_sub(1).max(1),
             }
         }
-        None => SizingConfig {
-            pool_size: get_worker_pool_size(),
-            queue_size: get_work_queue_size(),
-        },
+        None => {
+            let pool_size = std::env::var("DYN_TCP_WORKER_POOL_SIZE")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .or_else(|| {
+                    engine_max_num_seqs
+                        .filter(|capacity| *capacity > 0)
+                        .map(|capacity| {
+                            capacity
+                                .saturating_add(capacity.div_ceil(2))
+                                .min(Semaphore::MAX_PERMITS)
+                        })
+                })
+                .unwrap_or(DEFAULT_WORKER_POOL_SIZE);
+            SizingConfig {
+                pool_size,
+                queue_size: get_work_queue_size(),
+            }
+        }
     }
 }
 
@@ -164,11 +172,15 @@ struct EndpointHandler {
 }
 
 impl SharedTcpServer {
-    pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
+    pub fn new(
+        bind_addr: SocketAddr,
+        cancellation_token: CancellationToken,
+        engine_max_num_seqs: Option<usize>,
+    ) -> Arc<Self> {
         let SizingConfig {
             pool_size: worker_pool_size,
             queue_size: work_queue_size,
-        } = resolve_sizing();
+        } = resolve_sizing(engine_max_num_seqs);
 
         tracing::info!(
             "Initializing TCP server with dispatcher (concurrency={}, queue={})",
@@ -770,6 +782,52 @@ mod tests {
     use std::time::Duration;
     use tokio::time::Instant;
 
+    #[test]
+    fn worker_pool_size_precedence() {
+        temp_env::with_vars(
+            [
+                ("DYN_ENGINE_REQUEST_LIMIT", Some("7")),
+                ("DYN_DYNAMO_REQUEST_QUEUE_LIMIT", Some("5")),
+                ("DYN_TCP_WORKER_POOL_SIZE", Some("99")),
+                ("DYN_TCP_WORK_QUEUE_SIZE", Some("123")),
+            ],
+            || {
+                let sizing = resolve_sizing(Some(20));
+                assert_eq!(sizing.pool_size, 7);
+                assert_eq!(sizing.queue_size, 4);
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                ("DYN_ENGINE_REQUEST_LIMIT", None),
+                ("DYN_DYNAMO_REQUEST_QUEUE_LIMIT", None),
+                ("DYN_TCP_WORKER_POOL_SIZE", Some("99")),
+                ("DYN_TCP_WORK_QUEUE_SIZE", Some("123")),
+            ],
+            || {
+                let sizing = resolve_sizing(Some(20));
+                assert_eq!(sizing.pool_size, 99);
+                assert_eq!(sizing.queue_size, 123);
+            },
+        );
+
+        temp_env::with_vars_unset(
+            [
+                "DYN_ENGINE_REQUEST_LIMIT",
+                "DYN_DYNAMO_REQUEST_QUEUE_LIMIT",
+                "DYN_TCP_WORKER_POOL_SIZE",
+                "DYN_TCP_WORK_QUEUE_SIZE",
+            ],
+            || {
+                assert_eq!(resolve_sizing(Some(3)).pool_size, 5);
+                assert_eq!(resolve_sizing(Some(8)).pool_size, 12);
+                assert_eq!(resolve_sizing(None).pool_size, DEFAULT_WORKER_POOL_SIZE);
+                assert_eq!(resolve_sizing(None).queue_size, DEFAULT_WORK_QUEUE_SIZE);
+            },
+        );
+    }
+
     /// Mock handler that simulates slow request processing for testing
     struct SlowMockHandler {
         /// Tracks if a request is currently being processed
@@ -836,7 +894,7 @@ mod tests {
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
         // Create SharedTcpServer
-        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone(), None);
 
         // Create a handler that takes 1s to process requests
         let handler = Arc::new(SlowMockHandler::new(Duration::from_secs(1)));
@@ -1187,7 +1245,7 @@ mod tests {
         // a SharedTcpServer will have populated the gauges; we just assert they're > 0.
         let cancellation_token = CancellationToken::new();
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone(), None);
 
         assert!(
             WORK_HANDLER_POOL_CAPACITY.get() > 0,

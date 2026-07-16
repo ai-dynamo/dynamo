@@ -10,6 +10,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def engine_max_num_seqs(max_num_seqs: int | None, local_dp_size: int) -> int | None:
+    """Normalize vLLM's per-rank scheduler limit to this worker's DP scope."""
+    if (
+        not isinstance(max_num_seqs, int)
+        or isinstance(max_num_seqs, bool)
+        or max_num_seqs <= 0
+    ):
+        return None
+    return max_num_seqs * max(local_dp_size, 1)
+
+
 def per_rank_kv_blocks(
     total_kv_blocks: int | None, data_parallel_size: int
 ) -> int | None:

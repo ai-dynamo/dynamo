@@ -213,9 +213,19 @@ impl NetworkManager {
     /// - NATS mode is selected but NATS client is not available
     /// - Configuration is invalid (e.g., malformed bind address)
     pub async fn server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
+        self.server_with_engine_max_num_seqs(None).await
+    }
+
+    /// Get or create the request-plane server using the engine's normalized
+    /// maximum sequence count when this call performs the one-time creation.
+    /// Subsequent calls return the already-created fixed-size server.
+    pub async fn server_with_engine_max_num_seqs(
+        &self,
+        engine_max_num_seqs: Option<usize>,
+    ) -> Result<Arc<dyn RequestPlaneServer>> {
         let server = self
             .server
-            .get_or_try_init(async { self.create_server().await })
+            .get_or_try_init(async { self.create_server(engine_max_num_seqs).await })
             .await?;
 
         Ok(server.clone())
@@ -253,14 +263,20 @@ impl NetworkManager {
     // PRIVATE: Server Creation
     // ============================================================================
 
-    async fn create_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
+    async fn create_server(
+        &self,
+        engine_max_num_seqs: Option<usize>,
+    ) -> Result<Arc<dyn RequestPlaneServer>> {
         match self.mode {
-            RequestPlaneMode::Tcp => self.create_tcp_server().await,
+            RequestPlaneMode::Tcp => self.create_tcp_server(engine_max_num_seqs).await,
             RequestPlaneMode::Nats => self.create_nats_server().await,
         }
     }
 
-    async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
+    async fn create_tcp_server(
+        &self,
+        engine_max_num_seqs: Option<usize>,
+    ) -> Result<Arc<dyn RequestPlaneServer>> {
         // Use the global TCP server to ensure all workers in the same process share
         // a single server. This is critical for correct endpoint routing.
         let server = GLOBAL_TCP_SERVER
@@ -277,7 +293,11 @@ impl NetworkManager {
                     "Creating TCP request plane server"
                 );
 
-                let server = SharedTcpServer::new(bind_addr, GLOBAL_TCP_SERVER_TOKEN.clone());
+                let server = SharedTcpServer::new(
+                    bind_addr,
+                    GLOBAL_TCP_SERVER_TOKEN.clone(),
+                    engine_max_num_seqs,
+                );
 
                 // Bind and start server, getting the actual bound address
                 let actual_addr = server.clone().bind_and_start().await?;

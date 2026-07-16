@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
+    resolve_engine_max_num_seqs,
 )
 
 pytestmark = [
@@ -17,6 +19,99 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.asyncio
+async def test_engine_sequence_capacity_uses_smallest_effective_local_rank():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            get_internal_state=AsyncMock(
+                return_value=[
+                    {"effective_max_running_requests_per_dp": 7},
+                    {"effective_max_running_requests_per_dp": True},
+                    {"effective_max_running_requests_per_dp": 5},
+                ]
+            )
+        )
+    )
+
+    capacity = await resolve_engine_max_num_seqs(
+        engine,
+        SimpleNamespace(max_running_requests=999, dp_size=1),
+        local_dp_size=3,
+    )
+
+    assert capacity == 15
+
+
+@pytest.mark.asyncio
+async def test_engine_sequence_capacity_falls_back_to_configured_per_rank(caplog):
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            get_internal_state=AsyncMock(side_effect=RuntimeError("not supported"))
+        )
+    )
+
+    capacity = await resolve_engine_max_num_seqs(
+        engine,
+        SimpleNamespace(max_running_requests=24, dp_size=4),
+        local_dp_size=2,
+    )
+
+    assert capacity == 12
+    assert "falling back to configured max_running_requests" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_engine_sequence_capacity_returns_none_without_usable_limit():
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            get_internal_state=AsyncMock(return_value={"other": 1})
+        )
+    )
+
+    capacity = await resolve_engine_max_num_seqs(
+        engine,
+        SimpleNamespace(max_running_requests=None, dp_size=1),
+        local_dp_size=1,
+    )
+
+    assert capacity is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_registration_does_not_report_local_engine_capacity(monkeypatch):
+    from dynamo.sglang import register
+
+    server_args = SimpleNamespace(
+        context_length=4096,
+        disaggregation_mode=None,
+        max_prefill_tokens=None,
+        page_size=16,
+        speculative_algorithm="NONE",
+    )
+    dynamo_args = register.DynamoConfig()
+    dynamo_args.enable_local_indexer = False
+    resolver = AsyncMock(return_value=99)
+    capacity = SimpleNamespace(
+        max_num_seqs=None,
+        max_num_batched_tokens=None,
+        total_kv_blocks=None,
+    )
+
+    monkeypatch.setattr(register, "resolve_engine_max_num_seqs", resolver)
+    monkeypatch.setattr(register, "model_card_dp_rank_bounds", lambda _: (0, 1))
+    monkeypatch.setattr(register, "get_sglang_worker_group_id", lambda _: None)
+    monkeypatch.setattr(
+        register, "_get_bootstrap_info_for_config", lambda _: (None, None)
+    )
+    monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
+    monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+
+    runtime_config = await register._get_runtime_config(None, server_args, dynamo_args)
+
+    resolver.assert_not_awaited()
+    assert runtime_config.engine_max_num_seqs is None
 
 
 def test_spec_decode_runtime_data_uses_speculative_num_steps():

@@ -115,6 +115,11 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_engine_max_num_seqs(&mut self, capacity: Option<u64>) {
+        self.inner.engine_max_num_seqs = capacity;
+    }
+
+    #[setter]
     fn set_max_num_batched_tokens(&mut self, max_num_batched_tokens: u64) {
         self.inner.max_num_batched_tokens = Some(max_num_batched_tokens);
     }
@@ -205,6 +210,11 @@ impl ModelRuntimeConfig {
     #[getter]
     fn max_num_seqs(&self) -> Option<u64> {
         self.inner.max_num_seqs
+    }
+
+    #[getter]
+    fn engine_max_num_seqs(&self) -> Option<u64> {
+        self.inner.engine_max_num_seqs
     }
 
     #[getter]

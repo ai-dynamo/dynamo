@@ -144,6 +144,18 @@ async def init_decode(
         decode_needs = []
 
     try:
+        await register_model_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            output_type=parse_endpoint_types(dynamo_args.endpoint_types),
+            readiness_gate=ready_event,
+            worker_type=decode_worker_type,
+            needs=decode_needs,
+            # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
+            serves_lora_load=True,
+        )
         gather_tasks = [
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -166,18 +178,6 @@ async def init_decode(
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
-            ),
-            register_model_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                output_type=parse_endpoint_types(dynamo_args.endpoint_types),
-                readiness_gate=ready_event,
-                worker_type=decode_worker_type,
-                needs=decode_needs,
-                # Decode workers serve the LoRA load endpoints, so they may advertise capacity.
-                serves_lora_load=True,
             ),
         ]
         await asyncio.gather(*gather_tasks)
@@ -283,6 +283,26 @@ async def init_prefill(
     ready_event = asyncio.Event()
 
     try:
+        await register_model_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Tokens,
+            # Prefill workers have no OpenAI surface — the role is carried
+            # by `worker_type=Prefill` below. We register the legacy
+            # `ModelType.Prefill` marker bit (not a surface) so an OLD
+            # frontend, which detects prefill via that bit, still routes
+            # disaggregated traffic during the cross-version rollout. A new
+            # frontend ignores it and dispatches off `worker_type`.
+            output_type=ModelType.Prefill,
+            readiness_gate=ready_event,
+            worker_type=WorkerType.Prefill,
+            needs=[[WorkerType.Decode]],
+            # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
+            # advertise capacity.
+            serves_lora_load=True,
+        )
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -305,26 +325,6 @@ async def init_prefill(
             clear_endpoint.serve_endpoint(
                 handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
-            ),
-            register_model_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Tokens,
-                # Prefill workers have no OpenAI surface — the role is carried
-                # by `worker_type=Prefill` below. We register the legacy
-                # `ModelType.Prefill` marker bit (not a surface) so an OLD
-                # frontend, which detects prefill via that bit, still routes
-                # disaggregated traffic during the cross-version rollout. A new
-                # frontend ignores it and dispatches off `worker_type`.
-                output_type=ModelType.Prefill,
-                readiness_gate=ready_event,
-                worker_type=WorkerType.Prefill,
-                needs=[[WorkerType.Decode]],
-                # Prefill workers also serve the LoRA load endpoints (init_prefill), so they may
-                # advertise capacity.
-                serves_lora_load=True,
             ),
         )
     except Exception as e:

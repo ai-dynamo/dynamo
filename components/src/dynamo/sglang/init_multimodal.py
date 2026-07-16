@@ -79,6 +79,27 @@ async def init_multimodal_encode_worker(
     ready_event = asyncio.Event()
 
     try:
+        await register_model_with_readiness_gate(
+            None,  # engine
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Tokens,
+            # The encode worker is the OpenAI front door for sglang
+            # multimodal: it carries the Chat/Completions surface and
+            # delegates token generation to the internal PD worker via
+            # pd_worker_client. Its `worker_type=Encode` topology role gates
+            # serving on the downstream worker(s) — `needs` is a DNF: a P+D
+            # pair OR a single Aggregated peer — so the model is not
+            # advertised until the whole pipeline is live.
+            output_type=ModelType.Chat | ModelType.Completions,
+            readiness_gate=ready_event,
+            worker_type=WorkerType.Encode,
+            needs=[
+                [WorkerType.Prefill, WorkerType.Decode],
+                [WorkerType.Aggregated],
+            ],
+        )
         _ = await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
@@ -86,27 +107,6 @@ async def init_multimodal_encode_worker(
                 metrics_labels=[
                     (prometheus_names.labels.MODEL, server_args.served_model_name),
                     (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
-                ],
-            ),
-            register_model_with_readiness_gate(
-                None,  # engine
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Tokens,
-                # The encode worker is the OpenAI front door for sglang
-                # multimodal: it carries the Chat/Completions surface and
-                # delegates token generation to the internal PD worker via
-                # pd_worker_client. Its `worker_type=Encode` topology role gates
-                # serving on the downstream worker(s) — `needs` is a DNF: a P+D
-                # pair OR a single Aggregated peer — so the model is not
-                # advertised until the whole pipeline is live.
-                output_type=ModelType.Chat | ModelType.Completions,
-                readiness_gate=ready_event,
-                worker_type=WorkerType.Encode,
-                needs=[
-                    [WorkerType.Prefill, WorkerType.Decode],
-                    [WorkerType.Aggregated],
                 ],
             ),
         )
@@ -173,22 +173,22 @@ async def init_multimodal_worker(
         readiness_needs = [[WorkerType.Encode]]
 
     try:
+        await register_model_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Tokens,
+            output_type=ModelType.Empty,
+            worker_type=readiness_worker_type,
+            needs=readiness_needs,
+        )
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 metrics_labels=[("model", server_args.served_model_name)],
                 graceful_shutdown=True,
                 health_check_payload=health_check_payload,
-            ),
-            register_model_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Tokens,
-                output_type=ModelType.Empty,
-                worker_type=readiness_worker_type,
-                needs=readiness_needs,
             ),
         )
     except Exception as e:
@@ -227,22 +227,22 @@ async def init_multimodal_prefill_worker(
     # the decode worker / prefill router, never by the frontend. Registers a
     # topology card so the serving-readiness gate counts it.
     try:
+        await register_model_with_readiness_gate(
+            engine,
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Tokens,
+            output_type=ModelType.Empty,
+            worker_type=WorkerType.Prefill,
+            needs=[[WorkerType.Decode]],
+        )
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=[("model", server_args.served_model_name)],
                 health_check_payload=health_check_payload,
-            ),
-            register_model_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Tokens,
-                output_type=ModelType.Empty,
-                worker_type=WorkerType.Prefill,
-                needs=[[WorkerType.Decode]],
             ),
         )
     except Exception as e:

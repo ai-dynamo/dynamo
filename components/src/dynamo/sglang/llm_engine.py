@@ -73,6 +73,7 @@ from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     kv_metrics_block_values,
     local_dp_rank_bounds,
+    resolve_engine_max_num_seqs,
     runtime_capacity,
 )
 from dynamo.sglang.logits_processing import activate_logits_processors
@@ -241,6 +242,9 @@ class SglangLLMEngine(LLMEngine):
 
         self._dp_start = capacity.data_parallel_start_rank
         self._dp_size = capacity.data_parallel_size
+        engine_max_num_seqs = await resolve_engine_max_num_seqs(
+            self.engine, self.server_args, self._dp_size
+        )
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
@@ -250,6 +254,7 @@ class SglangLLMEngine(LLMEngine):
                 kv_cache_block_size=page_size,
                 total_kv_blocks=capacity.total_kv_blocks,
                 max_num_seqs=capacity.max_num_seqs,
+                engine_max_num_seqs=engine_max_num_seqs,
                 max_num_batched_tokens=capacity.max_num_batched_tokens,
                 # Router needs the rank range to enumerate per-rank load.
                 data_parallel_size=self._dp_size,

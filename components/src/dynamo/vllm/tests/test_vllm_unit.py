@@ -502,6 +502,7 @@ async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
 
     assert engine_args.served_model_name == [served_model_name]
     assert config.served_model_name == served_model_name
+    assert config.llm.engine_max_num_seqs == 2
 
 
 def test_should_prefetch_model_for_default_load_format():

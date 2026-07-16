@@ -359,6 +359,7 @@ impl LLMEngine for MockerBackend {
                 kv_cache_block_size: Some(self.engine_args.block_size as u32),
                 total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
                 max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
+                engine_max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
                 max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
                 data_parallel_size: None,
                 data_parallel_start_rank: None,

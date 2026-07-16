@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from dynamo.common.native_offloading import native_offloading_capacity
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -47,6 +50,43 @@ def per_rank_max_running_requests(server_args: Any) -> int | None:
         return max_running_requests
 
     return max_running_requests // dp_size
+
+
+async def resolve_engine_max_num_seqs(
+    engine: Any, server_args: Any, local_dp_size: int
+) -> int | None:
+    """Return post-initialization concurrent-sequence capacity for this worker.
+
+    SGLang may clamp the configured maximum after KV profiling. Prefer the
+    scheduler-reported effective per-DP value and conservatively use the
+    smallest local rank. Fall back to the configured per-rank value when the
+    installed SGLang does not expose usable internal state.
+    """
+    effective: list[int] = []
+    try:
+        states = await engine.tokenizer_manager.get_internal_state()
+        if isinstance(states, dict):
+            states = [states]
+        if isinstance(states, (list, tuple)):
+            for state in states:
+                if not isinstance(state, dict):
+                    continue
+                value = state.get("effective_max_running_requests_per_dp")
+                if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                    effective.append(value)
+    except Exception as exc:
+        logger.warning(
+            "Unable to read SGLang effective scheduler capacity; falling back "
+            "to configured max_running_requests: %s",
+            exc,
+        )
+
+    per_rank = (
+        min(effective) if effective else per_rank_max_running_requests(server_args)
+    )
+    if per_rank is None or per_rank <= 0:
+        return None
+    return per_rank * max(local_dp_size, 1)
 
 
 def tokens_to_kv_blocks(tokens: int, page_size: int | None) -> int:

@@ -567,6 +567,12 @@ fn build_engine_config(
     } else {
         (Some(0), Some(1))
     };
+    let engine_max_num_seqs =
+        max_num_seqs
+            .zip(data_parallel_size)
+            .map(|(per_rank_capacity, local_dp_size)| {
+                per_rank_capacity.saturating_mul(u64::from(local_dp_size))
+            });
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -589,6 +595,7 @@ fn build_engine_config(
             kv_cache_block_size: page_size,
             total_kv_blocks,
             max_num_seqs,
+            engine_max_num_seqs,
             max_num_batched_tokens,
             data_parallel_size,
             data_parallel_start_rank,

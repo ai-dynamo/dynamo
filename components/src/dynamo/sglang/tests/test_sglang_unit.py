@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import asyncio
 import json
 import logging
 import os
@@ -66,6 +67,118 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+@pytest.mark.asyncio
+async def test_decode_registers_capacity_before_serving_endpoints(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+
+    from dynamo.sglang import init_llm
+
+    registration_started = asyncio.Event()
+    registration_release = asyncio.Event()
+    all_endpoints_started = asyncio.Event()
+    started_endpoints: set[str] = set()
+
+    async def gated_registration(*_args, **_kwargs):
+        registration_started.set()
+        await registration_release.wait()
+
+    def endpoint(name: str):
+        async def serve(*_args, **_kwargs):
+            started_endpoints.add(name)
+            if len(started_endpoints) == 5:
+                all_endpoints_started.set()
+            await asyncio.Event().wait()
+
+        return SimpleNamespace(serve_endpoint=AsyncMock(side_effect=serve))
+
+    generate = endpoint("generate")
+    clear = endpoint("clear")
+    load_lora = endpoint("load_lora")
+    unload_lora = endpoint("unload_lora")
+    list_loras = endpoint("list_loras")
+    runtime = SimpleNamespace(
+        endpoint=Mock(side_effect=[generate, clear, load_lora, unload_lora, list_loras])
+    )
+
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+    publisher = SimpleNamespace(
+        component_gauges=SimpleNamespace(set_model_load_time=Mock())
+    )
+    handler = SimpleNamespace(
+        generate=Mock(),
+        load_lora=Mock(),
+        unload_lora=Mock(),
+        list_loras=Mock(),
+        clear_kv_blocks=Mock(),
+        register_engine_routes=Mock(),
+        cleanup=Mock(),
+    )
+    monkeypatch.setattr(
+        init_llm,
+        "setup_sgl_metrics",
+        AsyncMock(return_value=(publisher, metrics_task, [])),
+    )
+    monkeypatch.setattr(init_llm, "DecodeWorkerHandler", Mock(return_value=handler))
+    monkeypatch.setattr(
+        init_llm,
+        "SglangHealthCheckPayload",
+        Mock(return_value=SimpleNamespace(to_dict=lambda: {})),
+    )
+    monkeypatch.setattr(
+        init_llm, "register_model_with_readiness_gate", gated_registration
+    )
+
+    server_args = SimpleNamespace(
+        enable_forward_pass_metrics=False,
+        enable_trace=False,
+        node_rank=0,
+    )
+    dynamo_args = SimpleNamespace(
+        namespace="dyn",
+        component="backend",
+        endpoint="generate",
+        frontend_decoding=False,
+        endpoint_types="chat",
+        custom_jinja_template=None,
+        use_sglang_tokenizer=False,
+        sglang_trace_level=0,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=dynamo_args,
+        serving_mode=DisaggregationMode.AGGREGATED,
+    )
+
+    task = asyncio.create_task(
+        init_llm.init_decode(
+            runtime,
+            config,
+            asyncio.Event(),
+            [],
+            snapshot_engine=SimpleNamespace(),
+        )
+    )
+    try:
+        await asyncio.wait_for(registration_started.wait(), timeout=1)
+        assert not started_endpoints
+
+        registration_release.set()
+        await asyncio.wait_for(all_endpoints_started.wait(), timeout=1)
+        assert started_endpoints == {
+            "generate",
+            "clear",
+            "load_lora",
+            "unload_lora",
+            "list_loras",
+        }
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    handler.cleanup.assert_called_once()
 
 
 def _make_sglang_config(**overrides):

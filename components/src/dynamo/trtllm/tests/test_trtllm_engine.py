@@ -106,6 +106,7 @@ async def _check_start_populates_registration_metadata(started_engine):
     assert cfg.llm.context_length == 1024
     assert cfg.llm.kv_cache_block_size > 0
     assert cfg.llm.max_num_seqs == 4
+    assert cfg.llm.engine_max_num_seqs == 4
 
 
 async def _check_generate_streams_chunks_with_coherent_final_usage(started_engine):

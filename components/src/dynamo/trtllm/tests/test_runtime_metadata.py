@@ -5,7 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.trtllm.utils.trtllm_utils import get_spec_decode_runtime_data
+from dynamo.trtllm.utils.trtllm_utils import (
+    engine_max_num_seqs,
+    get_spec_decode_runtime_data,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -13,6 +16,23 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
+
+
+def test_engine_max_num_seqs_uses_post_init_engine_value():
+    engine = SimpleNamespace(
+        llm=SimpleNamespace(args=SimpleNamespace(max_batch_size=37))
+    )
+
+    assert engine_max_num_seqs(engine) == 37
+
+
+@pytest.mark.parametrize("value", [None, 0, -1, True, "37"])
+def test_engine_max_num_seqs_ignores_invalid_values(value):
+    engine = SimpleNamespace(
+        llm=SimpleNamespace(args=SimpleNamespace(max_batch_size=value))
+    )
+
+    assert engine_max_num_seqs(engine) is None
 
 
 def test_spec_decode_runtime_data_uses_max_draft_len():

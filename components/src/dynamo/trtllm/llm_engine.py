@@ -78,7 +78,11 @@ from dynamo.trtllm.utils.request_utils import (
     request_cache_salt,
     stored_event_cache_salt,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
+from dynamo.trtllm.utils.trtllm_utils import (
+    deep_update,
+    engine_max_num_seqs,
+    warn_override_collisions,
+)
 
 if TYPE_CHECKING:
     from tensorrt_llm.metrics import MetricsCollector
@@ -419,6 +423,7 @@ class TrtllmLLMEngine(LLMEngine):
                 context_length=self.max_seq_len,
                 kv_cache_block_size=self.kv_block_size,
                 max_num_seqs=self.max_batch_size,
+                engine_max_num_seqs=engine_max_num_seqs(self._engine),
                 max_num_batched_tokens=self.max_num_tokens,
                 data_parallel_size=self._attention_dp_size,
             ),

@@ -131,6 +131,12 @@ pub struct ModelRuntimeConfig {
 
     pub max_num_seqs: Option<u64>,
 
+    /// Normalized concurrent-sequence capacity owned by this local engine.
+    /// This is process-local admission metadata and must not be published in
+    /// the discovery model card.
+    #[serde(skip)]
+    pub engine_max_num_seqs: Option<u64>,
+
     pub max_num_batched_tokens: Option<u64>,
 
     pub tool_call_parser: Option<String>,
@@ -256,6 +262,7 @@ impl Default for ModelRuntimeConfig {
             context_length: None,
             total_kv_blocks: None,
             max_num_seqs: None,
+            engine_max_num_seqs: None,
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
@@ -434,6 +441,13 @@ impl ModelRuntimeConfig {
         self.validate().map_err(|error| error.to_string())
     }
 
+    /// Return the normalized whole-engine maximum used for TCP pool sizing.
+    pub fn worker_pool_engine_max_num_seqs(&self) -> Option<usize> {
+        self.engine_max_num_seqs
+            .and_then(|capacity| usize::try_from(capacity).ok())
+            .filter(|capacity| *capacity > 0)
+    }
+
     pub fn set_engine_specific<T: Serialize>(&mut self, key: &str, value: T) -> anyhow::Result<()> {
         self.runtime_data
             .insert(key.to_string(), serde_json::to_value(value)?);
@@ -509,6 +523,48 @@ impl ModelRuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_pool_uses_normalized_engine_max_num_seqs() {
+        let config = ModelRuntimeConfig {
+            max_num_seqs: Some(3),
+            engine_max_num_seqs: Some(9),
+            data_parallel_size: 3,
+            ..Default::default()
+        };
+        assert_eq!(config.worker_pool_engine_max_num_seqs(), Some(9));
+    }
+
+    #[test]
+    fn worker_pool_does_not_infer_capacity_from_public_max_num_seqs() {
+        let without_normalized_hint = ModelRuntimeConfig {
+            max_num_seqs: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(
+            without_normalized_hint.worker_pool_engine_max_num_seqs(),
+            None
+        );
+
+        let zero = ModelRuntimeConfig {
+            engine_max_num_seqs: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zero.worker_pool_engine_max_num_seqs(), None);
+    }
+
+    #[test]
+    fn engine_max_num_seqs_is_not_serialized() {
+        let config = ModelRuntimeConfig {
+            engine_max_num_seqs: Some(32),
+            ..Default::default()
+        };
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("engine_max_num_seqs"));
+
+        let deserialized: ModelRuntimeConfig = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.engine_max_num_seqs, None);
+    }
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and
     // `#[serial_test::serial]` (serialize against every other env-touching test in the

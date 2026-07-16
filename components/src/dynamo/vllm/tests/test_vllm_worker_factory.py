@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -45,6 +46,80 @@ def _make_config(**overrides) -> Mock:
     }
     defaults.update(overrides)
     return Mock(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_embedding_registers_capacity_before_serving_endpoint(monkeypatch):
+    registration_started = asyncio.Event()
+    registration_release = asyncio.Event()
+    serve_started = asyncio.Event()
+
+    async def gated_registration(*_args, **_kwargs):
+        registration_started.set()
+        await registration_release.wait()
+
+    async def serve(*_args, **_kwargs):
+        serve_started.set()
+        await asyncio.Event().wait()
+
+    endpoint = Mock()
+    endpoint.connection_id.return_value = 7
+    endpoint.serve_endpoint = AsyncMock(side_effect=serve)
+    runtime = Mock()
+    runtime.endpoint.return_value = endpoint
+
+    engine_client = Mock()
+    vllm_config = Mock()
+    engine_tuple: EngineSetupResult = (
+        engine_client,
+        vllm_config,
+        Mock(),
+        "/tmp/prom",
+        Mock(),
+    )
+    factory = WorkerFactory(
+        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_kv_event_publisher_fn=Mock(),
+        register_vllm_model_fn=gated_registration,
+        setup_fpm_relay_fn=Mock(),
+        setup_metrics_collection_fn=Mock(),
+    )
+    handler = Mock()
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory", Mock(return_value=Mock())
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.EmbeddingWorkerHandler",
+        Mock(return_value=handler),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.VllmEmbeddingHealthCheckPayload",
+        Mock(return_value=SimpleNamespace(to_dict=lambda: {})),
+    )
+    config = _make_config(
+        namespace="dyn",
+        component="backend",
+        endpoint="generate",
+        model="model",
+        served_model_name="served-model",
+    )
+
+    task = asyncio.create_task(
+        factory._create_embedding_worker(runtime, config, asyncio.Event(), [])
+    )
+    try:
+        await asyncio.wait_for(registration_started.wait(), timeout=1)
+        endpoint.serve_endpoint.assert_not_called()
+
+        registration_release.set()
+        await asyncio.wait_for(serve_started.wait(), timeout=1)
+        endpoint.serve_endpoint.assert_awaited_once()
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    handler.cleanup.assert_called_once()
 
 
 def _single_rank_benchmark_payload(

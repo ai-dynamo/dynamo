@@ -123,6 +123,9 @@ pub struct LlmRegistration {
     pub total_kv_blocks: Option<u64>,
     /// Maximum number of concurrent in-flight sequences.
     pub max_num_seqs: Option<u64>,
+    /// Normalized concurrent-sequence capacity owned by this local engine.
+    /// Unlike `max_num_seqs`, its DP scope is backend-independent.
+    pub engine_max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
     /// DP ranks this worker hosts (default 1); the router enumerates per-rank
