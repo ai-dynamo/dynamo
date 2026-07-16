@@ -36,15 +36,16 @@ async function main() {
   const future = all.filter(e => e.start >= now).slice(0, 3);
   const selected = [...future.reverse(), ...past.reverse()];
 
-  const lines = ['| Date | Event | Location |', '|------|-------|----------|'];
+  const lines = ['| 📅 Date | 🎤 Event | 📍 Location |', '|:--------|:---------|:------------|'];
 
   if (selected.length === 0) {
-    lines.push('| – | No events to show | |');
+    lines.push('| – | No upcoming events | |');
   } else {
     for (const e of selected) {
+      const isPast = e.start < now;
       const date = e.start.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
       const addUrl = buildAddToCalendarURL(e);
-      const label = `[${e.summary}](${addUrl})`;
+      const label = isPast ? `~~[${e.summary}](${addUrl})~~` : `**[${e.summary}](${addUrl})**`;
       const location = formatLocation(e.location);
       lines.push(`| ${date} | ${label} | ${location} |`);
     }
