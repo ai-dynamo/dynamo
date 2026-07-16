@@ -107,9 +107,7 @@ fn shard_files_present(index_path: &Path) -> bool {
 
 /// Check if offline mode is enabled via HF_HUB_OFFLINE environment variable.
 fn is_offline_mode() -> bool {
-    env::var(env_model::huggingface::HF_HUB_OFFLINE)
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false)
+    dynamo_runtime::config::env_is_truthy(env_model::huggingface::HF_HUB_OFFLINE)
 }
 
 /// Check if shared-storage mode is disabled via MODEL_EXPRESS_NO_SHARED_STORAGE.
@@ -118,9 +116,7 @@ fn is_offline_mode() -> bool {
 /// server and worker pods do not share a filesystem (e.g. RWO PVCs, cross-namespace
 /// deployments).
 fn is_no_shared_storage() -> bool {
-    env::var(env_model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE)
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(false)
+    dynamo_runtime::config::env_is_truthy(env_model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE)
 }
 
 /// Download a model using ModelExpress client. The client first requests for the model
