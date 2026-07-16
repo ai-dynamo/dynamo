@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
+use dynamo_kv_router::scheduling::PolicyClassAdmissionStrategies;
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    AdmissionLease, KvSchedulerError, LocalScheduler, OverloadedWorkerProvider,
-    PolicyClassAdmissionStrategies, PotentialLoad, RequestOutcome, ScheduleRequest,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
     SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
@@ -376,10 +376,6 @@ where
         self.inner.free(request_id).await?;
         self.update_queue_metrics();
         Ok(())
-    }
-
-    pub async fn mark_dispatched(&self, request_id: &str) {
-        self.inner.mark_dispatched(request_id).await;
     }
 
     pub fn pending_count(&self) -> usize {

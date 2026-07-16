@@ -80,12 +80,6 @@ pub struct SchedulingResponse {
     pub admission_lease: Option<super::queue::AdmissionLease>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestOutcome {
-    Completed { context_tokens: usize },
-    Aborted,
-}
-
 #[derive(Debug, Clone)]
 pub enum ScheduleMode {
     QueryOnly {

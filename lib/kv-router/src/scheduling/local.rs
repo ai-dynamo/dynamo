@@ -528,10 +528,6 @@ where
         Ok(())
     }
 
-    pub async fn mark_dispatched(&self, request_id: &str) {
-        self.queue.dispatched(request_id).await;
-    }
-
     pub fn pending_count(&self) -> usize {
         self.queue.pending_count()
     }

@@ -996,8 +996,6 @@ policy_classes:
     policy_family: agents
     cache_bucket: all
     queue_policy: fcfs
-    queue_admission:
-      type: session_aware
     quantum: 10
 "#,
         )
@@ -1068,8 +1066,6 @@ policy_classes:
     policy_family: agents
     cache_bucket: all
     queue_policy: wspt
-    queue_admission:
-      type: session_aware
     quantum: 1000
 "#,
         ));
@@ -1130,8 +1126,6 @@ policy_classes:
     policy_family: agents
     cache_bucket: cached
     queue_policy: fcfs
-    queue_admission:
-      type: session_aware
     quantum: 1000
   - name: agents_uncached
     policy_family: agents

@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rustc_hash::FxHashSet;
-use serde::Deserialize;
 
 use crate::protocols::WorkerWithDpRank;
 
@@ -248,13 +247,14 @@ pub enum AdmissionAction {
 
 /// Policy-class admission behavior.
 ///
-/// The host calls [`Self::admit`] exactly once for each tracked scheduling
-/// request, using a unique ID. Query-only selection bypasses admission. A
-/// bypassed request receives no lifecycle events. A ready request may receive
-/// one `Dispatched` event and every tracked request receives exactly one
-/// terminal `Completed` or `Aborted` event while the host remains alive. A
-/// deferred request receives no `Dispatched` event until the first valid
-/// `MakeReady` action is accepted. Duplicate or unknown actions are ignored.
+/// The host calls [`Self::admit`] exactly once for each admission-tracked request
+/// assigned to this strategy, using a unique ID. Query-only and ordinary tracked
+/// selection bypass admission. A `Bypass` decision receives no lifecycle events.
+/// A ready request may receive one `Dispatched` event and every non-bypassed
+/// admitted request receives exactly one terminal `Completed` or `Aborted` event
+/// while the host remains alive. A deferred request receives no `Dispatched`
+/// event until the first valid `MakeReady` action is accepted. Duplicate or
+/// unknown actions are ignored.
 /// While any request is deferred, `Reconcile` is delivered at least once per
 /// configured queue recheck interval and may also be delivered after lifecycle
 /// or capacity changes. Host shutdown drops the strategy and its requests
@@ -271,12 +271,6 @@ pub trait PolicyClassAdmissionStrategy: Send {
     fn reconcile_interval(&self) -> Option<Duration> {
         None
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum QueueAdmissionConfig {
-    SessionAware {},
 }
 
 #[cfg(test)]

@@ -351,7 +351,7 @@ impl RequestGuard {
             // Backend dispatch already succeeded. Record that fact synchronously so
             // lease cleanup still reports Dispatched before the terminal event if it
             // overtakes the actor command.
-            lease.report_dispatched().await;
+            lease.mark_dispatched().await;
         }
         self.observability.mark_dispatched();
     }
@@ -442,9 +442,6 @@ impl RequestGuard {
     }
 
     pub(super) async fn abort(&mut self) {
-        if let Some(lease) = self.cleanup.admission_lease.as_mut() {
-            lease.mark_aborted();
-        }
         self.cleanup.finish().await;
     }
 }

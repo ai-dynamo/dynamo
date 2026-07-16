@@ -8,7 +8,7 @@ use std::path::Path;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{QueueAdmissionConfig, config::RouterQueuePolicy};
+use super::config::RouterQueuePolicy;
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
@@ -34,7 +34,6 @@ pub enum RouterPolicyConfigError {
 pub struct PolicyClassConfig {
     pub name: String,
     pub queue_policy: RouterQueuePolicy,
-    pub queue_admission: Option<QueueAdmissionConfig>,
     pub quantum: usize,
     pub prefill_busy_threshold: Option<usize>,
     pub prefill_busy_threshold_frac: Option<f64>,
@@ -116,7 +115,6 @@ impl PolicyProfile {
         let class = PolicyClassConfig {
             name: SYNTHETIC_POLICY_CLASS.to_string(),
             queue_policy: router_queue_policy,
-            queue_admission: None,
             quantum: 1,
             prefill_busy_threshold: None,
             prefill_busy_threshold_frac: router_queue_threshold,
@@ -295,8 +293,6 @@ struct RawPolicyClassConfig {
     cache_bucket: Option<String>,
     #[serde(default)]
     queue_policy: RouterQueuePolicy,
-    #[serde(default)]
-    queue_admission: Option<QueueAdmissionConfig>,
     quantum: usize,
     #[serde(default)]
     prefill_busy_threshold: Option<usize>,
@@ -491,7 +487,6 @@ fn resolve_policy_class(
         config: PolicyClassConfig {
             name: raw.name,
             queue_policy: raw.queue_policy,
-            queue_admission: raw.queue_admission,
             quantum: raw.quantum,
             prefill_busy_threshold: raw.prefill_busy_threshold,
             prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
@@ -687,78 +682,9 @@ models:
     }
 
     #[test]
-    fn accepts_session_aware_admission() {
-        let config = RouterPolicyConfig::from_yaml(
+    fn rejects_queue_admission_config() {
+        let error = RouterPolicyConfig::from_yaml(
             r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: standard
-    policy_family: standard
-    cache_bucket: all
-    quantum: 1
-  - name: agents
-    queue_policy: wspt
-    queue_admission:
-      type: session_aware
-    quantum: 1
-"#,
-        )
-        .unwrap();
-
-        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
-        let agents = profile.class(profile.resolve_class_index(Some("agents"), 0));
-        assert!(matches!(
-            agents.queue_admission,
-            Some(QueueAdmissionConfig::SessionAware {})
-        ));
-    }
-
-    #[test]
-    fn synthetic_profile_has_no_queue_admission() {
-        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
-        assert!(profile.default_class().queue_admission.is_none());
-    }
-
-    #[test]
-    fn accepts_multiple_queue_admission_classes() {
-        RouterPolicyConfig::from_yaml(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: standard
-    policy_family: standard
-    cache_bucket: all
-    quantum: 1
-  - name: agents-a
-    queue_admission:
-      type: session_aware
-    quantum: 1
-  - name: agents-b
-    queue_admission:
-      type: session_aware
-    quantum: 1
-"#,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn rejects_unknown_queue_admission_config() {
-        for (admission, expected) in [
-            ("type: misspelled", "unknown variant"),
-            (
-                "type: session_aware\n      pause_threshold: 0.7",
-                "unknown field `pause_threshold`",
-            ),
-        ] {
-            let yaml = format!(
-                r#"
 default_policy_family: standard
 uncached_isl_buckets:
   - min_tokens: 0
@@ -768,13 +694,17 @@ policy_classes:
     policy_family: standard
     cache_bucket: all
     queue_admission:
-      {admission}
+      type: session_aware
     quantum: 1
-"#
-            );
-            let error = RouterPolicyConfig::from_yaml(&yaml).unwrap_err();
-            assert!(error.to_string().contains(expected), "{error}");
-        }
+"#,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `queue_admission`")
+        );
     }
 
     #[test]

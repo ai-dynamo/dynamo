@@ -60,14 +60,7 @@ impl PolicyClassAdmissionController {
             .classes()
             .iter()
             .map(|class| {
-                let strategy = strategies.remove(&class.name);
-                if class.queue_admission.is_some() && strategy.is_none() {
-                    return Err(KvSchedulerError::InitFailed(format!(
-                        "policy class {:?} configures queue admission, but no implementation was registered",
-                        class.name
-                    )));
-                }
-                Ok(strategy.map(|strategy| {
+                strategies.remove(&class.name).map(|strategy| {
                     let reconcile_interval = strategy
                         .reconcile_interval()
                         .map_or(queue_recheck_interval, |requested| {
@@ -78,11 +71,13 @@ impl PolicyClassAdmissionController {
                         reconcile_interval,
                         next_reconcile: now + reconcile_interval,
                     }
-                }))
+                })
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        for class_name in strategies.keys() {
-            tracing::warn!(%class_name, "Ignoring admission strategy for unknown policy class");
+            .collect();
+        if let Some(class_name) = strategies.keys().next() {
+            return Err(KvSchedulerError::InitFailed(format!(
+                "admission strategy registered for unknown policy class {class_name:?}"
+            )));
         }
         Ok(Self {
             strategies: resolved,
@@ -258,27 +253,11 @@ policy_classes:
     cache_bucket: all
     quantum: 1
   - name: agents
-    queue_admission:
-      type: session_aware
     quantum: 1
 "#,
         )
         .unwrap()
         .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
-    }
-
-    #[test]
-    fn rejects_configured_class_without_strategy() {
-        let error = PolicyClassAdmissionController::new(
-            &configured_profile(),
-            Duration::from_secs(60),
-            PolicyClassAdmissionStrategies::new(),
-        )
-        .err()
-        .unwrap();
-
-        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
-            message.contains("agents") && message.contains("queue admission")));
     }
 
     #[test]
@@ -300,19 +279,18 @@ policy_classes:
     }
 
     #[test]
-    fn accepts_programmatic_strategy_without_config() {
+    fn rejects_strategy_for_unknown_class() {
         let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
         let mut strategies = PolicyClassAdmissionStrategies::new();
-        strategies.insert(
-            profile.default_class().name.clone(),
-            Box::new(ReadyStrategy),
-        );
+        strategies.insert("unknown".to_owned(), Box::new(ReadyStrategy));
 
-        let controller =
+        let error =
             PolicyClassAdmissionController::new(&profile, Duration::from_secs(60), strategies)
+                .err()
                 .unwrap();
 
-        assert!(controller.has_strategy(0));
+        assert!(matches!(error, KvSchedulerError::InitFailed(message) if
+            message.contains("unknown policy class") && message.contains("unknown")));
     }
 
     #[tokio::test(start_paused = true)]

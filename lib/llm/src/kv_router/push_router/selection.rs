@@ -75,7 +75,7 @@ struct BestMatchArgs<'a> {
 
 impl KvPushRouter {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
-        let outcome = self
+        let (outcome, admission) = self
             .chooser
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
@@ -97,6 +97,7 @@ impl KvPushRouter {
                 true,
             )
             .await?;
+        let (request_progress, admission_lease) = admission.unzip();
 
         match outcome {
             FindBestMatchOutcome::Routed {
@@ -105,8 +106,6 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                request_progress,
-                admission_lease,
             } => Ok(WorkerSelection {
                 instance_id: worker.worker_id,
                 dp_rank: worker.dp_rank,
