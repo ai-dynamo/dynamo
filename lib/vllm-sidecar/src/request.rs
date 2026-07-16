@@ -268,7 +268,6 @@ pub(crate) fn build_generate_request(
                 .map(|value| format!("{CACHE_SALT_PREFIX}{value}"))
                 .unwrap_or_default(),
             kv_transfer_params,
-            ec_transfer_params: None,
         }),
         truncate_prompt_tokens: 0,
         priority: priority.unwrap_or(0),

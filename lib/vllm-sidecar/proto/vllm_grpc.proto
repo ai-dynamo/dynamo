@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 syntax = "proto3";
 package vllm;
 
@@ -128,9 +125,6 @@ message KVCacheParameters {
 
   // KV Connector transfer parameters
   google.protobuf.Struct kv_transfer_params = 3;
-
-  // Encoder cache connector transfer parameters
-  google.protobuf.Struct ec_transfer_params = 4;
 }
 
 // Controls which extra candidate tokens at each position should be returned
@@ -197,7 +191,6 @@ message FinishInfo {
 
   google.protobuf.Struct kv_transfer_params = 6;
   //uint64 seed = 7;
-  google.protobuf.Struct ec_transfer_params = 8;
 }
 
 // Info for candidate tokens other than the input/sampled
