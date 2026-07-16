@@ -274,6 +274,18 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 
 </details>
 
+## Community Events
+
+Stay up to date with Dynamo demos, meetups, and release walkthroughs.
+
+<!-- EVENTS:START -->
+| Date | Event |
+|------|-------|
+| – | No upcoming events |
+<!-- EVENTS:END -->
+
+> Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=YOUR_CALENDAR_ID).
+
 ## Reference
 
 - **[Support Matrix](https://docs.nvidia.com/dynamo/resources/support-matrix)** — Hardware, OS, CUDA, and backend versions
