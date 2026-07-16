@@ -121,6 +121,12 @@ spec:
                 - --enable-multi-layer-eagle
                 - --speculative-use-rejection-sampling
               env:
+                # sglang-runtime 1.4.0-inkling-dev.1-rc.0: forward-pass metrics crash on
+                # EAGLE batches (metrics_reporter iterates batch.seq_lens_cpu == None).
+                # The operator injects DYN_FORWARDPASS_METRIC_PORT which auto-enables
+                # them; an empty value keeps them off until the image gets a fix.
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
                 - name: SGLANG_ENABLE_UNIFIED_RADIX_TREE
                   value: "1"
                 - name: HF_HOME
