@@ -128,8 +128,40 @@ async def http_server(runtime: DistributedRuntime):
 
     server_task = asyncio.create_task(worker())
     await asyncio.wait_for(start_done.wait(), timeout=30.0)
-    if server_task.done() and server_task.exception():
-        raise ValueError(f"Server task failed to start {server_task.exception()}")
+
+    def raise_if_server_exited():
+        # A finished startup task means the server never stayed up: surface its
+        # exception, or the fact that it exited cleanly (exception() is None).
+        if server_task.done():
+            raise ValueError(
+                f"Server task exited during startup: {server_task.exception()}"
+            )
+
+    raise_if_server_exited()
+
+    # start_done only signals that service.run() returned; the socket is bound
+    # later on the runtime's background threads. Poll until the port actually
+    # accepts a connection so the client can't race ahead of the bind.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 10.0
+    while loop.time() < deadline:
+        try:
+            _, writer = await asyncio.open_connection("localhost", port)
+        except OSError:
+            raise_if_server_exited()
+            await asyncio.sleep(0.1)
+            continue
+        # Connected: the server is listening. Close the probe best-effort; a
+        # reset while tearing down the bare socket doesn't undo readiness.
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+        break
+    else:
+        raise TimeoutError(f"HTTP server did not accept connections on port {port}")
+
     yield f"http://localhost:{port}", model_name
 
     # Teardown: Cancel the server task if it's still running
