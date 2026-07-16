@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -77,7 +78,7 @@ func TestDynamoComponentDeploymentHandlerRegisterWithManager(t *testing.T) {
 	server := ctrlwebhook.NewServer(ctrlwebhook.Options{})
 	mgr := &fakeManager{scheme: scheme, webhookServer: server}
 	handler := NewDynamoComponentDeploymentHandler()
-	if err := handler.RegisterWithManager(mgr); err != nil {
+	if err := handler.RegisterWithManager(mgr, features.Defaults()); err != nil {
 		t.Fatalf("RegisterWithManager() error = %v", err)
 	}
 

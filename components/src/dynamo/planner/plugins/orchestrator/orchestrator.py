@@ -276,6 +276,8 @@ class LocalPlannerOrchestrator:
         self,
         ctx: PipelineContext,
         baseline: Mapping[ComponentKey, int],
+        *,
+        tick_now: Optional[float] = None,
     ) -> PipelineOutcome:
         """Run one tick through PREDICT / PROPOSE / RECONCILE / CONSTRAIN.
 
@@ -283,8 +285,13 @@ class LocalPlannerOrchestrator:
         (``apply`` / ``skip_no_targets`` / ``skip_short_circuit`` /
         ``skip_tick_timeout``) — the caller is responsible for
         projecting ``apply`` onto a ``PlannerConnector``.
+
+        ``tick_now`` is supplied by the engine adapter when it already used
+        that scheduler timestamp to plan observation collection. Direct
+        orchestrator callers may omit it and sample the clock here.
         """
-        tick_now = self._clock.monotonic()
+        if tick_now is None:
+            tick_now = self._clock.monotonic()
         return await run_pipeline(
             ctx=ctx,
             scheduler=self._scheduler,

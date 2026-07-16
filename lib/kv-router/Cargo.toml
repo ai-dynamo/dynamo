@@ -28,6 +28,7 @@ standalone-selection = ["standalone-indexer"]
 dynamo-runtime = { workspace = true, optional = true }
 dynamo-kv-hashing = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-truthy = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
@@ -53,6 +54,7 @@ validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
 # dependencies
+crossbeam-queue = "0.3"
 flume = "0.12.0"
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
