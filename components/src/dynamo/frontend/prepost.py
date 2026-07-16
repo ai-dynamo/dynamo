@@ -149,7 +149,11 @@ def _prepare_request(
     reasoning_effort = request_for_sampling.reasoning_effort
     if reasoning_effort is not None:
         chat_template_kwargs["reasoning_effort"] = reasoning_effort
-        chat_template_kwargs.setdefault("enable_thinking", reasoning_effort != "none")
+        # `adaptive` defers to the model, so don't derive a toggle from the grade.
+        if chat_template_kwargs.get("thinking_mode") != "adaptive":
+            chat_template_kwargs.setdefault(
+                "enable_thinking", reasoning_effort != "none"
+            )
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (

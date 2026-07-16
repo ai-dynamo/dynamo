@@ -791,6 +791,21 @@ class TestChatTemplateKwargsForwarding:
         )
         assert "reasoning_effort" not in kwargs
 
+    def test_adaptive_mode_skips_reasoning_effort_toggle(self, tokenizer):
+        """thinking_mode='adaptive' defers to the model: a grade forwards its
+        value but derives no enable_thinking toggle."""
+        kwargs = self._kwargs(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_args": {"thinking_mode": "adaptive"},
+                "reasoning_effort": "high",
+            },
+            tokenizer,
+        )
+        assert "enable_thinking" not in kwargs
+        assert kwargs["reasoning_effort"] == "high"
+
 
 @pytest.mark.parametrize(
     ("runtime_config", "expected"),
