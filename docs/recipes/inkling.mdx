@@ -130,6 +130,7 @@ curl -s http://localhost:8000/v1/chat/completions \
 - Video input is not supported in this recipe: the model card notes video handling exists for downstream fine-tuning but is unevaluated out of the box.
 - Reasoning and tool calling use the model's dedicated parsers, wired in both the frontend and the worker (`--reasoning-parser inkling --tool-call-parser inkling`).
 - EAGLE speculative decoding is enabled by default in the deploy manifest (multi-layer, 8 steps, rejection sampling); remove the `--speculative-*` flags to run without it.
+- The manifest sets `DYN_FORWARDPASS_METRIC_PORT` to an empty value — a deliberate workaround that keeps forward-pass metrics off, because this rc image crashes on EAGLE batches when they are enabled. Keep it (and don't set that variable) until a fixed image ships.
 - The worker enables the Mamba radix cache (`extra_buffer` strategy) and FlashInfer TRT-LLM GEMM/MoE backends; these flags are part of the validated configuration — change them only deliberately.
 
 ## Source
