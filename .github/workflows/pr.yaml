@@ -448,11 +448,7 @@ jobs:
   vllm-efa-build:
     name: vllm-runtime-efa
     needs: [changed-files]
-    # DIAGNOSTIC (de-flake repro): forced on so the in-PR `vllm-efa-test` repro below
-    # can build the efa image (a tests/serve-only change sets neither vllm nor
-    # efa). Restore this guard before merge:
-    #   if: needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.efa == 'true'
-    if: ${{ needs.changed-files.result == 'success' }}
+    if: needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.efa == 'true'
     uses: ./.github/workflows/shared-build-image.yml
     with:
       framework: vllm
@@ -606,28 +602,6 @@ jobs:
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
       run_gpu_parallel_tests: true
       gpu_parallel_max_vram_gib: '24'
-    secrets: inherit
-
-  # === DIAGNOSTIC (de-flake repro): revert this whole job before merge ===
-  # Reproduces the post-merge `vllm-runtime-efa / CPU Test` flake in-PR to
-  # validate the 450s de-flake on test_sample_deployment[aggregated]. Mirrors
-  # post-merge-ci.yml `vllm-efa-test` (amd64-only, same runner + markers).
-  # Requires the forced `vllm-efa-build` above. Do NOT merge this job.
-  vllm-efa-test:
-    name: vllm-runtime-efa
-    needs: [vllm-efa-build]
-    uses: ./.github/workflows/shared-test.yml
-    with:
-      dd_env: post-merge
-      test_suite_name: vllm-efa
-      test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
-      target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64"]'
-      run_cpu_only_tests: true
-      cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      run_gpu_tests: false
     secrets: inherit
 
   vllm-multi-gpu-test:
