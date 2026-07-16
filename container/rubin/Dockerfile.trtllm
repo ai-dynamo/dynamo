@@ -194,21 +194,6 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/libfabric/lib:${LD_LIBRARY_PATH:-}
 
-######################
-# Include MLPERF
-######################
-ARG MLPERF_REF=kmcgill/vr-dsr1
-RUN --mount=type=secret,id=gitlab_user \
-    --mount=type=secret,id=gitlab_token \
-    GITLAB_USERNAME=$(cat /run/secrets/gitlab_user) && \
-    GITLAB_TOKEN=$(cat /run/secrets/gitlab_token) && \
-    git clone --depth 1 --branch ${MLPERF_REF} https://${GITLAB_USERNAME}:${GITLAB_TOKEN}@gitlab-master.nvidia.com/mlpinf/mlperf-inference.git /opt/mlperf-inference
-WORKDIR /opt/mlperf-inference/closed/NVIDIA
-RUN HF_BASE=$(pip show huggingface_hub | awk '/^Version:/{print $2}') \
- && pip install ".[llm]" \
- && pip install --break-system-packages --no-cache-dir --no-deps "huggingface_hub==${HF_BASE}"
-
-
 ENV DYNAMO_HOME=/opt/dynamo
 WORKDIR /workspace
 ENTRYPOINT ["/bin/bash"]
