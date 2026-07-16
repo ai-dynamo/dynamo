@@ -269,6 +269,11 @@ async def test_load_lora_happy_path(monkeypatch):
     engine.engine_client.add_lora.assert_awaited_once()
     register.assert_awaited_once()
     assert register.await_args.kwargs["lora_name"] == "adapterA"
+    # The engine already owns the base weights; the card needs only
+    # config/tokenizer files. Fetching weights here would re-download the
+    # full base repo on a cache miss and fail the publish on any network
+    # error.
+    assert register.await_args.kwargs["ignore_weights"] is True
     assert engine.loaded_loras["adapterA"].id == 123
 
 
