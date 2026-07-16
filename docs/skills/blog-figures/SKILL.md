@@ -288,6 +288,8 @@ Prerequisites and the sample-data note are in [`examples/README.md`](examples/RE
 
 **Lint and score.** [`tools/lint_figures.py`](tools/lint_figures.py) statically checks the generators against the tokens (raw hex, fonts, WCAG contrast) and computes the measured half of the 0–100 rating in [RATINGS.md](RATINGS.md). `examples/build.sh` runs it after rendering and fails on any ERROR.
 
+**Browse the full generator set.** [`reference/figure-manifest.yaml`](reference/figure-manifest.yaml) catalogs every reusable generator by kind, renderer, treatment, outputs, and lint score (human index: [`reference/README.md`](reference/README.md)). Scan it to find the closest exemplar by kind and pull that generator as a starting template.
+
 ## Cross-References
 
 Sister files in this skill:

@@ -1,0 +1,356 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Figure-generator manifest for the blog-figures skill.
+#
+# A browsable, machine-readable catalog of every reusable figure GENERATOR in
+# the skill and its digest exemplars. To build a new figure, scan `kinds:` for
+# the closest visual grammar, find the matching entry under `generators:`, and
+# pull that generator as a starting template. Every field reflects what the
+# generator actually does (read from the source), not an aspiration.
+#
+# Human index + how-to-pull: reference/README.md.
+
+version: 1
+family: Dynamo Dark
+token_source: docs/digest/flash-indexer/tools/design_tokens.yaml
+generated: 2026-07-16
+
+# How `lint_score` was captured. Run per generator against its own sibling
+# design_tokens.yaml so the number reflects that one figure:
+#   python3 docs/skills/blog-figures/tools/lint_figures.py <generator.py> \
+#       --tokens <sibling>/design_tokens.yaml --score
+# `lint_score` is the linter's overall_measured (0-100); `ship_ready` is the
+# linter's >= 85 verdict. The measured score covers palette/typography/contrast/
+# variety/label-structure only; the judged dimensions still need eyes on the
+# rendered PNG (see RATINGS.md).
+
+# Renderer enum (pathway the generator uses to emit pixels).
+renderers:
+  plotly: "Python + Plotly through the shared plotly_dynamo template (load_tokens / build_template)."
+  html-css: "HTML + CSS source screenshotted to PNG via Playwright (headless Chromium)."
+  dsvg: "dynamo-svg manifest or hand-crafted SVG rendered via rsvg-convert. No generator of this kind is cataloged yet."
+
+# Title-treatment enum (from the seven non-negotiables; both top-left, one family).
+title_treatments:
+  display: "Hero / section-anchor scale. Helvetica Neue Light, title case, with a muted one-line subtitle."
+  compact: "Dense / inline-chart scale. Arial, 18 px, weight 700, uppercase, 0.08em."
+
+# Controlled vocabulary for `kind`. Only the kinds actually found in this branch
+# are enumerated; add a new key here before introducing a new `kind` value.
+kinds:
+  chart.bar: "Sorted single-series bar scoreboard; one green accent on the winner, values labeled in-bar."
+  chart.stacked-bar: "Multi-row segmented bars comparing a phase or time budget across configs (Gantt-style rows)."
+  chart.timeline-anatomy: "Single-row stacked timeline decomposing one run or total into labeled sequential phases, anchored by a KPI and a grouping bracket."
+  chart.line: "Line or connected-scatter series across a swept axis (often log), with peak-value or Nx bracket callouts."
+  chart.small-multiples: "Two or more panels sharing one series encoding (for example a sweep panel plus a Pareto panel)."
+  chart.heatmap: "Diverging matrix of entities by time with a zero-centered colorbar."
+  diagram.sequence: "UML-style lifelines and messages showing an ordered protocol exchange."
+  diagram.architecture: "Orthogonal component boxes wired into planes or a pipeline to show data flow."
+  diagram.loop: "Closed-loop pipeline: forward stages plus a squared feedback or return edge."
+  diagram.decision-cascade: "A decision chain that ends in two outcome chips joined by a delta bracket."
+  hero.flow: "Full-width, display-title flow or path diagram carrying a giant editorial stat (the win as art)."
+  hero.scatter: "Full-width, display-title scatter cloud bounded by a Pareto frontier curve."
+  cards.comparison: "HTML + CSS comparison card grid (typography-heavy), rendered to PNG."
+
+# Collections group generators by where they live and what role they play.
+collections:
+  modelexpress-coldstart:
+    root: drafts/modelexpress-coldstart/
+    note: "ModelExpress cold-start figure set, the newest end-to-end exemplars (all measure 100/100). One figure per fig-N/ directory plus a standalone hero."
+  skill-examples:
+    root: docs/skills/blog-figures/examples/
+    note: "Runnable pattern exemplars shipped with the skill. Deterministic, hard-coded sample data; swap in a source of truth before shipping."
+  digest:
+    root: docs/digest/
+    note: "Generators behind published digest posts. These predate the 100/100 exemplars, so two carry known raw-hex lint flags."
+
+generators:
+  # ---- ModelExpress cold-start set (drafts/modelexpress-coldstart/) ----------
+  - id: fig-1-coldstart-sequence
+    title: "Cold Start: The Data Plane Bypasses the Metadata Server"
+    collection: modelexpress-coldstart
+    kind: diagram.sequence
+    renderer: plotly
+    title_treatment: display
+    generator: drafts/modelexpress-coldstart/fig-1/gen_fig_1_coldstart_sequence.py
+    outputs:
+      - drafts/modelexpress-coldstart/fig-1/images/fig-1-modelexpress-coldstart.png
+      - drafts/modelexpress-coldstart/fig-1/images/fig-1-modelexpress-coldstart.svg
+    shows: "Three lifelines (source replica, ModelExpress server, new replica) across register / discover / transfer phases; the single green RDMA weight read crosses the metadata-server spine without terminating on it."
+    data: "Illustrative. Protocol and API labels only (PublishMetadata, ListSources, GetMetadata, NIXL, mx_source_id); no measured numbers."
+    tags: [cold-start, sequence, lifelines, data-plane, metadata-plane, rdma]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Rethought from a Mermaid-style sequence reference, not a pixel copy."
+    use_when: "You need an ordered protocol exchange across participants where one path must visibly bypass a coordinator."
+
+  - id: fig-2-rl-loop
+    title: "ModelExpress Closes the RL Training Loop"
+    collection: modelexpress-coldstart
+    kind: diagram.loop
+    renderer: plotly
+    title_treatment: display
+    generator: drafts/modelexpress-coldstart/fig-2/gen_fig_2_rl_loop.py
+    outputs:
+      - drafts/modelexpress-coldstart/fig-2/images/fig-2-rl-loop.png
+      - drafts/modelexpress-coldstart/fig-2/images/fig-2-rl-loop.svg
+    shows: "A four-stage RL loop (Rollout, Reward, Trainer, Weight refit) on a computed 2x2 grid with orthogonal clockwise connectors; the green weight-refit edge closes the loop back into rollout."
+    data: "Illustrative. Stage and backend names only; no numbers."
+    tags: [rl-loop, ring, orthogonal, weight-refit]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Rethought from a blue-highlight reference; recolored to a single green accent."
+    use_when: "You need a closed process loop where one return edge is the hero and every connector must stay orthogonal."
+
+  - id: fig-3-modelexpress-architecture
+    title: "ModelExpress Splits Coordination from Weight Transfer"
+    collection: modelexpress-coldstart
+    kind: diagram.architecture
+    renderer: plotly
+    title_treatment: display
+    generator: drafts/modelexpress-coldstart/fig-3/gen_fig_3_modelexpress.py
+    outputs:
+      - drafts/modelexpress-coldstart/fig-3/images/fig-3-modelexpress-coldstart.png
+      - drafts/modelexpress-coldstart/fig-3/images/fig-3-modelexpress-coldstart.svg
+    shows: "A two-plane architecture: a grey control plane (MX clients, MX server, metadata store) over a data plane where three GPU-direct paths (GPUDirect RDMA, ModelStreamer, GDS) converge on the new engine in green."
+    data: "Illustrative. Representative component layout; no measured numbers."
+    tags: [architecture, two-plane, control-plane, data-plane, gpudirect]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Rethought from a two-plane ModelExpress reference diagram."
+    use_when: "You need an orthogonal multi-zone architecture where a control plane and a data plane read as structurally separate."
+
+  - id: fig-4-coldstart-phases
+    title: "Cold Start Time With P2P RDMA and Kernel Artifacts"
+    collection: modelexpress-coldstart
+    kind: chart.stacked-bar
+    renderer: plotly
+    title_treatment: compact
+    generator: drafts/modelexpress-coldstart/fig-4/gen_fig_4_coldstart.py
+    outputs:
+      - drafts/modelexpress-coldstart/fig-4/images/fig-4-coldstart-phases.png
+      - drafts/modelexpress-coldstart/fig-4/images/fig-4-coldstart-phases.svg
+    shows: "Three cold-start paths as horizontal stacked phase bars (model loading, warmup cluster, others); the RDMA-plus-cache winner takes the green badge and a 4.6x callout, phase legend at the bottom."
+    data: "Real. Measured phase durations from the ModelExpress cold-start blog (seconds); 8m1s baseline down to 1m44s."
+    tags: [cold-start, stacked-bar, gantt, phases, speedup, comparison]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Restyle of the blog phase-budget bar into Dynamo Dark."
+    use_when: "You need to compare a multi-phase time budget across a few configs and point at one winning row."
+
+  - id: fig-5-nixl-registration
+    title: "NIXL Registration Time: VMM Arena Wins by 10.3x"
+    collection: modelexpress-coldstart
+    kind: chart.bar
+    renderer: plotly
+    title_treatment: compact
+    generator: drafts/modelexpress-coldstart/fig-5/gen_fig_5_nixl_registration.py
+    outputs:
+      - drafts/modelexpress-coldstart/fig-5/images/fig-5-nixl-registration.png
+      - drafts/modelexpress-coldstart/fig-5/images/fig-5-nixl-registration.svg
+    shows: "Three NIXL registration strategies as horizontal bars over a full-scale track, direct-labeled with env flags; VMM arena wins in green, the per-tensor baseline in coral, with a right-edge speedup column."
+    data: "Real. Measured registration times (8.16s, 1.14s, 0.79s); speedups computed from the baseline."
+    tags: [scoreboard, bar, nixl, registration, speedup, lower-is-better]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Reproduced from a three-row NIXL registration reference figure."
+    use_when: "You need a small sorted scoreboard where one row wins and a speedup column anchors to the right."
+
+  - id: fig-6-coldstart-anatomy
+    title: "Cold Start Anatomy: P2P Weights, Cold JIT Caches"
+    collection: modelexpress-coldstart
+    kind: chart.timeline-anatomy
+    renderer: plotly
+    title_treatment: display
+    generator: drafts/modelexpress-coldstart/fig-6/gen_fig_6_coldstart_anatomy.py
+    outputs:
+      - drafts/modelexpress-coldstart/fig-6/images/fig-6-coldstart-anatomy.png
+      - drafts/modelexpress-coldstart/fig-6/images/fig-6-coldstart-anatomy.svg
+    shows: "One 420s cold start decomposed into eight sequential phases on a hero-width bar; a 420s KPI, a green MX P2P weight-load callout (11s), the gold JIT-warmup cluster labeled in-bar, and a grey bracket grouping the three leading setup phases."
+    data: "Real. Observed DeepSeek-V4-Pro / vLLM cold start; durations in seconds, percentages derived."
+    tags: [cold-start, timeline, anatomy, kpi, bracket, phases]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Restyle of a light-theme breakdown-bar reference into Dynamo Dark."
+    use_when: "You need to break one run or total into labeled sequential segments with a headline KPI and a grouped sub-total."
+
+  - id: hero-modelexpress-coldstart
+    title: "The Fast Path to Warm GPUs"
+    collection: modelexpress-coldstart
+    kind: hero.flow
+    renderer: plotly
+    title_treatment: display
+    generator: drafts/modelexpress-coldstart/hero/tools/gen_hero.py
+    outputs:
+      - drafts/modelexpress-coldstart/hero/images/hero-modelexpress-coldstart.png
+      - drafts/modelexpress-coldstart/hero/images/hero-modelexpress-coldstart.svg
+    shows: "A flow diagram where weights stream peer-to-peer over a bold glowing green RDMA lane from a source GPU to a new GPU, a dim dashed coral baseline detour it bypasses, and the win as art: a giant 6.4x with a 59s-reclaimed subline."
+    data: "Real. 70s baseline object-store pull vs 11s RDMA transfer from the cold-start set; 6.4x and 59s derived."
+    tags: [hero, flow, editorial-stat, rdma, fast-path, glow]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Blends an explored flow-diagram concept with an editorial-stat concept; accepts -o / --width / --height."
+    use_when: "You need a full-width hero that pairs a single bold path with one giant headline number."
+
+  # ---- Skill example generators (docs/skills/blog-figures/examples/) ---------
+  - id: example-architecture-flow
+    title: "Dynamo Serving Stack: One Simulated Timeline"
+    collection: skill-examples
+    kind: diagram.architecture
+    renderer: plotly
+    title_treatment: display
+    generator: docs/skills/blog-figures/examples/gen_fig_2_architecture.py
+    outputs:
+      - docs/skills/blog-figures/examples/images/fig-2-architecture.png
+    shows: "A left-to-right pipeline of role-colored component boxes with orthogonal green data-flow arrows and a squared green replay edge looping telemetry back to the front."
+    data: "Illustrative. Representative component names; no external data."
+    tags: [architecture, pipeline, replay-edge, orthogonal, example]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Skill example (pattern exemplar). PNG only."
+    use_when: "You need a linear component pipeline with a squared return or replay edge instead of a curved bezier."
+
+  - id: example-decision-cascade
+    title: "Prefix-Aware Routing: The Decision Cascade"
+    collection: skill-examples
+    kind: diagram.decision-cascade
+    renderer: plotly
+    title_treatment: display
+    generator: docs/skills/blog-figures/examples/gen_fig_5_decision_cascade.py
+    outputs:
+      - docs/skills/blog-figures/examples/images/fig-5-decision-cascade.png
+    shows: "A routing decision chain across the top ending in two outcome chips (Round Robin grey baseline, KV Router green) joined by a green horizontal delta bracket carrying a +16% prefix-reuse label."
+    data: "Illustrative. Representative values (0.38 vs 0.44 prefix reuse)."
+    tags: [decision-cascade, delta-bracket, two-chip, comparison, example]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Skill example (pattern exemplar). PNG only."
+    use_when: "You need to compare two outcomes of the same decision path with an unambiguous delta bracket."
+
+  - id: example-tuning-loop
+    title: "Sweep, Verify, Calibrate: The Tuning Loop"
+    collection: skill-examples
+    kind: diagram.loop
+    renderer: plotly
+    title_treatment: display
+    generator: docs/skills/blog-figures/examples/gen_fig_6_tuning_loop.py
+    outputs:
+      - docs/skills/blog-figures/examples/images/fig-6-tuning-loop.png
+    shows: "A horizontal Sweep, Verify, Deploy, Telemetry pipeline with selective phase tags over the inflection stages and a squared dashed amethyst calibration loop returning telemetry to the sweep."
+    data: "Illustrative. Representative stage names; no external data."
+    tags: [tuning-loop, phase-tags, feedback-loop, dashed, example]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Skill example (pattern exemplar). PNG only."
+    use_when: "You need a forward pipeline plus a dashed feedback return and want to tag only the inflection stages."
+
+  - id: example-concurrency-sweep
+    title: "Round-Robin vs KV Router: Concurrency Sweep and Pareto Curve"
+    collection: skill-examples
+    kind: chart.small-multiples
+    renderer: plotly
+    title_treatment: display
+    generator: docs/skills/blog-figures/examples/gen_fig_concurrency_sweep.py
+    outputs:
+      - docs/skills/blog-figures/examples/images/fig-concurrency-sweep.png
+    shows: "Two panels sharing a green-vs-grey encoding: a log-y TTFT-vs-concurrency sweep with per-point delta callouts, and a throughput-vs-interactivity Pareto curve with concurrency labels and a prefix-reuse inset."
+    data: "Illustrative. Representative series values; no external data."
+    tags: [small-multiples, log-axis, pareto, delta-callouts, example]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Skill example (pattern exemplar). PNG only."
+    use_when: "You need paired panels (a sweep and a trade-off curve) that share one series encoding."
+
+  - id: example-throughput-bars
+    title: "Indexer Throughput by Backend"
+    collection: skill-examples
+    kind: chart.bar
+    renderer: plotly
+    title_treatment: compact
+    generator: docs/skills/blog-figures/examples/gen_fig_throughput_bars.py
+    outputs:
+      - docs/skills/blog-figures/examples/images/fig-throughput-bars.png
+    shows: "Five backends as a horizontal bar scoreboard sorted by value; the winner takes the single green accent, the rest a grey ramp, values labeled in-bar."
+    data: "Illustrative. Representative throughput values; no external data."
+    tags: [scoreboard, bar, sorted, single-accent, example]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Skill example (pattern exemplar). PNG only."
+    use_when: "You need a compact sorted bar scoreboard with exactly one accented winner."
+
+  - id: example-comparison-cards
+    title: "HTML+CSS Comparison Cards (title in fig-cards.html)"
+    collection: skill-examples
+    kind: cards.comparison
+    renderer: html-css
+    title_treatment: compact
+    generator: docs/skills/blog-figures/examples/gen_fig_cards.py
+    source_html: docs/skills/blog-figures/examples/fig-cards.html
+    outputs:
+      - docs/skills/blog-figures/examples/images/fig-cards.png
+    shows: "A typography-heavy comparison card grid rendered from HTML+CSS, with token surfaces, square corners, a compact uppercase title, and one green accent card."
+    data: "Illustrative. Card content hard-coded in the sibling fig-cards.html."
+    tags: [cards, html-css, playwright, comparison, example]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Skill example; the .py is a deterministic Playwright renderer for fig-cards.html. PNG only; needs chromium."
+    use_when: "You need typography-heavy comparison cards where CSS is the most expressive layout engine."
+
+  # ---- Published digest generators (docs/digest/<slug>/tools/) ---------------
+  - id: dynosim-hero-pareto
+    title: "DynoSim: Simulating the Pareto Frontier"
+    collection: digest
+    kind: hero.scatter
+    renderer: plotly
+    title_treatment: display
+    generator: docs/digest/dynosim/tools/gen_hero.py
+    outputs:
+      - docs/digest/dynosim/dynosim-hero.png
+    shows: "A dense cloud of DynoSim-explored configs hugging a Pareto throughput/latency frontier curve, with GPU-verified configs as blue diamonds sitting on that frontier."
+    data: "Illustrative. Deterministic seeded reproduction of the frontier shape and ranges (the source sweep is not committed); no individual point asserts a measured result."
+    tags: [hero, scatter, pareto-frontier, seeded, digest]
+    lint_score: 100.0
+    ship_ready: true
+    source_ref: "Digest hero for the DynoSim post; accepts -o / --width / --height. PNG only."
+    use_when: "You need a full-width hero that shows sweeping the space as a frontier-bounded point cloud."
+
+  - id: flash-indexer-throughput
+    title: "Achieved vs. Offered Throughput"
+    collection: digest
+    kind: chart.line
+    renderer: plotly
+    title_treatment: compact
+    generator: docs/digest/flash-indexer/tools/gen_throughput.py
+    outputs:
+      - docs/digest/flash-indexer/images/fig-6-indexer-throughput.png
+      - docs/digest/flash-indexer/images/fig-6-indexer-throughput.svg
+    shows: "Log-log achieved-vs-offered throughput lines for five indexer backends with a y=x reference, per-series peak-throughput callouts, and a right-edge bracket naming the Nx gap between best and baseline."
+    data: "Real. Reads mooncake_bench sweep data from a JSON path arg (../data/sweep_plot.json)."
+    tags: [line, log-log, throughput, peak-callouts, bracket, digest]
+    lint_score: 97.0
+    ship_ready: true
+    lint_flags:
+      - "raw-hex: #969696 (a silver-grey series color) is not in the flash-indexer tokens. Predates the 100/100 exemplars."
+    source_ref: "Published flash-indexer digest figure (fig-6). Takes a required sweep_plot.json argument."
+    use_when: "You need a log-log performance comparison with direct peak labels and an Nx improvement bracket."
+
+  - id: flash-indexer-heatmap
+    title: "KV Cache Event Density"
+    collection: digest
+    kind: chart.heatmap
+    renderer: plotly
+    title_treatment: compact
+    generator: docs/digest/flash-indexer/tools/gen_heatmap.py
+    outputs:
+      - docs/digest/flash-indexer/images/fig-1-kv-event-density.png
+      - docs/digest/flash-indexer/images/fig-1-kv-event-density.svg
+    shows: "A two-row diverging heatmap of Store-vs-Remove KV event density across 16 workers over time (a per-worker matrix plus an aggregate row), on a green-to-gold zero-centered colorscale."
+    data: "Real when a Mooncake trace is passed (--real-data); otherwise a deterministic synthetic Gamma/Zipf event pattern."
+    tags: [heatmap, diverging, kv-events, workers, digest]
+    lint_score: 85.0
+    ship_ready: true
+    lint_flags:
+      - "raw-hex: #c89a00 and #5aaa00 (diverging-colorscale interpolation stops) are not tokens. Predates the 100/100 exemplars."
+    source_ref: "Published flash-indexer digest figure (fig-1)."
+    use_when: "You need a diverging density matrix of entities over time with a signed (store vs remove) colorbar."
