@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import logging
 import os
+import resource
 import signal
 import sys
 from argparse import Namespace
@@ -61,8 +62,6 @@ FRONTEND_FD_LIMIT_TARGET = 8192
 def _raise_fd_limit(target: int = FRONTEND_FD_LIMIT_TARGET) -> None:
     """Raise the process's soft RLIMIT_NOFILE toward `target`, bounded by the
     hard limit. No-op if the soft limit is already >= target."""
-    import resource
-
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     new_soft = (
         target if hard == resource.RLIM_INFINITY else min(target, hard)
