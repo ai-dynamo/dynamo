@@ -266,4 +266,4 @@ We currently provide deployment examples for Kubernetes and SLURM.
 - **[Deploying Dynamo with SGLang on Kubernetes](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)**
 
 ## SLURM
-- **[Deploying Dynamo with SGLang on SLURM](https://github.com/ai-dynamo/dynamo/releases/tag/v0.9.1)**
+- **[Deploying Dynamo with SGLang on SLURM](https://github.com/ai-dynamo/dynamo/tree/v0.9.1/examples/backends/sglang/slurm_jobs)**
