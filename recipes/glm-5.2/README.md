@@ -36,9 +36,6 @@ Dynamo + SGLang deployment profiles for the B200 and H200 agentic workload:
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/kubernetes/README.md).
 2. **Hugging Face token** with access to `nvidia/GLM-5.2-NVFP4` for B200 or
    `zai-org/GLM-5.2-FP8` for H200.
-3. For H200 on Nebius, a `shared-model-cache` PVC containing
-   `zai-org/GLM-5.2-FP8` and an `nvcr-imagepullsecret` image-pull secret. The
-   H200 manifests use these Nebius resources directly.
 
 ## Quick Start
 
@@ -54,8 +51,6 @@ kubectl create secret generic hf-token-secret \
 
 ### 2. Create storage
 
-Skip this step for H200 on Nebius, where `shared-model-cache` is pre-provisioned.
-
 > [!NOTE]
 > Edit `model-cache/model-cache.yaml` and set `storageClassName` to a
 > ReadWriteMany storage class available on the target cluster.
@@ -68,9 +63,6 @@ kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 
 Edit `model-cache/model-download.yaml` and remove the `hf download` command for
 the checkpoint that does not match the target SKU.
-
-Skip this step for H200 on Nebius when the FP8 checkpoint is already present in
-`shared-model-cache`.
 
 ```bash
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}

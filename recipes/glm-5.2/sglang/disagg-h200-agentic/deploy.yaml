@@ -144,8 +144,6 @@ spec:
       type: frontend
       podTemplate:
         spec:
-          imagePullSecrets:
-            - name: nvcr-imagepullsecret
           containers:
             - name: main
               command:
@@ -171,8 +169,6 @@ spec:
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
-          imagePullSecrets:
-            - name: nvcr-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -224,11 +220,11 @@ spec:
               resources:
                 requests:
                   nvidia.com/gpu: "8"
-                  rdma/shared_ib: "1"
+                  rdma/ib: "8"
                   memory: 1Ti
                 limits:
                   nvidia.com/gpu: "8"
-                  rdma/shared_ib: "1"
+                  rdma/ib: "8"
                   memory: 1Ti
               securityContext:
                 runAsUser: 0
@@ -257,7 +253,7 @@ spec:
                 name: glm52-disagg-h200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
@@ -270,8 +266,6 @@ spec:
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
-          imagePullSecrets:
-            - name: nvcr-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -289,7 +283,7 @@ spec:
                       matchLabels:
                         nvidia.com/dynamo-component-type: prefill
                         nvidia.com/dynamo-graph-deployment-name: glm52-disagg-h200-agentic
-                    topologyKey: topology.nebius.com/tier-1
+                    topologyKey: topology.kubernetes.io/zone
           containers:
             - name: main
               command:
@@ -341,11 +335,11 @@ spec:
               resources:
                 requests:
                   nvidia.com/gpu: "8"
-                  rdma/shared_ib: "1"
+                  rdma/ib: "8"
                   memory: 200Gi
                 limits:
                   nvidia.com/gpu: "8"
-                  rdma/shared_ib: "1"
+                  rdma/ib: "8"
                   memory: 200Gi
               securityContext:
                 runAsUser: 0
@@ -374,7 +368,7 @@ spec:
                 name: glm52-disagg-h200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal

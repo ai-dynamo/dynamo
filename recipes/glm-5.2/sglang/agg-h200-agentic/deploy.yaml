@@ -63,8 +63,6 @@ spec:
       type: frontend
       podTemplate:
         spec:
-          imagePullSecrets:
-            - name: nvcr-imagepullsecret
           containers:
             - name: main
               command:
@@ -90,8 +88,6 @@ spec:
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
-          imagePullSecrets:
-            - name: nvcr-imagepullsecret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -171,7 +167,7 @@ spec:
                 name: glm52-agg-h200-agentic-sglang-config
             - name: model-cache
               persistentVolumeClaim:
-                claimName: shared-model-cache
+                claimName: model-cache
           tolerations:
             - key: nvidia.com/gpu
               operator: Equal
