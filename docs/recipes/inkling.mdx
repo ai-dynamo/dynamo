@@ -126,7 +126,7 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-For air-gapped clusters, send local files as `data:` URIs instead — e.g. `{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,'$(base64 -i sample.wav)'"}}` — and mix multiple media parts in one message as the context budget allows.
+For air-gapped clusters, send local files as `data:` URIs instead. Encode to a single line first (`base64` wraps output by default, which breaks the JSON payload): `AUDIO_B64=$(base64 < sample.wav | tr -d '\n')`, then `{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,'"${AUDIO_B64}"'"}}`. Multiple media parts can ride in one message as the context budget allows.
 
 ### Reasoning effort
 
