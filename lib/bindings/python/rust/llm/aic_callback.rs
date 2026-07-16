@@ -159,11 +159,11 @@ fn build_rust_engine(
     if let Some(existing) = cache.lock().unwrap().get(&key) {
         return Ok(Arc::clone(existing));
     }
-    // Reuse aiconfigurator's own systems-path resolution: this sets
+    // Reuse aiconfigurator-core's own systems-path resolution: this sets
     // AICONFIGURATOR_SYSTEMS_PATH in the process env, which build_aic_engine
     // reads for the Rust-side perf-DB load.
     if let Err(e) = py
-        .import("aiconfigurator.sdk.rust_engine_step")
+        .import("aiconfigurator_core.sdk.rust_engine_step")
         .and_then(|m| m.call_method0("_configure_default_data_roots"))
     {
         tracing::warn!("AIC: could not configure data roots ({e}); relying on build-time default");

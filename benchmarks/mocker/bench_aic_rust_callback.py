@@ -44,7 +44,7 @@ Two things are reported per workload:
   2. SPEEDUP — median wall-clock ratio (python / rust) over ``--repeat`` runs.
 
 Run:  python benchmarks/mocker/bench_aic_rust_callback.py
-Requires: aiconfigurator SDK installed with loadable systems/perf data for the
+Requires: aiconfigurator-core installed with loadable systems/perf data for the
 model/system/backend tuple, and the bindings built with the ``aic-forward-pass``
 feature.
 """

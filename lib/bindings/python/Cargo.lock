@@ -34,8 +34,8 @@ dependencies = [
 
 [[package]]
 name = "aiconfigurator-core"
-version = "0.9.0"
-source = "git+https://github.com/ai-dynamo/aiconfigurator.git?rev=ffbab15797d3a3f14c382e937c0ab0c1c5cbc530#ffbab15797d3a3f14c382e937c0ab0c1c5cbc530"
+version = "0.10.0"
+source = "git+https://github.com/ai-dynamo/aiconfigurator.git?rev=989dd6e9cbedcbd26d353da984af451b6b64fd3f#989dd6e9cbedcbd26d353da984af451b6b64fd3f"
 dependencies = [
  "bincode 1.3.3",
  "parquet",
