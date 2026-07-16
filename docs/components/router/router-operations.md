@@ -85,14 +85,13 @@ python -m dynamo.frontend --router-mode kv --http-port 8001 --router-replica-syn
 
 With replica sync enabled, a new router still starts with zero active-block knowledge, but it converges through live request handling and active-sequence events from other replicas. Without it, each replica keeps an isolated active-block view, which can lead to suboptimal load balancing.
 
-Session-affinity synchronization uses the separate
-`--router-session-affinity-replica-sync` option and requires
-`--router-session-affinity-ttl-secs`. That path is best effort: each replica owns its
-local idle TTL, rejects targets outside its local worker membership, and keeps the
-first live binding it observes. The origin publishes after dispatch for concurrent
-visibility and again when the lease ends to restart peer idle timers. Long requests
-and dropped completion updates can temporarily desynchronize those timers. Use
-ingress stickiness or authoritative storage when affinity must be strict.
+Session-affinity synchronization starts automatically when
+`--router-session-affinity-ttl-secs` is set. That path is best effort: each replica
+owns its local idle TTL, rejects targets outside its local worker membership, and
+keeps the first live binding it observes. The origin publishes after dispatch for
+concurrent visibility and again when the lease ends to restart peer idle timers.
+Long requests and dropped completion updates can temporarily desynchronize those
+timers. Use ingress stickiness or authoritative storage when affinity must be strict.
 
 ## Dynamo-Native Remote Indexer
 

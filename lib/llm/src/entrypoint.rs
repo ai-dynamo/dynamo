@@ -52,8 +52,6 @@ pub struct RouterConfig {
     pub enforce_disagg: bool,
     #[serde(default)]
     pub session_affinity_ttl_secs: Option<u64>,
-    #[serde(default)]
-    pub session_affinity_replica_sync: bool,
 }
 
 impl RouterConfig {
@@ -64,7 +62,6 @@ impl RouterConfig {
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
             session_affinity_ttl_secs: None,
-            session_affinity_replica_sync: false,
         }
     }
 
@@ -83,11 +80,6 @@ impl RouterConfig {
 
     pub fn with_session_affinity_ttl_secs(mut self, ttl_secs: u64) -> Self {
         self.session_affinity_ttl_secs = Some(ttl_secs);
-        self
-    }
-
-    pub fn with_session_affinity_replica_sync(mut self, enabled: bool) -> Self {
-        self.session_affinity_replica_sync = enabled;
         self
     }
 }

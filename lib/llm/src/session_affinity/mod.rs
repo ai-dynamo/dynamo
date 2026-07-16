@@ -23,15 +23,12 @@ pub type LlmResponse =
 pub(crate) async fn create_affinity_coordinator(
     ttl: Option<Duration>,
     client: Client,
-    replica_sync: bool,
 ) -> Result<Option<AffinityCoordinator>, Error> {
     let Some(ttl) = ttl else {
         return Ok(None);
     };
     let coordinator = AffinityCoordinator::new(ttl)?;
-    if replica_sync {
-        coordinator.enable_replica_sync(client).await?;
-    }
+    coordinator.enable_replica_sync(client).await?;
     Ok(Some(coordinator))
 }
 

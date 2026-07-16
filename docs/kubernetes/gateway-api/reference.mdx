@@ -157,7 +157,7 @@ Set these values on the EPP component unless the deployment manifest says otherw
 | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scales prompt-side prefill load after cache-hit credits are applied. |
 | `DYN_ROUTER_TEMPERATURE` | `0.0` | `0.0` selects deterministically. Higher values allow more worker exploration through softmax sampling. |
 | `DYN_ROUTER_REPLICA_SYNC` | `false` | Publishes and subscribes KV active-sequence state across router replicas. |
-| `DYN_ROUTER_SESSION_AFFINITY_REPLICA_SYNC` | `false` | Publishes and subscribes session-affinity bindings across router replicas. Requires `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`. |
+| `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` | unset | Enables session affinity and best-effort binding sync with this router-local idle TTL. |
 | `DYN_ROUTER_TRACK_ACTIVE_BLOCKS` | `true` | Tracks active decode blocks for load balancing. |
 | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Predicts output blocks during generation and decays them by progress toward expected output length. |
 | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Includes active prompt-side prefill tokens in load accounting. |

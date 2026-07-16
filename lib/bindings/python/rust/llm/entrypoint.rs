@@ -432,14 +432,12 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
-    session_affinity_replica_sync: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_replica_sync=false))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -448,7 +446,6 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
-        session_affinity_replica_sync: bool,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -461,11 +458,6 @@ impl RouterConfig {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
-            ));
-        }
-        if session_affinity_replica_sync && session_affinity_ttl_secs.is_none() {
-            return Err(PyValueError::new_err(
-                "session_affinity_replica_sync requires session_affinity_ttl_secs",
             ));
         }
         RsLoadThresholdConfig {
@@ -482,7 +474,6 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
-            session_affinity_replica_sync,
         })
     }
 }
@@ -499,7 +490,6 @@ impl From<RouterConfig> for RsRouterConfig {
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
-            session_affinity_replica_sync: rc.session_affinity_replica_sync,
         }
     }
 }

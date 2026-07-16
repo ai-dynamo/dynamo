@@ -56,7 +56,6 @@ impl PrefillRouter {
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
-        session_affinity_replica_sync: bool,
         model_name: String,
         namespace: String,
         is_eagle: bool,
@@ -95,7 +94,6 @@ impl PrefillRouter {
                         kv_cache_block_size,
                         kv_router_config,
                         router_clone.prefill_load_estimator.clone(),
-                        session_affinity_replica_sync,
                         worker_monitor.as_ref(),
                     ).await {
                         tracing::error!(error = %e, "Failed to activate prefill router");
@@ -118,7 +116,6 @@ impl PrefillRouter {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        session_affinity_replica_sync: bool,
         worker_monitor: Option<&crate::discovery::KvWorkerMonitor>,
     ) -> Result<()> {
         tracing::info!(
@@ -152,12 +149,8 @@ impl PrefillRouter {
             // Extract client from kv_chooser to ensure shared state
             let client = kv_chooser.client().clone();
             Self::attach_prefill_client(worker_monitor, &client);
-            let affinity = create_affinity_coordinator(
-                self.session_affinity_ttl,
-                client.clone(),
-                session_affinity_replica_sync,
-            )
-            .await?;
+            let affinity =
+                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -177,12 +170,8 @@ impl PrefillRouter {
             // Create client for simple router
             let client = endpoint.client().await?;
             Self::attach_prefill_client(worker_monitor, &client);
-            let affinity = create_affinity_coordinator(
-                self.session_affinity_ttl,
-                client.clone(),
-                session_affinity_replica_sync,
-            )
-            .await?;
+            let affinity =
+                create_affinity_coordinator(self.session_affinity_ttl, client.clone()).await?;
 
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only

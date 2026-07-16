@@ -124,13 +124,11 @@ The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
 option to keep affinity disabled.
 
-Add `--router-session-affinity-replica-sync` to synchronize affinity bindings
-between router replicas through the Runtime event plane. This option requires
-`--router-session-affinity-ttl-secs`; it does not enable session affinity by itself.
-The origin publishes a binding after successful dispatch so concurrent requests can
-observe it, then publishes it again when the request lease ends so peer idle timers
-restart when the request becomes idle. The extra event fanout is an intentional
-tradeoff.
+When session affinity is enabled, routers synchronize affinity bindings through the
+Runtime event plane. The origin publishes a binding after successful dispatch so
+concurrent requests can observe it, then publishes it again when the request lease
+ends so peer idle timers restart when the request becomes idle. The extra event
+fanout is an intentional tradeoff.
 
 Synchronization is advisory. Each replica owns its local idle TTL and uses the
 first live binding it observes. A matching update refreshes that local deadline,
@@ -220,7 +218,7 @@ For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](
 - `--router-track-output-blocks`: **Experimental.** Enables tracking of output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward the expected output sequence length (`agent_hints.osl` in `nvext`). For the cost-model behavior, see [Decode Load Modeling](router-concepts.md#decode-load-modeling).
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
-- `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization uses the separate `--router-session-affinity-replica-sync` option.
+- `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
 
 ## KV Indexer / Approx KV Indexer
 
