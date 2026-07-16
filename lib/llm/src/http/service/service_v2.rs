@@ -542,7 +542,7 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
 
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     enable_batch_endpoints: bool,
 
     /// Experimental engine-native APIs (currently the token-in/token-out
