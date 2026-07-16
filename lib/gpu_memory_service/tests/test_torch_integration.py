@@ -473,16 +473,16 @@ def test_deferred_gms_write_reconstructs_runtime_tensor_aliases(
         stats = prepare_gms_write(writer, model)
         rebound_bytes = rebind_nonparameter_tensors(writer, model)
         assert rebound_bytes == original.numel() * original.element_size()
-        holder = model.__dict__["_gms_rebound_tensor_owners"]
+        _, displaced_sources = model.__dict__["_gms_displaced_source_tensors"]
         assert all(alias is original for alias in model.aliases())
         assert original.data_ptr() != gms_ptr
-        assert len(holder.tensors) == 1
-        assert holder.tensors[0] is not original
-        assert holder.tensors[0].data_ptr() == gms_ptr
+        assert len(displaced_sources) == 1
+        assert displaced_sources[0] is not original
+        assert displaced_sources[0].data_ptr() == gms_ptr
         assert model.unrelated is unrelated_helper
         assert model.unrelated.tensor is unrelated
         assert list(model.state_dict()) == []
-        del holder
+        del displaced_sources
 
         assert rebind_nonparameter_tensors(writer, model) == 0
 

@@ -23,10 +23,10 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
 )
 from gpu_memory_service.client.torch.module import (
-    _discover_module_storage,
-    _locate_storage,
-    _make_parameter,
-    _swap_discovered_objects,
+    _discover_module_storages,
+    _make_parameter_from_template,
+    _match_storages_to_gms_mappings,
+    _swap_discovered_tensors,
     materialize_module_from_gms,
 )
 from gpu_memory_service.client.torch.tensor import (
@@ -262,10 +262,10 @@ def _move_untracked_params(
         if target_device.index is None
         else int(target_device.index)
     )
-    discovered_storages = _discover_module_storage(model)
+    discovered_storages = _discover_module_storages(model)
     located_storage_ids = {
         id(discovered_storage)
-        for discovered_storage in _locate_storage(
+        for discovered_storage in _match_storages_to_gms_mappings(
             discovered_storages,
             gms_client.mappings,
             require_parameters=False,
@@ -305,14 +305,14 @@ def _move_untracked_params(
                     int(tensor.storage_offset()),
                 )
                 if isinstance(tensor, torch.nn.Parameter):
-                    replacement = _make_parameter(
+                    replacement = _make_parameter_from_template(
                         tensor,
                         replacement,
-                        path=tensor_object.slots[0].path,
+                        path=tensor_object.bindings[0].path,
                         requires_grad=bool(tensor.requires_grad),
                     )
                 replacements[id(tensor)] = replacement
                 del replacement
                 objects.append(tensor_object)
 
-        _swap_discovered_objects(objects, replacements)
+        _swap_discovered_tensors(objects, replacements)

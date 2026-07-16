@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gc
 import sys
 import weakref
 from contextlib import nullcontext
@@ -30,7 +31,11 @@ from gpu_memory_service.client.torch.module import (
     rebind_nonparameter_tensors,
     register_module_tensors,
 )
-from gpu_memory_service.client.torch.tensor import STORAGE_MANIFEST_PREFIX, Slot
+from gpu_memory_service.client.torch.tensor import (
+    STORAGE_MANIFEST_PREFIX,
+    ModuleTensorBinding,
+    ModuleTensorKind,
+)
 from gpu_memory_service.integrations.common import utils as common_utils
 from gpu_memory_service.integrations.trtllm import model_loader as trtllm_model_loader
 from gpu_memory_service.integrations.vllm import model_loader
@@ -177,7 +182,23 @@ def _writer_for_tensor(tensor: torch.Tensor):
     return store, _Manager(store, allocations, mapped=True)
 
 
-def test_manifest_groups_exact_alias_slots_and_shared_storage_objects():
+def test_module_tensor_binding_round_trip_uses_lowercase_kind():
+    binding = ModuleTensorBinding(
+        "value",
+        ModuleTensorKind.NONPERSISTENT_BUFFER,
+    )
+    encoded = msgspec.msgpack.encode(binding)
+
+    assert msgspec.msgpack.decode(encoded) == {
+        "path": "value",
+        "kind": "nonpersistent_buffer",
+    }
+    decoded = msgspec.msgpack.decode(encoded, type=ModuleTensorBinding)
+    assert decoded == binding
+    assert decoded.kind is ModuleTensorKind.NONPERSISTENT_BUFFER
+
+
+def test_manifest_groups_exact_alias_bindings_and_shared_storage_objects():
     backing = torch.arange(8, dtype=torch.float32)
     first = backing[1:7:2]
     second = torch.empty(0).set_(
@@ -208,13 +229,15 @@ def test_manifest_groups_exact_alias_slots_and_shared_storage_objects():
         "stride": [2],
         "storage_offset_bytes": 4,
         "requires_grad": False,
-        "slots": [
+        "bindings": [
             {"path": "first", "kind": "attribute"},
             {"path": "first_alias", "kind": "attribute"},
         ],
     }
     assert manifest["objects"][1]["storage_offset_bytes"] == 8
-    assert manifest["objects"][1]["slots"] == [{"path": "second", "kind": "attribute"}]
+    assert manifest["objects"][1]["bindings"] == [
+        {"path": "second", "kind": "attribute"}
+    ]
     assert "allocation_id" not in payload.decode("latin1")
 
 
@@ -434,7 +457,7 @@ def test_parameter_subclass_state_comes_from_canonical_reader_template(
     torch.testing.assert_close(parameter, source)
 
 
-def test_reader_creates_writer_final_slots_absent_from_initial_model(
+def test_reader_creates_writer_final_bindings_absent_from_initial_model(
     cpu_storage_pointer,
 ):
     source = torch.nn.Parameter(
@@ -644,12 +667,14 @@ def test_reader_validates_storage_envelope_alignment_before_mapping():
     "mutate",
     [
         lambda manifest: manifest.update({"unknown": True}),
-        lambda manifest: manifest["objects"][0]["slots"][0].update({"kind": "invalid"}),
-        lambda manifest: manifest["objects"][0]["slots"].append(
-            manifest["objects"][0]["slots"][0].copy()
+        lambda manifest: manifest["objects"][0]["bindings"][0].update(
+            {"kind": "invalid"}
+        ),
+        lambda manifest: manifest["objects"][0]["bindings"].append(
+            manifest["objects"][0]["bindings"][0].copy()
         ),
     ],
-    ids=("unknown-field", "invalid-literal", "duplicate-slot"),
+    ids=("unknown-field", "invalid-enum", "duplicate-binding"),
 )
 def test_reader_rejects_compact_malformed_manifest_cases(mutate):
     tensor = torch.arange(4, dtype=torch.float32)
@@ -707,7 +732,7 @@ def test_reader_rejects_noncontiguous_ordinals_and_overlapping_manifests():
     store.entries[key] = store.entries.pop(f"{STORAGE_MANIFEST_PREFIX}1")
     allocation_id, _, payload = store.entries[key]
     second = msgspec.msgpack.decode(payload)
-    second["objects"][0]["slots"][0]["path"] = "other"
+    second["objects"][0]["bindings"][0]["path"] = "other"
     store.entries[f"{STORAGE_MANIFEST_PREFIX}1"] = (
         allocation_id,
         4,
@@ -803,7 +828,9 @@ def test_discovery_does_not_invoke_properties_or_walk_helper_graphs():
     manifest = msgspec.msgpack.decode(next(iter(store.entries.values()))[2])
 
     assert model.property_reads == 0
-    assert manifest["objects"][0]["slots"] == [{"path": "direct", "kind": "attribute"}]
+    assert manifest["objects"][0]["bindings"] == [
+        {"path": "direct", "kind": "attribute"}
+    ]
 
 
 def test_unregistered_parameter_and_zero_byte_storage_are_rejected():
@@ -839,11 +866,35 @@ def test_publisher_rebind_clones_storage_once_and_retains_one_source_owner():
     assert model.view is view
     assert model.backing.untyped_storage()._cdata != old_storage
     assert model.backing.untyped_storage()._cdata == model.view.untyped_storage()._cdata
-    owners = model.__dict__["_gms_rebound_tensor_owners"].tensors
+    sentinel, owners = model.__dict__["_gms_displaced_source_tensors"]
+    assert sentinel is torch_module._DISPLACED_SOURCE_TENSORS_SENTINEL
     assert len(owners) == 1
     assert owners[0].untyped_storage()._cdata == old_storage
+    owner_ref = weakref.ref(owners[0])
+    del owners
+    gc.collect()
+    retained_owner = owner_ref()
+    assert retained_owner is not None
+    assert retained_owner.untyped_storage()._cdata == old_storage
     model.view.add_(10)
     torch.testing.assert_close(model.backing[1::2], model.view)
+
+
+def test_second_rebind_preserves_displaced_source_owner_state():
+    tensor = torch.arange(4, dtype=torch.float32)
+    model = torch.nn.Module()
+    model.runtime = tensor
+    _, manager = _writer_for_tensor(tensor)
+
+    rebind_nonparameter_tensors(manager, model)
+    owner_state = model.__dict__["_gms_displaced_source_tensors"]
+    owners = owner_state[1]
+    owner = owners[0]
+
+    assert rebind_nonparameter_tensors(manager, model) == 0
+    assert model.__dict__["_gms_displaced_source_tensors"] is owner_state
+    assert len(owners) == 1
+    assert owners[0] is owner
 
 
 def test_swap_accepts_exclusively_owned_replacements_for_parameter_and_view():
@@ -852,8 +903,14 @@ def test_swap_accepts_exclusively_owned_replacements_for_parameter_and_view():
     with torch.no_grad():
         view = parameter[1::2]
     objects = [
-        torch_module._DiscoveredObject(parameter, [Slot("weight", "parameter")]),
-        torch_module._DiscoveredObject(view, [Slot("view", "attribute")]),
+        torch_module._DiscoveredTensor(
+            parameter,
+            [ModuleTensorBinding("weight", ModuleTensorKind.PARAMETER)],
+        ),
+        torch_module._DiscoveredTensor(
+            view,
+            [ModuleTensorBinding("view", ModuleTensorKind.ATTRIBUTE)],
+        ),
     ]
     target_storage = parameter.detach().clone().untyped_storage()
     replacements = {}
@@ -867,7 +924,7 @@ def test_swap_accepts_exclusively_owned_replacements_for_parameter_and_view():
             int(tensor.storage_offset()),
         )
         if isinstance(tensor, torch.nn.Parameter):
-            replacement = torch_module._make_parameter(
+            replacement = torch_module._make_parameter_from_template(
                 tensor,
                 replacement,
                 path="weight",
@@ -876,7 +933,7 @@ def test_swap_accepts_exclusively_owned_replacements_for_parameter_and_view():
         replacements[id(tensor)] = replacement
         del replacement
 
-    torch_module._swap_discovered_objects(objects, replacements)
+    torch_module._swap_discovered_tensors(objects, replacements)
 
     assert replacements == {}
     assert parameter.untyped_storage()._cdata == view.untyped_storage()._cdata
@@ -888,8 +945,14 @@ def test_swap_preflight_failure_does_not_mutate_earlier_objects():
     first = torch.arange(4, dtype=torch.float32)
     second = torch.arange(4, dtype=torch.float32) + 10
     objects = [
-        torch_module._DiscoveredObject(first, [Slot("first", "attribute")]),
-        torch_module._DiscoveredObject(second, [Slot("second", "attribute")]),
+        torch_module._DiscoveredTensor(
+            first,
+            [ModuleTensorBinding("first", ModuleTensorKind.ATTRIBUTE)],
+        ),
+        torch_module._DiscoveredTensor(
+            second,
+            [ModuleTensorBinding("second", ModuleTensorKind.ATTRIBUTE)],
+        ),
     ]
     replacements = {
         id(first): torch.full_like(first, 20),
@@ -900,7 +963,7 @@ def test_swap_preflight_failure_does_not_mutate_earlier_objects():
     second_ref = weakref.ref(second)
 
     with pytest.raises(RuntimeError, match="second.*weakref"):
-        torch_module._swap_discovered_objects(objects, replacements)
+        torch_module._swap_discovered_tensors(objects, replacements)
 
     assert second_ref() is second
     assert first.untyped_storage()._cdata == first_storage
@@ -909,11 +972,23 @@ def test_swap_preflight_failure_does_not_mutate_earlier_objects():
     torch.testing.assert_close(second, torch.arange(4, dtype=torch.float32) + 10)
 
 
-def test_rebound_tensor_owner_rejects_existing_none():
+def test_displaced_source_collision_is_rejected_without_rebind_candidate():
+    parameter = torch.nn.Parameter(torch.arange(4, dtype=torch.float32))
+    model = torch.nn.Module()
+    model.weight = parameter
+    model.__dict__["_gms_displaced_source_tensors"] = [torch.ones(1)]
+    _, manager = _writer_for_tensor(parameter)
+
+    with pytest.raises(RuntimeError, match="Reserved GMS attribute"):
+        rebind_nonparameter_tensors(manager, model)
+
+
+def test_displaced_source_collision_is_rejected_on_submodule():
     tensor = torch.arange(4, dtype=torch.float32)
     model = torch.nn.Module()
-    model.runtime = tensor
-    model.__dict__["_gms_rebound_tensor_owners"] = None
+    model.child = torch.nn.Module()
+    model.child.runtime = tensor
+    model.child.__dict__["_gms_displaced_source_tensors"] = None
     _, manager = _writer_for_tensor(tensor)
 
     with pytest.raises(RuntimeError, match="Reserved GMS attribute"):

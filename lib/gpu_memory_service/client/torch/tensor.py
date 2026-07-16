@@ -5,24 +5,25 @@
 
 from __future__ import annotations
 
-from typing import List, Literal, Tuple
+from enum import Enum
+from typing import List, Tuple
 
 import msgspec
 import torch
 
 STORAGE_MANIFEST_PREFIX = "torch.module.storage/"
 
-SlotKind = Literal[
-    "parameter",
-    "persistent_buffer",
-    "nonpersistent_buffer",
-    "attribute",
-]
+
+class ModuleTensorKind(str, Enum):
+    PARAMETER = "parameter"
+    PERSISTENT_BUFFER = "persistent_buffer"
+    NONPERSISTENT_BUFFER = "nonpersistent_buffer"
+    ATTRIBUTE = "attribute"
 
 
-class Slot(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
+class ModuleTensorBinding(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     path: str
-    kind: SlotKind
+    kind: ModuleTensorKind
 
 
 class TensorObject(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
@@ -31,7 +32,7 @@ class TensorObject(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
     stride: Tuple[int, ...]
     storage_offset_bytes: int
     requires_grad: bool
-    slots: Tuple[Slot, ...]
+    bindings: Tuple[ModuleTensorBinding, ...]
 
 
 class StorageManifest(msgspec.Struct, frozen=True, forbid_unknown_fields=True):
