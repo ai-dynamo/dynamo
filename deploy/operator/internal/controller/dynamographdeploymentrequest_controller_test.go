@@ -251,8 +251,6 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			structuralHub := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
 			Expect(alphaCompatibility.ConvertTo(structuralHub)).Should(Succeed())
 			Expect(structuralHub.Annotations).Should(HaveKey("nvidia.com/dgdr-spec"))
-			Expect(structuralHub.Annotations).ShouldNot(HaveKey("nvidia.com/dgdr-config-map-ref"))
-			Expect(structuralHub.Annotations).ShouldNot(HaveKey("nvidia.com/dgdr-output-pvc"))
 
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -354,22 +352,6 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 
 			// Clean up job
 			_ = k8sClient.Delete(ctx, job)
-		})
-
-		It("Should retain read-only support for legacy profiling annotations", func() {
-			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
-					"nvidia.com/dgdr-config-map-ref": `{"name":"legacy-config","key":"legacy.yaml"}`,
-					"nvidia.com/dgdr-output-pvc":     "legacy-output-pvc",
-				}},
-			}
-
-			config, err := restoredAlphaProfilingConfig(dgdr)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(config.ConfigMapRef).NotTo(BeNil())
-			Expect(config.ConfigMapRef.Name).To(Equal("legacy-config"))
-			Expect(config.ConfigMapRef.Key).To(Equal("legacy.yaml"))
-			Expect(config.OutputPVC).To(Equal("legacy-output-pvc"))
 		})
 
 		It("Should deliver the version-matched override tool when a DGD override is present", func() {
