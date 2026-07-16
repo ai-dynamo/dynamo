@@ -1,6 +1,6 @@
 ---
 name: dep-update
-description: Updates Dynamo Enhancement Proposal lifecycle state in GitHub, including triage, PIC assignment, review, approval, and status label changes. Use when triaging a new DEP, assigning a PIC, or moving a proposal through review and approval.
+description: Advances a Dynamo Enhancement Proposal through its lifecycle under the current model -- a short follow-up PR in ai-dynamo/enhancements that updates BOTH the status field and the status-banner admonition in sync (Draft -> Under Review -> Accepted/Rejected/Deferred -> Implemented -> Replaced). Approval is by the owning SIG's chairs/tech leads; the rendered metadata pill and sidebar pill update on the next docs build. Use when moving a DEP through review, recording a decision, or marking it implemented or replaced.
 license: Apache-2.0
 metadata:
   author: NVIDIA
@@ -8,11 +8,12 @@ metadata:
     - dynamo
     - dep
     - enhancement-proposal
-    - github
+    - enhancements
+    - sig
     - lifecycle
 ---
 
-# Skill: Update DEP Lifecycle
+# Skill: Advance a DEP's Lifecycle
 
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
@@ -21,85 +22,115 @@ SPDX-License-Identifier: CC-BY-4.0
 
 ## Purpose
 
-Update DEP status through its lifecycle — triage, review, approve,
-defer, or close. Covers the PIC workflow from initial assignment
-through final approval.
+Move a DEP through its lifecycle. Under the current model a DEP is a markdown
+file `deps/NNNN-slug.md` in **`ai-dynamo/enhancements`**, and its status is
+advanced by a **short follow-up PR** that edits the DEP's `status` field and its
+status-banner admonition together. This replaces the deprecated flow that
+flipped `dep:draft` / `dep:under-review` / `dep:approved` labels on a GitHub
+*issue* in `ai-dynamo/dynamo`.
+
+See `docs/proposals/README.mdx` and `docs/proposals/0001-dep-process.mdx` for
+the model, roles, and the status-banner convention. Do not restate the whole
+model here.
 
 ## When to Use
 
-When triaging DEP issues, reviewing a DEP as PIC or reviewer,
-approving a DEP that is under review, or updating DEP status.
+When requesting a decision on a DEP (moving it to Under Review), recording an
+Accepted / Rejected / Deferred decision, marking it Implemented once the work
+ships, or marking it Replaced when a later DEP supersedes it.
+
+## Lifecycle
+
+As proposed in DEP-0001 (exact state names are still being reconciled in
+review — defer to the meta-DEP where they differ):
+
+**Draft → Under Review → Accepted / Rejected / Deferred → Implemented → Replaced**
+
+- **Draft** — shape under discussion. The PR may merge early so the DEP is
+  discoverable and rendered; merging as Draft does not imply acceptance.
+- **Under Review** — the author requests a decision; the owning SIG's approvers
+  engage on the PR (line-level) and the tracking issue (design).
+- **Accepted / Rejected / Deferred** — maintainers record the decision in a
+  short follow-up PR that updates the status.
+- **Implemented** — the work items have merged; the DEP names the shipping
+  release.
+- **Replaced** — a later DEP supersedes this one.
+
+**Approvers** are the owning SIG's chairs or technical leads (the DEP's
+`required-reviewers`); they speak for the SIG and decide when it is accepted.
+Maintainers record the decision on the SIG's behalf.
+
+## Status ↔ Banner Mapping
+
+Keep the `status` field and the banner admonition in sync — the field carries
+the full enum value, the banner carries the reader-facing callout. The docs
+pipeline converts the GitHub-style admonition to a native callout
+(`fern/convert_callouts.py`).
+
+| Status | Banner admonition | Renders as |
+|--------|-------------------|------------|
+| Draft | `> [!WARNING]` | Warning |
+| Under Review (a.k.a. Proposed) | `> [!IMPORTANT]` | Info |
+| Accepted / Implemented (a.k.a. Approved) | `> [!NOTE]` | Note |
+| Rejected / Deferred / Replaced (a.k.a. Superseded) | `> [!CAUTION]` | Error |
 
 ## Workflow
 
-### Triage (assign PIC)
-
-1. **List unassigned DEPs**:
+### 1. Open the Follow-Up PR
 
 ```bash
-gh issue list --repo ai-dynamo/dynamo \
-  --label "dep:draft" \
-  --json number,title,labels,assignees \
-  --jq '.[] | select(.assignees | length == 0)'
+cd /path/to/enhancements-checkout          # gh repo clone ai-dynamo/enhancements
+git checkout main && git pull
+git checkout -b dep-<slug>-status-<new-status>
+# edit deps/NNNN-slug.md — see the two edits below
+git add deps/NNNN-slug.md
+git commit -s -m "docs: advance DEP-NNNN to <New Status>"
+git push -u origin dep-<slug>-status-<new-status>
+gh pr create --repo ai-dynamo/enhancements \
+  --title "DEP-NNNN: advance to <New Status>" \
+  --body "Records the <New Status> decision. Tracking issue: #<N_ISSUE>."
 ```
 
-2. **Assign PIC** based on the area label:
+### 2. Make Both Edits in Sync
 
-```bash
-gh issue edit <number> --repo ai-dynamo/dynamo \
-  --add-assignee "<github-username>"
+Update the status field **and** the banner in the same PR. For example, moving
+from Draft to Under Review:
+
+```md
+**Status**: Under Review
 ```
 
-3. **Move to review** when the spec is ready:
-
-```bash
-gh issue edit <number> --repo ai-dynamo/dynamo \
-  --remove-label "dep:draft" \
-  --add-label "dep:under-review"
+```md
+> [!IMPORTANT]
+> **Status: Under Review.** The author has requested a decision; the owning SIG's approvers are reviewing.
 ```
 
-### Review
+When marking **Implemented**, name the shipping release in the DEP body. When
+marking **Replaced**, link the superseding DEP (and its number) in the body.
 
-1. **Read the DEP issue and discussion**:
+### 3. Merge Under the Owning SIG's Approval
 
-```bash
-gh issue view <number> --repo ai-dynamo/dynamo
-gh issue view <number> --repo ai-dynamo/dynamo --comments
-```
+The follow-up PR merges once the owning SIG's approvers (the DEP's
+`required-reviewers`) approve. For an Accepted / Rejected / Deferred decision, a
+maintainer records it on the SIG's behalf. Keep GitHub the source of truth —
+the decision lives in the merged PR, not on the docs page.
 
-2. **Post review feedback** as comments on the issue.
+### 4. Confirm the Rendered Pills Update
 
-3. **Request changes** or clarifications from the author.
-
-### Approve
-
-1. **Verify the issue is under review**:
-
-```bash
-gh issue view <number> --repo ai-dynamo/dynamo --json labels
-```
-
-2. **Post the approval comment**:
-
-```bash
-gh issue comment <number> --repo ai-dynamo/dynamo --body "/approve"
-```
-
-3. **If this is the PIC approving** (or all required reviewers have
-   approved), update the label:
-
-```bash
-gh issue edit <number> --repo ai-dynamo/dynamo \
-  --remove-label "dep:under-review" \
-  --add-label "dep:approved"
-```
+No manual docs edit is needed. On the next Fern build,
+`fern/scripts/sync_deps.py` re-reads the DEP's status and regenerates
+`fern/js/dep-status-data.js`, so both the on-page `<DepMetadata>` pill and the
+right-aligned Proposals-sidebar pill (`fern/js/dep-status-pills.js`) update
+automatically to match the new status. The `/proposals/<slug>` URL is stable
+across status changes. Getting a DEP rendered in the first place is the
+`dep-render` skill.
 
 ## Notes
 
-- For straightforward DEPs, the PIC's `/approve` is sufficient.
-- For multi-reviewer DEPs, the PIC maintains a pinned approval
-  checklist and updates the label only when all required approvals are
-  collected.
-- `/approve` comments are searchable for audit:
-  `gh search issues --repo ai-dynamo/dynamo "/approve" in:comments`
-- Area labels are bare names (e.g., `frontend`, `router`) — no prefix.
+- One status change per follow-up PR keeps the decision auditable.
+- The banner and the `status` field must never disagree — a page that reads
+  "Draft" in the field but shows a Note banner misleads readers about whether a
+  proposal is ratified.
+- DEP-0001 is a *draft* proposal; where the exact lifecycle names are still
+  contested, phrase advice as the model the render layer implements today and
+  point to `docs/proposals/0001-dep-process.mdx`.
