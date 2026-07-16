@@ -514,7 +514,9 @@ _TOLERATION = {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSched
 _BASE_DGD = {
     "spec": {
         "services": {
-            "VllmDecodeWorker": {
+            "decode": {
+                "componentType": "worker",
+                "subComponentType": "decode",
                 "extraPodSpec": {
                     "mainContainer": {"image": "my-image", "args": ["--model", "m"]},
                 },
@@ -528,7 +530,7 @@ _BASE_DGD = {
 _OVERRIDE_DGD = {
     "spec": {
         "services": {
-            "VllmDecodeWorker": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
+            "decode": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
             "GhostService": {"extraPodSpec": {"tolerations": [_TOLERATION]}},
         }
     }
@@ -561,7 +563,7 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
 
     pick_result = {
         "dgd_config": base_dgd,
-        "resolved_backend": "vllm",
+        "resolved_backend": "trtllm",
         "chosen_exp": "disagg",
         "best_config_df": None,
         "best_latencies": {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0},
@@ -578,7 +580,7 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
             "dynamo.profiler.profile_sla._extract_profiler_params",
             return_value=(
                 "test/model",
-                "vllm",
+                "trtllm",
                 "h100_sxm",
                 8,
                 4000,
@@ -627,12 +629,16 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
     assert interpolation_kwargs, "run_interpolation was never called"
     disagg_config = interpolation_kwargs["disagg_config"]
 
-    # Tolerations must be present on VllmDecodeWorker before interpolation.
-    eps = disagg_config["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
+    # Tolerations and TRT-LLM runtime defaults must be present before interpolation.
+    eps = disagg_config["spec"]["services"]["decode"]["extraPodSpec"]
     assert eps["tolerations"] == [_TOLERATION]
 
     # mainContainer must be preserved (not overwritten by the tolerations merge).
     assert eps["mainContainer"]["image"] == "my-image"
+    chunked_prefill_idx = eps["mainContainer"]["args"].index(
+        "--trtllm.enable_chunked_prefill"
+    )
+    assert eps["mainContainer"]["args"][chunked_prefill_idx + 1] == "true"
 
     # GhostService (absent from base DGD) must be silently skipped.
     assert "GhostService" not in disagg_config["spec"]["services"]
@@ -644,10 +650,7 @@ async def test_run_profile_applies_dgd_overrides_before_interpolation(
     ), "Expected a WARNING mentioning the skipped 'GhostService'"
 
     # apply_dgd_overrides must not mutate its input.
-    assert (
-        "tolerations"
-        not in base_dgd["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"]
-    )
+    assert "tolerations" not in base_dgd["spec"]["services"]["decode"]["extraPodSpec"]
 
 
 # ---------------------------------------------------------------------------
