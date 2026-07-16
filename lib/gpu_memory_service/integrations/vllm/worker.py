@@ -275,12 +275,9 @@ class GMSWorker(Worker):
             # The scratch pool is scoped to the KV tensors by
             # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
             self.model_runner.initialize_kv_cache(kv_cache_config)
-            # The per-mapping "[GMS] Reserved ... scratch" line is logged at INFO
-            # on the gpu_memory_service logger, which the vLLM worker subprocess
-            # suppresses, so scratch engagement is invisible in engine logs. Emit
-            # one visible summary (logger + print, matching the accounting message
-            # above) so operators and failover harnesses can confirm the KV was
-            # scratch-aliased (VA-reserved, physically cheap) rather than fully backed.
+            # Visible summary of scratch engagement; per-mapping GMS INFO is
+            # suppressed in the vLLM worker subprocess, so print() for now (a
+            # worker-logging fix is a follow-up).
             n_scratch, virtual_bytes, physical_bytes = scratch_mgr.scratch_summary()
             msg = (
                 f"[GMS] Scratch-KV engaged: {n_scratch} allocations, "
@@ -290,11 +287,11 @@ class GMSWorker(Worker):
             )
             logger.info(msg)
             print(msg, flush=True)
-            # Fail closed: if the model has a KV cache but nothing was routed
-            # through scratch, the shadow has fully backed its KV — defeating
-            # colocation and risking ~2x KV OOM at scale. Surface it loudly
-            # instead of silently degrading.
-            if n_scratch == 0 and kv_cache_config.kv_cache_groups:
+            # Fail closed: KV tensors expected but none scratch-aliased means the
+            # shadow fully backed its KV (defeats colocation, risks ~2x KV OOM).
+            # kv_cache_tensors is the list _allocate_kv_cache iterates to emit the
+            # torch.zeros, so it is the direct signal that KV backing was expected.
+            if n_scratch == 0 and kv_cache_config.kv_cache_tensors:
                 raise RuntimeError(
                     "[GMS] Scratch-KV enabled but no KV allocation was routed "
                     "through scratch; the shadow would fully back its KV cache. "
