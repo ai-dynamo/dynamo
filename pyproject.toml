@@ -81,9 +81,9 @@ sglang = [
 ]
 
 mocker = [
-    # Runtime modeling only needs the standalone core. Keep this exactly aligned
-    # with the aiconfigurator-core Rust crate linked into ai-dynamo-runtime.
-    "aiconfigurator-core==0.10.0",
+    # Runtime modeling only needs the standalone core. Until the split core is
+    # released, install it from the exact AIC revision linked into the runtime.
+    "aiconfigurator-core @ git+https://github.com/ai-dynamo/aiconfigurator.git@989dd6e9cbedcbd26d353da984af451b6b64fd3f#subdirectory=aic-core",
 ]
 
 [project.entry-points.pytest11]
