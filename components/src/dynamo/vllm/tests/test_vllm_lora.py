@@ -9,6 +9,7 @@ add_lora<->register_model rollback couplings), and the on_endpoint_ready
 handoff. Everything is mocked: no GPU, no real AsyncLLM, no real discovery.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -375,6 +376,50 @@ async def test_prefill_inference_uses_lifecycle_registered_lora(monkeypatch):
     lora_request = captured["kwargs"]["lora_request"]
     assert lora_request.lora_name == "adapterA"
     assert lora_request.lora_path == "/cache/adapter"
+
+
+@pytest.mark.asyncio
+async def test_prefill_request_admission_serializes_with_unload(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+
+    admission_started = asyncio.Event()
+    allow_admission = asyncio.Event()
+    admitted = asyncio.Event()
+
+    async def _blocked_generate(_lora_request):
+        admission_started.set()
+        await allow_admission.wait()
+        admitted.set()
+        yield SimpleNamespace()
+
+    async def _remove_lora(lora_id):
+        assert lora_id == 123
+        assert admitted.is_set()
+
+    engine.engine_client.remove_lora = AsyncMock(side_effect=_remove_lora)
+    admission = engine._generate_with_lora_admission_lock(
+        engine._resolve_lora_request("adapterA"),
+        _blocked_generate,
+    )
+    admission_task = asyncio.create_task(anext(admission))
+    await admission_started.wait()
+
+    unload_task = asyncio.create_task(engine.unload_lora({"lora_name": "adapterA"}))
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+    unregister.assert_not_awaited()
+    assert "adapterA" in engine.loaded_loras
+
+    allow_admission.set()
+    await admission_task
+    result = await unload_task
+    await admission.aclose()
+
+    assert result["status"] == "success"
+    engine.engine_client.remove_lora.assert_awaited_once_with(123)
 
 
 @pytest.mark.asyncio

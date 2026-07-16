@@ -7,7 +7,7 @@ The unified vLLM engine has separate lifecycle coverage. These tests protect
 the still-supported ``BaseWorkerHandler`` path used by release images.
 """
 
-import threading
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -49,8 +49,9 @@ def _make_prefill_handler():
     handler.model_max_len = 8192
     handler.loaded_loras = {}
     handler._engine_loaded_loras = set()
-    handler._lora_load_locks = {}
-    handler._lora_load_locks_guard = threading.Lock()
+    handler._lora_load_locks = [
+        asyncio.Lock() for _ in range(handlers_mod._LORA_LOCK_STRIPES)
+    ]
     return handler
 
 
@@ -204,6 +205,82 @@ async def test_legacy_prefill_unload_removes_request_activated_adapter(monkeypat
 
     assert results[-1]["status"] == "success"
     handler.engine_client.remove_lora.assert_awaited_once_with(123)
+
+
+@pytest.mark.asyncio
+async def test_legacy_prefill_request_admission_serializes_with_unload(monkeypatch):
+    handler = _make_prefill_handler()
+    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+
+    admission_started = asyncio.Event()
+    allow_admission = asyncio.Event()
+    admitted = asyncio.Event()
+
+    async def _blocked_generate(_lora_request):
+        admission_started.set()
+        await allow_admission.wait()
+        admitted.set()
+        yield SimpleNamespace()
+
+    async def _remove_lora(lora_id):
+        assert lora_id == 123
+        assert admitted.is_set()
+
+    handler.engine_client.remove_lora = AsyncMock(side_effect=_remove_lora)
+    admission = handler._generate_with_lora_admission_lock(
+        handler._resolve_lora_request("adapterA"),
+        _blocked_generate,
+    )
+    admission_task = asyncio.create_task(anext(admission))
+    await admission_started.wait()
+
+    async def _unload():
+        return [
+            result
+            async for result in handler.unload_lora({"lora_name": "adapterA"})
+        ]
+
+    unload_task = asyncio.create_task(_unload())
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+    assert "adapterA" in handler.loaded_loras
+
+    allow_admission.set()
+    await admission_task
+    results = await unload_task
+    await admission.aclose()
+
+    assert results[-1]["status"] == "success"
+    handler.engine_client.remove_lora.assert_awaited_once_with(123)
+
+
+@pytest.mark.asyncio
+async def test_legacy_prefill_request_rejects_adapter_unloaded_before_admission(
+    monkeypatch,
+):
+    handler = _make_prefill_handler()
+    handler.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+    stale_request = handler._resolve_lora_request("adapterA")
+
+    results = [
+        result async for result in handler.unload_lora({"lora_name": "adapterA"})
+    ]
+
+    assert results[-1]["status"] == "success"
+
+    async def _must_not_generate(_lora_request):
+        raise AssertionError("stale request must not reach vLLM")
+        yield  # pragma: no cover - marks this as an async generator
+
+    with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+        await anext(
+            handler._generate_with_lora_admission_lock(
+                stale_request,
+                _must_not_generate,
+            )
+        )
 
 
 @pytest.mark.asyncio

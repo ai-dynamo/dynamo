@@ -14,7 +14,7 @@ import logging
 import os
 import tempfile
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -511,21 +511,23 @@ class VllmLLMEngine(LLMEngine):
         # model resolves to None. With LoRA enabled, an unknown adapter name
         # raises rather than silently falling back to the base model.
         lora_request = self._resolve_lora_request(request.get("model"))
-        self._track_lora_request_activation(lora_request)
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
 
-        gen = self.engine_client.generate(
-            prompt,
-            sampling_params,
-            request_id,
-            data_parallel_rank=local_dp_rank,
-            lora_request=lora_request,
-            **_engine_generate_reasoning_kwargs(
-                self.engine_client,
-                reasoning_ended,
-                reasoning_parser_kwargs,
+        gen = self._generate_with_lora_admission_lock(
+            lora_request,
+            lambda admitted_lora_request: self.engine_client.generate(
+                prompt,
+                sampling_params,
+                request_id,
+                data_parallel_rank=local_dp_rank,
+                lora_request=admitted_lora_request,
+                **_engine_generate_reasoning_kwargs(
+                    self.engine_client,
+                    reasoning_ended,
+                    reasoning_parser_kwargs,
+                ),
+                **telemetry.engine_trace_kwargs(context),
             ),
-            **telemetry.engine_trace_kwargs(context),
         )
 
         is_prefill = self.disaggregation_mode == DisaggregationMode.PREFILL
@@ -826,6 +828,41 @@ class VllmLLMEngine(LLMEngine):
         stripe serialize against each other (harmless on this control path).
         """
         return self._lora_load_locks[hash(lora_name) % _LORA_LOCK_STRIPES]
+
+    async def _generate_with_lora_admission_lock(
+        self,
+        lora_request: LoRARequest | None,
+        create_generator: Callable[[LoRARequest | None], AsyncGenerator[Any, None]],
+    ) -> AsyncGenerator[Any, None]:
+        """Yield results after atomically admitting a lazy LoRA request.
+
+        vLLM admits an ``AsyncLLM.generate`` request on its first iteration.
+        Holding the adapter lifecycle lock through that iteration prevents an
+        unload from deleting bookkeeping before lazy activation completes.
+        """
+        if lora_request is None or self._preload_lora_into_engine():
+            self._track_lora_request_activation(lora_request)
+            async for result in create_generator(lora_request):
+                yield result
+            return
+
+        lock = self._get_lora_lock(lora_request.lora_name)
+        async with lock:
+            # A pending request may have waited behind an unload. Re-resolve
+            # under the lock instead of admitting its stale path afterwards.
+            admitted_lora_request = self._resolve_lora_request(
+                lora_request.lora_name
+            )
+            generator = create_generator(admitted_lora_request)
+            self._track_lora_request_activation(admitted_lora_request)
+            try:
+                first_result = await anext(generator)
+            except StopAsyncIteration:
+                return
+
+        yield first_result
+        async for result in generator:
+            yield result
 
     def _preload_lora_into_engine(self) -> bool:
         """Whether lifecycle registration should eagerly activate the adapter.
