@@ -3,6 +3,14 @@ const fs = require('fs');
 
 const ICS_URL = 'https://calendar.google.com/calendar/ical/c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com/public/full.ics';
 
+function formatLocation(location) {
+  if (!location) return '–';
+  if (/^https?:\/\//.test(location)) return `[Online](${location})`;
+  const parts = location.split(',').map(s => s.trim());
+  const city = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+  return city || '–';
+}
+
 async function main() {
   const events = await ical.async.fromURL(ICS_URL);
   const now = new Date();
@@ -21,15 +29,16 @@ async function main() {
 
   const selected = [...future.reverse(), ...past.reverse()];
 
-  const lines = ['| Date | Event |', '|------|-------|'];
+  const lines = ['| Date | Event | Location |', '|------|-------|----------|'];
 
   if (selected.length === 0) {
-    lines.push('| – | No events to show |');
+    lines.push('| – | No events to show | |');
   } else {
     for (const e of selected) {
       const date = e.start.toDateString();
       const label = e.url ? `[${e.summary}](${e.url})` : e.summary;
-      lines.push(`| ${date} | ${label} |`);
+      const location = formatLocation(e.location);
+      lines.push(`| ${date} | ${label} | ${location} |`);
     }
   }
 
