@@ -4,6 +4,7 @@
 """Unit test for TRT-LLM --override-engine-args / --trtllm.* conflict resolution (GitHub #8659)."""
 
 import json
+import shlex
 
 import pytest
 
@@ -153,3 +154,67 @@ def test_enable_chunked_prefill_updates_generated_trtllm_workers():
         "args"
     ]
     assert encode_args == []
+
+
+def test_enable_chunked_prefill_preserves_shell_form_workers():
+    dynamic_command = (
+        "export READY=1 && python3 -m dynamo.trtllm "
+        '--model-path "${MODEL_PATH}" '
+        "--trtllm.enable_chunked_prefill false && echo ready"
+    )
+    override_command = (
+        "python3 -m dynamo.trtllm "
+        '--model-path "${MODEL_PATH}" '
+        "--override-engine-args "
+        '\'{"kv_cache_config": {"tokens_per_block": 32}}\''
+    )
+    config = {
+        "spec": {
+            "services": {
+                "dynamic": {
+                    "componentType": "worker",
+                    "subComponentType": "decode",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["/bin/sh", "-c"],
+                            "args": [dynamic_command],
+                        }
+                    },
+                },
+                "override": {
+                    "componentType": "worker",
+                    "subComponentType": "prefill",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "command": ["sh", "-c"],
+                            "args": [override_command],
+                        }
+                    },
+                },
+            }
+        }
+    }
+
+    result = enable_trtllm_chunked_prefill(config)
+    result = enable_trtllm_chunked_prefill(result)
+
+    dynamic_args = result["spec"]["services"]["dynamic"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert dynamic_args == [
+        "export READY=1 && python3 -m dynamo.trtllm "
+        '--model-path "${MODEL_PATH}" '
+        "--trtllm.enable_chunked_prefill true && echo ready"
+    ]
+
+    override_args = result["spec"]["services"]["override"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert len(override_args) == 1
+    assert '--model-path "${MODEL_PATH}"' in override_args[0]
+    override_tokens = shlex.split(override_args[0])
+    assert not any(token.startswith("--trtllm.") for token in override_tokens)
+    override_index = override_tokens.index("--override-engine-args")
+    override = json.loads(override_tokens[override_index + 1])
+    assert override["enable_chunked_prefill"] is True
+    assert override["kv_cache_config"]["tokens_per_block"] == 32
