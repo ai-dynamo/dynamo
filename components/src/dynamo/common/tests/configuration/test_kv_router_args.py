@@ -531,7 +531,8 @@ def test_enforce_disagg_cli_is_deprecated_and_not_forwarded(
 
     assert config.enforce_disagg is expected_value
     assert "enforce_disagg" not in kwargs
-    assert f"{flag} is deprecated and ignored" in caplog.text
+    warning = f"{flag} is deprecated and ignored"
+    assert caplog.text.count(warning) == 1
 
 
 @pytest.mark.parametrize("value", ["true", "false"])
@@ -550,7 +551,8 @@ def test_enforce_disagg_environment_is_deprecated_and_not_forwarded(
 
     assert config.enforce_disagg is (value == "true")
     assert "enforce_disagg" not in kwargs
-    assert "DYN_ENFORCE_DISAGG is deprecated and ignored" in caplog.text
+    warning = "DYN_ENFORCE_DISAGG is deprecated and ignored"
+    assert caplog.text.count(warning) == 1
 
 
 def test_admission_control_cli_flag_warns_and_is_ignored(
