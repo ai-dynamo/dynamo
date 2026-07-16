@@ -70,11 +70,7 @@ def test_prefill_generate_envelope_keeps_bootstrap_internal():
         },
         "extra_args": {
             "sglang_tito": {
-                "request_id": "request-1",
                 "sampling_params": {"max_tokens": 8, "seed": 17},
-                "model": "test-model",
-                "stream": False,
-                "priority": 0,
             }
         },
     }

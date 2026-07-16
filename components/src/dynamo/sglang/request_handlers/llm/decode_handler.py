@@ -20,7 +20,9 @@ from dynamo.sglang._compat import (
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import Config
-from dynamo.sglang.engine_generate import EngineGenerateRequest
+from dynamo.sglang.engine_generate import (
+    build_sampling_params as build_engine_generate_sampling_params,
+)
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -271,9 +273,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Returns:
             Dict of sampling parameters for SGLang engine.
         """
-        engine_request = EngineGenerateRequest.from_request(request)
-        if engine_request is not None:
-            return engine_request.build_sampling_params()
+        engine_sampling_params = build_engine_generate_sampling_params(request)
+        if engine_sampling_params is not None:
+            return engine_sampling_params
 
         if not self.use_sglang_tokenizer:
             # Token-based request format
@@ -350,19 +352,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         logging.debug(f"New Request ID: {context.id()}")
         trace_id = context.trace_id
-        engine_request = EngineGenerateRequest.from_request(request)
-        sampling_params = (
-            engine_request.build_sampling_params()
-            if engine_request is not None
-            else self._build_sampling_params(request)
-        )
+        sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
-        logprob_kwargs = (
-            engine_request.build_logprob_kwargs()
-            if engine_request is not None
-            else self._build_logprob_kwargs(request)
-        )
+        logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})

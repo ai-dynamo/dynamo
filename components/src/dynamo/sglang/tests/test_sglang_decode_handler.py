@@ -4,13 +4,10 @@
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 
-from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
-from dynamo.sglang.engine_generate import EngineGenerateRequest
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
@@ -183,16 +180,8 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
     return handler
 
 
-def _engine_generate_request(sampling_params, **fields):
-    payload = {
-        "request_id": "req-sglang-generate",
-        "sampling_params": sampling_params,
-        "model": "test-model",
-        "stream": False,
-        "priority": 0,
-    }
-    payload.update(fields)
-    return {"extra_args": {"sglang_tito": payload}}
+def _engine_generate_request(sampling_params):
+    return {"extra_args": {"sglang_tito": {"sampling_params": sampling_params}}}
 
 
 def test_engine_generate_maps_vllm_sampling_names_to_sglang():
@@ -227,51 +216,6 @@ def test_engine_generate_maps_vllm_sampling_names_to_sglang():
     }
 
 
-def test_engine_generate_validates_envelope_once(monkeypatch):
-    validation_calls = 0
-    original_validate = EngineGenerateRequest._validate_request_fields
-
-    def counting_validate(adapter):
-        nonlocal validation_calls
-        validation_calls += 1
-        original_validate(adapter)
-
-    monkeypatch.setattr(
-        EngineGenerateRequest, "_validate_request_fields", counting_validate
-    )
-
-    adapter = EngineGenerateRequest.from_request(_engine_generate_request({}))
-
-    assert adapter is not None
-    adapter.build_sampling_params()
-    adapter.build_logprob_kwargs()
-    assert validation_calls == 1
-
-
-def test_engine_generate_maps_output_and_prompt_logprobs(monkeypatch):
-    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1")
-    request = _engine_generate_request({"logprobs": 2, "prompt_logprobs": 3})
-    adapter = EngineGenerateRequest.from_request(request)
-
-    assert adapter is not None
-    assert adapter.build_logprob_kwargs() == {
-        "return_logprob": True,
-        "logprob_start_len": 0,
-        "top_logprobs_num": 3,
-    }
-
-
-def test_engine_generate_honors_top_logprob_safety_gate(monkeypatch):
-    monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
-    adapter = EngineGenerateRequest.from_request(
-        _engine_generate_request({"logprobs": 1})
-    )
-
-    assert adapter is not None
-    with pytest.raises(ValueError, match="does not currently support logprobs"):
-        adapter.build_logprob_kwargs()
-
-
 def test_engine_generate_rejects_ambiguous_or_unsupported_sampling_fields():
     handler = _new_decode_handler()
     with pytest.raises(ValueError, match="both map"):
@@ -282,80 +226,14 @@ def test_engine_generate_rejects_ambiguous_or_unsupported_sampling_fields():
         handler._build_sampling_params(_engine_generate_request({"best_of": 2}))
 
 
-def test_engine_generate_rejects_private_transfer_and_invalid_logprob_fields():
-    for field, value in [
-        ("cache_salt", "tenant-a"),
-        ("kv_transfer_params", {"remote": "client"}),
-        ("bootstrap_info", {"bootstrap_host": "client"}),
-    ]:
-        with pytest.raises(ValueError):
-            EngineGenerateRequest.from_request(
-                _engine_generate_request({}, **{field: value})
-            )
-
-    adapter = EngineGenerateRequest.from_request(
-        _engine_generate_request({"logprobs": -1})
-    )
-    assert adapter is not None
-    with pytest.raises(ValueError, match="non-negative integer"):
-        adapter.build_logprob_kwargs()
-
-
 async def _stream(items):
     for item in items:
         yield item
 
 
 class _Context:
-    trace_id = "legacy-generate-test"
-
-    def id(self):
-        return self.trace_id
-
     def is_stopped(self):
         return False
-
-
-@pytest.mark.asyncio
-async def test_engine_generate_legacy_decode_parses_adapter_once(monkeypatch):
-    expected_sampling_params = object()
-    adapter = SimpleNamespace(
-        build_sampling_params=Mock(return_value=expected_sampling_params),
-        build_logprob_kwargs=Mock(return_value={}),
-    )
-    parse_request = Mock(return_value=adapter)
-    monkeypatch.setattr(
-        EngineGenerateRequest, "from_request", parse_request
-    )
-
-    captured = {}
-
-    async def fake_async_generate(**kwargs):
-        captured.update(kwargs)
-        return _stream([])
-
-    handler = _new_decode_handler()
-    handler.engine = SimpleNamespace(async_generate=fake_async_generate)
-    handler.serving_mode = DisaggregationMode.AGGREGATED
-    handler.enable_trace = False
-    handler._engine_supports_priority = False
-    handler._routed_experts_kwargs = {}
-    handler._enable_frontend_decoding = False
-    handler._mm_hashes_supported = False
-    handler._get_input_param = lambda request: {}
-    handler._resolve_lora = lambda request: None
-    handler._build_sampling_params = lambda request: pytest.fail(
-        "engine-native generate reparsed the request through the fallback helper"
-    )
-    request = _engine_generate_request({})
-
-    async for _ in handler.generate(request, _Context()):
-        pass
-
-    parse_request.assert_called_once_with(request)
-    adapter.build_sampling_params.assert_called_once_with()
-    adapter.build_logprob_kwargs.assert_called_once_with()
-    assert captured["sampling_params"] is expected_sampling_params
 
 
 def test_build_sampling_params_passes_n_for_token_requests():

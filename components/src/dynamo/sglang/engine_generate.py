@@ -7,27 +7,13 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any
 
-from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 
 SGLANG_INFERENCE_V1_GENERATE_CAPABILITY = "sglang_inference_v1_generate"
 _PAYLOAD_KEY = "sglang_tito"
-_STANDARD_REQUEST_FIELDS = frozenset(
-    {
-        "request_id",
-        "sampling_params",
-        "model",
-        "stream",
-        "stream_options",
-        "cache_salt",
-        "priority",
-        "kv_transfer_params",
-    }
-)
 _INTERNAL_SAMPLING_FIELDS = frozenset(
     {
         "stop_strs",
@@ -69,59 +55,21 @@ def _sglang_sampling_fields() -> frozenset[str]:
     )
 
 
-@dataclass(frozen=True)
-class EngineGenerateRequest:
-    """Typed worker adapter for one SGLang-native generate request."""
-
-    sglang_tito: dict[str, Any]
-
-    @classmethod
-    def from_request(cls, request: dict[str, Any]) -> Optional["EngineGenerateRequest"]:
-        sglang_tito = payload(request)
-        if sglang_tito is None:
-            return None
-        engine_request = cls(sglang_tito)
-        engine_request._validate_request_fields()
-        return engine_request
-
-    def build_sampling_params(self) -> dict[str, Any]:
-        return _build_sampling_params(self.sglang_tito)
-
-    def build_logprob_kwargs(self) -> dict[str, Any]:
-        return _build_logprob_kwargs(self.sglang_tito)
-
-    def _validate_request_fields(self) -> None:
-        unsupported = sorted(set(self.sglang_tito) - _STANDARD_REQUEST_FIELDS)
-        if unsupported:
-            raise ValueError(
-                "unsupported top-level generate field(s) for SGLang: "
-                + ", ".join(unsupported)
-            )
-        if self.sglang_tito.get("cache_salt") is not None:
-            raise ValueError("cache_salt is not supported by SGLang generate")
-        if self.sglang_tito.get("kv_transfer_params") is not None:
-            raise ValueError(
-                "kv_transfer_params is managed by Dynamo for SGLang disaggregation"
-            )
-
-
-def payload(request: dict[str, Any]) -> Optional[dict[str, Any]]:
+def build_sampling_params(request: dict[str, Any]) -> dict[str, Any] | None:
+    """Translate an SGLang Generate payload, or return ``None`` when absent."""
     extra_args = request.get("extra_args")
     if not isinstance(extra_args, dict):
         return None
-    value = extra_args.get(_PAYLOAD_KEY)
-    return value if isinstance(value, dict) else None
-
-
-def _raw_sampling_params(sglang_tito: dict[str, Any]) -> dict[str, Any]:
+    sglang_tito = extra_args.get(_PAYLOAD_KEY)
+    if not isinstance(sglang_tito, dict):
+        return None
     raw_params = sglang_tito.get("sampling_params")
     if not isinstance(raw_params, dict):
         raise ValueError("extra_args.sglang_tito.sampling_params must be an object")
-    return raw_params
+    return _build_sampling_params(raw_params)
 
 
-def _build_sampling_params(sglang_tito: dict[str, Any]) -> dict[str, Any]:
-    raw_params = _raw_sampling_params(sglang_tito)
+def _build_sampling_params(raw_params: dict[str, Any]) -> dict[str, Any]:
     sampling_params: dict[str, Any] = {}
     sources: dict[str, str] = {}
     supported_fields = _sglang_sampling_fields()
@@ -246,34 +194,3 @@ def _structured_output_params(value: Any) -> dict[str, Any]:
             + ", ".join(sorted(unsupported))
         )
     return constraints
-
-
-def _build_logprob_kwargs(sglang_tito: dict[str, Any]) -> dict[str, Any]:
-    raw_params = _raw_sampling_params(sglang_tito)
-    logprobs = _logprob_count(raw_params.get("logprobs"), "logprobs")
-    prompt_logprobs = _logprob_count(
-        raw_params.get("prompt_logprobs"), "prompt_logprobs"
-    )
-    if logprobs is None and prompt_logprobs is None:
-        return {}
-
-    output_options = {
-        "logprobs": logprobs,
-        "prompt_logprobs": prompt_logprobs,
-    }
-    kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
-        output_options,
-        allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
-    )
-    kwargs.setdefault("logprob_start_len", -1)
-    return kwargs
-
-
-def _logprob_count(value: Any, name: str) -> Optional[int]:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(
-            f"sampling_params.{name} must be a non-negative integer for SGLang"
-        )
-    return value

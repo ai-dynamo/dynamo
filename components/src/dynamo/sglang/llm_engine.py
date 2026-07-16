@@ -80,7 +80,7 @@ from dynamo.sglang.capacity import (
 )
 from dynamo.sglang.engine_generate import (
     SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
-    EngineGenerateRequest,
+    build_sampling_params as build_engine_generate_sampling_params,
 )
 from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
@@ -384,12 +384,7 @@ class SglangLLMEngine(LLMEngine):
     ) -> AsyncGenerator[GenerateChunk, None]:
         assert self.engine is not None, "Engine not initialized"
 
-        engine_request = EngineGenerateRequest.from_request(request)
-        sampling_params = (
-            engine_request.build_sampling_params()
-            if engine_request is not None
-            else self._build_sampling_params(request)
-        )
+        sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
         priority_kwargs = {}
@@ -401,8 +396,6 @@ class SglangLLMEngine(LLMEngine):
         # especially with prompt_logprobs which forces a full prompt pass.
         if self.serving_mode == DisaggregationMode.PREFILL:
             logprob_kwargs = {}
-        elif engine_request is not None:
-            logprob_kwargs = engine_request.build_logprob_kwargs()
         else:
             logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
                 request.get("output_options", {}) or {},
@@ -1019,9 +1012,9 @@ class SglangLLMEngine(LLMEngine):
         return build_health_check_payload(bos_token_id=bos, extras=extras)
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
-        engine_request = EngineGenerateRequest.from_request(request)
-        if engine_request is not None:
-            return engine_request.build_sampling_params()
+        engine_sampling_params = build_engine_generate_sampling_params(request)
+        if engine_sampling_params is not None:
+            return engine_sampling_params
 
         if not self._use_sglang_tokenizer:
             sampling_opts = request.get("sampling_options", {})

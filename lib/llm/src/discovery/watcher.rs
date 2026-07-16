@@ -35,12 +35,9 @@ use crate::{
     backend::Backend,
     discovery::{KvWorkerMonitor, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
-    http::service::metrics::Metrics,
+    http::service::{metrics::Metrics, service_v2::EnabledGenerateBackends},
     kv_router::{EncoderRouter, PrefillRouter},
-    local_model::runtime_config::{
-        SGLANG_INFERENCE_V1_GENERATE_CAPABILITY, TokenizerBackend,
-        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-    },
+    local_model::runtime_config::TokenizerBackend,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -149,9 +146,13 @@ fn supports_generate_capability(card: &ModelDeploymentCard, capability: &str) ->
     )
 }
 
-fn supports_engine_generate(card: &ModelDeploymentCard) -> bool {
-    supports_generate_capability(card, VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
-        || supports_generate_capability(card, SGLANG_INFERENCE_V1_GENERATE_CAPABILITY)
+fn supports_enabled_engine_generate(
+    card: &ModelDeploymentCard,
+    enabled_backends: EnabledGenerateBackends,
+) -> bool {
+    enabled_backends
+        .capabilities()
+        .any(|capability| supports_generate_capability(card, capability))
 }
 
 const ENCODER_RESULT_HANDOFF_CAPABILITY: &str = "encoder_result_handoff";
@@ -234,9 +235,9 @@ pub struct ModelWatcher {
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
-    /// Whether the frontend configured an engine-native Generate API. Keep the
-    /// raw Generate pipeline out of non-HTTP and default-off paths.
-    generate_engine_enabled: bool,
+    /// Engine-native Generate routes mounted by the frontend. Keep raw
+    /// pipelines out of default-off paths and backend-mismatched worker sets.
+    enabled_generate_backends: EnabledGenerateBackends,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -360,7 +361,7 @@ impl ModelWatcher {
             pending_lora_adds: DashMap::new(),
             local_model_path: None,
             tokenizer_backend: None,
-            generate_engine_enabled: false,
+            enabled_generate_backends: EnabledGenerateBackends::default(),
         }
     }
 
@@ -376,8 +377,11 @@ impl ModelWatcher {
         self.tokenizer_backend = tokenizer_backend;
     }
 
-    pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
-        self.generate_engine_enabled = enabled;
+    pub(crate) fn set_enabled_generate_backends(
+        &mut self,
+        enabled_backends: EnabledGenerateBackends,
+    ) {
+        self.enabled_generate_backends = enabled_backends;
     }
 
     fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
@@ -1558,7 +1562,7 @@ impl ModelWatcher {
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
             let needs_generate_pipeline =
-                self.generate_engine_enabled && supports_engine_generate(card);
+                supports_enabled_engine_generate(card, self.enabled_generate_backends);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -2134,30 +2138,49 @@ fn seed_lora_state_from_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_model::runtime_config::{
+        SGLANG_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    };
     use crate::model_card::ModelDeploymentCard;
 
     #[test]
-    fn generate_requires_explicit_worker_capability() {
-        for capability in [
-            VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
-            SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+    fn generate_requires_enabled_matching_worker_capability() {
+        let disabled = EnabledGenerateBackends::default();
+        let vllm_enabled = EnabledGenerateBackends::new(true, false);
+        let sglang_enabled = EnabledGenerateBackends::new(false, true);
+        let both_enabled = EnabledGenerateBackends::new(true, true);
+
+        for (capability, matching, mismatched) in [
+            (
+                VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                vllm_enabled,
+                sglang_enabled,
+            ),
+            (
+                SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+                sglang_enabled,
+                vllm_enabled,
+            ),
         ] {
             let mut card = ModelDeploymentCard::with_name_only("model");
             card.model_type = ModelType::Chat | ModelType::Completions;
             assert!(!supports_generate_capability(&card, capability));
-            assert!(!supports_engine_generate(&card));
+            assert!(!supports_enabled_engine_generate(&card, matching));
 
             card.runtime_config
                 .set_engine_specific(capability, true)
                 .unwrap();
             assert!(supports_generate_capability(&card, capability));
-            assert!(supports_engine_generate(&card));
+            assert!(!supports_enabled_engine_generate(&card, disabled));
+            assert!(supports_enabled_engine_generate(&card, matching));
+            assert!(!supports_enabled_engine_generate(&card, mismatched));
+            assert!(supports_enabled_engine_generate(&card, both_enabled));
 
             card.runtime_config
                 .set_engine_specific(capability, false)
                 .unwrap();
             assert!(!supports_generate_capability(&card, capability));
-            assert!(!supports_engine_generate(&card));
+            assert!(!supports_enabled_engine_generate(&card, matching));
         }
     }
 

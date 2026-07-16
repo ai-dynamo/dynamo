@@ -46,6 +46,35 @@ use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
 use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::local_model::runtime_config::{
+    SGLANG_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EnabledGenerateBackends {
+    vllm: bool,
+    sglang: bool,
+}
+
+impl EnabledGenerateBackends {
+    pub(crate) fn new(vllm: bool, sglang: bool) -> Self {
+        Self { vllm, sglang }
+    }
+
+    pub(crate) fn any(self) -> bool {
+        self.vllm || self.sglang
+    }
+
+    pub(crate) fn capabilities(self) -> impl Iterator<Item = &'static str> {
+        [
+            self.vllm.then_some(VLLM_INFERENCE_V1_GENERATE_CAPABILITY),
+            self.sglang
+                .then_some(SGLANG_INFERENCE_V1_GENERATE_CAPABILITY),
+        ]
+        .into_iter()
+        .flatten()
+    }
+}
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -493,8 +522,8 @@ pub struct HttpService {
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
-    /// Resolved startup gate for either engine-native Generate API.
-    generate_api_enabled: bool,
+    /// Engine-native Generate backends whose HTTP routes are mounted.
+    enabled_generate_backends: EnabledGenerateBackends,
     /// RL worker discovery router, served on a dedicated port when enabled.
     rl_router: Option<axum::Router>,
     rl_port: u16,
@@ -622,7 +651,11 @@ impl HttpService {
     }
 
     pub fn generate_api_enabled(&self) -> bool {
-        self.generate_api_enabled
+        self.enabled_generate_backends.any()
+    }
+
+    pub(crate) fn enabled_generate_backends(&self) -> EnabledGenerateBackends {
+        self.enabled_generate_backends
     }
 
     pub async fn spawn(&self, cancel_token: CancellationToken) -> JoinHandle<Result<()>> {
@@ -904,8 +937,10 @@ impl HttpServiceConfigBuilder {
             config.enable_engine_apis || env_is_truthy(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV);
         let sglang_generate_endpoint_enabled =
             config.enable_engine_apis || env_is_truthy(SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV);
-        let generate_endpoint_enabled =
-            vllm_generate_endpoint_enabled || sglang_generate_endpoint_enabled;
+        let enabled_generate_backends = EnabledGenerateBackends::new(
+            vllm_generate_endpoint_enabled,
+            sglang_generate_endpoint_enabled,
+        );
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -953,7 +988,7 @@ impl HttpServiceConfigBuilder {
         );
         state
             .flags
-            .set(&EndpointType::Generate, generate_endpoint_enabled);
+            .set(&EndpointType::Generate, enabled_generate_backends.any());
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -1120,7 +1155,7 @@ impl HttpServiceConfigBuilder {
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
             route_docs: all_docs,
-            generate_api_enabled: generate_endpoint_enabled,
+            enabled_generate_backends,
             rl_router,
             rl_port: config.rl_port,
         })
@@ -1527,6 +1562,13 @@ mod tests {
             temp_env::with_var_unset(SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV, || {
                 let disabled = HttpService::builder().build().unwrap();
                 assert!(!disabled.generate_api_enabled());
+                assert!(
+                    disabled
+                        .enabled_generate_backends()
+                        .capabilities()
+                        .next()
+                        .is_none()
+                );
 
                 let enabled = HttpService::builder()
                     .enable_engine_apis(true)
@@ -1539,18 +1581,30 @@ mod tests {
                     .collect();
                 assert!(route_docs.contains(&"POST /inference/v1/generate".to_string()));
                 assert!(route_docs.contains(&"POST /sglang/inference/v1/generate".to_string()));
+                assert_eq!(
+                    enabled
+                        .enabled_generate_backends()
+                        .capabilities()
+                        .collect::<Vec<_>>(),
+                    vec![
+                        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                        SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
+                    ]
+                );
                 assert!(enabled.generate_api_enabled());
 
-                for (variable, expected_path, unexpected_path) in [
+                for (variable, expected_path, unexpected_path, expected_capability) in [
                     (
                         VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV,
                         "POST /inference/v1/generate",
                         "POST /sglang/inference/v1/generate",
+                        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
                     ),
                     (
                         SGLANG_ENABLE_INFERENCE_V1_GENERATE_ENV,
                         "POST /sglang/inference/v1/generate",
                         "POST /inference/v1/generate",
+                        SGLANG_INFERENCE_V1_GENERATE_CAPABILITY,
                     ),
                 ] {
                     temp_env::with_var(variable, Some("1"), || {
@@ -1561,6 +1615,13 @@ mod tests {
                             .iter()
                             .map(ToString::to_string)
                             .collect();
+                        assert_eq!(
+                            enabled
+                                .enabled_generate_backends()
+                                .capabilities()
+                                .collect::<Vec<_>>(),
+                            vec![expected_capability]
+                        );
                         assert!(route_docs.contains(&expected_path.to_string()));
                         assert!(!route_docs.contains(&unexpected_path.to_string()));
                     });

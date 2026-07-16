@@ -71,6 +71,17 @@ impl GenerateBackend {
             Self::Sglang => "sglang_tito",
         }
     }
+
+    fn worker_envelope(
+        self,
+        request: &GenerateRequest,
+        request_id: &str,
+    ) -> serde_json::Result<serde_json::Value> {
+        match self {
+            Self::Vllm => serde_json::to_value(VllmTitoEnvelope::new(request, request_id)),
+            Self::Sglang => serde_json::to_value(SglangTitoEnvelope::new(request)),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -199,13 +210,13 @@ fn generate_internal_error_response() -> Response {
     )
 }
 
-/// Borrowed worker envelope for engine-specific request fields.
+/// Complete vLLM-owned request envelope forwarded opaquely to its worker.
 ///
 /// `token_ids` are intentionally absent: `PreprocessedRequest.token_ids` is
 /// the canonical routing and wire representation, and the worker reconstructs
 /// the engine request from that field.
 #[derive(Serialize)]
-struct EngineTitoEnvelope<'a> {
+struct VllmTitoEnvelope<'a> {
     request_id: &'a str,
     sampling_params: &'a SamplingParams,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -222,7 +233,7 @@ struct EngineTitoEnvelope<'a> {
     passthrough: &'a serde_json::Map<String, serde_json::Value>,
 }
 
-impl<'a> EngineTitoEnvelope<'a> {
+impl<'a> VllmTitoEnvelope<'a> {
     fn new(request: &'a GenerateRequest, request_id: &'a str) -> Self {
         let GenerateRequest {
             request_id: _,
@@ -246,6 +257,21 @@ impl<'a> EngineTitoEnvelope<'a> {
             priority: *priority,
             kv_transfer_params: kv_transfer_params.as_ref(),
             passthrough,
+        }
+    }
+}
+
+/// Minimal SGLang-owned request payload. Routing, response formatting, and
+/// public request validation remain canonical in the Rust frontend.
+#[derive(Serialize)]
+struct SglangTitoEnvelope<'a> {
+    sampling_params: &'a SamplingParams,
+}
+
+impl<'a> SglangTitoEnvelope<'a> {
+    fn new(request: &'a GenerateRequest) -> Self {
+        Self {
+            sampling_params: &request.sampling_params,
         }
     }
 }
@@ -281,6 +307,15 @@ fn validate_sglang_request(request: &GenerateRequest) -> Result<(), String> {
             ));
         }
     }
+    if !request.passthrough.is_empty() {
+        let mut unsupported: Vec<_> = request.passthrough.keys().cloned().collect();
+        unsupported.sort();
+        return Err(format!(
+            "unsupported top-level generate field(s) for SGLang: {}",
+            unsupported.join(", ")
+        ));
+    }
+
     Ok(())
 }
 
@@ -305,9 +340,8 @@ fn generate_output_options(
     })
 }
 
-/// Project routing controls while retaining all engine-owned fields in an
-/// opaque backend envelope. The backend remains the authority for interpreting
-/// engine-specific fields.
+/// Project canonical routing and response controls, then attach only the
+/// request payload owned by the selected backend.
 fn preprocessed_from_generate(
     request: GenerateRequest,
     model: &str,
@@ -321,7 +355,7 @@ fn preprocessed_from_generate(
     let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
     let output_options = generate_output_options(&request, backend)?;
-    let engine_tito = serde_json::to_value(EngineTitoEnvelope::new(&request, request_id))?;
+    let engine_tito = backend.worker_envelope(&request, request_id)?;
     let mut extra_args = serde_json::Map::new();
     // Do not copy token_ids into this envelope. The worker reconstructs that
     // field from the canonical PreprocessedRequest token_ids after routing.
@@ -854,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sglang_generate_rejects_public_bootstrap_and_transfer_fields() {
+    async fn sglang_generate_rejects_unsupported_top_level_fields() {
         let (port, handle) = serve(Some(true)).await;
         let client = reqwest::Client::new();
         let private_fields = [
@@ -874,6 +908,7 @@ mod tests {
                 serde_json::json!({"remote": "client"}),
             ),
             ("cache_salt", serde_json::json!("tenant-a")),
+            ("future_vllm_field", serde_json::json!(true)),
         ];
 
         for (field, value) in private_fields {
@@ -1134,8 +1169,11 @@ mod tests {
         let extra_args = preprocessed.extra_args.as_ref().expect("extra args");
         assert!(extra_args.get("vllm_tito").is_none());
         let envelope = extra_args.get("sglang_tito").expect("sglang_tito envelope");
-        assert_eq!(envelope["request_id"], "resolved-request");
         assert_eq!(envelope["sampling_params"]["seed"], 4);
+        assert_eq!(envelope.as_object().map(|object| object.len()), Some(1));
+        assert!(envelope.get("request_id").is_none());
+        assert!(envelope.get("model").is_none());
+        assert!(envelope.get("priority").is_none());
         assert!(envelope.get("token_ids").is_none());
     }
 

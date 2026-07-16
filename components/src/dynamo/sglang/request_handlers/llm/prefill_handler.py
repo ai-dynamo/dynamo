@@ -11,7 +11,9 @@ from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang.args import Config
-from dynamo.sglang.engine_generate import EngineGenerateRequest
+from dynamo.sglang.engine_generate import (
+    build_sampling_params as build_engine_generate_sampling_params,
+)
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
@@ -100,9 +102,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             sampling_params = {
                 k: v for k, v in sampling_params.items() if v is not None
             }
-        engine_request = EngineGenerateRequest.from_request(inner_request)
-        if engine_request is not None:
-            sampling_params = engine_request.build_sampling_params()
+        engine_sampling_params = build_engine_generate_sampling_params(inner_request)
+        if engine_sampling_params is not None:
+            sampling_params = engine_sampling_params
 
         # Use provided bootstrap_info if available (e.g., for health checks with FAKE_BOOTSTRAP_HOST)
         # Otherwise use real bootstrap host/port from engine and generate room locally
