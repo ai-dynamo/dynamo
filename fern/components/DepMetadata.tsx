@@ -63,6 +63,79 @@ function statusVariant(status: string): string {
   return "draft";
 }
 
+/**
+ * Parse an Authors / Required Reviewers field value into a list of
+ * `{ label, href }` entries. Each comma-separated entry is treated as either
+ * a markdown link `[label](https://...)` — the canonical shape emitted by
+ * `fern/scripts/sync_deps.py` when it pulls DEP bodies from
+ * ai-dynamo/enhancements — or as a plain-text fallback (href = null).
+ *
+ * Kept as plain JavaScript syntax (no TS annotations inside the body) so the
+ * companion test file at `fern/components/test_dep_metadata.mjs` can regex-
+ * extract and eval it under node, matching the extraction pattern used by
+ * `fern/js/test_dep_pr_comments.mjs`.
+ *
+ * Only `http` / `https` URLs are accepted — anything else (e.g. a
+ * `javascript:` URI in a malformed manifest entry) is dropped to a plain-text
+ * entry, so the component never renders an unsafe anchor href.
+ *
+ * @param {string | null | undefined} value
+ * @returns {Array<{ label: string, href: string | null }>}
+ */
+function parseLinkedItems(value) {
+  if (!value) return [];
+  const raw = String(value);
+  const pieces = raw.split(",");
+  const items = [];
+  for (let i = 0; i < pieces.length; i++) {
+    const piece = pieces[i].trim();
+    if (piece.length === 0) continue;
+    const m = piece.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+    if (m) {
+      items.push({ label: m[1], href: m[2] });
+    } else {
+      items.push({ label: piece, href: null });
+    }
+  }
+  return items;
+}
+
+/** Labels whose values are parsed as a comma-separated list of author/reviewer
+ * handles (see parseLinkedItems). Other fields (Category, Sponsor, ...) render
+ * as plain text. */
+const LINKED_FIELDS = new Set(["Authors", "Required Reviewers"]);
+
+/** Turn a parsed author/reviewer value into a React fragment — anchor tags
+ * for entries with an href, plain spans for plain-text fallbacks, joined by
+ * ", " separators. Falls back to the raw value string if nothing parsed (an
+ * empty span already suppresses render, so this only matters if a caller
+ * bypasses the `useful_fields`-style filter). */
+function renderLinkedList(value: string) {
+  const items = parseLinkedItems(value);
+  if (items.length === 0) return value;
+  return (
+    <>
+      {items.map((item, i) => (
+        <span key={`item-${i}`}>
+          {i > 0 ? ", " : ""}
+          {item.href ? (
+            <a
+              className="dep-meta-link"
+              href={item.href}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              {item.label}
+            </a>
+          ) : (
+            item.label
+          )}
+        </span>
+      ))}
+    </>
+  );
+}
+
 /* Theme-aware via Fern's --pst-color-* vars (defined for both light and dark in
  * fern/main.css). Every background is paired with an explicit foreground so the
  * card never inherits an adjacent callout's color. */
@@ -86,6 +159,9 @@ const DEP_META_CSS = `
 .dep-meta-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
 .dep-meta-field b{font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--pst-color-text-muted,#777);}
 .dep-meta-field span{font-size:13.5px;line-height:1.35;color:var(--pst-color-text-base,#1a1a1a);overflow-wrap:break-word;}
+.dep-meta-link{color:#4c7a00;text-decoration:none;font-weight:600;}
+.dark .dep-meta-link{color:var(--nv-color-green,#76b900);}
+.dep-meta-link:hover{text-decoration:underline;}
 .dep-meta-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;}
 .dep-meta-action{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:6px 14px;border:1px solid var(--nv-color-green,#76b900);border-radius:8px;color:var(--pst-color-text-base,#1a1a1a);font-size:13px;font-weight:600;line-height:1;text-decoration:none;white-space:nowrap;}
 .dep-meta-action:hover{background:rgba(118,185,0,.12);text-decoration:none;}
@@ -145,7 +221,9 @@ export function DepMetadata({
           {fields.map((f) => (
             <div className="dep-meta-field" key={f.label}>
               <b>{f.label}</b>
-              <span>{f.value}</span>
+              <span>
+                {LINKED_FIELDS.has(f.label) ? renderLinkedList(f.value) : f.value}
+              </span>
             </div>
           ))}
         </div>
