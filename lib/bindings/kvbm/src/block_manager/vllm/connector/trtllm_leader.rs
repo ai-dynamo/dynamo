@@ -53,6 +53,13 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
         context_current_position: usize,
     ) -> anyhow::Result<()>;
 
+    fn on_rewind(
+        &mut self,
+        request_id: String,
+        live_block_ids: Vec<BlockId>,
+        num_tokens: usize,
+    ) -> anyhow::Result<()>;
+
     fn build_connector_metadata(
         &mut self,
         scheduler_output: SchedulerOutput,
@@ -304,6 +311,34 @@ impl Leader for KvConnectorLeader {
             self.inflight_request_to_num_external_tokens
                 .remove(&request_id);
         }
+
+        Ok(())
+    }
+
+    fn on_rewind(
+        &mut self,
+        request_id: String,
+        live_block_ids: Vec<BlockId>,
+        num_tokens: usize,
+    ) -> anyhow::Result<()> {
+        tracing::debug!(
+            request_id,
+            live_block_ids = ?live_block_ids,
+            num_tokens,
+            "on_rewind: trimming slot device_blocks after specdec rewind"
+        );
+
+        if !self.slot_manager().has_slot(&request_id) {
+            tracing::warn!("on_rewind called for request_id: {request_id} but slot is not found");
+            return Ok(());
+        }
+
+        let shared_slot = self.slot_manager().get_slot(&request_id)?;
+        let mut slot = shared_slot
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
+
+        slot.rewind_device_blocks(&live_block_ids, num_tokens);
 
         Ok(())
     }
@@ -583,6 +618,17 @@ impl PyTrtllmKvConnectorLeader {
     ) -> PyResult<()> {
         self.connector_leader
             .update_state_after_alloc(request_id, block_ids, context_current_position)
+            .map_err(to_pyerr)
+    }
+
+    fn on_rewind(
+        &mut self,
+        request_id: &str,
+        live_block_ids: Vec<BlockId>,
+        num_tokens: usize,
+    ) -> PyResult<()> {
+        self.connector_leader
+            .on_rewind(request_id.to_string(), live_block_ids, num_tokens)
             .map_err(to_pyerr)
     }
 
