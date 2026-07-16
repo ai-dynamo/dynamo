@@ -819,10 +819,7 @@ impl PyEngineCore {
                     kv_cache_block_size: opt_attr::<u32>(&v, "kv_cache_block_size")?,
                     total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
                     max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
-                    engine_max_num_seqs: opt_attr::<u64>(
-                        &v,
-                        "engine_max_num_seqs",
-                    )?,
+                    engine_max_num_seqs: opt_attr::<u64>(&v, "engine_max_num_seqs")?,
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,

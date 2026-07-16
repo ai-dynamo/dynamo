@@ -713,6 +713,7 @@ mod tests {
         assert_eq!(llm.kv_cache_block_size, Some(64));
         assert_eq!(llm.total_kv_blocks, Some(16384));
         assert_eq!(llm.max_num_seqs, Some(256));
+        assert_eq!(llm.engine_max_num_seqs, Some(256));
         assert_eq!(llm.context_length, Some(8192));
         engine.cleanup().await.unwrap();
     }

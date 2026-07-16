@@ -442,8 +442,8 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
-    """Return the Dynamo-normalized served model name from EngineConfig."""
+async def test_unified_start_returns_normalized_registration_metadata(monkeypatch):
+    """Return normalized model identity and local-DP capacity metadata."""
     from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
     from dynamo.vllm import llm_engine
 
@@ -471,7 +471,7 @@ async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
         "from_vllm_config",
         lambda **kwargs: engine_client,
     )
-    monkeypatch.setattr(llm_engine, "get_dp_range_for_worker", lambda config: (0, 1))
+    monkeypatch.setattr(llm_engine, "get_dp_range_for_worker", lambda config: (2, 3))
     monkeypatch.setattr(llm_engine, "per_rank_kv_blocks", lambda blocks, size: blocks)
     monkeypatch.setattr(
         llm_engine,
@@ -502,7 +502,7 @@ async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
 
     assert engine_args.served_model_name == [served_model_name]
     assert config.served_model_name == served_model_name
-    assert config.llm.engine_max_num_seqs == 2
+    assert config.llm.engine_max_num_seqs == 6
 
 
 def test_should_prefetch_model_for_default_load_format():

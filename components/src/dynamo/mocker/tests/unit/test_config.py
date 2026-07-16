@@ -94,6 +94,26 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert runtime_config.runtime_data["output_replay_consumer"] == "true"
 
 
+@pytest.mark.parametrize(
+    "max_num_seqs, dp_size, expected_engine_max_num_seqs",
+    [
+        (7, 1, 7),
+        (7, 3, 21),
+    ],
+)
+def test_build_runtime_config_normalizes_engine_max_num_seqs(
+    max_num_seqs, dp_size, expected_engine_max_num_seqs
+):
+    engine_args = CONFIG.build_mocker_engine_args(
+        make_args(max_num_seqs=max_num_seqs, dp_size=dp_size)
+    )
+
+    _, runtime_config = CONFIG.build_runtime_config(engine_args)
+
+    assert runtime_config.max_num_seqs == max_num_seqs
+    assert runtime_config.engine_max_num_seqs == expected_engine_max_num_seqs
+
+
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
     with pytest.raises(Exception, match="block_size and sglang.page_size to match"):
         CONFIG.build_mocker_engine_args(

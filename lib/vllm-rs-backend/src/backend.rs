@@ -182,6 +182,39 @@ impl VllmBackend {
         };
         Ok((engine, config))
     }
+
+    fn build_engine_config(
+        &self,
+        context_length: u32,
+        total_kv_blocks: Option<u64>,
+        data_parallel_size: u32,
+    ) -> EngineConfig {
+        EngineConfig {
+            model: self.model.clone(),
+            served_model_name: Some(
+                self.served_model_name
+                    .clone()
+                    .unwrap_or_else(|| self.model.clone()),
+            ),
+            runtime_data: Default::default(),
+            llm: Some(LlmRegistration {
+                context_length: Some(context_length),
+                kv_cache_block_size: self.extra.block_size,
+                total_kv_blocks,
+                max_num_seqs: self.extra.max_num_seqs,
+                engine_max_num_seqs: engine_max_num_seqs(
+                    self.extra.max_num_seqs,
+                    data_parallel_size,
+                ),
+                max_num_batched_tokens: self.extra.max_num_batched_tokens,
+                data_parallel_size: Some(data_parallel_size),
+                // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
+                data_parallel_start_rank: Some(0),
+                bootstrap_host: None,
+                bootstrap_port: None,
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -307,31 +340,7 @@ impl LLMEngine for VllmBackend {
             "vLLM backend started"
         );
 
-        Ok(EngineConfig {
-            model: self.model.clone(),
-            served_model_name: Some(
-                self.served_model_name
-                    .clone()
-                    .unwrap_or_else(|| self.model.clone()),
-            ),
-            runtime_data: Default::default(),
-            llm: Some(LlmRegistration {
-                context_length: Some(context_length),
-                kv_cache_block_size: self.extra.block_size,
-                total_kv_blocks,
-                max_num_seqs: self.extra.max_num_seqs,
-                engine_max_num_seqs: engine_max_num_seqs(
-                    self.extra.max_num_seqs,
-                    data_parallel_size,
-                ),
-                max_num_batched_tokens: self.extra.max_num_batched_tokens,
-                data_parallel_size: Some(data_parallel_size),
-                // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
-                data_parallel_start_rank: Some(0),
-                bootstrap_host: None,
-                bootstrap_port: None,
-            }),
-        })
+        Ok(self.build_engine_config(context_length, total_kv_blocks, data_parallel_size))
     }
 
     async fn generate(
@@ -614,6 +623,27 @@ mod tests {
         assert_eq!(engine_max_num_seqs(Some(128), 2), Some(256));
         assert_eq!(engine_max_num_seqs(None, 2), None);
         assert_eq!(engine_max_num_seqs(Some(u64::MAX), 2), Some(u64::MAX));
+    }
+
+    #[test]
+    fn engine_config_reports_normalized_local_capacity() {
+        let (engine, _config) = VllmBackend::from_args(Some(vec![
+            "dynamo-vllm-rs-backend".to_string(),
+            "Qwen/Qwen3-0.6B".to_string(),
+            "--data-parallel-size".to_string(),
+            "2".to_string(),
+            "--max-num-seqs".to_string(),
+            "128".to_string(),
+        ]))
+        .unwrap();
+        let data_parallel_size = u32::try_from(engine.managed_engine.data_parallel_size).unwrap();
+
+        let config = engine.build_engine_config(4096, Some(1024), data_parallel_size);
+        let llm = config.llm.expect("vLLM backend must register LLM capacity");
+
+        assert_eq!(llm.max_num_seqs, Some(128));
+        assert_eq!(llm.data_parallel_size, Some(2));
+        assert_eq!(llm.engine_max_num_seqs, Some(256));
     }
 
     #[test]

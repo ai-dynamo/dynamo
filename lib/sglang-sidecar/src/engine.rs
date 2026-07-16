@@ -607,9 +607,10 @@ fn build_engine_config(
 
 #[cfg(test)]
 mod tests {
+    use dynamo_backend_common::DisaggregationMode;
     use serde_json::json;
 
-    use super::{Discovery, resolve_bootstrap_host_with_local};
+    use super::{Discovery, build_engine_config, resolve_bootstrap_host_with_local};
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
         Discovery {
@@ -668,5 +669,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("--bootstrap-host"));
+    }
+
+    #[test]
+    fn engine_config_normalizes_max_num_seqs_to_local_dp_scope() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "max_running_requests": 48,
+                "dp_size": 4,
+                "enable_dp_attention": true,
+                "nnodes": 2,
+                "node_rank": 1
+            })),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        let llm = config
+            .llm
+            .expect("SGLang sidecar must register LLM capacity");
+
+        assert_eq!(llm.max_num_seqs, Some(12));
+        assert_eq!(llm.data_parallel_size, Some(2));
+        assert_eq!(llm.data_parallel_start_rank, Some(2));
+        assert_eq!(llm.engine_max_num_seqs, Some(24));
     }
 }

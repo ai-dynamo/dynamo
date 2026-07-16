@@ -20,9 +20,11 @@ pytestmark = [
 
 def test_engine_max_num_seqs_uses_post_init_engine_value():
     engine = SimpleNamespace(
-        llm=SimpleNamespace(args=SimpleNamespace(max_batch_size=37))
+        llm=SimpleNamespace(args=SimpleNamespace(max_batch_size=37)),
+        get_attention_dp_size=lambda: 4,
     )
 
+    # TRT-LLM reports one engine-wide budget; attention DP must not multiply it.
     assert engine_max_num_seqs(engine) == 37
 
 

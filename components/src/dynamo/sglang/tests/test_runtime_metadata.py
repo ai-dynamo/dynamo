@@ -80,6 +80,58 @@ async def test_engine_sequence_capacity_returns_none_without_usable_limit():
 
 
 @pytest.mark.asyncio
+async def test_unified_start_reports_normalized_local_engine_capacity(monkeypatch):
+    from dynamo.sglang import llm_engine
+
+    backend = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            get_internal_state=AsyncMock(
+                return_value=[
+                    {"effective_max_running_requests_per_dp": 7},
+                    {"effective_max_running_requests_per_dp": 5},
+                ]
+            )
+        ),
+        _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
+    )
+    server_args = SimpleNamespace(
+        model_path="Qwen/Qwen3-0.6B",
+        served_model_name="qwen",
+        context_length=4096,
+        max_running_requests=999,
+        page_size=16,
+        skip_tokenizer_init=True,
+        enable_trace=False,
+    )
+    engine = llm_engine.SglangLLMEngine(
+        server_args,
+        SimpleNamespace(use_sglang_tokenizer=False),
+        llm_engine.DisaggregationMode.AGGREGATED,
+    )
+    capacity = SimpleNamespace(
+        data_parallel_start_rank=2,
+        data_parallel_size=3,
+        max_num_seqs=5,
+        max_num_batched_tokens=1024,
+        total_kv_blocks=64,
+    )
+
+    monkeypatch.setattr(llm_engine.sgl, "Engine", lambda server_args: backend)
+    monkeypatch.setattr(
+        llm_engine, "SGLangEnginePauseController", lambda backend: object()
+    )
+    monkeypatch.setattr(llm_engine, "InputParamManager", lambda tokenizer: object())
+    monkeypatch.setattr(llm_engine, "runtime_capacity", lambda *_: capacity)
+    monkeypatch.setattr(llm_engine, "_get_runtime_data", lambda *_: None)
+    monkeypatch.setattr(engine, "_start_metrics_task", lambda: None)
+    monkeypatch.setattr(engine, "logits_processor_spec", AsyncMock(return_value=None))
+
+    config = await engine.start(worker_id=0)
+
+    assert config.llm.engine_max_num_seqs == 15
+
+
+@pytest.mark.asyncio
 async def test_proxy_registration_does_not_report_local_engine_capacity(monkeypatch):
     from dynamo.sglang import register
 
