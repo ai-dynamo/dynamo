@@ -206,6 +206,10 @@ async def test_override_suppresses_dp_rank_and_forwards_conversation_params(
     dp_rank suppressed, conversation_params forwarded. Mirrors the legacy
     HandlerBase override test so both entry points stay in lockstep."""
     monkeypatch.setattr(
+        "dynamo.trtllm.llm_engine.CONVERSATION_PARAMS_AVAILABLE",
+        True,
+    )
+    monkeypatch.setattr(
         "dynamo.trtllm.conversation_affinity.ConversationParams",
         _FakeConversationParams,
     )
