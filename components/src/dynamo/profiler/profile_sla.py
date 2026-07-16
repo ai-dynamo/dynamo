@@ -27,6 +27,9 @@ from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
 from dynamo.profiler.rapid import run_rapid
 from dynamo.profiler.thorough import run_thorough
+from dynamo.profiler.utils.config_modifiers.trtllm import (
+    enable_trtllm_chunked_prefill,
+)
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
@@ -468,6 +471,8 @@ async def run_profile(
                     runtime_backend=resolved_backend,
                     model_name_or_path=resolve_model_path(dgdr),
                 )
+                if resolved_backend == "trtllm":
+                    enable_trtllm_chunked_prefill(interpolation_dgd_config)
                 await run_interpolation(
                     dgdr,
                     ops,

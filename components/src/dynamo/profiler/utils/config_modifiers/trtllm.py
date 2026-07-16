@@ -110,12 +110,11 @@ def _merge_overrides_into_args(args: list[str], overrides: dict) -> list[str]:
 
 
 def enable_trtllm_chunked_prefill(config: dict) -> dict:
-    """Enable chunked prefill on every generated TRT-LLM LLM worker.
+    """Enable chunked prefill on generated TRT-LLM workers using dynamic flags.
 
-    Generated configs may express engine options either as ``--trtllm.*``
-    dynamic flags or in an ``--override-engine-args`` JSON object.  Normalize
-    both forms through :func:`_merge_overrides_into_args`, replacing an
-    existing dynamic flag so the result is idempotent and unambiguous.
+    Replace an existing dynamic flag so the result is idempotent.  When a
+    worker uses explicit ``--override-engine-args``, remove its chunked-prefill
+    entry instead of mixing that representation with ``--trtllm.*`` flags.
     """
     services = config.get("spec", {}).get("services", {})
     if not isinstance(services, dict):
@@ -133,7 +132,27 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
 
         args = break_arguments(main_container.get("args", []))
         while "--trtllm.enable_chunked_prefill" in args:
-            args = remove_valued_arguments(args, "--trtllm.enable_chunked_prefill")
+            idx = args.index("--trtllm.enable_chunked_prefill")
+            del args[idx]
+            if idx < len(args) and not (
+                isinstance(args[idx], str) and args[idx].startswith("--")
+            ):
+                del args[idx]
+
+        if "--override-engine-args" in args:
+            idx = args.index("--override-engine-args")
+            if idx + 1 < len(args):
+                try:
+                    override = json.loads(args[idx + 1])
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(override, dict):
+                        override.pop("enable_chunked_prefill", None)
+                        args[idx + 1] = json.dumps(override)
+            main_container["args"] = args
+            continue
+
         main_container["args"] = _merge_overrides_into_args(
             args, {"enable_chunked_prefill": True}
         )
