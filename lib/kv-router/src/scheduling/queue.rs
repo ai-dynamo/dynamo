@@ -286,37 +286,14 @@ impl<
             prefill_load_estimator,
             overlap_scores_refresh,
             overloaded_worker_provider,
+            Duration::from_secs(60),
+            PolicyClassAdmissionStrategies::new(),
         )
         .expect("synthetic policy profile does not require admission strategies")
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_policy_profile(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        profile: PolicyProfile,
-        block_size: u32,
-        selector: Sel,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<RF>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    ) -> Result<Self, KvSchedulerError> {
-        Self::new_with_policy_profile_and_admission_strategies(
-            slots,
-            workers_with_configs,
-            profile,
-            block_size,
-            selector,
-            prefill_load_estimator,
-            overlap_scores_refresh,
-            overloaded_worker_provider,
-            Duration::from_secs(60),
-            PolicyClassAdmissionStrategies::new(),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_policy_profile_and_admission_strategies(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
@@ -2023,6 +2000,8 @@ mod tests {
                 None,
                 None,
                 None,
+                Duration::from_secs(60),
+                PolicyClassAdmissionStrategies::new(),
             )
             .unwrap(),
         );
@@ -2439,7 +2418,7 @@ policy_classes:
         let mut strategies = PolicyClassAdmissionStrategies::new();
         strategies.insert(class_name.to_owned(), strategy);
         let queue = Arc::new(
-            SchedulerQueue::new_with_policy_profile_and_admission_strategies(
+            SchedulerQueue::new_with_policy_profile(
                 Arc::clone(&slots),
                 cfg_rx,
                 profile,

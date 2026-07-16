@@ -111,6 +111,7 @@ where
             cancellation_token,
             worker_type,
             monitor_worker_configs,
+            PolicyClassAdmissionStrategies::new(),
         )
         .expect("synthetic policy profile does not require admission strategies")
     }
@@ -130,10 +131,15 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
+        admission_strategies: PolicyClassAdmissionStrategies,
     ) -> Result<Self, KvSchedulerError> {
-        Self::new_with_policy_profile_and_admission_strategies(
-            slots,
-            workers_with_configs,
+        let periodic_recheck_interval = admission_strategies
+            .values()
+            .filter_map(|strategy| strategy.reconcile_interval())
+            .fold(recheck_interval, Duration::min);
+        let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
+            Arc::clone(&slots),
+            workers_with_configs.clone(),
             profile,
             block_size,
             selector,
@@ -141,49 +147,8 @@ where
             overlap_scores_refresh,
             overloaded_worker_provider,
             recheck_interval,
-            track_prefill_tokens_default,
-            cancellation_token,
-            worker_type,
-            monitor_worker_configs,
-            PolicyClassAdmissionStrategies::new(),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_policy_profile_and_admission_strategies(
-        slots: Arc<ActiveSequencesMultiWorker<P>>,
-        workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
-        profile: PolicyProfile,
-        block_size: u32,
-        selector: Sel,
-        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-        overlap_scores_refresh: Option<Arc<RF>>,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        recheck_interval: Duration,
-        track_prefill_tokens_default: bool,
-        cancellation_token: CancellationToken,
-        worker_type: &'static str,
-        monitor_worker_configs: bool,
-        admission_strategies: PolicyClassAdmissionStrategies,
-    ) -> Result<Self, KvSchedulerError> {
-        let periodic_recheck_interval = admission_strategies
-            .values()
-            .filter_map(|strategy| strategy.reconcile_interval())
-            .fold(recheck_interval, Duration::min);
-        let queue = Arc::new(
-            SchedulerQueue::new_with_policy_profile_and_admission_strategies(
-                Arc::clone(&slots),
-                workers_with_configs.clone(),
-                profile,
-                block_size,
-                selector,
-                prefill_load_estimator,
-                overlap_scores_refresh,
-                overloaded_worker_provider,
-                recheck_interval,
-                admission_strategies,
-            )?,
-        );
+            admission_strategies,
+        )?);
 
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
@@ -647,6 +612,7 @@ where
             cancellation_token,
             worker_type,
             monitor_worker_configs,
+            PolicyClassAdmissionStrategies::new(),
         )
     }
 
@@ -1477,7 +1443,7 @@ mod tests {
             Box::new(AbortCountingStrategy(Arc::clone(&aborted))),
         );
         let cancel_token = CancellationToken::new();
-        let scheduler = LocalScheduler::new_with_policy_profile_and_admission_strategies(
+        let scheduler = LocalScheduler::new_with_policy_profile(
             Arc::clone(&slots),
             cfg_rx,
             PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
@@ -1534,7 +1500,7 @@ mod tests {
         );
         let cancel_token = CancellationToken::new();
         let scheduler = Arc::new(
-            LocalScheduler::new_with_policy_profile_and_admission_strategies(
+            LocalScheduler::new_with_policy_profile(
                 slots,
                 cfg_rx,
                 PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),

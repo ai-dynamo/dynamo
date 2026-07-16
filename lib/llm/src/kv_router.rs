@@ -293,6 +293,7 @@ where
             model_name.as_deref(),
             worker_type,
             cancellation_token.child_token(),
+            Default::default(),
         )
         .await?;
 

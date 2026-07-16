@@ -762,7 +762,7 @@ mod tests {
             Box::new(RecordingAdmissionStrategy(Arc::clone(&events))),
         );
         let cancel = CancellationToken::new();
-        let scheduler = LocalScheduler::new_with_policy_profile_and_admission_strategies(
+        let scheduler = LocalScheduler::new_with_policy_profile(
             Arc::clone(&slots),
             config_rx,
             PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs),
