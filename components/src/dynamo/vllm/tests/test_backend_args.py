@@ -8,6 +8,8 @@ Unit tests for vLLM backend arguments.
 need to add more tests to cover different code paths of DynamoVllmConfig.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from dynamo.vllm.backend_args import DisaggregationMode, DynamoVllmConfig
@@ -189,6 +191,61 @@ class TestEmbeddingWorkerExclusivity:
         config.embedding_worker = False
         config.benchmark_mode = "agg"
         config._validate_embedding_worker_exclusivity()
+
+
+class TestRealtimeTranscriptionWorkerExclusivity:
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.realtime_transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config._validate_realtime_transcription_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_disagg_rejected(self, mode):
+        config = create_config()
+        config.realtime_transcription_worker = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_realtime_transcription_worker_exclusivity()
+
+    def test_embedding_combination_rejected(self):
+        config = create_config()
+        config.realtime_transcription_worker = True
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="embedding-worker"):
+            config._validate_realtime_transcription_worker_exclusivity()
+
+    def test_multimodal_combination_rejected(self):
+        config = create_config()
+        config.realtime_transcription_worker = True
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="multimodal"):
+            config._validate_realtime_transcription_worker_exclusivity()
+
+    def test_benchmark_mode_rejected(self):
+        config = create_config()
+        config.realtime_transcription_worker = True
+        config.benchmark_mode = "agg"
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="benchmark-mode"):
+            config._validate_realtime_transcription_worker_exclusivity()
+
+    def test_lora_rejected(self):
+        config = create_config()
+        config.realtime_transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = SimpleNamespace(enable_lora=True)
+        with pytest.raises(ValueError, match="enable-lora"):
+            config._validate_realtime_transcription_worker_exclusivity()
 
 
 class TestValidateCustomEncoder:
