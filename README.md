@@ -33,6 +33,10 @@ limitations under the License.
 
 # Dynamo
 
+**The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
+
+Built in Rust for performance, Python for extensibility.
+
 ## Community Events
 
 <!-- EVENTS:START -->
@@ -43,11 +47,6 @@ limitations under the License.
 <!-- EVENTS:END -->
 
 > Events are updated automatically. Subscribe to our [public calendar](https://calendar.google.com/calendar/embed?src=c_c2448d2efb09eac2ddee1f34524124135bd3f4554868769059105e18e1b97e8f%40group.calendar.google.com).
-
-
-**The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
-
-Built in Rust for performance, Python for extensibility.
 
 ## When to use Dynamo
 

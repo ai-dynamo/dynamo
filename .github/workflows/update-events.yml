@@ -2,7 +2,7 @@ name: Update Community Events
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 concurrency:
@@ -24,8 +24,9 @@ jobs:
       - run: node .github/scripts/update-events.js
       - uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676  # v7
         with:
-          commit-message: 'chore: update community events from Google Calendar [skip ci]'
+          commit-message: 'chore: update community events from Google Calendar'
           title: 'chore: update community events'
           branch: auto/update-community-events
           delete-branch: true
+          signoff: true
           body: Automated community events update from Google Calendar.
