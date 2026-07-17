@@ -14,6 +14,11 @@
  * shared NVIDIA global theme at publish, per the RecipeStyles constraint.
  */
 
+// Type-only import (erased at build): lets the lifecycle stepper set the
+// `--dep-accent` CSS custom property inline without pulling React into runtime
+// scope, matching the other components' zero-runtime-import convention.
+import type { CSSProperties } from "react";
+
 interface DepMetadataProps {
   /**
    * DEP number, e.g. "0000". Optional; when omitted, the card leads with the
@@ -75,6 +80,42 @@ function statusVariant(status) {
   if (/reject|withdraw/.test(s)) return "rejected";
   if (/replac|supersed|deferr|defer/.test(s)) return "muted";
   return "draft";
+}
+
+/** Forward lifecycle stages shown in the stepper, in order. Off-track terminal
+ * states (Rejected / Deferred / Replaced) are handled separately — see
+ * DepLifecycle below. */
+const LIFECYCLE_STAGES = ["Draft", "Under Review", "Accepted", "Implemented"];
+
+/** Accent color per pill variant. Drives both the card's status-tinted accent
+ * (border + corner wash) and the stepper fill, so a DEP reads in one color.
+ * Values match ACCENT in fern/js/dep-index.js. */
+const STATUS_ACCENT = {
+  draft: "#e0a800",
+  proposed: "#5b8def",
+  accepted: "#76b900",
+  rejected: "#dc4848",
+  muted: "#9a9a9a",
+};
+
+/**
+ * Index into LIFECYCLE_STAGES for a forward-moving DEP. Rejected / Deferred /
+ * Replaced are terminal off-track states and never reach here (DepLifecycle
+ * branches on statusVariant first) — this only ranks the happy path.
+ *
+ * Kept as plain JavaScript syntax (no TS annotations) so the companion test at
+ * fern/components/test_dep_metadata.mjs can regex-extract and eval it, matching
+ * the parseLinkedItems / statusVariant extraction pattern.
+ *
+ * @param {string | null | undefined} status
+ * @returns {number}
+ */
+function lifecycleStage(status) {
+  const s = (status || "").toLowerCase();
+  if (/implement|final/.test(s)) return 3;
+  if (/accept|approv|active|ratif/.test(s)) return 2;
+  if (/propos|review/.test(s)) return 1;
+  return 0;
 }
 
 /**
@@ -154,7 +195,16 @@ function renderLinkedList(value: string) {
  * fern/main.css). Every background is paired with an explicit foreground so the
  * card never inherits an adjacent callout's color. */
 const DEP_META_CSS = `
-.dep-meta{margin:0 0 2rem;padding:20px 22px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-radius:14px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);}
+.dep-meta{position:relative;overflow:hidden;margin:0 0 2rem;padding:20px 22px;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));border-radius:14px;background:var(--pst-color-surface,#f7f7f7);color:var(--pst-color-text-base,#1a1a1a);}
+/* Status accent: tint the card border and lay a faint status-colored wash in
+   the top-right corner (echoes the index card's ghosted watermark). --dep-accent
+   is set inline per DEP; no hard left rail. */
+.dep-meta::after{content:"";position:absolute;top:-40%;right:-10%;width:280px;height:280px;border-radius:50%;background:radial-gradient(circle,var(--dep-accent,transparent) 0%,transparent 70%);opacity:.06;pointer-events:none;}
+.dep-meta--draft{border-color:rgba(224,168,0,.38);}
+.dep-meta--proposed{border-color:rgba(91,141,239,.38);}
+.dep-meta--accepted{border-color:rgba(118,185,0,.48);}
+.dep-meta--rejected{border-color:rgba(220,72,72,.36);}
+.dep-meta--muted{border-color:rgba(127,127,127,.32);}
 .dep-meta-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;}
 .dep-meta-eyebrow{margin:0 0 4px;color:var(--nv-color-green,#76b900);font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;}
 .dep-meta-title{margin:0;font-size:1.35rem;line-height:1.25;color:var(--pst-color-heading,inherit);}
@@ -179,7 +229,75 @@ const DEP_META_CSS = `
 .dep-meta-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;}
 .dep-meta-action{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:6px 14px;border:1px solid var(--nv-color-green,#76b900);border-radius:8px;color:var(--pst-color-text-base,#1a1a1a);font-size:13px;font-weight:600;line-height:1;text-decoration:none;white-space:nowrap;}
 .dep-meta-action:hover{background:rgba(118,185,0,.12);text-decoration:none;}
+/* Lifecycle stepper: Draft -> Under Review -> Accepted -> Implemented, filled to
+   the current stage. Off-track terminal states branch (see DepLifecycle):
+   Draft -> Under Review -> [Rejected|Deferred|...]. --dep-accent is set per step. */
+.dep-meta-steps{display:flex;align-items:flex-start;margin-top:16px;padding-top:16px;border-top:1px solid var(--border,var(--grayscale-a5,#e2e2e2));position:relative;z-index:1;}
+.dep-meta-step{flex:1;display:flex;flex-direction:column;align-items:center;gap:7px;position:relative;text-align:center;}
+.dep-meta-step::before{content:"";position:absolute;top:6px;left:-50%;width:100%;height:2px;background:var(--border,var(--grayscale-a5,#dcdcdc));z-index:0;}
+.dep-meta-step:first-child::before{display:none;}
+.dep-meta-step.is-done::before,.dep-meta-step.is-current::before,.dep-meta-step.is-terminal::before{background:var(--dep-accent,var(--nv-color-green,#76b900));}
+.dep-meta-dot{position:relative;z-index:1;width:14px;height:14px;border-radius:50%;background:var(--pst-color-surface,#fff);border:2px solid var(--border,var(--grayscale-a5,#ccc));box-sizing:border-box;}
+.dep-meta-step.is-done .dep-meta-dot,.dep-meta-step.is-terminal .dep-meta-dot{background:var(--dep-accent,var(--nv-color-green,#76b900));border-color:var(--dep-accent,var(--nv-color-green,#76b900));}
+.dep-meta-step.is-current .dep-meta-dot{background:var(--dep-accent,var(--nv-color-green,#76b900));border-color:var(--dep-accent,var(--nv-color-green,#76b900));box-shadow:0 0 0 4px color-mix(in srgb,var(--dep-accent,#76b900) 22%,transparent);}
+.dep-meta-steplabel{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;line-height:1.2;color:var(--pst-color-text-muted,#888);max-width:12ch;}
+.dep-meta-step.is-done .dep-meta-steplabel,.dep-meta-step.is-current .dep-meta-steplabel,.dep-meta-step.is-terminal .dep-meta-steplabel{color:var(--pst-color-text-base,#1a1a1a);}
 `;
+
+/** A step in the lifecycle stepper. `state` drives the dot/connector fill via
+ * the is-* CSS classes; `accent` is the per-step color (green for reached
+ * happy-path stages, the terminal color for an off-track end node). */
+type LifecycleStep = {
+  label: string;
+  state: "done" | "current" | "todo" | "terminal";
+  accent: string;
+};
+
+/**
+ * Render the lifecycle stepper for a DEP.
+ *
+ * Happy path: the four LIFECYCLE_STAGES, filled up to the current stage. Off-
+ * track terminal states (Rejected / Deferred / Replaced — statusVariant
+ * "rejected" or "muted") instead show Draft -> Under Review -> <terminal>, so
+ * the card conveys "this reached review, then ended" rather than implying it
+ * marched to Implemented.
+ */
+function DepLifecycle({ status }: { status: string }) {
+  const variant = statusVariant(status);
+  const terminalOff = variant === "rejected" || variant === "muted";
+
+  let steps: LifecycleStep[];
+  if (terminalOff) {
+    steps = [
+      { label: "Draft", state: "done", accent: STATUS_ACCENT.accepted },
+      { label: "Under Review", state: "done", accent: STATUS_ACCENT.accepted },
+      { label: status, state: "terminal", accent: STATUS_ACCENT[variant] },
+    ];
+  } else {
+    const current = lifecycleStage(status);
+    const accent = STATUS_ACCENT[variant];
+    steps = LIFECYCLE_STAGES.map((label, i) => ({
+      label,
+      state: i < current ? "done" : i === current ? "current" : "todo",
+      accent,
+    }));
+  }
+
+  return (
+    <div className="dep-meta-steps" role="img" aria-label={`Lifecycle: ${status}`}>
+      {steps.map((step, i) => (
+        <div
+          className={`dep-meta-step is-${step.state}`}
+          key={`${step.label}-${i}`}
+          style={{ "--dep-accent": step.accent } as CSSProperties}
+        >
+          <span className="dep-meta-dot" />
+          <span className="dep-meta-steplabel">{step.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function DepMetadata({
   dep,
@@ -217,7 +335,10 @@ export function DepMetadata({
   push("Replaced By", replacedBy);
 
   return (
-    <div className="dep-meta">
+    <div
+      className={`dep-meta dep-meta--${variant}`}
+      style={{ "--dep-accent": STATUS_ACCENT[variant] } as CSSProperties}
+    >
       <style dangerouslySetInnerHTML={{ __html: DEP_META_CSS }} />
       <div className="dep-meta-top">
         <div>
@@ -241,6 +362,8 @@ export function DepMetadata({
           ))}
         </div>
       )}
+
+      {status && status.trim() ? <DepLifecycle status={status} /> : null}
 
       {(prUrl || trackingIssue) && (
         <div className="dep-meta-actions">

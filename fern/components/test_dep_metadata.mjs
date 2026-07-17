@@ -57,6 +57,7 @@ function extractFn(name) {
 
 const parseLinkedItems = extractFn("parseLinkedItems");
 const statusVariant = extractFn("statusVariant");
+const lifecycleStage = extractFn("lifecycleStage");
 
 let passes = 0;
 let fails = 0;
@@ -197,6 +198,38 @@ test("unknown / empty status → draft (default)", () => {
   assert.equal(statusVariant(""), "draft");
   assert.equal(statusVariant(null), "draft");
   assert.equal(statusVariant(undefined), "draft");
+});
+
+console.log("");
+console.log(
+  "lifecycleStage() — ranks a happy-path DEP into the 4-stage stepper (Draft=0 .. Implemented=3)",
+);
+
+test("Draft → 0 (first stage / default)", () => {
+  assert.equal(lifecycleStage("Draft"), 0);
+});
+
+test("Under Review → 1 (via /review/)", () => {
+  assert.equal(lifecycleStage("Under Review"), 1);
+});
+
+test("legacy Proposed → 1 (same stage as Under Review)", () => {
+  assert.equal(lifecycleStage("Proposed"), 1);
+});
+
+test("Accepted → 2", () => {
+  assert.equal(lifecycleStage("Accepted"), 2);
+});
+
+test("Implemented → 3 (final happy-path stage, via /implement/)", () => {
+  assert.equal(lifecycleStage("Implemented"), 3);
+});
+
+test("unknown / empty status → 0 (falls back to Draft stage)", () => {
+  assert.equal(lifecycleStage("Whatever"), 0);
+  assert.equal(lifecycleStage(""), 0);
+  assert.equal(lifecycleStage(null), 0);
+  assert.equal(lifecycleStage(undefined), 0);
 });
 
 console.log(`\n${passes} passed, ${fails} failed`);
