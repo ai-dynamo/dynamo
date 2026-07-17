@@ -6,10 +6,6 @@ name: EPD Test Template
 
 on:
   workflow_call:
-    secrets:
-      AUNG_SAN_I_DYNAMO:
-        description: 'SSH private key with read access to this repository'
-        required: true
     inputs:
       test_name:
         description: 'Test name (e.g., e-pd-2nodes)'
@@ -86,77 +82,36 @@ jobs:
     env:
       NS: dynamo-system
     steps:
-      - name: Install SSH Key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.AUNG_SAN_I_DYNAMO }}
-
-      - name: Verify SSH checkout credentials
+      - name: print-inputs
+        run: |
+          echo "Test Name: ${{ inputs.test_name }}"
+          echo "Test YAML Path: ${{ inputs.test_yaml_path }}"
+          echo "Runner: ${{ inputs.runner }}"
+          echo "PR Number: ${{ inputs.PR_NUMBER }}"
+          echo "Checkout Commit: ${{ inputs.CHECKOUT_COMMIT }}"
+          echo "Docker Image XPU: ${{ inputs.docker_image_xpu }}"
+          echo "Docker Image GPU: ${{ inputs.docker_image_gpu }}"
+          echo "XPU Resource Template: ${{ inputs.xpu_resource_template }}"
+          echo "NVIDIA Resource Template: ${{ inputs.nvidia_resource_template }}"
+          echo "XPU Node: ${{ inputs.xpu_node }}"
+          echo "NVIDIA Node: ${{ inputs.nvidia_node }}"
+          echo "Model: ${{ inputs.model }}"
+          echo "Tensor Parallel: ${{ inputs.tensor_parallel }}"
+          echo "Log Directory Name: ${{ inputs.log_dir_name }}"
+          
+      - name: Prepare checkout path
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Loaded SSH identities:"
-          ssh-add -l
-
-          echo "Testing SSH authentication to GitHub..."
-          set +e
-          SSH_OUTPUT=$(ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new git@github.com 2>&1)
-          SSH_STATUS=$?
-          set -e
-
-          echo "$SSH_OUTPUT"
-
-          if echo "$SSH_OUTPUT" | grep -q "successfully authenticated"; then
-            echo "SSH authentication to GitHub succeeded"
-          else
-            echo "ERROR: SSH authentication to GitHub failed"
-            echo "Check that secret AUNG_SAN_I_DYNAMO contains the private key whose public key has read access to ${GITHUB_REPOSITORY}"
-            exit "$SSH_STATUS"
-          fi
+          echo "REPO_NAME=repo" >> "$GITHUB_ENV"
+          rm -rf "$GITHUB_WORKSPACE/repo"
 
       - name: Checkout repository
-        shell: bash
-        env:
-          COMMIT: ${{ inputs.CHECKOUT_COMMIT }}
-          PR_NUMBER: ${{ inputs.PR_NUMBER }}
-        run: |
-          REPO_NAME="${GITHUB_REPOSITORY##*/}"
-          echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_ENV"
-          COMMIT_SHA="$COMMIT"
-          if [ -z "$COMMIT_SHA" ]; then
-            COMMIT_SHA="$GITHUB_SHA"
-          fi
-
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-          echo "COMMIT=$COMMIT_SHA"
-          echo "PR_NUMBER=$PR_NUMBER"
-          pwd
-          ls -la "$GITHUB_WORKSPACE"; echo ''
-
-          rm -rf "$GITHUB_WORKSPACE" 2>/dev/null || true
-          mkdir -p "$GITHUB_WORKSPACE"
-
-          cd "$GITHUB_WORKSPACE"
-
-          # Ensure GitHub's SSH host key is trusted (fixes "Host key verification failed")
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >> ~/.ssh/known_hosts
-          sort -u ~/.ssh/known_hosts -o ~/.ssh/known_hosts
-          
-          REPO_SSH_URL="git@github.com:${GITHUB_REPOSITORY}.git"
-          if [ -n "$PR_NUMBER" ]; then
-            echo "Checking out main and merging PR #$PR_NUMBER"
-            git clone --branch main "$REPO_SSH_URL" "$REPO_NAME"
-            cd "$REPO_NAME"
-            git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
-            git merge --no-edit pr-${PR_NUMBER}
-          else
-            echo "Checking out commit SHA: $COMMIT_SHA"
-            git clone --filter=blob:none "$REPO_SSH_URL" "$REPO_NAME"
-            cd "$REPO_NAME"
-            git checkout "$COMMIT_SHA"
-          fi
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.PR_NUMBER != '' && format('refs/pull/{0}/merge', inputs.PR_NUMBER) || inputs.CHECKOUT_COMMIT || github.sha }}
+          path: repo
 
       - name: Prepare diagnostics helper
         env:
@@ -655,6 +610,47 @@ jobs:
 
       - name: Cleanup
         if: always()
+        shell: bash
         run: |
-          kubectl delete job "$TEST_NAME-bench" -n "$NS" --ignore-not-found || true
-          kubectl delete dynamographdeployment "$TEST_NAME" -n "$NS" --ignore-not-found || true
+          set -u
+
+          if [ -z "${TEST_NAME:-}" ]; then
+            echo "TEST_NAME is not set; cleanup skipped"
+            exit 0
+          fi
+
+          SERVICE_SELECTOR="nvidia.com/dynamo-graph-deployment-name=$TEST_NAME"
+          BENCH_SELECTOR="job-name=$TEST_NAME-bench"
+          remaining=0
+
+          echo "Deleting benchmark Job: $TEST_NAME-bench"
+          kubectl delete job "$TEST_NAME-bench" -n "$NS" --ignore-not-found=true --wait=true --timeout=5m || true
+          kubectl delete pods -n "$NS" -l "$BENCH_SELECTOR" --ignore-not-found=true --wait=true --timeout=5m || true
+
+          echo "Deleting DynamoGraphDeployment: $TEST_NAME"
+          kubectl delete dynamographdeployment "$TEST_NAME" -n "$NS" --ignore-not-found=true --wait=true --timeout=6m || true
+          kubectl delete pods -n "$NS" -l "$SERVICE_SELECTOR" --ignore-not-found=true --wait=true --timeout=6m || true
+
+          if kubectl get job "$TEST_NAME-bench" -n "$NS" >/dev/null 2>&1; then
+            echo "ERROR: benchmark Job still exists after cleanup: $TEST_NAME-bench"
+            remaining=1
+          fi
+
+          if kubectl get dynamographdeployment "$TEST_NAME" -n "$NS" >/dev/null 2>&1; then
+            echo "ERROR: DynamoGraphDeployment still exists after cleanup: $TEST_NAME"
+            remaining=1
+          fi
+
+          for selector in "$BENCH_SELECTOR" "$SERVICE_SELECTOR"; do
+            if kubectl get pods -n "$NS" -l "$selector" --no-headers 2>/dev/null | grep -q .; then
+              echo "ERROR: pods still exist after cleanup for selector: $selector"
+              kubectl get pods -n "$NS" -l "$selector" -o wide || true
+              remaining=1
+            fi
+          done
+
+          if [ "$remaining" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "Cleanup verified: benchmark Job, DynamoGraphDeployment, and pods are terminated"
