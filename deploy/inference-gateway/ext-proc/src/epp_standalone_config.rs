@@ -105,7 +105,7 @@ impl EppStandaloneConfig {
 
     fn parse(get: &EnvGet) -> anyhow::Result<Self> {
         Ok(Self {
-            selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTOR_THREADS")?
+            selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
             peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
             peer_sync_port: opt_parse::<u16>(get, "DYN_EPP_PEER_SYNC_PORT")?,
@@ -118,8 +118,8 @@ impl EppStandaloneConfig {
             replay_port: opt_parse::<u16>(get, "DYN_EPP_REPLAY_PORT")?,
             data_parallel_size: opt_parse::<u32>(get, "DYN_DATA_PARALLEL_SIZE")?
                 .unwrap_or(DEFAULT_DATA_PARALLEL_SIZE),
-            total_kv_blocks: opt_parse::<u64>(get, "DYN_TOTAL_KV_BLOCKS")?,
-            max_num_batched_tokens: opt_parse::<u64>(get, "DYN_MAX_NUM_BATCHED_TOKENS")?,
+            total_kv_blocks: opt_parse::<u64>(get, "DYN_EPP_TOTAL_KV_BLOCKS")?,
+            max_num_batched_tokens: opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?,
         })
     }
 
@@ -258,7 +258,7 @@ mod tests {
         let cfg = parse_cfg(&[
             ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
             ("DYN_EPP_PEER_SYNC_PORT", "9191"),
-            ("DYN_EPP_SELECTOR_THREADS", "8"),
+            ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
