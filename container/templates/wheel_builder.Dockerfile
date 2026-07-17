@@ -317,6 +317,11 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 ARG FFMPEG_VERSION
 {% if framework != "vllm" %}ARG NV_CODEC_HEADERS_REF
 {% endif %}ARG LIBVPX_REF
+{% if framework == "vllm" %}
+# `ffmpeg -codecs` includes inert codec-ID descriptors even when no encoder or
+# decoder implementation is built, so the post-build guard checks only
+# functional component inventories.
+{% endif %}
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     export AWS_WEB_IDENTITY_TOKEN_FILE=/run/secrets/aws-token && \
@@ -379,7 +384,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --enable-protocol=file,pipe,fd && \
     make -j$(nproc) && \
     make install && \
-{% if framework == "vllm" %}    for surface in codecs encoders decoders parsers bsfs formats; do \
+{% if framework == "vllm" %}    for surface in encoders decoders parsers bsfs formats; do \
         if /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>&1 | grep -qi h264; then \
             echo "ERROR: vLLM ffmpeg still exposes H.264 via ${surface}" >&2; \
             exit 1; \
