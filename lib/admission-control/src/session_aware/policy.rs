@@ -254,11 +254,20 @@ impl<P: WorkerCapacityProvider> SessionAwareAdmissionControl<P> {
         if let Some(worker) = assigned_worker {
             if worker_is_structurally_allowed(worker) {
                 if worker_is_available(worker) {
-                    // An assigned session already belongs to the active working set.
-                    // Preserve ThunderAgent's continuation semantics: dispatch its next
-                    // turn and let periodic pressure handling choose idle victims or
-                    // mark running victims for suspension after completion.
-                    return AdmissionDecision::Ready(WorkerPlacement::Exact(worker));
+                    let running_used = running_usage.get(&worker).copied().unwrap_or(0);
+                    if capacities
+                        .iter()
+                        .find(|capacity| capacity.worker == worker)
+                        .is_none_or(|capacity| {
+                            fits_worker_device_capacity(capacity, running_used, context_tokens)
+                        })
+                    {
+                        // An assigned session already belongs to the retained working set.
+                        // Preserve ThunderAgent's continuation semantics for retained
+                        // capacity, while keeping concurrently running contexts within
+                        // physical device capacity when native offload is configured.
+                        return AdmissionDecision::Ready(WorkerPlacement::Exact(worker));
+                    }
                 }
                 self.defer_request(session_id, id, now, true);
                 return AdmissionDecision::Defer;
@@ -1135,10 +1144,18 @@ fn fits_worker_capacity(
         .tokens
         .checked_sub(total_used)
         .is_some_and(|remaining| remaining >= request_tokens)
-        && capacity
-            .device_tokens
-            .checked_sub(running_used)
-            .is_some_and(|remaining| remaining >= request_tokens)
+        && fits_worker_device_capacity(capacity, running_used, request_tokens)
+}
+
+fn fits_worker_device_capacity(
+    capacity: &WorkerCapacity,
+    running_used: usize,
+    request_tokens: usize,
+) -> bool {
+    capacity
+        .device_tokens
+        .checked_sub(running_used)
+        .is_some_and(|remaining| remaining >= request_tokens)
 }
 
 fn sort_backend_caps(capacities: &mut [(WorkerWithDpRank, usize)]) {
@@ -1341,14 +1358,14 @@ mod tests {
     }
 
     #[test]
-    fn active_session_continuation_is_not_capacity_gated() {
+    fn active_session_continuation_bypasses_retained_capacity() {
         let mut policy = SessionAwareAdmissionControl::new(
             || tiered_capacities(&[(1, 100, 100)]),
             Default::default(),
         )
         .unwrap();
         assert_eq!(
-            policy.admit(request(1, Some("a"), 80)),
+            policy.admit(request(1, Some("a"), 70)),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
         );
         policy.on_event(AdmissionEvent::Dispatched {
@@ -1357,17 +1374,61 @@ mod tests {
         });
         policy.on_event(AdmissionEvent::Completed {
             id: AdmissionId::new(1),
-            context_tokens: 90,
+            context_tokens: 70,
+        });
+        assert_eq!(
+            policy.admit(request(2, Some("b"), 30)),
+            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+        policy.on_event(AdmissionEvent::Dispatched {
+            id: AdmissionId::new(2),
+            worker: worker(1),
+        });
+        policy.on_event(AdmissionEvent::Completed {
+            id: AdmissionId::new(2),
+            context_tokens: 30,
         });
 
         assert_eq!(
-            policy.admit(request(2, Some("a"), 120)),
+            policy.admit(request(3, Some("a"), 80)),
             AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
         );
         assert_eq!(
-            policy.admit(request(3, Some("b"), 1)),
+            policy.admit(request(4, Some("c"), 1)),
             AdmissionDecision::Defer
         );
+    }
+
+    #[test]
+    fn active_session_continuation_respects_device_capacity() {
+        let mut policy = SessionAwareAdmissionControl::new(
+            || tiered_capacities(&[(1, 100, 1_000)]),
+            Default::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            policy.admit(request(1, Some("a"), 40)),
+            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+        policy.on_event(AdmissionEvent::Dispatched {
+            id: AdmissionId::new(1),
+            worker: worker(1),
+        });
+        policy.on_event(AdmissionEvent::Completed {
+            id: AdmissionId::new(1),
+            context_tokens: 40,
+        });
+        assert_eq!(
+            policy.admit(request(2, Some("b"), 80)),
+            AdmissionDecision::Ready(WorkerPlacement::Exact(worker(1)))
+        );
+
+        assert_eq!(
+            policy.admit(request(3, Some("a"), 30)),
+            AdmissionDecision::Defer
+        );
+        assert_eq!(policy.programs["a"].assigned_worker, Some(worker(1)));
+        assert!(policy.programs["a"].is_suspended());
     }
 
     #[test]
