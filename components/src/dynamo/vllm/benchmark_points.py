@@ -14,18 +14,18 @@ BenchmarkMode = Literal["prefill", "decode", "agg"]
 BENCHMARK_MODES: tuple[BenchmarkMode, ...] = ("prefill", "decode", "agg")
 
 
-class _BenchmarkPoint(BaseModel):
+class _PointCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     batch_size: int = Field(gt=0)
 
 
-class PrefillBenchmarkPoint(_BenchmarkPoint):
+class PrefillPointCandidate(_PointCandidate):
     total_prefill_tokens: int = Field(gt=0)
     total_kv_read_tokens: int = Field(ge=0)
 
     @model_validator(mode="after")
-    def validate_totals(self) -> PrefillBenchmarkPoint:
+    def validate_totals(self) -> PrefillPointCandidate:
         if self.total_prefill_tokens < self.batch_size:
             raise ValueError("total_prefill_tokens must be at least batch_size")
         if 0 < self.total_kv_read_tokens < self.batch_size:
@@ -33,11 +33,11 @@ class PrefillBenchmarkPoint(_BenchmarkPoint):
         return self
 
 
-class DecodeBenchmarkPoint(_BenchmarkPoint):
+class DecodePointCandidate(_PointCandidate):
     total_kv_read_tokens: int = Field(gt=0)
 
     @model_validator(mode="after")
-    def validate_totals(self) -> DecodeBenchmarkPoint:
+    def validate_totals(self) -> DecodePointCandidate:
         if self.total_kv_read_tokens < self.batch_size:
             raise ValueError("total_kv_read_tokens must be at least batch_size")
         return self
@@ -49,26 +49,14 @@ class BenchmarkPoints(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     schema_version: int = Field(strict=True, ge=1, le=1)
-    prefill: list[PrefillBenchmarkPoint]
-    decode: list[DecodeBenchmarkPoint]
-
-    def require_points_for(self, mode: BenchmarkMode) -> None:
-        if mode in ("prefill", "agg") and not self.prefill:
-            raise ValueError(
-                f"prefill must contain at least one point for benchmark mode {mode!r}"
-            )
-        if mode in ("decode", "agg") and not self.decode:
-            raise ValueError(
-                f"decode must contain at least one point for benchmark mode {mode!r}"
-            )
+    prefill: list[PrefillPointCandidate]
+    decode: list[DecodePointCandidate]
 
 
-def load_benchmark_points_file(path: str, mode: BenchmarkMode) -> BenchmarkPoints:
+def load_benchmark_points_file(path: str) -> BenchmarkPoints:
     """Load and validate a benchmark manifest before workers start."""
 
     try:
-        points = BenchmarkPoints.model_validate_json(Path(path).read_bytes())
-        points.require_points_for(mode)
-        return points
+        return BenchmarkPoints.model_validate_json(Path(path).read_bytes())
     except Exception as error:
         raise ValueError(f"--benchmark-points-file {path!r}: {error}") from error

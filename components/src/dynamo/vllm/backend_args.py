@@ -257,8 +257,10 @@ class DynamoVllmArgGroup(ArgGroup):
                 "JSON file containing explicit pure prefill/decode benchmark points "
                 "applied uniformly to every data-parallel rank. The file completely "
                 "replaces generated grid sampling for the phases selected by "
-                "--benchmark-mode. It is read and normalized once before vLLM "
-                "workers start, then the same contents are forwarded to every rank."
+                "--benchmark-mode; generated-grid sampling options, including legacy "
+                "granularity options, are ignored. It is read and normalized once "
+                "before vLLM workers start, then the same contents are forwarded to "
+                "every rank."
             ),
         )
         add_argument(
@@ -508,56 +510,10 @@ class DynamoVllmConfig(ConfigBase):
         if self.benchmark_mode is None:
             raise ValueError("--benchmark-points-file requires --benchmark-mode")
 
-        conflicting_options = []
-        if (
-            self.prefill_max_new_token_samples_explicit
-            or self.prefill_max_new_token_samples != 64
-        ):
-            conflicting_options.append("--prefill-max-new-token-samples")
-        if (
-            self.prefill_max_kv_read_token_samples_explicit
-            or self.prefill_max_kv_read_token_samples != 16
-        ):
-            conflicting_options.append("--prefill-max-kv-read-token-samples")
-        if (
-            self.decode_max_kv_read_token_samples_explicit
-            or self.decode_max_kv_read_token_samples != 128
-        ):
-            conflicting_options.append("--decode-max-kv-read-token-samples")
-        if (
-            self.decode_max_batch_size_samples_explicit
-            or self.decode_max_batch_size_samples != 128
-        ):
-            conflicting_options.append("--decode-max-batch-size-samples")
-        if (
-            self.prefix_max_batch_size_samples_explicit
-            or self.prefix_max_batch_size_samples != 3
-        ):
-            conflicting_options.append("--prefix-max-batch-size-samples")
-        if self.benchmark_prefill_granularity is not None:
-            conflicting_options.append("--benchmark-prefill-granularity")
-        if self.benchmark_prefill_kv_read_granularity is not None:
-            conflicting_options.append("--benchmark-prefill-kv-read-granularity")
-        if self.benchmark_prefill_batch_granularity is not None:
-            conflicting_options.append("--benchmark-prefill-batch-granularity")
-        if self.benchmark_decode_length_granularity is not None:
-            conflicting_options.append("--benchmark-decode-length-granularity")
-        if self.benchmark_decode_batch_granularity is not None:
-            conflicting_options.append("--benchmark-decode-batch-granularity")
-
-        if conflicting_options:
-            raise ValueError(
-                "--benchmark-points-file cannot be combined with grid sampling "
-                "option(s): " + ", ".join(conflicting_options)
-            )
-
-        self._benchmark_points = load_benchmark_points_file(
-            self.benchmark_points_file,
-            self.benchmark_mode,
-        )
+        self._benchmark_points = load_benchmark_points_file(self.benchmark_points_file)
 
     def _resolve_legacy_benchmark_sampling(self) -> None:
-        if self.benchmark_mode is None:
+        if self.benchmark_mode is None or self._benchmark_points is not None:
             return
 
         mappings = (
@@ -627,17 +583,18 @@ class DynamoVllmConfig(ConfigBase):
     def _validate_benchmark_sampling(self) -> None:
         if self.benchmark_mode is None:
             return
-        uniform_limits = (
-            "prefill_max_new_token_samples",
-            "prefill_max_kv_read_token_samples",
-            "decode_max_kv_read_token_samples",
-            "decode_max_batch_size_samples",
-        )
-        for name in uniform_limits:
-            if getattr(self, name) < 2:
-                raise ValueError(f"--{name.replace('_', '-')} must be at least 2")
-        if self.prefix_max_batch_size_samples < 1:
-            raise ValueError("--prefix-max-batch-size-samples must be positive")
+        if self._benchmark_points is None:
+            uniform_limits = (
+                "prefill_max_new_token_samples",
+                "prefill_max_kv_read_token_samples",
+                "decode_max_kv_read_token_samples",
+                "decode_max_batch_size_samples",
+            )
+            for name in uniform_limits:
+                if getattr(self, name) < 2:
+                    raise ValueError(f"--{name.replace('_', '-')} must be at least 2")
+            if self.prefix_max_batch_size_samples < 1:
+                raise ValueError("--prefix-max-batch-size-samples must be positive")
         if self.benchmark_warmup_iterations < 0:
             raise ValueError("--benchmark-warmup-iterations must be non-negative")
         if self.benchmark_timeout <= 0:

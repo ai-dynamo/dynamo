@@ -1403,23 +1403,44 @@ def _explicit_grid_stub(mode="agg", points=None):
 
 
 @pytest.mark.parametrize(
-    ("mode", "expected_types"),
+    ("mode", "expected_points"),
     [
-        ("prefill", ["prefill"]),
-        ("decode", ["decode"]),
-        ("agg", ["prefill", "decode"]),
+        ("prefill", [("prefill", 8, 0, 1)]),
+        ("decode", [("decode", 0, 16, 1)]),
+        ("agg", [("prefill", 8, 0, 1), ("decode", 0, 16, 1)]),
     ],
 )
-def test_explicit_points_replace_generated_grid(mode, expected_types):
+def test_explicit_points_replace_generated_grid(mode, expected_points):
     stub = _explicit_grid_stub(mode)
 
     InstrumentedScheduler._bench_build_grid(stub)
 
-    assert [point.point_type for point in stub._bench_grid] == expected_types
+    assert [
+        (
+            point.point_type,
+            point.total_prefill_tokens,
+            point.total_kv_read_tokens,
+            point.batch_size,
+        )
+        for point in stub._bench_grid
+    ] == expected_points
     assert [point.benchmark_id for point in stub._bench_grid] == list(
-        range(1, len(expected_types) + 1)
+        range(1, len(expected_points) + 1)
     )
     assert all("explicit" in point.sample_reasons for point in stub._bench_grid)
+
+
+def test_empty_explicit_points_are_a_noop():
+    stub = _explicit_grid_stub(
+        "agg",
+        {"schema_version": 1, "prefill": [], "decode": []},
+    )
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    assert list(stub._bench_grid) == []
+    assert stub._bench_expected_points == 0
+    assert stub._bench_missing_phases == []
 
 
 def test_explicit_infeasible_point_reports_source_index():
@@ -1462,7 +1483,7 @@ def test_explicit_runtime_failure_is_not_silently_skipped():
     InstrumentedScheduler._bench_build_grid(stub)
     point = stub._bench_grid[0]
 
-    with pytest.raises(RuntimeError, match=r"decode\[0\].*injection_failed"):
+    with pytest.raises(RuntimeError, match=r"benchmark_id=1.*injection_failed"):
         InstrumentedScheduler._bench_skip_point(stub, point, "injection_failed")
 
 

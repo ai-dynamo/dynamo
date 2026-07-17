@@ -116,8 +116,8 @@ from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
     BenchmarkMode,
     BenchmarkPoints,
-    DecodeBenchmarkPoint,
-    PrefillBenchmarkPoint,
+    DecodePointCandidate,
+    PrefillPointCandidate,
 )
 
 if TYPE_CHECKING:
@@ -1240,11 +1240,12 @@ class InstrumentedScheduler(AsyncScheduler):
             try:
                 output = self._bench_step()
             except Exception as error:
-                indexed_error = self._bench_contextualize_error(error)
-                logger.exception("Benchmark step failed, cleaning up")
-                self._bench_abort(indexed_error)
-                if indexed_error is not error:
-                    raise indexed_error from error
+                point = self._bench_current_point
+                logger.exception(
+                    "Benchmark step failed, cleaning up (benchmark_id=%s)",
+                    point.benchmark_id if point is not None else None,
+                )
+                self._bench_abort(error)
                 raise
             if output is not None:
                 self.kv_cache_manager.new_step_starts()
@@ -1252,11 +1253,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 try:
                     self._bench_synchronize_output(output)
                 except Exception as error:
-                    indexed_error = self._bench_contextualize_error(error)
-                    logger.exception("Benchmark synchronization failed")
-                    self._bench_abort(indexed_error)
-                    if indexed_error is not error:
-                        raise indexed_error from error
+                    point = self._bench_current_point
+                    logger.exception(
+                        "Benchmark synchronization failed (benchmark_id=%s)",
+                        point.benchmark_id if point is not None else None,
+                    )
+                    self._bench_abort(error)
                     raise
                 self._schedule_times.append(time.monotonic())
                 return output
@@ -1308,11 +1310,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 try:
                     self._bench_synchronize_output(output)
                 except Exception as error:
-                    indexed_error = self._bench_contextualize_error(error)
-                    logger.exception("Benchmark synchronization failed")
-                    self._bench_abort(indexed_error)
-                    if indexed_error is not error:
-                        raise indexed_error from error
+                    point = self._bench_current_point
+                    logger.exception(
+                        "Benchmark synchronization failed (benchmark_id=%s)",
+                        point.benchmark_id if point is not None else None,
+                    )
+                    self._bench_abort(error)
                     raise
             self._schedule_times.append(time.monotonic())
         return output
@@ -1340,11 +1343,12 @@ class InstrumentedScheduler(AsyncScheduler):
         try:
             return self._update_from_output(scheduler_output, model_runner_output)
         except Exception as error:
-            indexed_error = self._bench_contextualize_error(error)
-            logger.exception("Benchmark output update failed, cleaning up")
-            self._bench_abort(indexed_error)
-            if indexed_error is not error:
-                raise indexed_error from error
+            point = self._bench_current_point
+            logger.exception(
+                "Benchmark output update failed, cleaning up (benchmark_id=%s)",
+                point.benchmark_id if point is not None else None,
+            )
+            self._bench_abort(error)
             raise
 
     def _update_from_output(
@@ -1592,8 +1596,6 @@ class InstrumentedScheduler(AsyncScheduler):
             if raw_points is not None
             else None
         )
-        if self._bench_explicit_points is not None:
-            self._bench_explicit_points.require_points_for(mode)
 
         # additional_config values arrive as strings from JSON; coerce to
         # the types that BenchmarkConfig expects.
@@ -1823,43 +1825,45 @@ class InstrumentedScheduler(AsyncScheduler):
         mode = self._bench_config.mode
         if mode in ("prefill", "agg"):
             self._bench_grid.extend(
-                self._bench_explicit_prefill_point(point, f"prefill[{index}]")
-                for index, point in enumerate(points.prefill)
+                self._bench_materialize_prefill_candidate(
+                    candidate, f"prefill[{index}]"
+                )
+                for index, candidate in enumerate(points.prefill)
             )
         if mode in ("decode", "agg"):
             self._bench_feasible_max_decode_batch_size = (
                 self._bench_decode_feasible_max_batch_size()
             )
             self._bench_grid.extend(
-                self._bench_explicit_decode_point(point, f"decode[{index}]")
-                for index, point in enumerate(points.decode)
+                self._bench_materialize_decode_candidate(candidate, f"decode[{index}]")
+                for index, candidate in enumerate(points.decode)
             )
 
-    def _bench_explicit_prefill_point(
-        self, point: PrefillBenchmarkPoint, path: str
+    def _bench_materialize_prefill_candidate(
+        self, candidate: PrefillPointCandidate, path: str
     ) -> BenchmarkPoint:
         if (
-            point.total_kv_read_tokens > 0
+            candidate.total_kv_read_tokens > 0
             and not self.cache_config.enable_prefix_caching
         ):
             raise ValueError(f"{path}: total_kv_read_tokens requires prefix caching")
         if not self._bench_prefill_point_feasible(
-            point.total_prefill_tokens,
-            point.batch_size,
-            point.total_kv_read_tokens,
+            candidate.total_prefill_tokens,
+            candidate.batch_size,
+            candidate.total_kv_read_tokens,
         ):
-            self._bench_raise_explicit_infeasible(path, point)
+            self._bench_raise_explicit_infeasible(path, candidate)
 
         capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
-            point.total_prefill_tokens,
+            candidate.total_prefill_tokens,
             self._bench_prefill_capture_sizes,
             self.max_num_scheduled_tokens,
         )
         return BenchmarkPoint(
             point_type="prefill",
-            total_prefill_tokens=point.total_prefill_tokens,
-            total_kv_read_tokens=point.total_kv_read_tokens,
-            batch_size=point.batch_size,
+            total_prefill_tokens=candidate.total_prefill_tokens,
+            total_kv_read_tokens=candidate.total_kv_read_tokens,
+            batch_size=candidate.batch_size,
             expected_cudagraph_mode=(
                 self._bench_prefill_cudagraph_mode
                 if capture_size is not None
@@ -1870,26 +1874,26 @@ class InstrumentedScheduler(AsyncScheduler):
             sample_reasons=["explicit", *reasons],
         )
 
-    def _bench_explicit_decode_point(
-        self, point: DecodeBenchmarkPoint, path: str
+    def _bench_materialize_decode_candidate(
+        self, candidate: DecodePointCandidate, path: str
     ) -> BenchmarkPoint:
         if (
-            point.batch_size > self._bench_feasible_max_decode_batch_size
+            candidate.batch_size > self._bench_feasible_max_decode_batch_size
             or not self._bench_decode_point_feasible(
-                point.batch_size, point.total_kv_read_tokens
+                candidate.batch_size, candidate.total_kv_read_tokens
             )
         ):
-            self._bench_raise_explicit_infeasible(path, point)
+            self._bench_raise_explicit_infeasible(path, candidate)
 
         capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
-            point.batch_size,
+            candidate.batch_size,
             self._bench_decode_capture_sizes,
             self._bench_feasible_max_decode_batch_size,
         )
         return BenchmarkPoint(
             point_type="decode",
-            total_kv_read_tokens=point.total_kv_read_tokens,
-            batch_size=point.batch_size,
+            total_kv_read_tokens=candidate.total_kv_read_tokens,
+            batch_size=candidate.batch_size,
             expected_cudagraph_mode=(
                 self._bench_decode_cudagraph_mode
                 if capture_size is not None
@@ -1903,7 +1907,7 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_raise_explicit_infeasible(
         self,
         path: str,
-        point: PrefillBenchmarkPoint | DecodeBenchmarkPoint,
+        candidate: PrefillPointCandidate | DecodePointCandidate,
     ) -> None:
         limits = {
             "max_num_scheduled_tokens": self.max_num_scheduled_tokens,
@@ -1913,7 +1917,7 @@ class InstrumentedScheduler(AsyncScheduler):
         }
         raise ValueError(
             f"{path}: explicit benchmark point is infeasible: "
-            f"point={point.model_dump()} limits={limits}"
+            f"point={candidate.model_dump()} limits={limits}"
         )
 
     def _bench_generate_prefill_grid(self) -> None:
@@ -2985,8 +2989,6 @@ class InstrumentedScheduler(AsyncScheduler):
             return None
         point = next_point
 
-        if "explicit" in point.sample_reasons:
-            self._bench_current_point = point
         self._bench_current_fpms = []
         new_token_lengths = self._bench_prefill_new_token_lengths(
             point.total_prefill_tokens, point.batch_size
@@ -3244,41 +3246,14 @@ class InstrumentedScheduler(AsyncScheduler):
         return None
 
     def _bench_skip_point(self, point: BenchmarkPoint, reason: str) -> None:
-        explicit_path = self._bench_explicit_path(point)
-        if explicit_path is not None:
+        if "explicit" in point.sample_reasons:
             raise RuntimeError(
-                f"{explicit_path}: explicit benchmark point failed: {reason}"
+                f"benchmark_id={point.benchmark_id}: "
+                f"explicit benchmark point failed: {reason}"
             )
         self._bench_skipped_points.append(
             SkippedBenchmarkPoint(point=point, reason=reason)
         )
-
-    def _bench_explicit_path(self, point: BenchmarkPoint) -> str | None:
-        if "explicit" not in point.sample_reasons or point.point_type not in (
-            "prefill",
-            "decode",
-        ):
-            return None
-        points = self._bench_explicit_points
-        assert points is not None
-        index = point.benchmark_id - 1
-        if point.point_type == "decode" and self._bench_config.mode == "agg":
-            index -= len(points.prefill)
-        phase_points = (
-            points.prefill if point.point_type == "prefill" else points.decode
-        )
-        if not 0 <= index < len(phase_points):
-            return None
-        return f"{point.point_type}[{index}]"
-
-    def _bench_contextualize_error(self, error: Exception) -> Exception:
-        point = self._bench_current_point
-        if point is None:
-            return error
-        path = self._bench_explicit_path(point)
-        if path is None or str(error).startswith(f"{path}:"):
-            return error
-        return RuntimeError(f"{path}: explicit benchmark point failed: {error}")
 
     # -- Results output -------------------------------------------------
 

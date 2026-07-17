@@ -986,6 +986,7 @@ class TestBenchmarkConfig:
         bench = config._benchmark_additional_config
         assert bench["points"] == points
         assert "benchmark_points_file" not in bench
+        assert not any(key.endswith("_samples") for key in bench)
 
     def test_benchmark_sampling_controls_reach_scheduler_config(self, mock_vllm_cli):
         mock_vllm_cli(

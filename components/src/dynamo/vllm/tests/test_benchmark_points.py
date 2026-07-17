@@ -29,7 +29,7 @@ def test_load_benchmark_points_file_preserves_order(tmp_path):
     path = tmp_path / "points.json"
     path.write_text(json.dumps(_points()))
 
-    points = load_benchmark_points_file(str(path), "agg")
+    points = load_benchmark_points_file(str(path))
 
     assert points.model_dump(mode="json") == _points()
 
@@ -57,17 +57,14 @@ def test_manifest_schema_is_strict(payload):
         BenchmarkPoints.model_validate(payload)
 
 
-@pytest.mark.parametrize(
-    ("mode", "phase"),
-    [("prefill", "prefill"), ("decode", "decode"), ("agg", "prefill")],
-)
-def test_selected_phases_must_be_nonempty(mode, phase):
-    payload = _points()
-    payload[phase] = []
-    points = BenchmarkPoints.model_validate(payload)
+def test_empty_manifest_is_allowed(tmp_path):
+    path = tmp_path / "points.json"
+    path.write_text(json.dumps({"schema_version": 1, "prefill": [], "decode": []}))
 
-    with pytest.raises(ValueError, match=f"{phase} must contain"):
-        points.require_points_for(mode)
+    points = load_benchmark_points_file(str(path))
+
+    assert points.prefill == []
+    assert points.decode == []
 
 
 def test_load_error_includes_source_path(tmp_path):
@@ -75,4 +72,4 @@ def test_load_error_includes_source_path(tmp_path):
     path.write_text("not json")
 
     with pytest.raises(ValueError, match=str(path)):
-        load_benchmark_points_file(str(path), "agg")
+        load_benchmark_points_file(str(path))

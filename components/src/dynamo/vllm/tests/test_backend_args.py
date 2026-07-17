@@ -84,23 +84,21 @@ class TestExplicitBenchmarkPoints:
         with pytest.raises(ValueError, match="requires --benchmark-mode"):
             config._load_explicit_benchmark_points()
 
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        [
-            ("prefill_max_new_token_samples_explicit", True),
-            ("benchmark_decode_length_granularity", 4),
-            ("prefill_max_new_token_samples", 7),
-        ],
-    )
-    def test_file_rejects_grid_controls(self, tmp_path, field, value):
-        path, _ = write_benchmark_points(tmp_path)
+    def test_file_overrides_grid_controls(self, tmp_path):
+        path, points = write_benchmark_points(tmp_path)
         config = create_config()
         config.benchmark_mode = "agg"
         config.benchmark_points_file = str(path)
-        setattr(config, field, value)
+        config.prefill_max_new_token_samples = 1
+        config.prefill_max_new_token_samples_explicit = True
+        config.benchmark_decode_length_granularity = 0
 
-        with pytest.raises(ValueError, match="cannot be combined"):
-            config._load_explicit_benchmark_points()
+        config._load_explicit_benchmark_points()
+        config._resolve_legacy_benchmark_sampling()
+        config._validate_benchmark_sampling()
+
+        assert config._benchmark_points is not None
+        assert config._benchmark_points.model_dump(mode="json") == points
 
 
 class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
