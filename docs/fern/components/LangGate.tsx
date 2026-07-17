@@ -10,10 +10,10 @@
  *
  * Usage — swap one card between Slack (default) and WeChat (Chinese browsers):
  *
- *     <LangGate langs="zh" invert>   {/* everyone EXCEPT zh */}
+ *     <LangGate langs="zh" invert>   // everyone EXCEPT zh
  *       <Card title="Community Slack" ... />
  *     </LangGate>
- *     <LangGate langs="zh">          {/* zh only */}
+ *     <LangGate langs="zh">          // zh only
  *       <Card title="Community WeChat" ... />
  *     </LangGate>
  *
