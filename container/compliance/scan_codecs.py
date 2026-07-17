@@ -38,9 +38,11 @@ except ImportError:  # packaging is optional; fall back to a numeric-tuple compa
 
 logger = logging.getLogger("compliance.scan_codecs")
 
-# Top-level directories never worth walking (virtual / volatile). Pruned at the
-# scan root so the walk stays bounded to real image content.
-_PRUNE_DIRS = {"proc", "sys", "dev", "run", "tmp"}
+# Virtual kernel filesystems only — pruned at the scan root because walking them
+# is meaningless (and /proc is effectively unbounded). Real directories such as
+# /tmp and /run are NOT pruned: a codec binary left there still ships in the
+# image and must be scanned.
+_PRUNE_DIRS = {"proc", "sys", "dev"}
 
 
 def _glob_to_fullpath_pattern(glob: str) -> str:
@@ -133,7 +135,18 @@ def scan_sbom(sbom_path: Path, policy: CodecPolicy) -> list[dict]:
         version = str(comp.get("version") or "")
         floor = rule.get("min_fixed_version")
         if floor:
-            if version and _version_lt(version, floor):
+            # No version ⇒ we cannot prove the component is at/above the fixed
+            # floor, so flag it rather than let an unversioned denied component
+            # (e.g. an ffmpeg with no version in the SBOM) silently pass.
+            if not version:
+                out.append(
+                    {
+                        "path": f"sbom:{name}@(no version)",
+                        "glob": f"version unknown, cannot verify >= {floor}",
+                        "detail": f"no version in SBOM; fixed floor is {floor}",
+                    }
+                )
+            elif _version_lt(version, floor):
                 out.append(
                     {
                         "path": f"sbom:{name}@{version}",
@@ -200,7 +213,12 @@ def main(argv: list[str] | None = None) -> int:
 
     policy = CodecPolicy.load(args.policy)
     violations, exceptions, allowed = scan_filesystem(args.root, policy)
-    if args.sbom and args.sbom.is_file():
+    if args.sbom:
+        # An explicitly-supplied SBOM that is missing must fail loudly — silently
+        # skipping it would disable the version-floor gate without anyone noticing.
+        if not args.sbom.is_file():
+            logger.error("--sbom given but not found: %s", args.sbom)
+            return 1
         violations.extend(scan_sbom(args.sbom, policy))
 
     hdr = f"Codec gate{' for ' + args.image if args.image else ''}"
