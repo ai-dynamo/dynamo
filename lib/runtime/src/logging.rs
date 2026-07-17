@@ -1520,22 +1520,42 @@ fn filters(config: LoggingConfig) -> LoggingFilter {
 /// `RwLock`, and its span lifecycle callbacks acquire that lock even when the
 /// configured directives are all static.
 fn targets_filter(config: &LoggingConfig, dyn_log: Option<&str>) -> Option<Targets> {
-    let mut directives = vec![config.log_level.clone()];
+    // `EnvFilter::parse_lossy` ignores zero-length comma-separated segments,
+    // but leaves all other text untouched. In particular, do not trim here:
+    // whitespace may make the directive dynamic or invalid.
+    let dyn_directives = dyn_log
+        .into_iter()
+        .flat_map(|value| value.split(',').filter(|directive| !directive.is_empty()));
 
-    if let Some(value) = dyn_log {
+    let mut directives = Vec::new();
+    for directive in dyn_directives {
         // Parsing as `Targets` is also the feature test for whether the
-        // configured directives require EnvFilter's dynamic span matching.
-        value.parse::<Targets>().ok()?;
-        directives.push(value.to_string());
+        // configured directive requires EnvFilter's dynamic span matching.
+        directive.parse::<Targets>().ok()?;
+        directives.push(directive.to_string());
+    }
+
+    // EnvFilter uses the configured default only when DYN_LOG is absent or
+    // contains no directives. A target-only DYN_LOG must leave other targets
+    // disabled rather than inheriting the configured default level.
+    if directives.is_empty() {
+        directives.push(config.log_level.clone());
     }
 
     for (module, level) in &config.log_filters {
         let directive = format!("{module}={level}");
         match directive.parse::<Targets>() {
             Ok(_) => directives.push(directive),
-            Err(e) => {
-                eprintln!("Failed parsing filter '{level}' for module '{module}': {e}");
-            }
+            Err(_) => match directive.parse::<Directive>() {
+                // Valid span or field directives require EnvFilter's dynamic
+                // matching, so do not silently drop a configured filter.
+                Ok(_) => return None,
+                // Preserve the pre-fast-path warn-and-ignore behavior for
+                // directives that neither parser accepts.
+                Err(e) => {
+                    eprintln!("Failed parsing filter '{level}' for module '{module}': {e}");
+                }
+            },
         }
     }
 
@@ -1919,7 +1939,31 @@ pub mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn target_level_directives_use_static_filter() {
+    fn unset_dyn_log_uses_configured_default() {
+        let filter = targets_filter(&LoggingConfig::default(), None)
+            .expect("an unset DYN_LOG should use Targets");
+
+        assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
+        assert!(filter.would_enable("unlisted_target", &tracing::Level::INFO));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
+        assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+    }
+
+    #[test]
+    fn empty_dyn_log_uses_configured_default() {
+        for dyn_log in ["", ",,"] {
+            let filter = targets_filter(&LoggingConfig::default(), Some(dyn_log))
+                .expect("an empty DYN_LOG should use Targets");
+
+            assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
+            assert!(filter.would_enable("unlisted_target", &tracing::Level::INFO));
+            assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
+            assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+        }
+    }
+
+    #[test]
+    fn target_only_dyn_log_does_not_use_configured_default() {
         let filter = targets_filter(
             &LoggingConfig::default(),
             Some("dynamo_runtime::logging=debug"),
@@ -1927,10 +1971,22 @@ pub mod tests {
         .expect("target/level directives should use Targets");
 
         assert!(filter.would_enable("request_span", &tracing::Level::TRACE));
-        assert!(filter.would_enable("unlisted_target", &tracing::Level::INFO));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::INFO));
         assert!(!filter.would_enable("unlisted_target", &tracing::Level::DEBUG));
         assert!(filter.would_enable("dynamo_runtime::logging::child", &tracing::Level::DEBUG));
         assert!(!filter.would_enable("tower", &tracing::Level::WARN));
+    }
+
+    #[test]
+    fn trailing_empty_dyn_log_segments_do_not_enable_trace() {
+        let filter = targets_filter(
+            &LoggingConfig::default(),
+            Some("dynamo_runtime::logging=debug,"),
+        )
+        .expect("target/level directives should use Targets");
+
+        assert!(filter.would_enable("dynamo_runtime::logging", &tracing::Level::DEBUG));
+        assert!(!filter.would_enable("unlisted_target", &tracing::Level::TRACE));
     }
 
     #[test]
@@ -1942,6 +1998,19 @@ pub mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn dynamic_log_filters_fall_back_to_env_filter() {
+        let config = LoggingConfig {
+            log_level: DEFAULT_FILTER_LEVEL.to_string(),
+            log_filters: HashMap::from([(
+                "dynamo_runtime[request{model=foo}]".to_string(),
+                "debug".to_string(),
+            )]),
+        };
+
+        assert!(targets_filter(&config, None).is_none());
     }
 
     #[test]
