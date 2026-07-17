@@ -87,15 +87,18 @@ class _AliasedRuntimeTensor(torch.nn.Module):
         self.direct = tensor
 
 
+@pytest.mark.timeout(120)
 def test_trtllm_moves_complete_shared_parameter_storage_once(running_gms):
     backing = torch.arange(16, device="cuda", dtype=torch.float32)
     left = torch.nn.Parameter(backing[2:14:2], requires_grad=True)
     sibling = torch.nn.Parameter(backing[3:12:2], requires_grad=False)
     view = backing[1:15:3]
+    empty = torch.empty(0, device="cuda")
     model = torch.nn.Module()
     model.register_parameter("left", left)
     model.register_parameter("left_alias", left)
     model.register_parameter("sibling", sibling)
+    model.register_buffer("empty", empty)
     model.backing = backing
     model.view = view
     model.view_alias = view
@@ -119,6 +122,7 @@ def test_trtllm_moves_complete_shared_parameter_storage_once(running_gms):
         assert next(iter(manager.mappings.values())).size == storage_nbytes
         assert model.left is model.left_alias is left
         assert model.sibling is sibling
+        assert model.empty is empty
         assert model.backing is backing
         assert model.view is model.view_alias is view
         assert model.left.requires_grad
@@ -135,7 +139,7 @@ def test_trtllm_moves_complete_shared_parameter_storage_once(running_gms):
         assert model.sibling[0].item() == 123
     finally:
         del tensor, expected_tensor
-        del model, left, sibling, backing, view, objects, expected
+        del model, left, sibling, backing, view, empty, objects, expected
         manager.close()
 
 
@@ -468,34 +472,39 @@ def test_live_gms_tensor_survives_unmap_and_remap(running_gms):
     reader.close()
 
 
+@pytest.mark.timeout(120)
 def test_shared_interior_storages_survive_import_and_remap(running_gms):
-    writer = GMSClientMemoryManager(running_gms, device=0)
-    writer.connect(RequestedLockType.RW)
-    allocation_va = writer.create_mapping(size=4096, tag="weights")
-    allocation_id = writer.mappings[allocation_va].allocation_id
+    with GMSClientMemoryManager(running_gms, device=0) as writer:
+        writer.connect(RequestedLockType.RW)
+        data_storage = view_storage = None
+        data_tensor = view_tensor = None
+        writer_model = None
+        try:
+            allocation_va = writer.create_mapping(size=4096, tag="weights")
+            allocation_id = writer.mappings[allocation_va].allocation_id
 
-    data_storage = _storage_from_pointer(allocation_va + 128, 32, 0)
-    view_storage = _storage_from_pointer(allocation_va + 256, 48, 0)
-    data_tensor = _tensor_from_storage(data_storage, [8], [1], torch.float32)
-    view_tensor = _tensor_from_storage(view_storage, [12], [1], torch.float32)
-    data_tensor.copy_(torch.arange(8, device="cuda", dtype=torch.float32))
-    view_tensor.copy_(torch.arange(12, device="cuda", dtype=torch.float32) + 20)
+            data_storage = _storage_from_pointer(allocation_va + 128, 32, 0)
+            view_storage = _storage_from_pointer(allocation_va + 256, 48, 0)
+            data_tensor = _tensor_from_storage(data_storage, [8], [1], torch.float32)
+            view_tensor = _tensor_from_storage(view_storage, [12], [1], torch.float32)
+            data_tensor.copy_(torch.arange(8, device="cuda", dtype=torch.float32))
+            view_tensor.copy_(torch.arange(12, device="cuda", dtype=torch.float32) + 20)
 
-    writer_model = torch.nn.Module()
-    writer_model.register_parameter(
-        "data_weight", torch.nn.Parameter(data_tensor, requires_grad=True)
-    )
-    writer_model.data_exact = writer_model.data_weight
-    writer_model.data_view = writer_model.data_weight.data
-    writer_model.register_parameter(
-        "view_weight", torch.nn.Parameter(view_tensor, requires_grad=False)
-    )
-    writer_model.strided = writer_model.view_weight[2:10:2]
-    writer_model.transposed = writer_model.view_weight.reshape(3, 4).T
-    register_module_tensors(writer, writer_model)
-    assert writer.commit()
-    del writer_model, data_tensor, view_tensor, data_storage, view_storage
-    writer.close()
+            writer_model = torch.nn.Module()
+            writer_model.register_parameter(
+                "data_weight", torch.nn.Parameter(data_tensor, requires_grad=True)
+            )
+            writer_model.data_exact = writer_model.data_weight
+            writer_model.data_view = writer_model.data_weight.data
+            writer_model.register_parameter(
+                "view_weight", torch.nn.Parameter(view_tensor, requires_grad=False)
+            )
+            writer_model.strided = writer_model.view_weight[2:10:2]
+            writer_model.transposed = writer_model.view_weight.reshape(3, 4).T
+            register_module_tensors(writer, writer_model)
+            assert writer.commit()
+        finally:
+            del writer_model, data_tensor, view_tensor, data_storage, view_storage
 
     reader_model = torch.nn.Module()
     reader_model.register_parameter(

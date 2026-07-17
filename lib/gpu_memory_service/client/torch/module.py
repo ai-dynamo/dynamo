@@ -4,13 +4,13 @@
 """Publish and materialize PyTorch module storage through GMS.
 
 Write:
-  module -> discover storages -> match GMS mappings -> build manifests -> metadata
+  module -> discover -> match/select -> validate -> build manifests -> metadata
 Read:
   metadata -> validate/resolve -> GMS map -> parameter-containing storage
                               `-> clone ---> all other storage
 Writer rebind:
-  discover/match -> skip parameter-containing storage
-                 `-> clone/swap non-parameter-only storage -> retain source owners
+  discover -> match/select -> validate -> clone/swap non-parameter-only storage
+                                      `-> retain source owners
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import copyreg
 import logging
 import weakref
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import TYPE_CHECKING, Iterator
 
 import msgspec
@@ -205,6 +206,22 @@ def _discover_module_storages(model: torch.nn.Module) -> list[_DiscoveredStorage
 
     storages: dict[int, _DiscoveredStorage] = {}
     for tensor_object in objects.values():
+        storage = tensor_object.tensor.untyped_storage()
+        storage_id = int(storage._cdata)
+        discovered_storage = storages.get(storage_id)
+        if discovered_storage is None:
+            discovered_storage = _DiscoveredStorage(storage, [])
+            storages[storage_id] = discovered_storage
+        discovered_storage.objects.append(tensor_object)
+    return list(storages.values())
+
+
+def _validate_discovered_storage(
+    discovered_storage: _DiscoveredStorage,
+) -> None:
+    """Validate that a discovered StorageImpl is representable by GMS."""
+    storage = discovered_storage.storage
+    for tensor_object in discovered_storage.objects:
         tensor = tensor_object.tensor
         has_parameter_binding = any(
             binding.kind is ModuleTensorKind.PARAMETER
@@ -242,7 +259,6 @@ def _discover_module_storages(model: torch.nn.Module) -> list[_DiscoveredStorage
                 f"{tensor_object.bindings[0].path!r}"
             )
 
-        storage = tensor.untyped_storage()
         if storage.nbytes() == 0:
             raise RuntimeError(
                 "GMS module manifests do not support zero-byte StorageImpls: "
@@ -260,13 +276,6 @@ def _discover_module_storages(model: torch.nn.Module) -> list[_DiscoveredStorage
             int(tensor.storage_offset()),
             int(storage.nbytes()),
         )
-        storage_id = int(storage._cdata)
-        discovered_storage = storages.get(storage_id)
-        if discovered_storage is None:
-            discovered_storage = _DiscoveredStorage(storage, [])
-            storages[storage_id] = discovered_storage
-        discovered_storage.objects.append(tensor_object)
-    return list(storages.values())
 
 
 def _match_storages_to_gms_mappings(
@@ -325,7 +334,7 @@ def _match_storages_to_gms_mappings(
         )
     for allocation_id, allocation_intervals in intervals.items():
         ordered = sorted(allocation_intervals)
-        for previous, current in zip(ordered, ordered[1:], strict=False):
+        for previous, current in pairwise(ordered):
             if previous[1] > current[0]:
                 raise RuntimeError(
                     "Distinct StorageImpl byte ranges overlap in allocation "
@@ -430,6 +439,9 @@ def register_module_tensors(
         gms_client_memory_manager.mappings,
         require_parameters=True,
     )
+    for discovered_storage, _, _ in storages:
+        _validate_discovered_storage(discovered_storage)
+
     entries: list[tuple[str, str, int, bytes]] = []
     referenced_allocation_ids: set[str] = set()
     for ordinal, (
@@ -517,7 +529,7 @@ def _load_storage_manifests(
                 paths.add(binding.path)
     for allocation_id, allocation_intervals in intervals.items():
         ordered = sorted(allocation_intervals)
-        for previous, current in zip(ordered, ordered[1:], strict=False):
+        for previous, current in pairwise(ordered):
             if previous[1] > current[0]:
                 raise RuntimeError(
                     "GMS storage manifests overlap in allocation "
@@ -637,22 +649,15 @@ def _make_parameter_from_template(
     template: torch.nn.Parameter | None,
     tensor: torch.Tensor,
     *,
-    path: str,
     requires_grad: bool,
 ) -> torch.nn.Parameter:
     if template is None:
         return torch.nn.Parameter(tensor, requires_grad=requires_grad)
-    try:
-        parameter = torch.Tensor._make_subclass(type(template), tensor, requires_grad)
-        parameter.__dict__ = template.__dict__.copy()
-        for name in dict.fromkeys(copyreg._slotnames(type(template))):
-            if hasattr(template, name):
-                setattr(parameter, name, getattr(template, name))
-    except Exception as exc:
-        raise RuntimeError(
-            f"Cannot materialize GMS parameter {path!r} as "
-            f"{type(template).__name__}: {exc}"
-        ) from exc
+    parameter = torch.Tensor._make_subclass(type(template), tensor, requires_grad)
+    parameter.__dict__ = template.__dict__.copy()
+    for name in dict.fromkeys(copyreg._slotnames(type(template))):
+        if hasattr(template, name):
+            setattr(parameter, name, getattr(template, name))
     return parameter
 
 
@@ -776,12 +781,10 @@ def materialize_module_from_gms(
                     dtype,
                     tensor_object.storage_offset_bytes // dtype.itemsize,
                 )
-                parameter_destinations = tuple(
-                    destination
+                if any(
+                    destination.binding.kind is ModuleTensorKind.PARAMETER
                     for destination in object_destinations
-                    if destination.binding.kind is ModuleTensorKind.PARAMETER
-                )
-                if parameter_destinations:
+                ):
                     template = next(
                         (
                             destination.existing
@@ -794,7 +797,6 @@ def materialize_module_from_gms(
                     tensor = _make_parameter_from_template(
                         template,
                         tensor,
-                        path=parameter_destinations[0].binding.path,
                         requires_grad=tensor_object.requires_grad,
                     )
                 materialized.append((tensor, object_destinations))
@@ -908,6 +910,9 @@ def rebind_nonparameter_tensors(
         for discovered_storage, _, _ in storages
         if not discovered_storage.has_parameter
     ]
+    for discovered_storage in candidates:
+        _validate_discovered_storage(discovered_storage)
+
     if not candidates:
         return 0
 
