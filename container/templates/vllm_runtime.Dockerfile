@@ -275,6 +275,30 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # tool scripts referencing files not present in Dynamo's build context.
 RUN rm -rf /workspace/vllm
 
+# Remove the codec-bearing video-DECODE wheels inherited from the vllm-openai
+# base. Each bundles its own full ffmpeg carrying software H.264/H.265/AAC;
+# PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
+# imports none of them, so they are unused decode-side dead weight. The in-tree
+# LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
+# omni HW video-encode path (h264_nvenc — the sanctioned path). Direct rm makes
+# the removal robust regardless of how the base image's pip is configured; the
+# guards fail the build if any of them survive.
+RUN set -eux; \
+    python3 -m pip uninstall --yes \
+        av decord decord2 opencv-python opencv-python-headless torchcodec PyNvVideoCodec \
+        || true; \
+    SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    rm -rf \
+        "${SITE_PACKAGES}"/av "${SITE_PACKAGES}"/av-*.dist-info "${SITE_PACKAGES}"/av.libs \
+        "${SITE_PACKAGES}"/cv2 "${SITE_PACKAGES}"/opencv_python*.dist-info "${SITE_PACKAGES}"/opencv_python*.libs \
+        "${SITE_PACKAGES}"/decord "${SITE_PACKAGES}"/decord-*.dist-info "${SITE_PACKAGES}"/decord.libs \
+        "${SITE_PACKAGES}"/decord2 "${SITE_PACKAGES}"/decord2-*.dist-info "${SITE_PACKAGES}"/decord2.libs \
+        "${SITE_PACKAGES}"/torchcodec "${SITE_PACKAGES}"/torchcodec-*.dist-info \
+        "${SITE_PACKAGES}"/PyNvVideoCodec "${SITE_PACKAGES}"/PyNvVideoCodec-*.dist-info "${SITE_PACKAGES}"/PyNvVideoCodec.libs \
+        /root/.cache/pip; \
+    ! python3 -c "import cv2" 2>/dev/null; \
+    ! python3 -c "import av" 2>/dev/null
+
 USER dynamo
 
 # Copy the workspace surface needed by the current vLLM pre-merge test image.

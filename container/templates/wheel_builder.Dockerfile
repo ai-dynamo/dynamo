@@ -288,12 +288,38 @@ RUN mkdir -p /tmp/native-sources
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
-# Always build FFmpeg so libs are available for Rust checks in CI.
+# Build FFmpeg for frameworks that retain media encode/decode support. SGLang
+# deliberately omits it: its Inkling image/audio path uses Pillow and
+# soundfile/torchaudio, and the SGLang runtime must not contain H.264, H.265, or
+# AAC implementations.
+{% if framework != "sglang" %}
+# Build FFmpeg so libs are available for Rust checks in CI.
 # We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
 # code can encode video without the GPL-licensed binary shipped by imageio-ffmpeg.
 # Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
 # NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
 # GPU images) and VP9 from libvpx (BSD).
+#
+# MEDIA CODEC ALLOWLIST: the in-tree libavcodec should carry only
+# the media formats we actually build and use, not ffmpeg's full default decoder
+# set. A blanket --disable-decoders/--disable-demuxers/--disable-parsers plus a
+# narrow allowlist keeps the shipped libav*.so limited to that set (HW NVDEC can
+# be re-added explicitly if a decode feature ever needs H.264/H.265). The
+# allowlist covers exactly two paths: (1) the encode CLI ingesting rawvideo
+# frames from imageio over a pipe and encoding with h264_nvenc (NVIDIA's HW
+# encoder — the sanctioned path) or libvpx_vp9, and (2) the Rust media-ffmpeg
+# VideoDecoder decoding VP8/VP9 in mp4/webm/mkv (test fixtures are VP9-in-mp4).
+# The h264 *parser* is enabled — not the H.264 decoder — because the mp4 muxer
+# needs it to package the h264_nvenc bitstream (extract SPS/PPS); a parser
+# carries no codec implementation. Image decode does not use ffmpeg (it goes
+# through the Rust `image` crate), so no still-image decoders are enabled here.
+# The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
+# the `fd:` protocol on ffmpeg 8.x (not `pipe:`), so omitting it breaks the
+# imageio encode path with "Protocol not found. Did you mean file:fd:?". Both
+# are pure fd/stream I/O and carry no codec implementation.
+#
+# Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
+# this also trims the decoder surface to what we ship.
 # Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
 ARG NV_CODEC_HEADERS_REF
@@ -346,9 +372,16 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --enable-libvpx \
         --disable-encoders \
         --enable-encoder=h264_nvenc,libvpx_vp9 \
+        --disable-decoders \
+        --enable-decoder=vp8,vp9,rawvideo \
         --disable-muxers \
         --enable-muxer=mov,mp4,matroska,webm \
-        --enable-protocol=file,pipe && \
+        --disable-demuxers \
+        --enable-demuxer=mov,matroska,rawvideo \
+        --disable-parsers \
+        --enable-parser=vp8,vp9,h264 \
+        --disable-protocols \
+        --enable-protocol=file,pipe,fd && \
     make -j$(nproc) && \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
@@ -356,6 +389,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     mkdir -p /usr/local/src/ffmpeg && \
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
+{% endif %}
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
@@ -503,7 +537,9 @@ COPY components/ /opt/dynamo/components/
 
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
+{% if framework != "sglang" %}
 ARG ENABLE_MEDIA_FFMPEG
+{% endif %}
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
@@ -520,12 +556,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+{% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist && \
+{% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist; \
     fi && \
-    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
+{% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text
