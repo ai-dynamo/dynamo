@@ -12,6 +12,8 @@ from tests.utils.multimodal import (
     TopologyConfig,
     make_audio_payload,
     make_custom_encoder_benchmark_payload,
+    make_custom_encoder_native_multi_image_payload,
+    make_custom_encoder_native_payload,
     make_custom_encoder_payload,
     make_image_payload,
     make_image_payload_b64,
@@ -63,6 +65,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
     "agg_custom": "agg_custom.sh",
     "agg_custom_qwen_benchmark": "agg_qwen2_5_vl_benchmark.sh",
+    "agg_custom_qwen_native": "agg_qwen2_5_vl_native.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -211,6 +214,27 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         name="Qwen/Qwen2.5-VL-3B-Instruct",
         short_name="qwen2.5-vl-3b",
         topologies={
+            "agg_custom_qwen_native": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=900,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    "DYN_WORKER_GPU": "0",
+                    "DYN_QWEN2_VL_DISABLE_CUDA_GRAPHS": "1",
+                    "DYN_QWEN2_VL_MAX_BATCH_COST": "2",
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[
+                    MmCase(
+                        suffix="non_square",
+                        payload=make_custom_encoder_native_payload(),
+                    ),
+                    MmCase(
+                        suffix="multi_image",
+                        payload=make_custom_encoder_native_multi_image_payload(),
+                    ),
+                ],
+            ),
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,

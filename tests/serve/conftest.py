@@ -14,6 +14,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 # Shared constants for multimodal testing
 IMAGE_SERVER_PORT = allocate_port(8765)
 MULTIMODAL_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic.png"
+MULTIMODAL_WIDE_IMG_URL = f"http://localhost:{IMAGE_SERVER_PORT}/llm-graphic-wide.png"
 MULTIMODAL_VIDEO_PATH = os.path.join(
     WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
 )
@@ -22,6 +23,34 @@ MULTIMODAL_VIDEO_PATH = os.path.join(
 def get_multimodal_test_image_bytes() -> bytes:
     """Return a deterministic PNG with an obvious green square."""
 
+    return _make_multimodal_test_image_bytes(
+        size=(512, 512),
+        fill=(0, 180, 0),
+        outline=(0, 90, 0),
+        label="GREEN",
+    )
+
+
+def get_multimodal_wide_test_image_bytes() -> bytes:
+    """Return a deterministic non-square PNG with an obvious blue rectangle."""
+
+    return _make_multimodal_test_image_bytes(
+        size=(768, 384),
+        fill=(0, 90, 200),
+        outline=(0, 45, 120),
+        label="BLUE",
+    )
+
+
+def _make_multimodal_test_image_bytes(
+    *,
+    size: tuple[int, int],
+    fill: tuple[int, int, int],
+    outline: tuple[int, int, int],
+    label: str,
+) -> bytes:
+    """Build one synthetic test PNG without relying on Git LFS media."""
+
     # Lazy import so conftest loads in environments that don't have Pillow (e.g. pre-commit).
     from PIL import Image, ImageDraw
 
@@ -29,10 +58,16 @@ def get_multimodal_test_image_bytes() -> bytes:
     # Keep this synthetic so CI never depends on Git LFS media. The white
     # background plus large centered square gives VLMs a stronger signal than
     # an edge-to-edge flat color.
-    img = Image.new("RGB", (512, 512), color="white")
+    width, height = size
+    img = Image.new("RGB", size, color="white")
     draw = ImageDraw.Draw(img)
-    draw.rectangle((96, 96, 416, 416), fill=(0, 180, 0), outline=(0, 90, 0), width=8)
-    draw.text((214, 444), "GREEN", fill=(0, 90, 0))
+    draw.rectangle(
+        (width // 5, height // 5, width * 4 // 5, height * 4 // 5),
+        fill=fill,
+        outline=outline,
+        width=8,
+    )
+    draw.text((width * 2 // 5, height * 17 // 20), label, fill=outline)
     img.save(buf, format="PNG")
     return buf.getvalue()
 
@@ -53,7 +88,8 @@ def image_server(httpserver: HTTPServer):
     inference capabilities where models need to fetch images via HTTP.
 
     Currently serves:
-        - /llm-graphic.png - synthetic green-square PNG used by multimodal serve tests
+        - /llm-graphic.png - synthetic green-square PNG
+        - /llm-graphic-wide.png - synthetic non-square blue PNG
 
     The handler honors `Range: bytes=A-B` and returns 206 Partial Content.
     The MM-routing dim-fetch path (`fetch_image_dims_uncached`) strictly
@@ -69,29 +105,38 @@ def image_server(httpserver: HTTPServer):
     from werkzeug.wrappers import Request, Response
 
     image_data = get_multimodal_test_image_bytes()
+    wide_image_data = get_multimodal_wide_test_image_bytes()
 
-    def _handler(request: Request) -> Response:
-        range_hdr = request.headers.get("Range", "")
-        if range_hdr.startswith("bytes="):
-            spec = range_hdr[len("bytes=") :]
-            lo_s, _, hi_s = spec.partition("-")
-            try:
-                lo = int(lo_s) if lo_s else 0
-                hi = int(hi_s) if hi_s else len(image_data) - 1
-            except ValueError:
-                return Response(status=416)
-            hi = min(hi, len(image_data) - 1)
-            lo = max(lo, 0)
-            if lo > hi:
-                return Response(status=416)
-            chunk = image_data[lo : hi + 1]
-            resp = Response(chunk, status=206, content_type="image/png")
-            resp.headers["Content-Range"] = f"bytes {lo}-{hi}/{len(image_data)}"
-            resp.headers["Accept-Ranges"] = "bytes"
-            return resp
-        return Response(image_data, status=200, content_type="image/png")
+    def _handler_for(data: bytes):
+        def _handler(request: Request) -> Response:
+            range_hdr = request.headers.get("Range", "")
+            if range_hdr.startswith("bytes="):
+                spec = range_hdr[len("bytes=") :]
+                lo_s, _, hi_s = spec.partition("-")
+                try:
+                    lo = int(lo_s) if lo_s else 0
+                    hi = int(hi_s) if hi_s else len(data) - 1
+                except ValueError:
+                    return Response(status=416)
+                hi = min(hi, len(data) - 1)
+                lo = max(lo, 0)
+                if lo > hi:
+                    return Response(status=416)
+                chunk = data[lo : hi + 1]
+                resp = Response(chunk, status=206, content_type="image/png")
+                resp.headers["Content-Range"] = f"bytes {lo}-{hi}/{len(data)}"
+                resp.headers["Accept-Ranges"] = "bytes"
+                return resp
+            return Response(data, status=200, content_type="image/png")
 
-    httpserver.expect_request("/llm-graphic.png").respond_with_handler(_handler)
+        return _handler
+
+    httpserver.expect_request("/llm-graphic.png").respond_with_handler(
+        _handler_for(image_data)
+    )
+    httpserver.expect_request("/llm-graphic-wide.png").respond_with_handler(
+        _handler_for(wide_image_data)
+    )
 
     # Serve video file for multimodal video tests (guard against LFS pointers)
     if os.path.isfile(MULTIMODAL_VIDEO_PATH):
