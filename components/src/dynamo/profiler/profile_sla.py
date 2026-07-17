@@ -32,6 +32,7 @@ from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
@@ -498,6 +499,8 @@ async def run_profile(
                     chosen_exp,
                 )
             else:
+                if resolved_backend == "trtllm":
+                    enable_trtllm_chunked_prefill(dgd_config)
                 await run_interpolation(
                     dgdr,
                     ops,
