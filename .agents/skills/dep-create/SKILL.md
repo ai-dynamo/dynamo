@@ -93,6 +93,33 @@ gh issue create --repo ai-dynamo/enhancements \
 # record the issue number -> N_ISSUE
 ```
 
+The **issue body** is deliberately thin — the design *record* is the DEP
+markdown (the PR), not this thread. Keep the ticket short and link-forward; its
+job is to be the stable anchor and the durable, open-ended discussion, not a
+second copy of the proposal. A skeleton for `/tmp/dep-tracking-issue.md`:
+
+```md
+## DEP-NNNN: <Title>
+
+**PR**: ai-dynamo/enhancements#<N_PR> — the revision; leave line-level review there.
+**Owning SIG**: SIG-<Area> · **Required Reviewers**: [@approver-one](https://github.com/approver-one)
+**Status**: Draft
+
+<one-sentence summary of what the DEP proposes>
+
+### Open Design Questions
+
+- <the decisions this thread exists to settle>
+
+Line-level review happens on the PR. Use this thread for durable, open-ended
+design discussion; it stays the DEP's stable anchor across every status
+follow-up PR.
+```
+
+Everything else — the section-by-section design — lives in the DEP markdown so it
+renders on the docs page and can be reviewed line by line. Do not restate the
+proposal here.
+
 ### 4. Open the DEP PR
 
 Add `deps/NNNN-slug.md` on a branch and open the PR. `NNNN` is the next free
