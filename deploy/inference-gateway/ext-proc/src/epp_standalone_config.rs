@@ -34,7 +34,6 @@ pub enum EppMode {
     // to be connected to the runtime. (default)
     DynamoRuntime,
     // No runtime connection. Constructs a ServiceSelector for tracking workers, kv state and selecting best worker.
-    // Workers can be raw vllm serve pods or other OpenAI-compatible backends.
     Standalone,
 }
 
@@ -85,8 +84,6 @@ pub struct EppStandaloneConfig {
     /// KV zmq event port.
     #[validate(range(min = 1))]
     pub kv_event_port: u16,
-    /// KV zmq event topic.
-    pub kv_event_topic: String,
     /// Optional zmq port the selector uses for live-stream gap replay.
     pub replay_port: Option<u16>,
     /// Engine data-parallel size. Currently only support DP=1.
@@ -118,7 +115,6 @@ impl EppStandaloneConfig {
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
-            kv_event_topic: trimmed(get("DYN_EPP_KV_EVENT_TOPIC")).unwrap_or_default(),
             replay_port: opt_parse::<u16>(get, "DYN_EPP_REPLAY_PORT")?,
             data_parallel_size: opt_parse::<u32>(get, "DYN_DATA_PARALLEL_SIZE")?
                 .unwrap_or(DEFAULT_DATA_PARALLEL_SIZE),
