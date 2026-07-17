@@ -272,6 +272,34 @@ impl EventPublisher {
         .await
     }
 
+    /// Create a publisher for an endpoint identity without constructing a local endpoint handle.
+    pub async fn for_endpoint_id(
+        drt: &DistributedRuntime,
+        endpoint: &EndpointId,
+        topic: impl Into<String>,
+    ) -> Result<Self> {
+        let transport_kind = drt.default_event_transport_kind();
+        Self::for_endpoint_id_with_transport(drt, endpoint, topic, transport_kind).await
+    }
+
+    /// Create an endpoint-identity publisher with an explicit transport.
+    pub async fn for_endpoint_id_with_transport(
+        drt: &DistributedRuntime,
+        endpoint: &EndpointId,
+        topic: impl Into<String>,
+        transport_kind: EventTransportKind,
+    ) -> Result<Self> {
+        Self::new_internal(
+            drt,
+            EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic.into(),
+            transport_kind,
+        )
+        .await
+    }
+
     /// Create a publisher for a component-scoped topic.
     ///
     /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that

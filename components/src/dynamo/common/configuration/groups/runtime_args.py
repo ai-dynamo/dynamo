@@ -25,6 +25,7 @@ class DynamoRuntimeConfig(ConfigBase):
 
     namespace: str
     endpoint: Optional[str] = None
+    kv_state_endpoint: Optional[str] = None
     discovery_backend: str
     request_plane: str
     event_plane: Optional[str] = None
@@ -127,6 +128,13 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_ENDPOINT",
             default=None,
             help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Example: dyn://dynamo.backend.generate.",
+        )
+        add_argument(
+            g,
+            flag_name="--kv-state-endpoint",
+            env_var="DYN_KV_STATE_ENDPOINT",
+            default=None,
+            help="Endpoint identity that owns this worker's KV event and recovery state. Defaults to the serving endpoint.",
         )
         add_argument(
             g,

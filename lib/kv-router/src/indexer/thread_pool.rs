@@ -950,6 +950,38 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         );
     }
 
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
+        }
+
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::RemoveWorkerDpRank {
+                worker_id,
+                dp_rank,
+                sweep_tree: true,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Flush(resp_tx))
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
+    }
+
     fn shutdown(&self) {
         if let Some(cancel) = &self.prune_pump_cancel {
             cancel.cancel();

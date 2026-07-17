@@ -4,7 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -18,11 +18,14 @@ use dynamo_kv_router::{
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
-use super::{Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
+use super::{
+    KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
+    kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
+};
 
 use dynamo_runtime::{
     component::{Endpoint, build_transport_type},
-    discovery::DiscoverySpec,
+    discovery::{Discovery, DiscoverySpec},
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
@@ -144,6 +147,10 @@ pub struct ModelManager {
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
 
+    /// Shared KV-source membership coordinators, scoped by exact serving endpoint.
+    /// Weak ownership lets the discovery loop stop when its last consumer goes away.
+    kv_source_memberships: DashMap<EndpointId, Weak<KvSourceMembershipCoordinator>>,
+
     /// Exact endpoint → independent LoRA allocation and load domain.
     lora_domains: DashMap<EndpointId, Arc<LoraEndpointDomain>>,
     lora_enabled: bool,
@@ -180,6 +187,7 @@ impl ModelManager {
             prefill_router_activators: DashMap::new(),
             encoder_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            kv_source_memberships: DashMap::new(),
             lora_domains: DashMap::new(),
             lora_enabled: crate::lora::lora_serving_enabled(),
             lora_load_feeds: DashMap::new(),
@@ -1050,7 +1058,6 @@ impl ModelManager {
             endpoint: router_endpoint_id.name.clone(),
             transport,
             device_type: None,
-            source_endpoint: None,
         };
 
         discovery.register(discovery_spec).await?;
@@ -1079,10 +1086,23 @@ impl ModelManager {
             }
         };
 
+        let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
+        let kv_source_membership = if !effective_kv_router_config.use_remote_indexer
+            && effective_kv_router_config.should_subscribe_to_kv_events()
+        {
+            Some(
+                self.get_or_create_kv_source_membership_watch(endpoint)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
             workers_with_configs,
+            kv_source_membership,
             kv_cache_block_size,
             selector,
             kv_router_config,
@@ -1676,6 +1696,58 @@ impl ModelManager {
         Ok(result)
     }
 
+    /// Get or create the reusable KV-source membership watch for one exact serving endpoint.
+    ///
+    /// The coordinator reuses this manager's runtime-config watch, dynamically follows its
+    /// effective KV-state endpoint, and joins exact KV source advertisements only to serving
+    /// worker/rank membership. KV-source health never changes ordinary serving membership.
+    pub async fn get_or_create_kv_source_membership_watch(
+        &self,
+        endpoint: &Endpoint,
+    ) -> anyhow::Result<KvSourceMembershipWatch> {
+        let runtime_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
+        Ok(self.get_or_create_kv_source_membership_watch_with(
+            endpoint.id(),
+            runtime_configs,
+            endpoint.drt().discovery(),
+        ))
+    }
+
+    fn get_or_create_kv_source_membership_watch_with(
+        &self,
+        serving_endpoint: EndpointId,
+        runtime_configs: RuntimeConfigWatch,
+        discovery: Arc<dyn Discovery>,
+    ) -> KvSourceMembershipWatch {
+        if let Some(existing) = self
+            .kv_source_memberships
+            .get(&serving_endpoint)
+            .and_then(|entry| entry.value().upgrade())
+        {
+            return existing.subscribe();
+        }
+
+        let candidate = KvSourceMembershipCoordinator::start(
+            serving_endpoint.clone(),
+            runtime_configs,
+            discovery,
+        );
+        let coordinator = match self.kv_source_memberships.entry(serving_endpoint) {
+            Entry::Occupied(mut entry) => match entry.get().upgrade() {
+                Some(existing) => existing,
+                None => {
+                    entry.insert(Arc::downgrade(&candidate));
+                    candidate
+                }
+            },
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::downgrade(&candidate));
+                candidate
+            }
+        };
+        coordinator.subscribe()
+    }
+
     /// Get disaggregated endpoint for a specific worker.
     pub fn get_disaggregated_endpoint(
         &self,
@@ -1794,10 +1866,19 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
+        distributed::DistributedConfig,
+        transports::event_plane::EventScope,
+    };
 
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use crate::model_card::ModelDeploymentCard;
+    use crate::{
+        discovery::{KvEventSource, KvSourceStatus},
+        local_model::runtime_config::ModelRuntimeConfig,
+    };
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
         WorkerSet::new(
@@ -1814,6 +1895,77 @@ mod tests {
     ) {
         let (_tx, rx) = tokio::sync::watch::channel(configs);
         mm.runtime_configs.insert(endpoint_id.clone(), rx);
+    }
+
+    #[tokio::test]
+    async fn kv_source_membership_watch_is_shared_by_exact_serving_endpoint() {
+        let manager = ModelManager::new();
+        let serving_endpoint = EndpointId::from("ns.worker.generate");
+        let kv_endpoint = EndpointId::from("ns.worker.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let (_configs_tx, configs_rx) = tokio::sync::watch::channel(HashMap::from([(
+            42,
+            ModelRuntimeConfig {
+                data_parallel_start_rank: 4,
+                data_parallel_size: 1,
+                kv_state_endpoint: Some(kv_endpoint.clone()),
+                ..Default::default()
+            },
+        )]));
+        let discovery: Arc<dyn Discovery> =
+            Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()));
+
+        let mut first = manager.get_or_create_kv_source_membership_watch_with(
+            serving_endpoint.clone(),
+            configs_rx.clone(),
+            discovery.clone(),
+        );
+        let mut second = manager.get_or_create_kv_source_membership_watch_with(
+            serving_endpoint.clone(),
+            configs_rx.clone(),
+            discovery.clone(),
+        );
+        assert!(first.shares_coordinator_with(&second));
+        let other_endpoint = EndpointId::from("ns.worker.generate-b");
+        let other = manager.get_or_create_kv_source_membership_watch_with(
+            other_endpoint,
+            configs_rx,
+            discovery.clone(),
+        );
+        assert!(!first.shares_coordinator_with(&other));
+
+        let source = KvEventSource {
+            kv_state_endpoint: kv_endpoint.clone(),
+            worker,
+            publisher_id: 100,
+            recovery_target: None,
+        };
+        discovery
+            .register(DiscoverySpec::EventSource {
+                scope: EventScope::Endpoint {
+                    endpoint: kv_endpoint,
+                },
+                topic: KV_EVENT_SUBJECT.to_string(),
+                publisher_id: source.publisher_id,
+                metadata: serde_json::to_value(&source).unwrap(),
+            })
+            .await
+            .unwrap();
+
+        for membership in [&mut first, &mut second] {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    if membership.borrow().status(&worker)
+                        == Some(&KvSourceStatus::ActiveLiveOnly(source.clone()))
+                    {
+                        break;
+                    }
+                    membership.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+        }
     }
 
     fn topology_runtime_config(

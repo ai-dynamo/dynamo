@@ -338,6 +338,9 @@ class DynamoSglangPublisher:
                     zmq_topic="",
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
                     dp_rank=dp_rank,
+                    kv_state_endpoint=getattr(
+                        self.dynamo_args, "kv_state_endpoint", None
+                    ),
                 )
                 self.kv_publishers.append(publisher)
 

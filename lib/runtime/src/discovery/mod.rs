@@ -226,6 +226,8 @@ pub enum DiscoveryQuery {
     },
     /// Unified event channel query with optional scope filters
     EventChannels(EventChannelQuery),
+    /// Semantic event source query with optional scope filters.
+    EventSources(EventSourceQuery),
 }
 
 /// Scope of an event channel.
@@ -366,8 +368,8 @@ fn decode_event_segment(value: &str) -> Result<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EventChannelQuery {
     /// Exact scope. `None` is reserved for administrative all-channel queries.
-    pub scope: Option<EventScope>,
-    pub topic: Option<String>,
+    scope: Option<EventScope>,
+    topic: Option<String>,
 }
 
 impl EventChannelQuery {
@@ -450,6 +452,90 @@ impl EventChannelQuery {
     }
 }
 
+/// Unified query for semantic event sources with an optional exact scope and topic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EventSourceQuery {
+    /// Exact scope. `None` is reserved for administrative all-source queries.
+    scope: Option<EventScope>,
+    topic: Option<String>,
+}
+
+impl EventSourceQuery {
+    pub fn all() -> Self {
+        Self {
+            scope: None,
+            topic: None,
+        }
+    }
+
+    pub fn namespace(namespace: impl Into<String>) -> Self {
+        Self {
+            scope: Some(EventScope::Namespace {
+                name: namespace.into(),
+            }),
+            topic: None,
+        }
+    }
+
+    pub fn namespace_topic(namespace: impl Into<String>, topic: impl Into<String>) -> Self {
+        Self {
+            scope: Some(EventScope::Namespace {
+                name: namespace.into(),
+            }),
+            topic: Some(topic.into()),
+        }
+    }
+
+    pub fn component(namespace: impl Into<String>, component: impl Into<String>) -> Self {
+        Self {
+            scope: Some(EventScope::Component {
+                namespace: namespace.into(),
+                component: component.into(),
+            }),
+            topic: None,
+        }
+    }
+
+    pub fn topic(
+        namespace: impl Into<String>,
+        component: impl Into<String>,
+        topic: impl Into<String>,
+    ) -> Self {
+        Self {
+            scope: Some(EventScope::Component {
+                namespace: namespace.into(),
+                component: component.into(),
+            }),
+            topic: Some(topic.into()),
+        }
+    }
+
+    pub fn endpoint(endpoint: EndpointId) -> Self {
+        Self {
+            scope: Some(EventScope::Endpoint { endpoint }),
+            topic: None,
+        }
+    }
+
+    pub fn endpoint_topic(endpoint: EndpointId, topic: impl Into<String>) -> Self {
+        Self {
+            scope: Some(EventScope::Endpoint { endpoint }),
+            topic: Some(topic.into()),
+        }
+    }
+
+    /// Get the query specificity (0=all, 1=scope, 2=scope+topic).
+    pub fn scope_level(&self) -> u8 {
+        if self.topic.is_some() {
+            2
+        } else if self.scope.is_some() {
+            1
+        } else {
+            0
+        }
+    }
+}
+
 /// Specification for registering objects in the discovery plane
 /// Represents the input to the register() operation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,9 +550,6 @@ pub enum DiscoverySpec {
         /// Optional execution device for this endpoint instance.
         /// Used by hetero routing to distinguish CPU and CUDA workers.
         device_type: Option<DeviceType>,
-        /// Serving endpoint whose worker-local state this endpoint exposes.
-        /// Regular serving endpoints leave this unset.
-        source_endpoint: Option<EndpointId>,
     },
     Model {
         namespace: String,
@@ -493,6 +576,15 @@ pub enum DiscoverySpec {
         publisher_id: u64,
         /// Event transport type (NATS subject prefix or ZMQ endpoint)
         transport: EventTransport,
+    },
+    /// Semantic source of events, independent of event transport discovery.
+    EventSource {
+        scope: EventScope,
+        topic: String,
+        /// Unique identity of this source incarnation.
+        publisher_id: u64,
+        /// Domain-specific source descriptor owned by the consuming crate.
+        metadata: serde_json::Value,
     },
 }
 
@@ -536,8 +628,8 @@ impl DiscoverySpec {
     /// Converts this registration spec into a discovery instance.
     ///
     /// Endpoint and model specs use `default_instance_id`, normally the
-    /// discovery client's process-level ID. Event channel specs already carry
-    /// a publisher-level ID, so they use that instead.
+    /// discovery client's process-level ID. Event channel and source specs
+    /// already carry a publisher-level ID, so they use that instead.
     pub fn into_instance(self, default_instance_id: u64) -> DiscoveryInstance {
         match self {
             Self::Endpoint {
@@ -546,7 +638,6 @@ impl DiscoverySpec {
                 endpoint,
                 transport,
                 device_type,
-                source_endpoint,
             } => DiscoveryInstance::Endpoint(crate::component::Instance {
                 namespace,
                 component,
@@ -554,7 +645,6 @@ impl DiscoverySpec {
                 instance_id: default_instance_id,
                 transport,
                 device_type,
-                source_endpoint,
             }),
             Self::Model {
                 namespace,
@@ -580,6 +670,17 @@ impl DiscoverySpec {
                 topic,
                 instance_id: publisher_id,
                 transport,
+            },
+            Self::EventSource {
+                scope,
+                topic,
+                publisher_id,
+                metadata,
+            } => DiscoveryInstance::EventSource {
+                scope,
+                topic,
+                publisher_id,
+                metadata,
             },
         }
     }
@@ -618,6 +719,13 @@ pub enum DiscoveryInstance {
         /// Event transport type (NATS subject prefix or ZMQ endpoint)
         transport: EventTransport,
     },
+    /// Registered semantic event source.
+    EventSource {
+        scope: EventScope,
+        topic: String,
+        publisher_id: u64,
+        metadata: serde_json::Value,
+    },
 }
 
 impl DiscoveryInstance {
@@ -627,6 +735,7 @@ impl DiscoveryInstance {
             Self::Endpoint(inst) => inst.instance_id,
             Self::Model { instance_id, .. } => *instance_id,
             Self::EventChannel { instance_id, .. } => *instance_id,
+            Self::EventSource { publisher_id, .. } => *publisher_id,
         }
     }
 
@@ -644,6 +753,9 @@ impl DiscoveryInstance {
             Self::EventChannel { .. } => {
                 anyhow::bail!("Cannot deserialize model from EventChannel instance")
             }
+            Self::EventSource { .. } => {
+                anyhow::bail!("Cannot deserialize model from EventSource instance")
+            }
         }
     }
 
@@ -656,7 +768,6 @@ impl DiscoveryInstance {
                 component: inst.component.clone(),
                 endpoint: inst.endpoint.clone(),
                 instance_id: inst.instance_id,
-                source_endpoint: inst.source_endpoint.clone(),
             }),
             Self::Model {
                 namespace,
@@ -682,6 +793,16 @@ impl DiscoveryInstance {
                 topic: topic.clone(),
                 instance_id: *instance_id,
             }),
+            Self::EventSource {
+                scope,
+                topic,
+                publisher_id,
+                ..
+            } => DiscoveryInstanceId::EventSource(EventSourceInstanceId {
+                scope: scope.clone(),
+                topic: topic.clone(),
+                publisher_id: *publisher_id,
+            }),
         }
     }
 }
@@ -693,38 +814,23 @@ pub struct EndpointInstanceId {
     pub component: String,
     pub endpoint: String,
     pub instance_id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_endpoint: Option<EndpointId>,
 }
 
 impl EndpointInstanceId {
     /// Converts to a path string.
-    ///
-    /// Regular endpoints retain the legacy
-    /// `{namespace}/{component}/{endpoint}/{instance_id:x}` form. Attributed
-    /// endpoints append `/source/{namespace}/{component}/{endpoint}` so two
-    /// otherwise identical auxiliary endpoints can coexist for distinct
-    /// serving pools.
     pub fn to_path(&self) -> String {
-        let base = format!(
+        format!(
             "{}/{}/{}/{:x}",
             self.namespace, self.component, self.endpoint, self.instance_id
-        );
-        match &self.source_endpoint {
-            Some(source) => format!(
-                "{base}/source/{}/{}/{}",
-                source.namespace, source.component, source.name
-            ),
-            None => base,
-        }
+        )
     }
 
-    /// Parses either the legacy path or an attributed endpoint path.
+    /// Parses an endpoint instance path.
     pub fn from_path(path: &str) -> Result<Self> {
         let parts: Vec<&str> = path.split('/').collect();
-        if parts.len() != 4 && (parts.len() != 8 || parts[4] != "source") {
+        if parts.len() != 4 {
             anyhow::bail!(
-                "Invalid EndpointInstanceId path: expected 4 legacy parts or 8 attributed parts, got {}",
+                "Invalid EndpointInstanceId path: expected 4 parts, got {}",
                 parts.len()
             );
         }
@@ -734,11 +840,6 @@ impl EndpointInstanceId {
             endpoint: parts[2].to_string(),
             instance_id: u64::from_str_radix(parts[3], 16)
                 .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
-            source_endpoint: (parts.len() == 8).then(|| EndpointId {
-                namespace: parts[5].to_string(),
-                component: parts[6].to_string(),
-                name: parts[7].to_string(),
-            }),
         })
     }
 }
@@ -834,6 +935,37 @@ impl EventChannelInstanceId {
     }
 }
 
+/// Unique identifier for a semantic event source incarnation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EventSourceInstanceId {
+    pub scope: EventScope,
+    pub topic: String,
+    pub publisher_id: u64,
+}
+
+impl EventSourceInstanceId {
+    /// Converts to a delimiter-safe path containing the exact source scope.
+    pub fn to_path(&self) -> String {
+        format!(
+            "{}/topic/{}/{:x}",
+            self.scope.path_prefix(),
+            encode_event_segment(&self.topic),
+            self.publisher_id
+        )
+    }
+
+    /// Parses a path produced by [`Self::to_path`].
+    pub fn from_path(path: &str) -> Result<Self> {
+        let channel_id = EventChannelInstanceId::from_path(path)
+            .with_context(|| format!("invalid EventSourceInstanceId path: {path}"))?;
+        Ok(Self {
+            scope: channel_id.scope,
+            topic: channel_id.topic,
+            publisher_id: channel_id.instance_id,
+        })
+    }
+}
+
 impl ModelCardInstanceId {
     /// Converts to a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}[/{model_suffix}]`
     pub fn to_path(&self) -> String {
@@ -875,6 +1007,7 @@ pub enum DiscoveryInstanceId {
     Endpoint(EndpointInstanceId),
     Model(ModelCardInstanceId),
     EventChannel(EventChannelInstanceId),
+    EventSource(EventSourceInstanceId),
 }
 
 impl DiscoveryInstanceId {
@@ -884,6 +1017,7 @@ impl DiscoveryInstanceId {
             Self::Endpoint(eid) => eid.instance_id,
             Self::Model(mid) => mid.instance_id,
             Self::EventChannel(ecid) => ecid.instance_id,
+            Self::EventSource(esid) => esid.publisher_id,
         }
     }
 
@@ -893,6 +1027,7 @@ impl DiscoveryInstanceId {
             Self::Endpoint(eid) => Ok(eid),
             Self::Model(_) => anyhow::bail!("Expected Endpoint variant, got Model"),
             Self::EventChannel(_) => anyhow::bail!("Expected Endpoint variant, got EventChannel"),
+            Self::EventSource(_) => anyhow::bail!("Expected Endpoint variant, got EventSource"),
         }
     }
 
@@ -902,6 +1037,7 @@ impl DiscoveryInstanceId {
             Self::Model(mid) => Ok(mid),
             Self::Endpoint(_) => anyhow::bail!("Expected Model variant, got Endpoint"),
             Self::EventChannel(_) => anyhow::bail!("Expected Model variant, got EventChannel"),
+            Self::EventSource(_) => anyhow::bail!("Expected Model variant, got EventSource"),
         }
     }
 
@@ -911,6 +1047,21 @@ impl DiscoveryInstanceId {
             Self::EventChannel(ecid) => Ok(ecid),
             Self::Endpoint(_) => anyhow::bail!("Expected EventChannel variant, got Endpoint"),
             Self::Model(_) => anyhow::bail!("Expected EventChannel variant, got Model"),
+            Self::EventSource(_) => {
+                anyhow::bail!("Expected EventChannel variant, got EventSource")
+            }
+        }
+    }
+
+    /// Extracts the EventSourceInstanceId, returning an error for other variants.
+    pub fn extract_event_source_id(&self) -> Result<&EventSourceInstanceId> {
+        match self {
+            Self::EventSource(esid) => Ok(esid),
+            Self::Endpoint(_) => anyhow::bail!("Expected EventSource variant, got Endpoint"),
+            Self::Model(_) => anyhow::bail!("Expected EventSource variant, got Model"),
+            Self::EventChannel(_) => {
+                anyhow::bail!("Expected EventSource variant, got EventChannel")
+            }
         }
     }
 }
@@ -1000,8 +1151,8 @@ fn find_conflicting_model_name(
 pub trait Discovery: Send + Sync {
     /// Returns a unique identifier for this worker (e.g lease id if using etcd or generated id for memory store)
     /// Endpoint and model objects created by this worker use this ID. Event
-    /// channels use a publisher-level ID because a worker can own more than one
-    /// publisher for the same topic.
+    /// channels and sources use a publisher-level ID because a worker can own
+    /// more than one publisher for the same topic.
     fn instance_id(&self) -> u64;
 
     /// Registers an object in the discovery plane with the instance id
@@ -1091,37 +1242,15 @@ mod event_channel_scope_tests {
     use super::*;
 
     #[test]
-    fn endpoint_instance_id_paths_preserve_legacy_and_source_identity() {
-        let legacy = EndpointInstanceId {
+    fn endpoint_instance_id_path_round_trips() {
+        let id = EndpointInstanceId {
             namespace: "ns".to_string(),
             component: "backend".to_string(),
             endpoint: "generate".to_string(),
             instance_id: 0xfeed,
-            source_endpoint: None,
         };
-        assert_eq!(legacy.to_path(), "ns/backend/generate/feed");
-        assert_eq!(
-            EndpointInstanceId::from_path(&legacy.to_path()).unwrap(),
-            legacy
-        );
-
-        let attributed = EndpointInstanceId {
-            endpoint: "worker_kv_indexer_query_dp0".to_string(),
-            source_endpoint: Some(EndpointId {
-                namespace: "workers".to_string(),
-                component: "backend".to_string(),
-                name: "generate".to_string(),
-            }),
-            ..legacy
-        };
-        assert_eq!(
-            attributed.to_path(),
-            "ns/backend/worker_kv_indexer_query_dp0/feed/source/workers/backend/generate"
-        );
-        assert_eq!(
-            EndpointInstanceId::from_path(&attributed.to_path()).unwrap(),
-            attributed
-        );
+        assert_eq!(id.to_path(), "ns/backend/generate/feed");
+        assert_eq!(EndpointInstanceId::from_path(&id.to_path()).unwrap(), id);
     }
 
     #[test]
@@ -1141,6 +1270,25 @@ mod event_channel_scope_tests {
         let path = id.to_path();
         assert!(!path.contains("ns.with/slash"));
         assert_eq!(EventChannelInstanceId::from_path(&path).unwrap(), id);
+    }
+
+    #[test]
+    fn endpoint_source_id_path_round_trips_reserved_segments() {
+        let id = EventSourceInstanceId {
+            scope: EventScope::Endpoint {
+                endpoint: EndpointId {
+                    namespace: "ns.with/slash".to_string(),
+                    component: "component.*".to_string(),
+                    name: "endpoint.>/%".to_string(),
+                },
+            },
+            topic: "kv.events/>".to_string(),
+            publisher_id: 0xfeed,
+        };
+
+        let path = id.to_path();
+        assert!(!path.contains("ns.with/slash"));
+        assert_eq!(EventSourceInstanceId::from_path(&path).unwrap(), id);
     }
 
     #[test]

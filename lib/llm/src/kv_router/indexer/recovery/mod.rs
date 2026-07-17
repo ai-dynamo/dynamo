@@ -3,9 +3,7 @@
 
 mod subscriber;
 mod worker_query;
-mod worker_query_directory;
 mod worker_query_endpoint;
-mod worker_query_health;
 mod worker_query_state;
 mod worker_query_transport;
 

@@ -419,6 +419,7 @@ def setup_kv_event_publisher(
             enable_local_indexer=config.enable_local_indexer,
             dp_rank=dp_rank,
             image_token_id=image_token_id,
+            kv_state_endpoint=getattr(config, "kv_state_endpoint", None),
         )
         kv_publishers.append(kv_publisher)
 
@@ -700,6 +701,7 @@ async def register_vllm_model(
         config.enable_local_indexer
         and config.disaggregation_mode != DisaggregationMode.DECODE
     )
+    runtime_config.kv_state_endpoint = getattr(config, "kv_state_endpoint", None)
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off

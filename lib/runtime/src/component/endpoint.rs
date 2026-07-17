@@ -47,6 +47,34 @@ fn endpoint_device_type() -> Option<DeviceType> {
     Some(DeviceType::Cuda)
 }
 
+/// A registered endpoint whose exact callable instance is ready for use.
+///
+/// Dropping this handle does not stop the endpoint. Call [`shutdown`](Self::shutdown)
+/// for scoped endpoint lifetimes, or [`wait`](Self::wait) for the traditional
+/// runtime-owned lifetime.
+pub struct StartedEndpoint {
+    instance: Instance,
+    shutdown_token: CancellationToken,
+    task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl StartedEndpoint {
+    pub fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    pub async fn shutdown(self) -> Result<()> {
+        self.shutdown_token.cancel();
+        self.task.await??;
+        Ok(())
+    }
+
+    pub async fn wait(self) -> Result<()> {
+        self.task.await??;
+        Ok(())
+    }
+}
+
 #[derive(Educe, Builder, Dissolve)]
 #[educe(Debug)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
@@ -72,10 +100,6 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, setter(into, strip_option))]
     health_check_payload: Option<serde_json::Value>,
-
-    /// Serving endpoint whose worker-local state this endpoint exposes.
-    #[builder(default, setter(into, strip_option))]
-    source_endpoint: Option<EndpointId>,
 }
 
 impl EndpointConfigBuilder {
@@ -100,14 +124,13 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (
-            endpoint,
-            handler,
-            metrics_labels,
-            graceful_shutdown,
-            health_check_payload,
-            source_endpoint,
-        ) = self.build_internal()?.dissolve();
+        self.start_with_registration().await?.wait().await
+    }
+
+    /// Start an endpoint and return once its exact discovery instance is callable.
+    pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
+        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
+            self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -125,25 +148,6 @@ impl EndpointConfigBuilder {
 
         let system_health = endpoint.drt().system_health();
 
-        // Register with graceful shutdown tracker if needed
-        if graceful_shutdown {
-            tracing::debug!(
-                "Registering endpoint '{}' with graceful shutdown tracker",
-                endpoint.name
-            );
-            let tracker = endpoint.drt().graceful_shutdown_tracker();
-            tracker.register_endpoint();
-        } else {
-            tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
-        }
-
-        // Launch endpoint based on request plane mode
-        let tracker_clone = if graceful_shutdown {
-            Some(endpoint.drt().graceful_shutdown_tracker())
-        } else {
-            None
-        };
-
         // Create clones for the async closure
         let namespace_name_for_task = endpoint_id.namespace.clone();
         let component_name_for_task = endpoint_id.component.clone();
@@ -151,6 +155,7 @@ impl EndpointConfigBuilder {
 
         // Get the unified request plane server
         let server = endpoint.drt().request_plane_server().await?;
+        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
@@ -169,17 +174,13 @@ impl EndpointConfigBuilder {
                 );
             }
 
-            // Build transport based on request plane mode
-            let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
-
             let instance = Instance {
                 component: endpoint_id.component.clone(),
                 endpoint: endpoint_id.name.clone(),
                 namespace: endpoint_id.namespace.clone(),
                 instance_id: connection_id,
-                transport,
+                transport: transport.clone(),
                 device_type: endpoint_device_type(),
-                source_endpoint: source_endpoint.clone(),
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -211,20 +212,72 @@ impl EndpointConfigBuilder {
             )
             .await?;
 
-        // Create cleanup task that unregisters on cancellation
-        let endpoint_name_for_cleanup = endpoint_name_for_task.clone();
-        let server_for_cleanup = server.clone();
+        let tracker_clone = if graceful_shutdown {
+            tracing::debug!(
+                "Registering endpoint '{}' with graceful shutdown tracker",
+                endpoint.name
+            );
+            let tracker = endpoint.drt().graceful_shutdown_tracker();
+            tracker.register_endpoint();
+            Some(tracker)
+        } else {
+            tracing::debug!("Endpoint '{}' has graceful_shutdown=false", endpoint.name);
+            None
+        };
+
+        // Register this endpoint instance in the discovery plane
+        // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
+        // consistent registration/discovery across the system.
+        let discovery = endpoint.drt().discovery();
+
+        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+            transport,
+            device_type: endpoint_device_type(),
+        };
+
+        let discovery_instance = match discovery.register(discovery_spec).await {
+            Ok(instance) => instance,
+            Err(e) => {
+                tracing::error!(
+                    %endpoint_id,
+                    error = %e,
+                    "Unable to register service for discovery"
+                );
+                let _ = server.unregister_endpoint(&endpoint_name_for_task).await;
+                if let Some(tracker) = tracker_clone {
+                    tracker.unregister_endpoint();
+                }
+                anyhow::bail!(
+                    "Unable to register service for discovery. Check discovery service status"
+                );
+            }
+        };
+        let instance = match &discovery_instance {
+            crate::discovery::DiscoveryInstance::Endpoint(instance) => instance.clone(),
+            _ => unreachable!("endpoint discovery spec returned a non-endpoint instance"),
+        };
+
+        // Create cleanup task that unregisters on cancellation.
+        let endpoint_name_for_cleanup = endpoint_name_for_task;
+        let server_for_cleanup = server;
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
+        let discovery_for_cleanup = discovery;
 
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             cancel_token_for_cleanup.cancelled().await;
+
+            if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
+                tracing::warn!(%error, "Failed to unregister endpoint from discovery");
+            }
 
             tracing::debug!(
                 endpoint = %endpoint_name_for_cleanup,
                 "Unregistering endpoint from request plane server"
             );
 
-            // Unregister from server
             if let Err(e) = server_for_cleanup
                 .unregister_endpoint(&endpoint_name_for_cleanup)
                 .await
@@ -236,7 +289,6 @@ impl EndpointConfigBuilder {
                 );
             }
 
-            // Unregister from graceful shutdown tracker
             if let Some(tracker) = tracker_clone {
                 tracing::debug!("Unregister endpoint from graceful shutdown tracker");
                 tracker.unregister_endpoint();
@@ -245,38 +297,11 @@ impl EndpointConfigBuilder {
             anyhow::Ok(())
         });
 
-        // Register this endpoint instance in the discovery plane
-        // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
-        // consistent registration/discovery across the system.
-        let discovery = endpoint.drt().discovery();
-
-        // Build transport for discovery service based on request plane mode
-        let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
-
-        let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-            transport,
-            device_type: endpoint_device_type(),
-            source_endpoint,
-        };
-
-        if let Err(e) = discovery.register(discovery_spec).await {
-            tracing::error!(
-                %endpoint_id,
-                error = %e,
-                "Unable to register service for discovery"
-            );
-            endpoint_shutdown_token.cancel();
-            anyhow::bail!(
-                "Unable to register service for discovery. Check discovery service status"
-            );
-        }
-
-        task.await??;
-
-        Ok(())
+        Ok(StartedEndpoint {
+            instance,
+            shutdown_token: endpoint_shutdown_token,
+            task,
+        })
     }
 }
 
@@ -375,7 +400,6 @@ impl Endpoint {
             instance_id,
             transport,
             device_type: endpoint_device_type(),
-            source_endpoint: None,
         });
 
         let discovery = drt.discovery();
@@ -418,7 +442,6 @@ impl Endpoint {
             endpoint: endpoint_id.name,
             transport,
             device_type: endpoint_device_type(),
-            source_endpoint: None,
         };
 
         let discovery = drt.discovery();

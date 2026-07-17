@@ -1722,7 +1722,7 @@ mod test_integration_publisher {
     use crate::kv_router::KV_METRICS_SUBJECT;
     use dynamo_kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
-    use dynamo_runtime::transports::event_plane::EventSubscriber;
+    use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 
     #[tokio::test]
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
@@ -1745,7 +1745,8 @@ mod test_integration_publisher {
         let worker_id = 1234;
 
         // Start event-plane metrics publishing
-        publisher.start_metrics_publishing(endpoint, worker_id);
+        let event_publisher = EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?;
+        publisher.start_metrics_publishing(event_publisher, worker_id);
 
         // Allow some time for the background task to start
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;

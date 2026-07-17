@@ -125,6 +125,12 @@ struct PendingMutationReceivers<'a> {
     routing_rx: &'a mut mpsc::Receiver<RoutingDecisionRequest>,
 }
 
+struct ResetWorkerDpRankRequest {
+    worker_id: WorkerId,
+    dp_rank: DpRank,
+    resp: oneshot::Sender<()>,
+}
+
 fn drain_pending_mutations(
     trie: &mut RadixTree,
     receivers: PendingMutationReceivers<'_>,
@@ -180,6 +186,8 @@ pub struct KvIndexer {
     remove_worker_tx: mpsc::Sender<WorkerId>,
     /// A sender for remove worker dp_rank requests.
     remove_worker_dp_rank_tx: mpsc::Sender<(WorkerId, DpRank)>,
+    /// A sender for acknowledged worker dp_rank reset requests.
+    reset_worker_dp_rank_tx: mpsc::Sender<ResetWorkerDpRankRequest>,
     /// A sender for get workers requests.
     get_workers_tx: mpsc::Sender<GetWorkersRequest>,
     /// A sender for dump requests.
@@ -220,6 +228,8 @@ impl KvIndexer {
         let (remove_worker_tx, remove_worker_rx) = mpsc::channel::<WorkerId>(16);
         let (remove_worker_dp_rank_tx, remove_worker_dp_rank_rx) =
             mpsc::channel::<(WorkerId, DpRank)>(16);
+        let (reset_worker_dp_rank_tx, reset_worker_dp_rank_rx) =
+            mpsc::channel::<ResetWorkerDpRankRequest>(16);
         let (get_workers_tx, get_workers_rx) = mpsc::channel::<GetWorkersRequest>(16);
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (flush_tx, flush_rx) = mpsc::channel::<FlushRequest>(16);
@@ -241,6 +251,7 @@ impl KvIndexer {
                     let mut event_rx = event_rx;
                     let mut remove_worker_rx = remove_worker_rx;
                     let mut remove_worker_dp_rank_rx = remove_worker_dp_rank_rx;
+                    let mut reset_worker_dp_rank_rx = reset_worker_dp_rank_rx;
                     let mut get_workers_rx = get_workers_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
@@ -258,6 +269,29 @@ impl KvIndexer {
                             _ = cancel.cancelled() => {
                                 tracing::debug!("KvCacheIndexer progress loop shutting down");
                                 return;
+                            }
+
+                            Some(reset) = reset_worker_dp_rank_rx.recv() => {
+                                drain_pending_mutations(
+                                    &mut trie,
+                                    PendingMutationReceivers {
+                                        event_rx: &mut event_rx,
+                                        remove_worker_rx: &mut remove_worker_rx,
+                                        remove_worker_dp_rank_rx: &mut remove_worker_dp_rank_rx,
+                                        routing_rx: &mut routing_rx,
+                                    },
+                                    &counters,
+                                    &prune_manager,
+                                    &mut event_id_counter,
+                                );
+                                trie.remove_worker_dp_rank(reset.worker_id, reset.dp_rank);
+                                if let Some(pm) = &prune_manager {
+                                    pm.remove_worker_dp_rank(WorkerWithDpRank::new(
+                                        reset.worker_id,
+                                        reset.dp_rank,
+                                    ));
+                                }
+                                let _ = reset.resp.send(());
                             }
 
                             Some(worker) = remove_worker_rx.recv() => {
@@ -399,6 +433,7 @@ impl KvIndexer {
             match_details_tx,
             remove_worker_tx,
             remove_worker_dp_rank_tx,
+            reset_worker_dp_rank_tx,
             get_workers_tx,
             dump_tx,
             flush_tx,
@@ -546,6 +581,25 @@ impl KvIndexerInterface for KvIndexer {
             .send((worker, dp_rank))
             .await
             .unwrap();
+    }
+
+    async fn reset_worker_dp_rank_and_wait(
+        &self,
+        worker_id: WorkerId,
+        dp_rank: DpRank,
+    ) -> Result<(), KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.reset_worker_dp_rank_tx
+            .send(ResetWorkerDpRankRequest {
+                worker_id,
+                dp_rank,
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 
     fn shutdown(&self) {

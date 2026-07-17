@@ -122,8 +122,7 @@ pub async fn apply_cr(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::{Instance, TransportType};
-    use crate::discovery::{DiscoveryInstance, DiscoveryQuery};
+    use crate::discovery::{DiscoveryInstance, DiscoveryQuery, EventScope, EventSourceQuery};
     use crate::protocols::EndpointId;
     use kube::Resource;
 
@@ -165,51 +164,31 @@ mod tests {
     }
 
     #[test]
-    fn source_attribution_round_trips_through_kubernetes_metadata() {
+    fn event_source_round_trips_through_kubernetes_metadata() {
         let mut metadata = DiscoveryMetadata::new();
-        let source_a = EndpointId {
+        let endpoint = EndpointId {
             namespace: "workers".to_string(),
             component: "backend".to_string(),
-            name: "generate-a".to_string(),
+            name: "kv-state".to_string(),
         };
-        let source_b = EndpointId {
-            name: "generate-b".to_string(),
-            ..source_a.clone()
+        let source = DiscoveryInstance::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv-events".to_string(),
+            publisher_id: 205,
+            metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
         };
-
-        for source_endpoint in [source_a.clone(), source_b.clone()] {
-            metadata
-                .register_endpoint(DiscoveryInstance::Endpoint(Instance {
-                    namespace: "relay".to_string(),
-                    component: "backend".to_string(),
-                    endpoint: "worker_kv_indexer_query_dp0".to_string(),
-                    instance_id: 7,
-                    transport: TransportType::Nats("query-subject".to_string()),
-                    device_type: None,
-                    source_endpoint: Some(source_endpoint),
-                }))
-                .unwrap();
-        }
+        metadata.register_event_source(source.clone()).unwrap();
 
         let cr = build_cr("test-pod", "test-pod", "pod-uid", &metadata).unwrap();
         let round_trip: DiscoveryMetadata = serde_json::from_value(cr.spec.data).unwrap();
-        let endpoints = round_trip.filter(&DiscoveryQuery::Endpoint {
-            namespace: "relay".to_string(),
-            component: "backend".to_string(),
-            endpoint: "worker_kv_indexer_query_dp0".to_string(),
-        });
 
-        assert_eq!(endpoints.len(), 2);
-        let sources = endpoints
-            .into_iter()
-            .map(|instance| match instance {
-                DiscoveryInstance::Endpoint(instance) => instance.source_endpoint,
-                _ => unreachable!(),
-            })
-            .collect::<std::collections::HashSet<_>>();
         assert_eq!(
-            sources,
-            std::collections::HashSet::from([Some(source_a), Some(source_b)])
+            round_trip.filter(&DiscoveryQuery::EventSources(
+                EventSourceQuery::endpoint_topic(endpoint, "kv-events")
+            )),
+            vec![source]
         );
     }
 }

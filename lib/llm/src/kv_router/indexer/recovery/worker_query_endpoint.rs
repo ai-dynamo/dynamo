@@ -9,29 +9,24 @@ use dynamo_kv_router::{
     protocols::DpRank,
 };
 use dynamo_runtime::{
-    component::Component,
+    component::{Component, StartedEndpoint},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
         network::Ingress,
     },
-    protocols::EndpointId,
     stream,
     traits::DistributedRuntimeProvider,
 };
 use tokio::sync::Semaphore;
 
-use crate::kv_router::{
-    worker_kv_indexer_query_endpoint, worker_kv_indexer_query_endpoint_for_worker,
-};
-
 /// Worker-side endpoint registration for Router -> LocalKvIndexer query service
 pub(crate) async fn start_worker_kv_query_endpoint(
     component: Component,
-    source_endpoint: EndpointId,
+    publisher_id: u64,
     worker_id: u64,
     dp_rank: DpRank,
     local_indexer: Arc<LocalKvIndexer>,
-) {
+) -> anyhow::Result<StartedEndpoint> {
     let engine = Arc::new(WorkerKvQueryEngine {
         worker_id,
         dp_rank,
@@ -39,41 +34,22 @@ pub(crate) async fn start_worker_kv_query_endpoint(
         processing_semaphore: Semaphore::new(1),
     });
 
-    let ingress = match Ingress::for_engine(engine) {
-        Ok(ingress) => ingress,
-        Err(e) => {
-            tracing::error!(
-                "Failed to build WorkerKvQuery endpoint handler for worker {worker_id} dp_rank {dp_rank}: {e}"
-            );
-            return;
-        }
-    };
+    let ingress = Ingress::for_engine(engine)?;
 
     let route_worker_id = component.drt().connection_id();
-    let endpoint_name = if route_worker_id == worker_id {
-        worker_kv_indexer_query_endpoint(dp_rank)
-    } else {
-        worker_kv_indexer_query_endpoint_for_worker(worker_id, dp_rank)
-    };
+    let endpoint_name = format!("worker_kv_query_source_{publisher_id:x}");
     tracing::info!(
-        source_endpoint = %source_endpoint,
         "WorkerKvQuery endpoint starting for worker {worker_id} dp_rank {dp_rank} \
          routed by instance {route_worker_id} on endpoint '{endpoint_name}'"
     );
 
-    if let Err(e) = component
+    component
         .endpoint(&endpoint_name)
         .endpoint_builder()
-        .source_endpoint(source_endpoint)
         .handler(ingress)
         .graceful_shutdown(true)
-        .start()
+        .start_with_registration()
         .await
-    {
-        tracing::error!(
-            "WorkerKvQuery endpoint failed for worker {worker_id} dp_rank {dp_rank}: {e}"
-        );
-    }
 }
 
 pub(super) struct WorkerKvQueryEngine {

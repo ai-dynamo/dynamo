@@ -925,6 +925,7 @@ mod tests {
             endpoint,
             client.clone(),
             workers,
+            None,
             16,
             DefaultWorkerSelector::new(Some(config.clone()), "decode"),
             Some(config),

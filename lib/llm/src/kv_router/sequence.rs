@@ -267,6 +267,19 @@ mod tests {
         .await??;
         assert!(sequences_a.active_blocks()[&worker] > 0);
         assert!(sequences_a_peer.active_blocks()[&worker] > 0);
+        let leaked_to_b = tokio::time::timeout(tokio::time::Duration::from_millis(250), async {
+            loop {
+                if sequences_b.active_blocks()[&worker] > 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            leaked_to_b.is_err(),
+            "endpoint B received endpoint A sequence state"
+        );
         assert_eq!(sequences_b.active_blocks()[&worker], 0);
         cancel.cancel();
         Ok(())

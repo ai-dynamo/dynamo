@@ -1279,7 +1279,6 @@ mod tests {
             component: component.to_string(),
             endpoint: endpoint.to_string(),
             instance_id,
-            source_endpoint: None,
         }
     }
 

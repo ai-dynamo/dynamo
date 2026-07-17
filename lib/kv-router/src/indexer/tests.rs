@@ -1418,6 +1418,31 @@ mod interface_tests {
     }
 
     #[tokio::test]
+    #[apply(indexer_template)]
+    async fn test_acknowledged_rank_reset_orders_after_accepted_events(variant: &str) {
+        let workers = [WorkerWithDpRank::new(7, 0), WorkerWithDpRank::new(7, 1)];
+        let index = make_indexer(variant);
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 0))
+            .await;
+        index
+            .apply_event(make_store_event_with_dp_rank(7, &[1, 2, 3], 1))
+            .await;
+
+        index.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+
+        assert_query_scores_with_semantics(
+            variant,
+            index.as_ref(),
+            &[1, 2, 3],
+            &workers,
+            &[(workers[1], 3)],
+            MatchSemantics::Exact,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     #[apply(matching_indexer_template)]
     async fn test_partial_block_removal(variant: &str) {
         let worker = WorkerWithDpRank::new(0, 0);

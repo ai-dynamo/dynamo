@@ -42,6 +42,9 @@ pub struct DiscoveryMetadata {
     /// Registered event channel instances (key: path string from EventChannelInstanceId::to_path())
     #[serde(default, deserialize_with = "deserialize_null_default")]
     event_channels: HashMap<String, DiscoveryInstance>,
+    /// Registered event source instances (key: path string from EventSourceInstanceId::to_path())
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    event_sources: HashMap<String, DiscoveryInstance>,
 }
 
 impl DiscoveryMetadata {
@@ -51,6 +54,7 @@ impl DiscoveryMetadata {
             endpoints: HashMap::new(),
             model_cards: HashMap::new(),
             event_channels: HashMap::new(),
+            event_sources: HashMap::new(),
         }
     }
 
@@ -66,6 +70,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot register EventChannel instance as endpoint")
+            }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot register EventSource instance as endpoint")
             }
         }
     }
@@ -83,6 +90,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot register EventChannel instance as model card")
             }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot register EventSource instance as model card")
+            }
         }
     }
 
@@ -98,6 +108,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot unregister EventChannel instance as endpoint")
+            }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot unregister EventSource instance as endpoint")
             }
         }
     }
@@ -115,6 +128,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::EventChannel(_) => {
                 anyhow::bail!("Cannot unregister EventChannel instance as model card")
             }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot unregister EventSource instance as model card")
+            }
         }
     }
 
@@ -131,6 +147,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot register Model instance as event channel")
             }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot register EventSource instance as event channel")
+            }
         }
     }
 
@@ -146,6 +165,47 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot unregister Model instance as event channel")
+            }
+            DiscoveryInstanceId::EventSource(_) => {
+                anyhow::bail!("Cannot unregister EventSource instance as event channel")
+            }
+        }
+    }
+
+    /// Register a semantic event source instance.
+    pub fn register_event_source(&mut self, instance: DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::EventSource(key) => {
+                self.event_sources.insert(key.to_path(), instance);
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot register Endpoint instance as event source")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot register Model instance as event source")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot register EventChannel instance as event source")
+            }
+        }
+    }
+
+    /// Unregister one exact semantic event source incarnation.
+    pub fn unregister_event_source(&mut self, instance: &DiscoveryInstance) -> Result<()> {
+        match instance.id() {
+            DiscoveryInstanceId::EventSource(key) => {
+                self.event_sources.remove(&key.to_path());
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot unregister Endpoint instance as event source")
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot unregister Model instance as event source")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot unregister EventChannel instance as event source")
             }
         }
     }
@@ -165,12 +225,18 @@ impl DiscoveryMetadata {
         self.event_channels.values().cloned().collect()
     }
 
+    /// Get all registered semantic event sources.
+    pub fn get_all_event_sources(&self) -> Vec<DiscoveryInstance> {
+        self.event_sources.values().cloned().collect()
+    }
+
     /// Get all registered instances (endpoints, model cards, and event channels)
     pub fn get_all(&self) -> Vec<DiscoveryInstance> {
         self.endpoints
             .values()
             .chain(self.model_cards.values())
             .chain(self.event_channels.values())
+            .chain(self.event_sources.values())
             .cloned()
             .collect()
     }
@@ -190,6 +256,7 @@ impl DiscoveryMetadata {
 
             // EventChannel queries now return actual event channels
             DiscoveryQuery::EventChannels(_) => self.get_all_event_channels(),
+            DiscoveryQuery::EventSources(_) => self.get_all_event_sources(),
         };
 
         filter_instances(all_instances, query)
@@ -303,6 +370,22 @@ fn filter_instances(
                 _ => false,
             })
             .collect(),
+
+        DiscoveryQuery::EventSources(query) => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::EventSource {
+                    scope, topic: t, ..
+                } => {
+                    query
+                        .scope
+                        .as_ref()
+                        .is_none_or(|expected| expected == scope)
+                        && query.topic.as_ref().is_none_or(|qt| qt == t)
+                }
+                _ => false,
+            })
+            .collect(),
     }
 }
 
@@ -387,7 +470,7 @@ impl MetadataSnapshot {
 mod tests {
     use super::*;
     use crate::component::{Instance, TransportType};
-    use crate::discovery::EventChannelQuery;
+    use crate::discovery::{EventChannelQuery, EventSourceQuery};
 
     #[test]
     fn test_metadata_serde() {
@@ -401,7 +484,6 @@ mod tests {
             instance_id: 123,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
             device_type: None,
-            source_endpoint: None,
         });
 
         metadata.register_endpoint(instance).unwrap();
@@ -435,7 +517,6 @@ mod tests {
                         instance_id: i,
                         transport: TransportType::Nats("nats://localhost:4222".to_string()),
                         device_type: None,
-                        source_endpoint: None,
                     });
                     meta.register_endpoint(instance).unwrap();
                 })
@@ -465,7 +546,6 @@ mod tests {
                 instance_id: i,
                 transport: TransportType::Nats("nats://localhost:4222".to_string()),
                 device_type: None,
-                source_endpoint: None,
             });
             metadata.register_endpoint(instance).unwrap();
         }
@@ -542,6 +622,39 @@ mod tests {
         };
         metadata.unregister_event_channel(&instance).unwrap();
         assert_eq!(metadata.get_all_event_channels().len(), 2);
+    }
+
+    #[test]
+    fn event_source_registration_filters_and_removes_exact_incarnation() {
+        use crate::discovery::EventScope;
+        use crate::protocols::EndpointId;
+
+        let mut metadata = DiscoveryMetadata::new();
+        let endpoint = EndpointId {
+            namespace: "test".to_string(),
+            component: "worker".to_string(),
+            name: "decode".to_string(),
+        };
+        let source = |publisher_id| DiscoveryInstance::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv-events".to_string(),
+            publisher_id,
+            metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
+        };
+
+        let old = source(100);
+        let current = source(205);
+        metadata.register_event_source(old.clone()).unwrap();
+        metadata.register_event_source(current.clone()).unwrap();
+
+        let query =
+            DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(endpoint, "kv-events"));
+        assert_eq!(metadata.filter(&query).len(), 2);
+
+        metadata.unregister_event_source(&old).unwrap();
+        assert_eq!(metadata.filter(&query), vec![current]);
     }
 
     #[test]
@@ -623,7 +736,6 @@ mod tests {
             instance_id: 1,
             transport: TransportType::Nats("nats://localhost:4222".to_string()),
             device_type: None,
-            source_endpoint: None,
         });
         metadata.register_endpoint(endpoint).unwrap();
 

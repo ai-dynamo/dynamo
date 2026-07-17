@@ -995,7 +995,7 @@ impl KvEventPublisher {
     ///         Use ``50`` to allow compatible tails to span lists for up to 50 ms.
     ///         Maximum allowed is 15_000 (15 seconds); larger values are capped.
     #[new]
-    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None))]
+    #[pyo3(signature = (endpoint, worker_id=None, kv_block_size=0, dp_rank=0, enable_local_indexer=false, zmq_endpoint=None, zmq_topic=None, batching_timeout_ms=llm_rs::kv_router::publisher::DEFAULT_BATCHING_TIMEOUT_MS, image_token_id=None, kv_state_endpoint=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
@@ -1007,6 +1007,7 @@ impl KvEventPublisher {
         zmq_topic: Option<String>,
         batching_timeout_ms: Option<u64>,
         image_token_id: Option<u32>,
+        kv_state_endpoint: Option<String>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
             endpoint: ep,
@@ -1019,8 +1020,12 @@ impl KvEventPublisher {
         }
 
         let inner =
-            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id(
-                endpoint.inner,
+            llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer_and_worker_id_at(
+                endpoint.inner.clone(),
+                kv_state_endpoint
+                    .as_deref()
+                    .map(dynamo_runtime::protocols::EndpointId::from)
+                    .unwrap_or_else(|| endpoint.inner.id()),
                 worker_id,
                 kv_block_size as u32,
                 source_config,

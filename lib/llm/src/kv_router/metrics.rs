@@ -225,7 +225,7 @@ impl RouterWorkerStatusMetrics {
                 let kv_event_source_mismatch_workers = metrics
                     .create_intgaugevec(
                         router::KV_EVENT_SOURCE_MISMATCH_WORKERS,
-                        "Number of workers expected to publish KV events but missing worker-local KV indexer query endpoints",
+                        "Number of serving workers with missing or ambiguous KV sources, or without an expected RecoveryTarget",
                         &[
                             labels::MODEL,
                             labels::WORKER_TYPE,

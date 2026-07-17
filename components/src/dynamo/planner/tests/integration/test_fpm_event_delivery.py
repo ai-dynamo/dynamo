@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from contextlib import AsyncExitStack
 
 import pytest
 
@@ -66,18 +67,25 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
     monkeypatch.setenv("DYN_FILE_KV", str(tmp_path))
     namespace = "fpm-test"
     endpoint_path = f"{namespace}.worker.generate"
-    worker_runtime = DistributedRuntime(
-        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
-    )
-    planner_runtime = DistributedRuntime(
-        asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
-    )
-    publisher = None
-    provider = None
-
-    try:
+    async with AsyncExitStack() as stack:
+        worker_runtime = DistributedRuntime(
+            asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+        )
+        stack.callback(worker_runtime.shutdown)
+        planner_runtime = DistributedRuntime(
+            asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+        )
+        stack.callback(planner_runtime.shutdown)
+        decoy_runtime = DistributedRuntime(
+            asyncio.get_running_loop(), "file", "tcp", event_plane="zmq"
+        )
+        stack.callback(decoy_runtime.shutdown)
         worker_endpoint = worker_runtime.endpoint(endpoint_path)
         worker_id = str(worker_endpoint.connection_id())
+        decoy_endpoint = decoy_runtime.endpoint(f"{namespace}.worker.generate-decoy")
+        decoy_worker_id = str(decoy_endpoint.connection_id())
+        decoy_publisher = FpmDirectPublisher(decoy_endpoint, decoy_worker_id, dp_size=1)
+        stack.callback(decoy_publisher.shutdown)
         await register_model(
             ModelInput.Tensor,
             ModelType.TensorBased,
@@ -105,8 +113,10 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
             namespace_source=sources,
         )
         await provider.async_init()
+        stack.push_async_callback(provider.shutdown)
 
         publisher = FpmDirectPublisher(worker_endpoint, worker_id, dp_size=1)
+        stack.callback(publisher.shutdown)
         config = PlannerConfig(
             mode="agg",
             enable_load_scaling=True,
@@ -126,6 +136,19 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
         )
         tick_input = None
         for _ in range(100):
+            decoy_publisher.publish(
+                dp_rank=0,
+                scheduled_num_prefill_requests=0,
+                scheduled_sum_prefill_tokens=0,
+                scheduled_sum_prefill_kv_tokens=0,
+                scheduled_num_decode_requests=1,
+                scheduled_sum_decode_kv_tokens=999,
+                queued_num_prefill_requests=0,
+                queued_sum_prefill_tokens=0,
+                queued_num_decode_requests=1,
+                queued_sum_decode_kv_tokens=999,
+                wall_time_secs=0.01,
+            )
             publisher.publish(
                 dp_rank=0,
                 scheduled_num_prefill_requests=0,
@@ -155,6 +178,7 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
         observations = tick_input.fpm_observations
         assert observations.decode is not None
         assert (worker_id, 0) in observations.decode
+        assert (decoy_worker_id, 0) not in observations.decode
 
         scaling = PlannerScalingState(
             config,
@@ -171,10 +195,3 @@ async def test_endpoint_fpm_reaches_planner_and_drives_scale_up(tmp_path, monkey
         assert decision is not None
         assert decision.num_decode is not None
         assert decision.num_decode > 1
-    finally:
-        if provider is not None:
-            await provider.shutdown()
-        if publisher is not None:
-            publisher.shutdown()
-        planner_runtime.shutdown()
-        worker_runtime.shutdown()

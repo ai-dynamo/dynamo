@@ -118,6 +118,18 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
                 && query.topic.as_ref().is_none_or(|t| t == inst_topic)
         }
 
+        (
+            DiscoveryInstance::EventSource {
+                scope: inst_scope,
+                topic: inst_topic,
+                ..
+            },
+            DiscoveryQuery::EventSources(query),
+        ) => {
+            query.scope.as_ref().is_none_or(|scope| scope == inst_scope)
+                && query.topic.as_ref().is_none_or(|t| t == inst_topic)
+        }
+
         // Cross-type matches return false
         (
             DiscoveryInstance::Endpoint(_),
@@ -125,7 +137,8 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. }
-            | DiscoveryQuery::EventChannels(_),
+            | DiscoveryQuery::EventChannels(_)
+            | DiscoveryQuery::EventSources(_),
         ) => false,
         (
             DiscoveryInstance::Model { .. },
@@ -133,7 +146,8 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
             | DiscoveryQuery::Endpoint { .. }
-            | DiscoveryQuery::EventChannels(_),
+            | DiscoveryQuery::EventChannels(_)
+            | DiscoveryQuery::EventSources(_),
         ) => false,
         (
             DiscoveryInstance::EventChannel { .. },
@@ -145,6 +159,19 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. },
+        ) => false,
+        (DiscoveryInstance::EventChannel { .. }, DiscoveryQuery::EventSources(_)) => false,
+        (
+            DiscoveryInstance::EventSource { .. },
+            DiscoveryQuery::AllEndpoints
+            | DiscoveryQuery::NamespacedEndpoints { .. }
+            | DiscoveryQuery::ComponentEndpoints { .. }
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllModels
+            | DiscoveryQuery::NamespacedModels { .. }
+            | DiscoveryQuery::ComponentModels { .. }
+            | DiscoveryQuery::EndpointModels { .. }
+            | DiscoveryQuery::EventChannels(_),
         ) => false,
     }
 }
@@ -291,7 +318,6 @@ mod tests {
             endpoint: "test-ep".to_string(),
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
             device_type: None,
-            source_endpoint: None,
         };
 
         let query = DiscoveryQuery::Endpoint {
@@ -339,62 +365,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn source_attribution_distinguishes_mock_instances_and_removals() {
+    async fn event_source_removal_is_publisher_specific() {
+        use crate::discovery::{EventScope, EventSourceQuery};
+
         let client = MockDiscovery::new(Some(42), SharedMockRegistry::new());
-        let query = DiscoveryQuery::Endpoint {
-            namespace: "relay".to_string(),
-            component: "backend".to_string(),
-            endpoint: "worker_kv_indexer_query_dp0".to_string(),
-        };
-        let source_a = crate::protocols::EndpointId {
+        let endpoint = crate::protocols::EndpointId {
             namespace: "workers".to_string(),
             component: "backend".to_string(),
-            name: "generate-a".to_string(),
+            name: "kv-state".to_string(),
         };
-        let source_b = crate::protocols::EndpointId {
-            name: "generate-b".to_string(),
-            ..source_a.clone()
-        };
-        let spec = |source_endpoint| DiscoverySpec::Endpoint {
-            namespace: "relay".to_string(),
-            component: "backend".to_string(),
-            endpoint: "worker_kv_indexer_query_dp0".to_string(),
-            transport: crate::component::TransportType::Nats("query-subject".to_string()),
-            device_type: None,
-            source_endpoint: Some(source_endpoint),
+        let query = DiscoveryQuery::EventSources(EventSourceQuery::endpoint_topic(
+            endpoint.clone(),
+            "kv-events",
+        ));
+        let spec = |publisher_id| DiscoverySpec::EventSource {
+            scope: EventScope::Endpoint {
+                endpoint: endpoint.clone(),
+            },
+            topic: "kv-events".to_string(),
+            publisher_id,
+            metadata: serde_json::json!({"worker_id": 7, "dp_rank": 0}),
         };
 
-        let registered_a = client.register(spec(source_a.clone())).await.unwrap();
-        let registered_b = client.register(spec(source_b.clone())).await.unwrap();
+        let old = client.register(spec(100)).await.unwrap();
+        let current = client.register(spec(205)).await.unwrap();
         assert_eq!(client.list(query.clone()).await.unwrap().len(), 2);
 
-        let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
-        for _ in 0..2 {
-            assert!(matches!(
-                stream.next().await.unwrap().unwrap(),
-                DiscoveryEvent::Added(DiscoveryInstance::Endpoint(_))
-            ));
-        }
-
-        client.unregister(registered_a).await.unwrap();
-        let removed = tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
-            loop {
-                if let DiscoveryEvent::Removed(id) = stream.next().await.unwrap().unwrap() {
-                    break id;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            removed
-                .extract_endpoint_id()
-                .unwrap()
-                .source_endpoint
-                .as_ref(),
-            Some(&source_a)
-        );
-        assert_eq!(client.list(query).await.unwrap(), vec![registered_b]);
+        client.unregister(old).await.unwrap();
+        assert_eq!(client.list(query).await.unwrap(), vec![current]);
     }
 
     #[tokio::test]

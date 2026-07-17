@@ -56,23 +56,15 @@ impl WorkerMetricsPublisher {
 
     pub async fn create_endpoint(&self, endpoint: Endpoint) -> Result<()> {
         let worker_id = endpoint.drt().connection_id();
-        self.start_metrics_publishing(endpoint, worker_id);
+        let event_publisher = EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?;
+        self.start_metrics_publishing(event_publisher, worker_id);
         Ok(())
     }
 
-    pub(super) fn start_metrics_publishing(&self, endpoint: Endpoint, worker_id: u64) {
+    pub(super) fn start_metrics_publishing(&self, event_publisher: EventPublisher, worker_id: u64) {
         let metrics_rx = self.rx.clone();
 
         tokio::spawn(async move {
-            let event_publisher =
-                match EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await {
-                    Ok(publisher) => publisher,
-                    Err(e) => {
-                        tracing::error!("Failed to create metrics publisher: {}", e);
-                        return;
-                    }
-                };
-
             let mut rx = metrics_rx;
             let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;

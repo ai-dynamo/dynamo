@@ -166,6 +166,15 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_event_channel(instance.clone())?;
             }
+            DiscoveryInstance::EventSource { scope, topic, .. } => {
+                tracing::info!(
+                    "Registering event source: scope={:?}, topic={}, publisher_id={:x}",
+                    scope,
+                    topic,
+                    instance_id
+                );
+                metadata.register_event_source(instance.clone())?;
+            }
         }
 
         // Build and apply the CR with the updated metadata
@@ -237,6 +246,15 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.unregister_event_channel(&instance)?;
+            }
+            DiscoveryInstance::EventSource { scope, topic, .. } => {
+                tracing::info!(
+                    "Unregistering event source: scope={:?}, topic={}, publisher_id={:x}",
+                    scope,
+                    topic,
+                    instance_id
+                );
+                metadata.unregister_event_source(&instance)?;
             }
         }
 
