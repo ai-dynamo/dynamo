@@ -16,6 +16,8 @@ pub enum EndpointType {
     Images,
     /// Audios API (speech/audio generation)
     Audios,
+    /// Audio Transcriptions API (speech-to-text)
+    Transcriptions,
     /// Videos API (video generation)
     Videos,
     /// Realtime API (bidirectional streaming over WebSocket)
@@ -36,6 +38,7 @@ impl EndpointType {
             Self::Embedding => "embedding",
             Self::Images => "images",
             Self::Audios => "audios",
+            Self::Transcriptions => "transcriptions",
             Self::Videos => "videos",
             Self::Realtime => "realtime",
             Self::Responses => "responses",
@@ -51,6 +54,7 @@ impl EndpointType {
             Self::Embedding,
             Self::Images,
             Self::Audios,
+            Self::Transcriptions,
             Self::Videos,
             Self::Realtime,
             Self::Responses,
@@ -82,5 +86,11 @@ mod tests {
     #[test]
     fn generate_in_all() {
         assert!(EndpointType::all().contains(&EndpointType::Generate));
+    }
+
+    #[test]
+    fn transcriptions_is_a_registered_endpoint() {
+        assert_eq!(EndpointType::Transcriptions.as_str(), "transcriptions");
+        assert!(EndpointType::all().contains(&EndpointType::Transcriptions));
     }
 }

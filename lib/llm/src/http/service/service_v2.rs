@@ -285,6 +285,7 @@ struct StateFlags {
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
     audios_endpoints_enabled: AtomicBool,
+    transcriptions_endpoints_enabled: AtomicBool,
     realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
@@ -300,6 +301,9 @@ impl StateFlags {
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Audios => self.audios_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Transcriptions => self
+                .transcriptions_endpoints_enabled
+                .load(Ordering::Relaxed),
             EndpointType::Realtime => self.realtime_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::AnthropicMessages => {
@@ -328,6 +332,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Audios => self
                 .audios_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Transcriptions => self
+                .transcriptions_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Realtime => self
                 .realtime_endpoints_enabled
@@ -365,6 +372,7 @@ impl State {
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
                 audios_endpoints_enabled: AtomicBool::new(false),
+                transcriptions_endpoints_enabled: AtomicBool::new(false),
                 realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
@@ -1177,6 +1185,8 @@ impl HttpServiceConfigBuilder {
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
         let (videos_docs, videos_route) = super::openai::videos_router(state.clone(), None);
         let (audios_docs, audios_route) = super::openai::audios_router(state.clone(), None);
+        let (transcriptions_docs, transcriptions_route) =
+            super::transcriptions::transcriptions_router(state.clone(), None);
         let (realtime_docs, realtime_route) = super::realtime::realtime_router(state.clone(), None);
         let (responses_docs, responses_route) = super::openai::responses_router(
             state.clone(),
@@ -1190,6 +1200,10 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
         endpoint_routes.insert(EndpointType::Audios, (audios_docs, audios_route));
+        endpoint_routes.insert(
+            EndpointType::Transcriptions,
+            (transcriptions_docs, transcriptions_route),
+        );
         endpoint_routes.insert(EndpointType::Realtime, (realtime_docs, realtime_route));
         endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
 

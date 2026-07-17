@@ -53,6 +53,7 @@ use crate::{
             completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
             embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
             images::{NvCreateImageRequest, NvImagesResponse},
+            transcriptions::{NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest},
             videos::{NvCreateVideoRequest, NvVideosResponse},
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
@@ -239,6 +240,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Embedding,
     ModelType::Images,
     ModelType::Audios,
+    ModelType::Transcriptions,
     ModelType::Videos,
     ModelType::TensorBased,
     ModelType::Realtime,
@@ -256,6 +258,8 @@ fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bo
         manager.list_images_models().is_empty()
     } else if model_type == ModelType::Audios {
         manager.list_audios_models().is_empty()
+    } else if model_type == ModelType::Transcriptions {
+        manager.list_transcriptions_models().is_empty()
     } else if model_type == ModelType::Videos {
         manager.list_videos_models().is_empty()
     } else if model_type == ModelType::TensorBased {
@@ -1812,9 +1816,11 @@ impl ModelWatcher {
         else if card.model_input == ModelInput::Text
             && (card.model_type.supports_images()
                 || card.model_type.supports_audios()
+                || card.model_type.supports_transcriptions()
                 || card.model_type.supports_videos())
         {
-            // Image/Audio/Video models can also support chat completions (vLLM omni way)
+            // Text-input media capabilities share this worker-set construction path;
+            // capability bits determine which endpoint routers are installed.
             if card.model_type.supports_chat() {
                 let chat_router = PushRouter::<
                     NvCreateChatCompletionRequest,
@@ -1853,6 +1859,17 @@ impl ModelWatcher {
                 )
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
+            }
+
+            if card.model_type.supports_transcriptions() {
+                let transcriptions_router = PushRouter::<
+                    NvCreateAudioTranscriptionRequest,
+                    Annotated<NvAudioTranscriptionResponse>,
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
+                .await?;
+                worker_set.transcriptions_engine = Some(Arc::new(transcriptions_router));
             }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case: Text + Chat (pure text-to-text, no diffusion)
@@ -1945,7 +1962,7 @@ impl ModelWatcher {
             // prefill is routed off `worker_type`.)
             anyhow::bail!(
                 "Unsupported model configuration: {} with {} input. Supported combinations: \
-                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Videos|Embeddings|Realtime), \
+                Tokens+(Chat|Completions), Text+(Chat|Completions|Images|Audios|Transcriptions|Videos|Embeddings|Realtime), \
                 Tokens+Embeddings, Tensor+TensorBased",
                 card.model_type,
                 card.model_input.as_str()
@@ -2322,6 +2339,7 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Embedding));
         assert!(is_model_type_list_empty(&mm, ModelType::Images));
         assert!(is_model_type_list_empty(&mm, ModelType::Audios));
+        assert!(is_model_type_list_empty(&mm, ModelType::Transcriptions));
         assert!(is_model_type_list_empty(&mm, ModelType::Videos));
         assert!(is_model_type_list_empty(&mm, ModelType::TensorBased));
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
@@ -2336,8 +2354,9 @@ mod tests {
     }
 
     #[test]
-    fn test_realtime_in_all_model_types() {
+    fn test_expected_types_in_all_model_types() {
         assert!(ALL_MODEL_TYPES.contains(&ModelType::Realtime));
+        assert!(ALL_MODEL_TYPES.contains(&ModelType::Transcriptions));
     }
 
     #[test]

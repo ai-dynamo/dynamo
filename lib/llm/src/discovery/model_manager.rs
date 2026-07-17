@@ -40,7 +40,9 @@ use crate::{
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            images::OpenAIImagesStreamingEngine,
+            transcriptions::OpenAITranscriptionsStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -525,6 +527,14 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_transcriptions_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_transcriptions_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_videos_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -625,6 +635,16 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_audios_engine()
+    }
+
+    pub fn get_transcriptions_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_transcriptions_engine()
     }
 
     pub fn get_realtime_engine(
@@ -858,6 +878,27 @@ impl ModelManager {
             Self::aggregated_local_card(),
         );
         ws.audios_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
+    pub fn add_transcriptions_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAITranscriptionsStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_transcriptions_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_transcriptions_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.transcriptions_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }

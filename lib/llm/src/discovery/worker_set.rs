@@ -21,7 +21,9 @@ use crate::{
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
-            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+            images::OpenAIImagesStreamingEngine,
+            transcriptions::OpenAITranscriptionsStreamingEngine,
+            videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -44,6 +46,7 @@ pub struct WorkerSet {
     pub(crate) images_engine: Option<OpenAIImagesStreamingEngine>,
     pub(crate) videos_engine: Option<OpenAIVideosStreamingEngine>,
     pub(crate) audios_engine: Option<OpenAIAudiosStreamingEngine>,
+    pub(crate) transcriptions_engine: Option<OpenAITranscriptionsStreamingEngine>,
     pub(crate) tensor_engine: Option<TensorStreamingEngine>,
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
@@ -79,6 +82,7 @@ impl WorkerSet {
             images_engine: None,
             videos_engine: None,
             audios_engine: None,
+            transcriptions_engine: None,
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
@@ -126,6 +130,10 @@ impl WorkerSet {
         self.audios_engine.is_some()
     }
 
+    pub fn has_transcriptions_engine(&self) -> bool {
+        self.transcriptions_engine.is_some()
+    }
+
     pub fn has_tensor_engine(&self) -> bool {
         self.tensor_engine.is_some()
     }
@@ -155,6 +163,7 @@ impl WorkerSet {
             || self.has_tensor_engine()
             || self.has_videos_engine()
             || self.has_audios_engine()
+            || self.has_transcriptions_engine()
             || self.has_realtime_engine()
             || self.has_generate_engine()
     }

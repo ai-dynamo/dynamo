@@ -25,7 +25,7 @@ use crate::types::{
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
         generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
-        videos::OpenAIVideosStreamingEngine,
+        transcriptions::OpenAITranscriptionsStreamingEngine, videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -225,6 +225,12 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_audios_engine())
+    }
+
+    pub fn has_transcriptions_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_transcriptions_engine())
     }
 
     /// Check if any WorkerSet has a realtime engine.
@@ -570,6 +576,13 @@ impl Model {
     pub fn get_audios_engine(&self) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.audios_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_audios_engine()))
+    }
+
+    pub fn get_transcriptions_engine(
+        &self,
+    ) -> Result<OpenAITranscriptionsStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.transcriptions_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_transcriptions_engine()))
     }
 
     pub fn get_tensor_engine(&self) -> Result<TensorStreamingEngine, ModelManagerError> {

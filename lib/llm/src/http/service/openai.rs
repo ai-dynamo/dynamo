@@ -149,7 +149,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
 }
 
 /// Extract ErrorType from ErrorResponse for metrics
-fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
+pub(super) fn extract_error_type_from_response(response: &ErrorResponse) -> ErrorType {
     classify_error_for_metrics(response.0, &response.1.message)
 }
 
@@ -173,6 +173,10 @@ fn find_invalid_argument_in_chain<'a>(
         current = e.source();
     }
     None
+}
+
+pub(super) fn error_is_invalid_argument(err: &(dyn std::error::Error + 'static)) -> bool {
+    find_invalid_argument_in_chain(err).is_some()
 }
 
 fn find_queue_rejection_in_chain<'a>(
@@ -249,6 +253,20 @@ impl ErrorMessage {
             Json(ErrorMessage {
                 message,
                 error_type,
+                code: code.as_u16(),
+                details: None,
+            }),
+        )
+    }
+
+    /// Invalid request.
+    pub fn bad_request<T: Display>(msg: T) -> ErrorResponse {
+        let code = StatusCode::BAD_REQUEST;
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type: map_error_code_to_error_type(code),
                 code: code.as_u16(),
                 details: None,
             }),

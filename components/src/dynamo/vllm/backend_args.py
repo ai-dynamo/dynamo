@@ -190,6 +190,15 @@ class DynamoVllmArgGroup(ArgGroup):
             "and InstrumentedScheduler injection (none apply to pooling models).",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--transcription-worker",
+            env_var="DYN_VLLM_TRANSCRIPTION_WORKER",
+            default=False,
+            help="Run as an aggregated speech-to-text worker using vLLM's native "
+            "OpenAI transcription serving layer.",
+        )
+
         # Headless mode for multi-node TP/PP
         add_negatable_bool_argument(
             g,
@@ -434,6 +443,7 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+    transcription_worker: bool = False
 
     # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
     custom_encoder_class: Optional[str] = None
@@ -475,6 +485,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
+        self._validate_transcription_worker_exclusivity()
         self._validate_custom_encoder()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
@@ -571,6 +582,33 @@ class DynamoVllmConfig(ConfigBase):
         if isinstance(self.embedding_transfer_mode, str):
             self.embedding_transfer_mode = EmbeddingTransferMode(
                 self.embedding_transfer_mode
+            )
+
+    def _validate_transcription_worker_exclusivity(self) -> None:
+        """Transcription workers are standalone aggregated ASR engines."""
+        if not self.transcription_worker:
+            return
+        if self.embedding_worker:
+            raise ValueError(
+                "--transcription-worker cannot be combined with --embedding-worker."
+            )
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            mode = (
+                self.disaggregation_mode.value
+                if isinstance(self.disaggregation_mode, DisaggregationMode)
+                else self.disaggregation_mode
+            )
+            raise ValueError(
+                "--transcription-worker is only valid with "
+                f"--disaggregation-mode=agg (got {mode})."
+            )
+        if self._count_multimodal_roles() > 0 or self.enable_multimodal:
+            raise ValueError(
+                "--transcription-worker cannot be combined with multimodal flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError(
+                "--transcription-worker cannot be combined with --benchmark-mode."
             )
 
     def _resolve_disaggregation_mode(self) -> None:
