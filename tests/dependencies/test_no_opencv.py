@@ -9,10 +9,11 @@ already function-local, so nothing needs it at import time. Dynamo's
 trtllm_runtime.Dockerfile drops the preinstall (including the vendored media
 libraries under opencv_python_headless.libs/) in both the runtime_full stage and
 the pre_runtime whiteout, slimming the image. This test keeps a base-image bump
-or Dockerfile refactor from silently reintroducing it. See OPS-7625.
+or Dockerfile refactor from silently reintroducing it.
 """
 
 import importlib.util
+import pathlib
 
 import pytest
 
@@ -41,8 +42,6 @@ def test_opencv_not_installed():
 
 def test_no_vendored_opencv_libs():
     """The wheel's vendored shared libraries must be gone from dist-packages."""
-    import pathlib
-
     leftovers = list(
         pathlib.Path("/usr/local/lib/python3.12/dist-packages").glob(
             "opencv_python_headless*"
