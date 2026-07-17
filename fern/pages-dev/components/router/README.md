@@ -15,16 +15,10 @@ To launch the Dynamo frontend with the KV Router:
 python -m dynamo.frontend --router-mode kv --http-port 8000
 ```
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--router-mode kv` | `round-robin` | Enable KV cache-aware routing |
-| `--load-aware` | disabled | Use KV active-load routing without cache-reuse signals; implies `--router-mode kv` on the frontend |
-| `--router-kv-overlap-score-credit` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
-| `--router-prefill-load-scale` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
-| `--router-kv-events` / `--no-router-kv-events` | `--router-kv-events` | Consume worker KV events, or explicitly disable them to use approximate routing |
-| `--router-queue-threshold` | disabled | Backpressure queue threshold; setting a numeric value enables queueing, where priority hints reorder waiting requests |
-| `--router-queue-policy` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
-| `--no-router-track-prefill-tokens` | disabled | Ignore prompt-side prefill tokens in router load accounting; useful for decode-only routing paths |
+The [Frontend Configuration Reference](../frontend/configuration.md#router) is the
+canonical reference for embedded-router flags, environment variables, defaults, and
+boolean forms. See [Configuration and Tuning](router-configuration.md) for behavioral
+guidance.
 
 <Info>
 `--router-mode kv` (or `DYN_ROUTER_MODE=kv`) enables KV routing on the
@@ -43,7 +37,7 @@ For Kubernetes, set `DYN_ROUTER_MODE=kv` on the Frontend service.
 
 You can also run the KV router as a standalone service (without the Dynamo frontend). See the [Standalone Router component](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/router/) for more details.
 
-For deployment modes and quick start steps, see the [Router Guide](router-guide.md). For CLI arguments and tuning guidelines, see [Configuration and Tuning](router-configuration.md). For A/B benchmarking, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
+For deployment modes and quick start steps, see the [Router Guide](router-guide.md). For tuning guidelines, see [Configuration and Tuning](router-configuration.md). For A/B benchmarking, see the [KV Router A/B Benchmarking Guide](../../benchmarks/kv-router-ab-testing.md).
 
 ## Prerequisites and Limitations
 
@@ -59,14 +53,15 @@ For deployment modes and quick start steps, see the [Router Guide](router-guide.
 **Limitations:**
 - Static endpoints are not supported with KV routing; use dynamic discovery so the router can track worker instances and KV cache state
 
-For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, `--router-mode least-loaded`, or `--router-mode device-aware-weighted` with both static and dynamic endpoints.
+For basic model registration without KV routing, use `--router-mode round-robin`, `--router-mode random`, `--router-mode power-of-two`, `--router-mode least-loaded`, or `--router-mode device-aware-weighted` with both static and dynamic endpoints.
 
 ## Next Steps
 
 - **[Router Guide](router-guide.md)**: Deployment modes, quick start, and page map
 - **[Routing Concepts](router-concepts.md)**: Cost model and worker-selection behavior
 - **[Router Filtering](router-filtering.md)**: Candidate eligibility, DP-rank filtering, and busy-threshold overload handling
-- **[Configuration and Tuning](router-configuration.md)**: Router flags, transport modes, and metrics
+- **[Frontend Configuration Reference](../frontend/configuration.md#router)**: Canonical embedded-router flags and environment variables
+- **[Configuration and Tuning](router-configuration.md)**: Router behavior, transport modes, and tuning guidance
 - **[Deficit Round Robin Queue Scheduling](deficit-round-robin.md)**: Weighted policy-class arbitration, cursor movement, and bulk virtual rounds
 - **[Priority Scheduling](priority-scheduling.md)**: Router queue, backend engine, and cache priority behavior
 - **[Disaggregated Serving](router-disaggregated-serving.md)**: Prefill and decode routing setups
