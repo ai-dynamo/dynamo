@@ -27,9 +27,12 @@ def configure_gms_worker_logging() -> None:
     vllm_logger = logging.getLogger("vllm")
     for handler in vllm_logger.handlers:
         gms_root.addHandler(handler)
-    level = os.environ.get(ENV_LOG_LEVEL)
-    if level and hasattr(logging, level):
-        gms_root.setLevel(getattr(logging, level))
+    level_name = os.environ.get(ENV_LOG_LEVEL)
+    # getLevelName maps a valid level name to its int; anything unknown comes
+    # back as a "Level <x>" string, so only apply it when it resolved to an int.
+    level = logging.getLevelName(level_name) if level_name else None
+    if isinstance(level, int):
+        gms_root.setLevel(level)
     elif vllm_logger.level != logging.NOTSET:
         gms_root.setLevel(vllm_logger.level)
     else:

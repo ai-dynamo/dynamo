@@ -233,22 +233,19 @@ class GMSWorker(Worker):
         )
         self.available_kv_cache_memory_bytes = int(projected_available)
 
-        msg = (
+        logger.info(
             "[GMS] projected available memory "
             "%.2f GiB (requested=%.2f GiB, non_kv=%.2f GiB, "
             "torch_peak=%.2f GiB, invisible_weights=%.2f GiB, "
-            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)"
-            % (
-                projected_available / (1 << 30),
-                self.requested_memory / (1 << 30),
-                non_kv_cache_memory / (1 << 30),
-                torch_peak / (1 << 30),
-                invisible_weights_memory / (1 << 30),
-                cudagraph_memory_estimate / (1 << 30),
-                cudagraph_memory_estimate_applied / (1 << 30),
-            )
+            "cudagraph_estimate=%.2f GiB, cudagraph_applied=%.2f GiB)",
+            projected_available / (1 << 30),
+            self.requested_memory / (1 << 30),
+            non_kv_cache_memory / (1 << 30),
+            torch_peak / (1 << 30),
+            invisible_weights_memory / (1 << 30),
+            cudagraph_memory_estimate / (1 << 30),
+            cudagraph_memory_estimate_applied / (1 << 30),
         )
-        logger.info(msg)
 
         return int(projected_available)
 
