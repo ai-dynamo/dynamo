@@ -4,13 +4,13 @@
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, WorkerConfig, usage,
+    LLMEngineOutputExt, WorkerConfig, normalize_grpc_endpoint, usage,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use crate::args::{Args, normalize_endpoint};
+use crate::args::Args;
 use crate::client::{self, VllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::model::ConfiguredModel;
@@ -68,7 +68,8 @@ impl VllmSidecarEngine {
             ));
         }
 
-        let endpoint = normalize_endpoint(&args.vllm_endpoint).map_err(client::invalid_argument)?;
+        let endpoint = normalize_grpc_endpoint(&args.vllm_endpoint, "--vllm-endpoint")
+            .map_err(client::invalid_argument)?;
         let model = ConfiguredModel {
             source: args.model_path,
         };

@@ -13,6 +13,38 @@ use clap::Args;
 
 use crate::disagg::DisaggregationMode;
 
+/// Normalize a plaintext gRPC client endpoint for tonic.
+///
+/// Bare addresses and `grpc://` URLs are translated to `http://`. TLS and
+/// other schemes are rejected until the caller configures tonic TLS.
+pub fn normalize_grpc_endpoint(raw: &str, argument: &str) -> Result<String, String> {
+    let endpoint = raw.trim();
+    if endpoint.is_empty() {
+        return Err(format!(
+            "`{argument}` is required and must specify a gRPC server address, such as `http://HOST:PORT`"
+        ));
+    }
+
+    let (host, normalized) = if let Some(host) = endpoint.strip_prefix("grpc://") {
+        (host, format!("http://{host}"))
+    } else if let Some(host) = endpoint.strip_prefix("http://") {
+        (host, endpoint.to_string())
+    } else if endpoint.starts_with("grpcs://") || endpoint.starts_with("https://") {
+        return Err(format!("TLS endpoints are not supported by `{argument}`"));
+    } else if endpoint.contains("://") {
+        return Err(format!(
+            "unsupported endpoint scheme in `{argument}`: `{endpoint}`"
+        ));
+    } else {
+        (endpoint, format!("http://{endpoint}"))
+    };
+
+    if host.is_empty() {
+        return Err(format!("`{argument}` must include a host"));
+    }
+    Ok(normalized)
+}
+
 /// CLI flags that every Rust backend needs. Flatten these into your engine's
 /// `Args` struct:
 ///
@@ -90,4 +122,41 @@ pub struct CommonArgs {
     /// shim does not read this env var.
     #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
     pub route_to_encoder: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_grpc_endpoint;
+
+    const ARGUMENT: &str = "--test-endpoint";
+
+    #[test]
+    fn normalizes_plaintext_grpc_endpoints() {
+        assert_eq!(
+            normalize_grpc_endpoint(" 127.0.0.1:50051 ", ARGUMENT).unwrap(),
+            "http://127.0.0.1:50051"
+        );
+        assert_eq!(
+            normalize_grpc_endpoint("http://server:50051", ARGUMENT).unwrap(),
+            "http://server:50051"
+        );
+        assert_eq!(
+            normalize_grpc_endpoint("grpc://server:50051", ARGUMENT).unwrap(),
+            "http://server:50051"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_hosts_and_unsupported_schemes() {
+        for endpoint in [
+            "",
+            " ",
+            "http://",
+            "grpc://",
+            "https://server",
+            "other://server",
+        ] {
+            assert!(normalize_grpc_endpoint(endpoint, ARGUMENT).is_err());
+        }
+    }
 }
