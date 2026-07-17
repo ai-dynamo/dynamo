@@ -229,6 +229,7 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
+  - lib/backend/sidecar-common/
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -553,11 +554,6 @@ areas:
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
 shared:
-- glob: lib/backend/sidecar-common/
-  owners:
-  - backend-vllm
-  - backend-sglang
-  - backend-trtllm
 - glob: components/src/dynamo/thunderagent_router/
   owners:
   - router
