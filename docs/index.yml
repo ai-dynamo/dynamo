@@ -694,9 +694,16 @@ navigation:
       # fern/scripts/sync_deps.py). Populated automatically from the same two
       # sources as the sidebar status pills (synced upstream + hand-authored
       # <DepMetadata> cards) — nothing on the page is hand-maintained.
+      #
+      # slug MUST NOT be `index`: Fern reserves that slug for the tab/section
+      # root and silently drops the page (it vanishes from the sidebar and
+      # 404s at /proposals/index). Using a real slug (`registry`) both fixes
+      # that AND makes this the tab landing page — the bare /proposals root
+      # redirects to the first layout entry, exactly like the recipes tab's
+      # `Browse All Recipes` (slug: browse).
       - page: All Proposals
         path: proposals/index.mdx
-        slug: index
+        slug: registry
       - page: Overview
         path: proposals/README.mdx
         slug: overview
