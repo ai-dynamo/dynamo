@@ -72,6 +72,10 @@
   var state = { status: "All", sig: "All SIGs", sort: "num" };
   var gridEl = null;
   var countEl = null;
+  // True when the last renderGrid() ran against an empty dataset, so scan() can
+  // catch up exactly once if window.__DEP_INDEX arrives after the first build —
+  // without rebuilding the grid on every unrelated DOM mutation.
+  var renderedEmpty = false;
 
   /**
    * Map a free-text lifecycle status to a pill variant.
@@ -208,6 +212,7 @@
   function renderGrid() {
     if (!gridEl) return;
     var all = records();
+    renderedEmpty = all.length === 0;
 
     var filtered = [];
     for (var i = 0; i < all.length; i++) {
@@ -242,8 +247,10 @@
     // Reset view state for the fresh mount.
     state = { status: "All", sig: "All SIGs", sort: "num" };
 
+    // No <h2> title here: registry.mdx frontmatter already renders "Dynamo
+    // Enhancement Proposals" as the page H1 + subtitle. A second heading was a
+    // redundant duplicate. Keep only the live result count.
     var head = el("div", "dep-index-head");
-    head.appendChild(el("h2", "dep-index-title", "Dynamo Enhancement Proposals"));
     countEl = el("span", "dep-index-count", "");
     head.appendChild(countEl);
     mount.appendChild(head);
@@ -327,8 +334,12 @@
     var mount = document.getElementById(MOUNT_ID);
     if (!mount) return;
     if (mount.getAttribute(READY_ATTR) === "1") {
-      // Same mount, but data may have arrived after the first build.
-      renderGrid();
+      // Already built. Do NOT rebuild on every DOM mutation: the body-level
+      // MutationObserver fires constantly (Fern hover/prefetch churn), and
+      // re-running renderGrid() would destroy and recreate the cards under the
+      // cursor — flickering on hover and reloading avatars. Only catch up once,
+      // if the grid was built empty because window.__DEP_INDEX arrived late.
+      if (renderedEmpty && records().length > 0) renderGrid();
       return;
     }
     mount.setAttribute(READY_ATTR, "1");

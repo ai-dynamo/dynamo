@@ -31,8 +31,9 @@
  * both light and dark; .dark overrides mirror DepMetadata.tsx). */
 const DEP_INDEX_CSS = `
 .dep-index{--dep-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"RobotoMono",monospace;margin:0 0 2rem;}
-.dep-index-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding-bottom:12px;margin-bottom:16px;border-bottom:2px solid var(--pst-color-heading,#111);}
-.dep-index-title{margin:0;font-size:1.3rem;font-weight:800;letter-spacing:-.01em;color:var(--pst-color-heading,inherit);}
+/* Slim result-count line. No title/heading here — registry.mdx frontmatter
+   already renders the "Dynamo Enhancement Proposals" H1 + subtitle above. */
+.dep-index-head{display:flex;align-items:baseline;gap:16px;margin:0 0 14px;}
 .dep-index-count{font-family:var(--dep-mono);font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--pst-color-text-muted,#6b6b6b);text-transform:uppercase;white-space:nowrap;}
 .dep-index-filters{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-bottom:18px;}
 .dep-index-chip{font-family:var(--dep-mono);font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;border:1px solid var(--border,var(--grayscale-a5,#dcdcdc));background:transparent;color:var(--pst-color-text-muted,#6b6b6b);padding:5px 11px;border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;gap:7px;line-height:1;}
