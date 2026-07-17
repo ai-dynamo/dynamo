@@ -104,6 +104,10 @@ pub struct RlWorkerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub routes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -315,12 +319,30 @@ async fn describe_worker(
         call_worker_routes(state, &endpoint, timeout).await
     };
     match tokio::time::timeout(timeout, probe).await {
-        Ok(Ok(routes)) => worker_info(endpoint, model, routes.routes, routes.system_url, None),
-        Ok(Err(err)) => worker_info(endpoint, model, Vec::new(), None, Some(err.to_string())),
+        Ok(Ok(routes)) => worker_info(
+            endpoint,
+            model,
+            routes.routes,
+            routes.system_url,
+            routes.admin_base_url,
+            routes.world_size,
+            None,
+        ),
+        Ok(Err(err)) => worker_info(
+            endpoint,
+            model,
+            Vec::new(),
+            None,
+            None,
+            None,
+            Some(err.to_string()),
+        ),
         Err(_) => worker_info(
             endpoint,
             model,
             Vec::new(),
+            None,
+            None,
             None,
             Some(format!(
                 "worker discovery timed out after {}s",
@@ -334,6 +356,8 @@ async fn describe_worker(
 struct WorkerRoutes {
     routes: Vec<String>,
     system_url: Option<String>,
+    admin_base_url: Option<String>,
+    world_size: Option<u32>,
 }
 
 async fn call_worker_routes(
@@ -440,7 +464,31 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
         .filter(|url| !url.is_empty())
         .map(ToString::to_string);
 
-    Ok(WorkerRoutes { routes, system_url })
+    let admin_base_url = value
+        .get("admin_base_url")
+        .and_then(|url| url.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToString::to_string);
+    let world_size = match value.get("world_size") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|size| u32::try_from(size).ok())
+                .filter(|size| *size > 0)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("worker routes response has invalid 'world_size'")
+                })?,
+        ),
+    };
+
+    Ok(WorkerRoutes {
+        routes,
+        system_url,
+        admin_base_url,
+        world_size,
+    })
 }
 
 fn worker_info(
@@ -448,6 +496,8 @@ fn worker_info(
     model: Option<String>,
     mut routes: Vec<String>,
     system_url: Option<String>,
+    admin_base_url: Option<String>,
+    world_size: Option<u32>,
     error: Option<String>,
 ) -> RlWorkerInfo {
     routes.sort();
@@ -461,6 +511,8 @@ fn worker_info(
         instance_id: endpoint.instance_id,
         transport: endpoint.transport,
         system_url,
+        admin_base_url,
+        world_size,
         model,
         routes,
         error,
@@ -537,12 +589,29 @@ mod tests {
         let parsed = parse_worker_routes(json!({
             "routes": ["pause_generation", "resume_generation"],
             "system_url": "  http://worker:8080  ",
+            "admin_base_url": "  http://worker:8120  ",
+            "world_size": 2,
         }))
         .expect("valid payload");
         let routes: Vec<&str> = parsed.routes.iter().map(String::as_str).collect();
         assert_eq!(routes, ["pause_generation", "resume_generation"]);
         // system_url is trimmed.
         assert_eq!(parsed.system_url.as_deref(), Some("http://worker:8080"));
+        assert_eq!(parsed.admin_base_url.as_deref(), Some("http://worker:8120"));
+        assert_eq!(parsed.world_size, Some(2));
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_invalid_world_size() {
+        for world_size in [json!(0), json!(-1), json!("2")] {
+            let err = parse_worker_routes(json!({
+                "routes": [],
+                "admin_base_url": "http://worker:8120",
+                "world_size": world_size,
+            }))
+            .unwrap_err();
+            assert!(err.to_string().contains("world_size"));
+        }
     }
 
     #[test]

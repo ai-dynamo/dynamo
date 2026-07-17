@@ -29,6 +29,11 @@ pub struct Args {
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
     pub grpc_endpoint: String,
 
+    /// Direct HTTP admin endpoint of the same vLLM engine. Required when
+    /// `DYN_ENABLE_RL=true` so Dynamo can publish it through `/v1/rl/workers`.
+    #[arg(long, env = "VLLM_HTTP_ENDPOINT")]
+    pub admin_endpoint: Option<String>,
+
     /// Dynamo topology role. vLLM deliberately does not expose deployment
     /// topology in its native protocol, so the sidecar owns this routing
     /// configuration explicitly.
@@ -133,6 +138,25 @@ pub fn normalize_endpoint(raw: &str) -> Result<String, String> {
     }
 }
 
+pub fn normalize_admin_endpoint(raw: &str) -> Result<String, String> {
+    let normalized = normalize_endpoint(raw)?;
+    let remainder = normalized
+        .strip_prefix("http://")
+        .expect("normalize_endpoint always returns plain HTTP");
+    let (authority, path) = remainder.split_once('/').unwrap_or((remainder, ""));
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('?')
+        || authority.contains('#')
+        || !matches!(path.trim_end_matches('/'), "" | "v1")
+    {
+        return Err(format!(
+            "invalid vLLM admin endpoint `{raw}`; expected pod-local host:port with optional /v1"
+        ));
+    }
+    Ok(format!("http://{authority}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +182,14 @@ mod tests {
     #[test]
     fn whitespace_is_trimmed() {
         assert_eq!(normalize_endpoint("  host:9  ").unwrap(), "http://host:9");
+    }
+
+    #[test]
+    fn admin_endpoint_uses_the_same_pod_local_http_validation() {
+        assert_eq!(
+            normalize_admin_endpoint("  127.0.0.1:8120/v1  ").unwrap(),
+            "http://127.0.0.1:8120"
+        );
+        assert!(normalize_admin_endpoint("https://worker:8120").is_err());
     }
 }

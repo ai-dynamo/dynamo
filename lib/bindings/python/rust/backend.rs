@@ -427,6 +427,7 @@ impl WorkerConfig {
                 route_to_encoder,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
+                rl_metadata: None,
             },
         })
     }

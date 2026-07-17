@@ -179,6 +179,8 @@ pub struct WorkerConfig {
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
     pub media_fetcher: Option<MediaFetcher>,
+    /// Direct engine admin metadata published through Dynamo RL discovery.
+    pub rl_metadata: Option<crate::RlWorkerMetadata>,
 }
 
 impl WorkerConfig {
@@ -218,6 +220,7 @@ impl Default for WorkerConfig {
             route_to_encoder: false,
             media_decoder: None,
             media_fetcher: None,
+            rl_metadata: None,
         }
     }
 }
@@ -1011,6 +1014,28 @@ impl Worker {
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
+        let rl_endpoint = match (crate::rl::enabled(), self.config.rl_metadata.clone()) {
+            (true, Some(metadata)) => match crate::rl::serve_endpoint(&endpoint, metadata) {
+                Ok(endpoint) => Some(endpoint),
+                Err(error) => {
+                    self.orchestrator_steps(&endpoint).await;
+                    return Err(err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("RL endpoint setup: {error}"),
+                    ));
+                }
+            },
+            _ => None,
+        };
+        let rl_endpoint_handle = rl_endpoint.as_ref().map(|rl| rl.endpoint.clone());
+        let rl_serve = async move {
+            match rl_endpoint {
+                Some(endpoint) => endpoint.future.await,
+                None => std::future::pending::<anyhow::Result<()>>().await,
+            }
+        };
+        tokio::pin!(rl_serve);
+
         let engine_watch = {
             let engine = self.engine.clone();
             async move { engine.watch().await }
@@ -1042,6 +1067,19 @@ impl Worker {
                     }
                 }
             }
+            result = &mut rl_serve => {
+                shutdown.cancel();
+                match result {
+                    Ok(()) => {
+                        tracing::warn!("RL discovery endpoint completed unexpectedly");
+                        None
+                    }
+                    Err(error) => Some(Err(err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("RL endpoint serve: {error}"),
+                    ))),
+                }
+            }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
                 None
@@ -1065,6 +1103,11 @@ impl Worker {
             }
         };
 
+        if let Some(rl_endpoint) = rl_endpoint_handle
+            && let Err(error) = rl_endpoint.unregister_endpoint_instance().await
+        {
+            tracing::warn!(%error, "RL discovery endpoint unregister failed");
+        }
         self.orchestrator_steps(&endpoint).await;
         if let Some(result) = shutdown_result {
             result?;

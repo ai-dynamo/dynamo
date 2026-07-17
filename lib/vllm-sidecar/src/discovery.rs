@@ -104,6 +104,24 @@ pub(crate) fn validate_discovery(discovery: &Discovery) -> Result<(), DynamoErro
     Ok(())
 }
 
+pub(crate) fn inference_world_size(parallelism: &pb::ParallelismInfo) -> Result<u32, DynamoError> {
+    let sizes = [
+        parallelism.tensor_parallel_size,
+        parallelism.pipeline_parallel_size,
+        parallelism.data_parallel_size,
+    ];
+    if sizes.contains(&0) {
+        return Err(client::invalid_arg(
+            "vLLM parallelism sizes must be positive for RL discovery",
+        ));
+    }
+    sizes.into_iter().try_fold(1u32, |world_size, size| {
+        world_size
+            .checked_mul(size)
+            .ok_or_else(|| client::invalid_arg("vLLM inference world size overflow"))
+    })
+}
+
 pub(crate) fn component_for_mode(mode: DisaggregationMode) -> &'static str {
     match mode {
         DisaggregationMode::Prefill => "prefill",
@@ -220,5 +238,24 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn world_size_includes_tensor_pipeline_and_data_parallelism() {
+        let parallelism = pb::ParallelismInfo {
+            tensor_parallel_size: 2,
+            pipeline_parallel_size: 3,
+            data_parallel_size: 4,
+            ..Default::default()
+        };
+        assert_eq!(inference_world_size(&parallelism).unwrap(), 24);
+
+        let invalid = pb::ParallelismInfo {
+            tensor_parallel_size: 0,
+            pipeline_parallel_size: 1,
+            data_parallel_size: 1,
+            ..Default::default()
+        };
+        assert!(inference_world_size(&invalid).is_err());
     }
 }

@@ -32,18 +32,18 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
     HEALTH_CHECK_KEY, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LoraAdapter,
-    PreprocessedRequest, WorkerConfig, usage,
+    PreprocessedRequest, RlWorkerMetadata, WorkerConfig, rl_enabled, usage,
 };
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
-use crate::args::{Args, TransportConfig, normalize_endpoint};
+use crate::args::{Args, TransportConfig, normalize_admin_endpoint, normalize_endpoint};
 use crate::client::{self, Health, Pool};
 use crate::discovery::{
     BootstrapIdentity, bootstrap_discover, build_engine_config, component_for_mode,
-    lora_from_proto, nonempty, validate_discovery,
+    inference_world_size, lora_from_proto, nonempty, validate_discovery,
 };
 use crate::proto as pb;
 use crate::request::{build_generate_request, finish_output};
@@ -136,6 +136,23 @@ impl VllmSidecarEngine {
         validate_discovery(&discovery)?;
         let disaggregation_mode = args.disaggregation_mode;
 
+        let rl_metadata = if rl_enabled() {
+            let admin_endpoint = args.admin_endpoint.as_deref().ok_or_else(|| {
+                client::invalid_arg("DYN_ENABLE_RL requires --admin-endpoint or VLLM_HTTP_ENDPOINT")
+            })?;
+            let admin_base_url =
+                normalize_admin_endpoint(admin_endpoint).map_err(client::invalid_arg)?;
+            let parallelism = discovery.server.parallelism.as_ref().ok_or_else(|| {
+                client::invalid_arg("vLLM server did not report parallelism for RL discovery")
+            })?;
+            Some(RlWorkerMetadata {
+                admin_base_url,
+                world_size: inference_world_size(parallelism)?,
+            })
+        } else {
+            None
+        };
+
         let served_model_name = (!discovery.model.served_model_name.is_empty())
             .then(|| discovery.model.served_model_name.clone());
 
@@ -157,6 +174,7 @@ impl VllmSidecarEngine {
             served_model_name,
             reasoning_parser: nonempty(&discovery.model.reasoning_parser),
             tool_call_parser: nonempty(&discovery.model.tool_call_parser),
+            rl_metadata,
             ..Default::default()
         };
 

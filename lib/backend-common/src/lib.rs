@@ -21,6 +21,7 @@ pub mod error;
 mod lora;
 pub mod metrics;
 mod publisher;
+mod rl;
 pub mod run;
 pub mod snapshot_publisher;
 pub mod telemetry;
@@ -44,6 +45,11 @@ pub use engine::{
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};
+pub use rl::RlWorkerMetadata;
 pub use run::{run, run_raw};
 pub use snapshot_publisher::SnapshotPublisher;
 pub use worker::{RuntimeConfig, Worker, WorkerConfig};
+
+pub fn rl_enabled() -> bool {
+    rl::enabled()
+}
