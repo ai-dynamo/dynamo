@@ -14,18 +14,22 @@ FFMPEG = Path("/usr/local/bin/ffmpeg")
 ALLOWED_LIBRARY_ROOT = Path("/usr/local/lib")
 SEARCH_ROOTS = (Path("/usr"), Path("/opt"), Path("/workspace"))
 ALLOWED_DECODERS = {"rawvideo", "vp8", "vp9"}
-ALLOWED_ENCODERS = {"h264_nvenc", "libvpx_vp9"}
+ALLOWED_ENCODERS = {"libvpx-vp9"}
 REQUIRED_BUILD_CONFIGURATION = {
     "--disable-bsfs",
     "--disable-decoders",
     "--disable-demuxers",
     "--disable-encoders",
+    "--disable-muxers",
     "--disable-parsers",
     "--disable-protocols",
     "--enable-decoder=vp8,vp9,rawvideo",
     "--enable-demuxer=mov,matroska,rawvideo",
-    "--enable-encoder=h264_nvenc,libvpx_vp9",
+    "--enable-encoder=libvpx_vp9",
+    "--enable-libvpx",
+    "--enable-muxer=matroska,webm",
     "--enable-parser=vp8,vp9",
+    "--enable-protocol=file,pipe",
 }
 FORBIDDEN_DISTRIBUTIONS = {
     "decord",

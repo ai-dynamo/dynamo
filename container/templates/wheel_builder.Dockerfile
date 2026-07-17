@@ -289,11 +289,10 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
 # Always build FFmpeg so libs are available for Rust checks in CI.
-# We also build the ffmpeg CLI with h264_nvenc + libvpx_vp9 encoders so Python
-# code can encode video without the GPL-licensed binary shipped by imageio-ffmpeg.
-# Stays LGPL-only: --disable-gpl --disable-nonfree are preserved; H.264 comes from
-# NVIDIA's NVENC (proprietary HW encoder, already a runtime dependency of these
-# GPU images) and VP9 from libvpx (BSD).
+# vLLM uses a narrow VP8/VP9/raw-video decode surface and VP9 encoding. Other
+# frameworks retain their existing media configuration.
+# Do not treat a hardware implementation as changing a codec's patent status:
+# the vLLM build deliberately does not compile the NVENC H.264 encoder.
 # Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
 ARG NV_CODEC_HEADERS_REF
@@ -311,12 +310,14 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     elif [ "$DEVICE" = "cuda" ]; then \
     dnf install -y --setopt=tsflags=nocontexts pkg-config xz git yasm; \
     fi && \
+    cd /tmp && \
+{% if framework != "vllm" %}
     # nv-codec-headers: provides the NVENC/NVDEC API headers ffmpeg compiles against.
     # Header-only, no runtime dep here; libcuda/libnvidia-encode are loaded at runtime
     # in the consuming container.
-    cd /tmp && \
     git clone --depth 1 --branch ${NV_CODEC_HEADERS_REF} https://github.com/FFmpeg/nv-codec-headers.git && \
     make -C nv-codec-headers PREFIX=/usr/local install && \
+{% endif %}
     # libvpx: BSD-licensed VP9 encoder needed for the WebM output path. Built from
     # source so we don't need to track distro package names (libvpx-dev on Debian
     # vs libvpx-devel via EPEL on RHEL/manylinux).
@@ -342,6 +343,21 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-devices \
         --disable-libdrm \
         --enable-shared \
+{% if framework == "vllm" %}
+        --disable-decoders \
+        --enable-decoder=vp8,vp9,rawvideo \
+        --disable-demuxers \
+        --enable-demuxer=mov,matroska,rawvideo \
+        --disable-parsers \
+        --enable-parser=vp8,vp9 \
+        --enable-libvpx \
+        --disable-encoders \
+        --enable-encoder=libvpx_vp9 \
+        --disable-muxers \
+        --enable-muxer=matroska,webm \
+        --disable-protocols \
+        --enable-protocol=file,pipe && \
+{% else %}
         --enable-nvenc \
         --enable-libvpx \
         --disable-encoders \
@@ -349,6 +365,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-muxers \
         --enable-muxer=mov,mp4,matroska,webm \
         --enable-protocol=file,pipe && \
+{% endif %}
     make -j$(nproc) && \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \

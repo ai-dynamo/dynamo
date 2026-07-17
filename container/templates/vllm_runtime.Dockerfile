@@ -255,9 +255,9 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 # The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
 # against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
 # codec packages and replace them with the LGPL-only in-tree ffmpeg built in
-# wheel_builder (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via
-# libvpx). PyAV and OpenCV are handled separately below because their upstream
-# wheels carry private FFmpeg libraries that apt cannot see. torchaudio,
+# wheel_builder (--disable-gpl --disable-nonfree; VP9 encoding via libvpx; no
+# H.264/H.265/AAC codec). PyAV and OpenCV are handled separately below because
+# their upstream wheels carry private FFmpeg libraries that apt cannot see. torchaudio,
 # torchvision, soundfile, and Pillow do not link libav. dpkg-query keeps the
 # package match robust across base-image/arch version suffixes (for example,
 # libavcodec58 versus libavcodec60).
@@ -289,10 +289,10 @@ RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.
     python3 /tmp/validate_torch_compile_smoke.py
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
-# libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
+# libsw*.so*) + libvpx + the LGPL CLI binary that imageio targets via
 # IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base GPL ffmpeg
 # was just purged, so the LGPL CLI must always be present for the omni
-# video-export path to have something to encode with.
+# WebM/VP9 video-export path to have something to encode with.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     rm -rf /usr/local/include/libav* /usr/local/include/libsw* /usr/local/src/ffmpeg && \
     rm -f /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
