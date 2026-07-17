@@ -311,6 +311,10 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # needs it to package the h264_nvenc bitstream (extract SPS/PPS); a parser
 # carries no codec implementation. Image decode does not use ffmpeg (it goes
 # through the Rust `image` crate), so no still-image decoders are enabled here.
+# The `fd` protocol is enabled alongside `pipe`: `ffmpeg -i -` reads stdin via
+# the `fd:` protocol on ffmpeg 8.x (not `pipe:`), so omitting it breaks the
+# imageio encode path with "Protocol not found. Did you mean file:fd:?". Both
+# are pure fd/stream I/O and carry no codec implementation.
 #
 # Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
 # this also trims the decoder surface to what we ship.
@@ -375,7 +379,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-parsers \
         --enable-parser=vp8,vp9,h264 \
         --disable-protocols \
-        --enable-protocol=file,pipe && \
+        --enable-protocol=file,pipe,fd && \
     make -j$(nproc) && \
     make install && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
