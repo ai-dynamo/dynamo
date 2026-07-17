@@ -40,9 +40,8 @@ so a partial/dry run never truncates the committed snapshot):
 Both draw from the same two sources: the synced upstream markdown and the
 hand-authored `<DepMetadata>` cards under docs/proposals/.
 
-Transforms applied to each source markdown (see PROPOSAL COPY IN THE BRANCH
-`docs/proposals/0000-nova.mdx` for the reference hand-copy the pipeline
-reproduces):
+Transforms applied to each source markdown (the generated output lands under
+`docs/proposals/_generated/`, e.g. `dep-nova-synced.mdx` for the Nova demo):
 
   1. Drop the source's H1 title (Fern renders the front-matter `title` as H1).
   2. Parse the bold-key metadata block (`**Key**: Value`) into fields; feed

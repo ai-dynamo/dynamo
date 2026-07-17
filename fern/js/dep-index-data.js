@@ -30,20 +30,6 @@ window.__DEP_INDEX = [
   {
     "authors": [
       {
-        "handle": "ryanolson",
-        "label": "@ryanolson"
-      }
-    ],
-    "category": "Architecture",
-    "dep": "Nova",
-    "slug": "0000-nova",
-    "status": "Draft",
-    "submitter": "ryanolson",
-    "title": "DEP-Nova: Active Messaging as a Foundational Network Primitive"
-  },
-  {
-    "authors": [
-      {
         "handle": "dagil-nvidia",
         "label": "@dagil-nvidia"
       }

@@ -725,26 +725,15 @@ navigation:
       - page: "DEP-0001: The DEP Process"
         path: proposals/0001-dep-process.mdx
         slug: 0001-dep-process
-      # Demo mirror of ai-dynamo/enhancements PR #61 (Ryan Olson's Nova
-      # DEP). Cross-repo: the client runtime reads owner/repo/pr/path
-      # from the mount div in the mdx so it fetches from the enhancements
-      # repo, not this one. Illustrative only — remove or swap for a
-      # real in-repo DEP before this tab is announced.
-      - page: "DEP-Nova: Active Messaging (Demo)"
-        path: proposals/0000-nova.mdx
-        slug: 0000-nova
-      # Prototype of build-time DEP sync: the body of this page lives
-      # ONLY in ai-dynamo/enhancements (branch ryan/nova,
-      # deps/0000-nova.md). Every Fern build runs
-      # fern/scripts/sync_deps.py first, which regenerates
-      # docs/proposals/_generated/dep-nova-synced.mdx from the source and
-      # wraps it with <DepMetadata> + <PrInlineComments>. The generated
-      # dir is gitignored — nothing from it may be committed. This entry
-      # is deliberately parked alongside the hand-copied demo above so
-      # the two can be compared side-by-side; once the sync is trusted,
-      # the hand-copy goes away. The sidebar pill mirrors the Status
-      # field parsed by sync_deps.py from the upstream source (Draft in
-      # ai-dynamo/enhancements ryan/nova today).
-      - page: "DEP-Nova: Active Messaging (Synced)"
+      # Build-time synced Nova demo — the sole Nova page. Its body lives
+      # ONLY in ai-dynamo/enhancements (branch ryan/nova, deps/0000-nova.md);
+      # every Fern build runs fern/scripts/sync_deps.py first, which
+      # regenerates docs/proposals/_generated/dep-nova-synced.mdx from that
+      # source and wraps it with <DepMetadata> + <PrInlineComments>. The
+      # generated dir is gitignored — nothing from it may be committed. The
+      # sidebar pill mirrors the Status field sync_deps.py parses from the
+      # upstream source (Draft on ryan/nova today). Illustrative only; remove
+      # or swap for a real in-repo DEP before this tab is announced.
+      - page: "DEP-Nova: Active Messaging"
         path: proposals/_generated/dep-nova-synced.mdx
         slug: dep-nova-synced
