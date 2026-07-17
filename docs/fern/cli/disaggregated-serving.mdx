@@ -1,0 +1,66 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Disaggregated Serving
+sidebar-title: Disaggregated Serving
+description: Split prefill and decode across independent workers
+---
+
+Disaggregated serving separates the prefill and decode phases of inference into independent workers, each scalable on its own and connected via [NIXL](../design-docs/disagg-serving.md) for KV cache transfer. This is the local equivalent of the disaggregated pattern in the [Kubernetes Disaggregated Serving guide](../features/disaggregated-serving/README.md) — the same architecture, driven by CLI flags instead of a DynamoGraphDeployment.
+
+For the architecture and when to use it, see [Disaggregated Serving](../features/disaggregated-serving/README.md).
+
+## How it works locally
+
+A disaggregated deployment is still a frontend plus workers (see the [Introduction](overview.mdx)), except instead of one worker doing both phases, you run:
+
+- A **prefill worker** — computes the prompt's KV cache.
+- A **decode worker** — receives the KV cache over NIXL and generates tokens.
+
+The `launch/disagg.sh` presets start the frontend and both workers, pinned to separate GPUs with the KV-transfer config wired up. Requires 2 GPUs.
+
+## Disaggregated serving
+
+<Tabs>
+  <Tab title="vLLM" language="vllm">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/vllm
+    bash launch/disagg.sh
+    ```
+
+    Each worker needs a unique `VLLM_NIXL_SIDE_CHANNEL_PORT`; the preset sets these for you.
+  </Tab>
+  <Tab title="SGLang" language="sglang">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/sglang
+    ./launch/disagg.sh
+    ```
+
+    For how SGLang disaggregation works with Dynamo — the bootstrap mechanism and RDMA transfer flow — see [SGLang Disaggregation](../backends/sglang/sglang-disaggregation.md).
+  </Tab>
+  <Tab title="TensorRT-LLM" language="trtllm">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/trtllm
+    ./launch/disagg.sh
+    ```
+  </Tab>
+</Tabs>
+
+## Adding KV-aware routing
+
+To scale each pool and route requests by cache overlap, use the `disagg_router.sh` presets (2 prefill + 2 decode workers, 4 GPUs). See [KV-Aware Routing](kv-routing.mdx#disaggregated-serving-with-kv-routing).
+
+<Tip>
+With a disaggregated deployment running, try adding another prefill worker — the frontend discovers and uses it automatically.
+</Tip>
+
+## Troubleshooting
+
+**Workers fail to start with NIXL errors.** Ensure NIXL is installed and side-channel ports don't conflict. Each worker in a multi-worker setup needs a unique side-channel port.
+
+## See also
+
+- **[Disaggregated Serving (architecture)](../features/disaggregated-serving/README.md)** — design and rationale
+- **[KV-Aware Routing](kv-routing.mdx)** — route across prefill/decode pools
+- **[Tuning Disaggregated Performance](../performance/tuning.md)** — P/D tuning guide
+- **[Backend deployment guides](../backends/vllm/vllm-examples.md)** — all patterns per backend

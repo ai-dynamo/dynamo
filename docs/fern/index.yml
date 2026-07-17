@@ -200,7 +200,7 @@ navigation:
         icon: download
         contents:
           - page: Install Dynamo
-            path: getting-started/local-installation.md
+            path: getting-started/local-installation.mdx
           - page: Building from Source
             path: cli/building-from-source.md
           - page: Minikube Setup
@@ -216,8 +216,14 @@ navigation:
       - section: Model Deployment
         icon: microchip
         contents:
-          - page: Overview
-            path: cli/overview.md
+          - page: Introduction
+            path: cli/overview.mdx
+          - page: KV-Aware Routing
+            path: cli/kv-routing.mdx
+          - page: Disaggregated Serving
+            path: cli/disaggregated-serving.mdx
+          - page: Multi-Node Deployment
+            path: cli/multinode-deployment.mdx
           - section: Backends
             collapsed: true
             contents:

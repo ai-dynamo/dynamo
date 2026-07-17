@@ -1,0 +1,92 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: KV-Aware Routing
+sidebar-title: KV-Aware Routing
+description: Route requests across workers based on KV cache overlap
+---
+
+KV-aware routing places multiple workers behind the frontend and routes each request to the worker most likely to already hold its KV cache, eliminating redundant prefill computation. It is the local equivalent of the routing you configure in the [Kubernetes KV Routing guide](../kubernetes/dgd-kv-routing.md) — same router, driven by CLI flags instead of a DynamoGraphDeployment.
+
+For how routing decisions are made, see [Routing Concepts](../components/router/router-concepts.md) and the [Router Guide](../components/router/router-guide.md).
+
+## How it works locally
+
+A KV-routed deployment is still just a frontend plus workers (see the [Introduction](overview.mdx)), with two differences:
+
+- The **frontend** runs in KV routing mode so it tracks cache state across workers.
+- Each **worker** publishes KV cache events (over ZMQ by default) so the frontend knows what each worker holds.
+
+You run **two or more workers** so the router has somewhere to choose between. The pre-built `launch/agg_router.sh` presets wire this up for you.
+
+## Aggregated serving with KV routing
+
+Two workers behind the KV-aware router, maximizing cache reuse. Requires 2 GPUs.
+
+<Tabs>
+  <Tab title="vLLM" language="vllm">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/vllm
+    bash launch/agg_router.sh
+    ```
+
+    This launches the frontend in KV routing mode with two workers publishing KV events over ZMQ.
+  </Tab>
+  <Tab title="SGLang" language="sglang">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/sglang
+    ./launch/agg_router.sh
+    ```
+
+    This launches the frontend with `--router-mode kv` and two workers with ZMQ-based KV event publishing.
+  </Tab>
+  <Tab title="TensorRT-LLM" language="trtllm">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/trtllm
+    ./launch/agg_router.sh
+    ```
+  </Tab>
+</Tabs>
+
+## Disaggregated serving with KV routing
+
+Scales to 2 prefill + 2 decode workers with KV-aware routing on both pools. The frontend runs in KV routing mode and automatically detects prefill workers to activate an internal prefill router. Requires 4 GPUs.
+
+<Tabs>
+  <Tab title="vLLM" language="vllm">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/vllm
+    bash launch/disagg_router.sh
+    ```
+  </Tab>
+  <Tab title="SGLang" language="sglang">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/sglang
+    ./launch/disagg_router.sh
+    ```
+
+    Each worker publishes KV events over ZMQ on unique ports.
+  </Tab>
+  <Tab title="TensorRT-LLM" language="trtllm">
+    ```bash
+    cd $DYNAMO_HOME/examples/backends/trtllm
+    ./launch/disagg_router.sh
+    ```
+
+    In the disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.
+  </Tab>
+</Tabs>
+
+<Tip>
+Once a routed deployment is running, try adding another worker — the frontend discovers it automatically and starts routing to it.
+</Tip>
+
+## Troubleshooting
+
+**Router not routing correctly (vLLM).** Ensure `PYTHONHASHSEED=0` is set for all vLLM processes when using KV-aware routing, so cache-block hashes are consistent across workers. See [Hashing Consistency](../backends/vllm/vllm-reference-guide.md#hashing-consistency-for-kv-events).
+
+## See also
+
+- **[Router Guide](../components/router/router-guide.md)** — router modes and configuration
+- **[Disaggregated Serving](disaggregated-serving.mdx)** — split prefill and decode across workers
+- **[Backend deployment guides](../backends/vllm/vllm-examples.md)** — all patterns per backend

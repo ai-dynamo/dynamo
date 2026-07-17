@@ -1,0 +1,232 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Local Installation
+sidebar-title: Local Installation
+description: Install Dynamo on a local machine or VM with containers or PyPI
+---
+
+<p align="left">
+  <a href="./local-installation.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
+This guide walks through installing Dynamo on a local machine or VM with one or more GPUs.
+
+For production multi-node clusters, see the [Kubernetes Deployment Guide](../kubernetes/README.md). To build from source for development, see [Building from Source](../cli/building-from-source.md).
+
+## System Requirements
+
+| Requirement | Supported |
+|---|---|
+| **GPU** | NVIDIA Ampere, Ada Lovelace, Hopper, Blackwell |
+| **OS** | Ubuntu 22.04, Ubuntu 24.04 |
+| **Architecture** | x86_64, ARM64 (ARM64 requires Ubuntu 24.04) |
+| **CUDA** | 12.9+ or 13.0+ (B300/GB300 require CUDA 13) |
+| **Python** | 3.10, 3.12 |
+| **Driver** | 575.51.03+ (CUDA 12) or 580.00.03+ (CUDA 13) |
+
+TensorRT-LLM does not support Python 3.11.
+
+For the full compatibility matrix including backend framework versions, see the [Support Matrix](../reference/support-matrix.md).
+
+## Prerequisites
+
+Before installing Dynamo, make sure the host has the following. The GPU driver is the only piece that must live on the host in every case — the prebuilt container bundles CUDA and all framework dependencies, so the CUDA toolkit is only needed for the Python virtual environment path.
+
+| Prerequisite | Container path | Python venv path | Notes |
+|---|---|---|---|
+| **NVIDIA GPU driver** | ✅ Required | ✅ Required | The kernel driver cannot be containerized. Use the version from System Requirements above and verify with `nvidia-smi`. |
+| **Docker Engine** | ✅ Required | — | Runs the runtime image and the NATS/etcd Compose stack. |
+| **[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)** | ✅ Required | — | Makes `--gpus all` work. Without it, the container starts but cannot see the GPU. |
+| **CUDA toolkit** (`nvcc`, headers) | Bundled in container | ✅ Required | Only the host-install path needs it; the container already includes CUDA. |
+| **`HF_TOKEN`** | For gated models | For gated models | Export it before launch and accept the model license on the Hugging Face model page: `export HF_TOKEN=hf_...` |
+
+Verify the driver is installed and the GPU is visible:
+
+```bash
+nvidia-smi
+```
+
+<Note>
+This covers single-machine setups only. Multi-node disaggregated serving additionally needs an RDMA-capable interconnect (NIXL/UCX) — out of scope for this guide. For clusters, the [Kubernetes Deployment Guide](../kubernetes/README.md) covers the GPU Operator and, where applicable, the Network Operator instead of these host-level installs.
+</Note>
+
+## Install Dynamo
+
+<Steps>
+  <Step title="Clone the Dynamo repository">
+    The repository provides the infrastructure Compose file, launch scripts, and engine configs referenced throughout this guide:
+
+    ```bash
+    git clone https://github.com/ai-dynamo/dynamo.git
+    cd dynamo
+    ```
+  </Step>
+
+  <Step title="Start infrastructure services (NATS + etcd)">
+    Dynamo components discover each other through etcd and exchange events through NATS. Bring both up in the background with Docker Compose:
+
+    ```bash
+    docker compose -f dev/docker-compose.yml up -d
+    ```
+
+    Leave these running for the rest of the guide.
+
+    <Note>
+    NATS and etcd are **not strictly required** for a single-machine setup — you can pass `--discovery-backend file` to the frontend and worker to skip them entirely (discovery falls back to the local filesystem and events to ZMQ). They are **recommended** because they match the multi-node, production, and Kubernetes deployment path. See [Discovery and events on a single machine](#discovery-and-events-on-a-single-machine) below for the trade-offs.
+    </Note>
+  </Step>
+
+  <Step title="Install for your backend">
+    You can run Dynamo two ways. Choose one:
+
+    - **Prebuilt container (recommended)** — all dependencies are pre-installed and the repository contents are bundled at `/workspace`. Because the frontend and worker run *inside* this container, you'll need to `docker exec` into it to run subsequent commands.
+    - **Python virtual environment (PyPI)** — install the `ai-dynamo` wheel for your backend directly on the host.
+
+    <Tabs>
+      <Tab title="Prebuilt container (Recommended)">
+        Pull and run the runtime image for your backend. `--network host` lets the container reach NATS and etcd on the host:
+
+        <Tabs>
+          <Tab title="SGLang" language="sglang">
+            ```bash
+            docker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+            ```
+          </Tab>
+          <Tab title="TensorRT-LLM" language="trtllm">
+            ```bash
+            docker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
+            ```
+          </Tab>
+          <Tab title="vLLM" language="vllm">
+            ```bash
+            docker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+            ```
+          </Tab>
+        </Tabs>
+
+        This drops you into a shell inside the container. See [Release Artifacts](../reference/release-artifacts.mdx#container-images) for available versions and the backend guides for run instructions: [SGLang](../backends/sglang/README.md) | [TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md).
+      </Tab>
+
+      <Tab title="Python virtual environment (PyPI)">
+        First set up a Python virtual environment:
+
+        ```bash
+        # Install uv (recommended Python package manager)
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+
+        # Create virtual environment
+        uv venv venv
+        source venv/bin/activate
+        uv pip install pip
+        ```
+
+        Then install system dependencies and the Dynamo wheel for your backend:
+
+        <Tabs>
+          <Tab title="SGLang" language="sglang">
+            ```bash
+            sudo apt install python3-dev
+            uv pip install --prerelease=allow "ai-dynamo[sglang]"
+            ```
+
+            For CUDA 13 (B300/GB300), the container is recommended. See the [SGLang install docs](https://docs.sglang.io/get_started/install.html) for details.
+          </Tab>
+          <Tab title="TensorRT-LLM" language="trtllm">
+            ```bash
+            sudo apt install python3-dev
+            pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
+            pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
+            ```
+
+            TensorRT-LLM requires `pip` due to a transitive Git URL dependency that `uv` doesn't resolve. We recommend using the TensorRT-LLM container for broader compatibility. See the [TRT-LLM backend guide](../backends/trtllm/README.md) for details.
+          </Tab>
+          <Tab title="vLLM" language="vllm">
+            ```bash
+            sudo apt install python3-dev libxcb1
+            uv pip install --prerelease=allow "ai-dynamo[vllm]"
+            ```
+          </Tab>
+        </Tabs>
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Verify installation">
+    <Note>
+    If you used the **prebuilt container**, run this command *inside* the container. If you started it in another shell, `docker exec` into it first:
+
+    ```bash
+    docker exec -it <container_id> bash
+    ```
+    </Note>
+
+    Verify the CLI is installed and callable:
+
+    ```bash
+    python3 -m dynamo.frontend --help
+    ```
+
+    You can also run additional system checks from the repository root:
+
+    ```bash
+    python3 dev/sanity_check.py
+    ```
+  </Step>
+</Steps>
+
+## Discovery and events on a single machine
+
+Dynamo is a distributed runtime: the **frontend** (the OpenAI-compatible HTTP server) and the **worker** (the engine running your model) are separate processes that have to find each other. Two planes make that happen:
+
+- **Discovery plane** — how the frontend learns which workers exist. Workers register their endpoints on startup; the frontend watches for them and routes requests accordingly.
+- **Event plane** — how components exchange KV-cache events and worker metrics, which power features like KV-aware routing and the planner.
+
+On a single machine you can run either of two configurations:
+
+| | `--discovery-backend file` | etcd + NATS (this guide) |
+|---|---|---|
+| **Extra services** | None | etcd + NATS (via Docker Compose) |
+| **Discovery** | Local filesystem | etcd |
+| **Events** | ZMQ (in-process) | NATS |
+| **Scope** | Single machine only | Single **or** multi-node |
+| **Failure cleanup** | None | Lease-based auto-cleanup (default 10s TTL) — a crashed worker's endpoints are removed automatically and the frontend reroutes |
+| **KV events / routing / planner** | Not available | Available |
+| **Matches production / Kubernetes** | No | Yes |
+
+The `file` mode is the lightest way to get a model answering with no prerequisites — ideal for a quick local smoke test. This guide uses **etcd + NATS** instead because it is the same discovery path Dynamo uses for multi-node and Kubernetes deployments, so what you learn here carries forward to production.
+
+To use the zero-dependency mode instead, skip the infrastructure step above and pass `--discovery-backend file` to both the frontend and each worker.
+
+<Note>
+This applies to **local, single-machine** setups. On Kubernetes, the Dynamo operator manages discovery natively (via custom resources and EndpointSlices) and sets `DYN_DISCOVERY_BACKEND=kubernetes` automatically — neither `file` mode nor a standalone etcd is used. See the [Discovery Plane](../design-docs/discovery-plane.md) design doc for the full picture.
+</Note>
+
+## Troubleshooting
+
+**CUDA/driver version mismatch**
+
+Run `nvidia-smi` to check your driver version. Dynamo requires driver 575.51.03+ for CUDA 12 or 580.00.03+ for CUDA 13. B300/GB300 GPUs require CUDA 13. See the [Support Matrix](../reference/support-matrix.md) for full requirements.
+
+**Python 3.11 with TensorRT-LLM**
+
+TensorRT-LLM does not support Python 3.11. If you see installation failures with TensorRT-LLM, check your Python version with `python3 --version`. Use Python 3.10 or 3.12 instead.
+
+**Container runs but GPU not detected**
+
+Ensure you passed `--gpus all` to `docker run`. Without this flag, the container won't have access to GPUs:
+
+```bash
+# Correct
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+
+# Wrong -- no GPU access
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
+```
+
+## Next Steps
+
+- [Backend Guides](../backends/sglang/README.md) -- Backend-specific configuration and features
+- [Disaggregated Serving](../features/disaggregated-serving/README.md) -- Scale prefill and decode independently
+- [KV Cache Aware Routing](../components/router/router-guide.md) -- Smart request routing
+- [Kubernetes Deployment](../kubernetes/README.md) -- Production multi-node deployments
