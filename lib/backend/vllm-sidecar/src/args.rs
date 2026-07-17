@@ -16,7 +16,10 @@ pub(crate) struct Args {
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
     pub vllm_endpoint: String,
 
-    /// Hugging Face model ID or local path used for tokenization and templates.
+    /// Hugging Face model ID or local path used by Dynamo for model-card
+    /// registration, tokenization, and chat templates. The released vLLM gRPC
+    /// API does not expose this metadata, so it cannot be inferred from the
+    /// endpoint.
     #[arg(long)]
     pub model_path: String,
 }
