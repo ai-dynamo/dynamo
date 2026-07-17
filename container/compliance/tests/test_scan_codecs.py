@@ -52,15 +52,16 @@ def test_in_tree_ffmpeg_is_allowed(tmp_path: Path):
     }
 
 
-def test_dali_bundled_libav_is_a_logged_exception(tmp_path: Path):
-    _touch(
-        tmp_path,
-        "usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs/libavcodec-73c99a8b.so.62",
-    )
+def test_dali_bundled_ffmpeg_is_a_logged_exception(tmp_path: Path):
+    # DALI's whole vendored .libs/ is waived — both libavcodec and the libsw*
+    # companions (the latter regressed the trtllm build when the glob was libav* only).
+    dali = "usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs"
+    _touch(tmp_path, f"{dali}/libavcodec-73c99a8b.so.62")
+    _touch(tmp_path, f"{dali}/libswscale-8cfd67c4.so.9")
     violations, exceptions, _allowed = scan_filesystem(tmp_path, _POLICY)
     assert violations == []
-    assert len(exceptions) == 1
-    assert "DALI" in (exceptions[0]["detail"] or "")
+    assert len(exceptions) == 2
+    assert all("DALI" in (e["detail"] or "") for e in exceptions)
 
 
 @pytest.mark.parametrize(

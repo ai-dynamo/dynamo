@@ -71,9 +71,11 @@ allow_paths:
 # Explicit third-party exceptions: LOGGED in the report but do NOT fail the build.
 # Every entry must carry a reason and an owner so the waiver is auditable.
 exceptions:
-  - glob: "**/nvidia/dali/.libs/libav*"
+  - glob: "**/nvidia/dali/.libs/*"
     reason: >-
-      NVIDIA DALI (nvidia-dali-cuda130) bundles its own libav* for its video
-      reader. It is owned and handled by its own component team and tracked
-      separately rather than gated here.
+      NVIDIA DALI (nvidia-dali-cuda130) vendors its own ffmpeg stack (libav* plus
+      the libsw*/libpostproc companions) under .libs/ for its video reader. It is
+      owned and handled by its own component team and tracked separately rather
+      than gated here. The glob covers the whole vendored dir so the libsw*
+      companions are waived too, not just libavcodec.
     owner: DALI
