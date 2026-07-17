@@ -280,9 +280,9 @@ RUN rm -rf /workspace/vllm
 # PyAV and decord additionally ship GPL libx264/libx265. Dynamo's vLLM component
 # imports none of them, so they are unused decode-side dead weight. The in-tree
 # LGPL ffmpeg + imageio-ffmpeg installed above are intentionally KEPT for the
-# omni HW video-encode path (h264_nvenc — the sanctioned path). Direct rm makes
-# the removal robust regardless of how the base image's pip is configured; the
-# guards fail the build if any of them survive.
+# omni video-encode path, which uses the royalty-free VP9 (libvpx_vp9) encoder —
+# no H.264 is built. Direct rm makes the removal robust regardless of how the
+# base image's pip is configured; the guards fail the build if any of them survive.
 RUN set -eux; \
     python3 -m pip uninstall --yes \
         av decord decord2 opencv-python opencv-python-headless torchcodec PyNvVideoCodec \
