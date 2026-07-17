@@ -526,9 +526,7 @@ pub struct HttpServiceConfig {
     metrics_config: MetricsConfig,
 
     /// Additional system routes merged with the built-in health, metrics, and model routes.
-    ///
-    /// Extensions receive the shared frontend state, allowing handlers to build
-    /// responses from live model manager and discovery state.
+    /// Each extension is invoked with a read-only [`FrontendExtensionContext`].
     #[builder(default)]
     frontend_route_extensions: Vec<FrontendRouteExtension>,
 

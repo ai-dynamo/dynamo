@@ -129,9 +129,6 @@ pub(crate) fn frontend_route_extensions_from_py(
     let Some(routes) = routes else {
         return Ok(Vec::new());
     };
-    if routes.is_none(py) {
-        return Ok(Vec::new());
-    }
 
     let bound = routes.bind(py);
     let iter = PyIterator::from_object(bound)?;

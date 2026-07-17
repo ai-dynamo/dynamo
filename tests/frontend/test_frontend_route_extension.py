@@ -28,7 +28,11 @@ from pathlib import Path
 import pytest
 import requests
 
-from tests.frontend.route_extension_provider import HELLO_BODY, HELLO_PATH
+from tests.frontend.route_extension_provider import (
+    HELLO_BODY,
+    HELLO_PATH,
+    READINESS_PATH,
+)
 from tests.utils.constants import DynamoPortRange
 from tests.utils.managed_process import DynamoFrontendProcess
 from tests.utils.port_utils import allocate_port, deallocate_port
@@ -122,6 +126,14 @@ def test_frontend_route_extension_serves_custom_route(request, tmp_path, selecto
             response is not None and response.status_code == 200
         ), f"custom route {url} never returned 200"
         assert response.json() == HELLO_BODY
+
+        # Verify FrontendExtensionContext is wired through the PyO3 bridge.
+        # No model is registered, so has_any_ready_model() must return False.
+        ctx_response = requests.get(
+            f"http://localhost:{frontend.frontend_port}{READINESS_PATH}", timeout=5
+        )
+        assert ctx_response.status_code == 200
+        assert ctx_response.json() == {"ready": False}
 
 
 @pytest.mark.timeout(120)
