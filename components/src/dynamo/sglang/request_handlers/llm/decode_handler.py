@@ -20,6 +20,9 @@ from dynamo.sglang._compat import (
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import Config
+from dynamo.sglang.engine_generate import (
+    build_sampling_params as build_engine_generate_sampling_params,
+)
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -270,6 +273,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Returns:
             Dict of sampling parameters for SGLang engine.
         """
+        engine_sampling_params = build_engine_generate_sampling_params(request)
+        if engine_sampling_params is not None:
+            return engine_sampling_params
+
         if not self.use_sglang_tokenizer:
             # Token-based request format
             sampling_opts = request.get("sampling_options", {})
@@ -318,11 +325,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     def _extract_logprobs(
         meta_info: Dict[str, Any],
         num_output_logprobs_so_far: int,
+        num_output_tokens_in_chunk: Optional[int] = None,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
             num_output_logprobs_so_far,
+            num_output_tokens_in_chunk=num_output_tokens_in_chunk,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
@@ -515,10 +524,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
-        # SGLang's token stream is asymmetric: output_ids are disjoint deltas
-        # when stream_output=True, but meta_info output logprobs are cumulative.
-        # With n>1, chunks for different choices are interleaved, so track the
-        # cumulative-logprob cursor per choice index instead of globally.
+        # SGLang versions return either cumulative or per-delta logprob arrays.
+        # Track the total seen for cumulative slicing; with n>1, interleaved
+        # chunks need an independent cursor per choice.
         output_logprobs_per_choice: dict[int, int] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
@@ -571,6 +579,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     ) = self._extract_logprobs(
                         meta_info,
                         output_logprobs_per_choice.get(output_idx, 0),
+                        num_output_tokens_in_chunk=len(output_ids),
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
                     )
                     output_logprobs_per_choice[output_idx] = next_logprobs_total
@@ -579,13 +588,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
+                engine_data = {}
                 routed_experts = meta_info.get("routed_experts")
                 if routed_experts is not None and metadata_uploader is None:
                     # sglang >= 0.5.11 base64-encodes routed_experts upstream. It rides
                     # the engine's opaque engine_data passthrough (surfaced by the frontend
                     # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
-                    out["engine_data"] = {"routed_experts": routed_experts}
+                    engine_data["routed_experts"] = routed_experts
                 if finish_reason:
+                    prompt_payload = (
+                        _shared_logprobs.extract_prompt_logprobs_from_sglang_meta(
+                            meta_info
+                        )
+                    )
+                    if prompt_payload is not None and metadata_uploader is None:
+                        engine_data["prompt_logprobs"] = prompt_payload
                     input_tokens = meta_info.get("prompt_tokens")
                     completion_tokens = meta_info.get("completion_tokens")
                     cached_tokens = meta_info.get("cached_tokens")
@@ -610,6 +627,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             meta_info.clear()
                 elif metadata_uploader is not None:
                     meta_info.clear()
+                if engine_data:
+                    out["engine_data"] = engine_data
                 if not context.is_stopped():
                     yield out
 

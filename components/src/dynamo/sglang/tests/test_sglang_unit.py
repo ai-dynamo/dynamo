@@ -68,6 +68,47 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
+@pytest.mark.parametrize(
+    ("input_name", "output_name", "worker_name", "expected"),
+    [
+        ("Tokens", "Prefill", "Prefill", True),
+        ("Tokens", "Chat", "Decode", True),
+        ("Tokens", "Completions", "Aggregated", True),
+        ("Tokens", "Empty", "Prefill", False),
+        ("Tokens", "Empty", "Decode", False),
+        ("Text", "Chat", "Aggregated", False),
+        ("Tokens", "Embedding", "Aggregated", False),
+    ],
+)
+def test_engine_generate_capability_registration_gate(
+    input_name, output_name, worker_name, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    assert (
+        sglang_register._supports_engine_generate(
+            getattr(sglang_register.ModelInput, input_name),
+            getattr(sglang_register.ModelType, output_name),
+            getattr(sglang_register.WorkerType, worker_name),
+        )
+        is expected
+    )
+
+
+def test_unified_runtime_data_can_advertise_engine_generate(monkeypatch):
+    monkeypatch.setattr(sglang_llm_engine, "get_sglang_worker_group_id", lambda _: None)
+    monkeypatch.setattr(
+        sglang_llm_engine,
+        "get_hicache_native_offloading_capacity",
+        lambda *_: None,
+    )
+
+    assert sglang_llm_engine._get_runtime_data(
+        SimpleNamespace(), enable_generate=True
+    ) == {sglang_llm_engine.SGLANG_GENERATE_CAPABILITY: True}
+
+
 def _make_sglang_config(**overrides):
     config = DynamoSGLangConfig()
     config.use_sglang_tokenizer = False

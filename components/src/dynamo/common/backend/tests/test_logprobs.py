@@ -256,9 +256,8 @@ def test_prompt_logprobs_sglang_returns_none_when_absent():
 
 
 def test_prompt_logprobs_sglang_prepends_none_for_bos():
-    # SGLang's `input_token_logprobs` starts at prompt position 1; we
-    # add `None` at index 0 to align with the Rust PromptLogprobs
-    # invariant (BOS has no logprob).
+    # Older SGLang versions start at prompt position 1; add ``None`` at index
+    # 0 to align with the Rust PromptLogprobs invariant (BOS has no logprob).
     meta = {
         "input_token_logprobs": [
             (-0.5, 7, "a"),
@@ -270,6 +269,29 @@ def test_prompt_logprobs_sglang_prepends_none_for_bos():
         None,
         {"7": {"logprob": -0.5, "decoded_token": "a"}},
         {"8": {"logprob": -0.6, "decoded_token": "b"}},
+    ]
+
+
+def test_prompt_logprobs_sglang_preserves_engine_bos_none():
+    # Current SGLang versions include the BOS position as a tuple with a null
+    # logprob, and align input_top_logprobs to that same position.
+    meta = {
+        "input_token_logprobs": [
+            (None, 6, None),
+            (-0.5, 7, "a"),
+        ],
+        "input_top_logprobs": [
+            None,
+            [(-0.5, 7, "a"), (-1.5, 70, "A")],
+        ],
+    }
+    payload = extract_prompt_logprobs_from_sglang_meta(meta)
+    assert payload == [
+        None,
+        {
+            "7": {"logprob": -0.5, "decoded_token": "a"},
+            "70": {"logprob": -1.5, "decoded_token": "A"},
+        },
     ]
 
 
@@ -361,6 +383,25 @@ def test_sglang_extract_slices_cumulative_array():
     assert log_probs == [-0.2, -0.3]
     assert top_logprobs is None
     assert new_total == 3
+
+
+def test_sglang_extract_supports_incremental_streaming_metadata():
+    # Current SGLang slices output logprobs to the same disjoint token chunk.
+    meta = {
+        "output_token_logprobs": [(-0.2, 2, "b")],
+        "output_top_logprobs": [[(-0.2, 2, "b"), (-1.2, 20, "B")]],
+    }
+    log_probs, top_logprobs, new_total = extract_from_sglang_meta(
+        meta, 1, num_output_tokens_in_chunk=1
+    )
+    assert log_probs == [-0.2]
+    assert top_logprobs == [
+        [
+            {"rank": 1, "token_id": 2, "token": "b", "logprob": -0.2},
+            {"rank": 2, "token_id": 20, "token": "B", "logprob": -1.2},
+        ]
+    ]
+    assert new_total == 2
 
 
 def test_sglang_extract_with_top():

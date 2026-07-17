@@ -180,6 +180,77 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
     return handler
 
 
+def _engine_generate_request(sampling_params):
+    return {"extra_args": {"sglang_tito": {"sampling_params": sampling_params}}}
+
+
+def test_engine_generate_maps_vllm_sampling_names_to_sglang():
+    handler = _new_decode_handler()
+    request = _engine_generate_request(
+        {
+            "max_tokens": 8,
+            "min_tokens": 2,
+            "seed": 17,
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "stop": ["END"],
+            "stop_token_ids": [99],
+            "n": 2,
+            "structured_outputs": {"json": {"type": "object", "required": ["answer"]}},
+            "logprobs": 2,
+        }
+    )
+
+    sampling_params = handler._build_sampling_params(request)
+
+    assert sampling_params == {
+        "max_new_tokens": 8,
+        "min_new_tokens": 2,
+        "sampling_seed": 17,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "stop": ["END"],
+        "stop_token_ids": [99],
+        "n": 2,
+        "json_schema": json.dumps({"type": "object", "required": ["answer"]}),
+    }
+
+
+def test_engine_generate_rejects_ambiguous_or_unsupported_sampling_fields():
+    handler = _new_decode_handler()
+    with pytest.raises(ValueError, match="both map"):
+        handler._build_sampling_params(
+            _engine_generate_request({"max_tokens": 8, "max_new_tokens": 9})
+        )
+    with pytest.raises(ValueError, match="unsupported sampling parameter"):
+        handler._build_sampling_params(_engine_generate_request({"best_of": 2}))
+
+
+def test_engine_generate_requires_singleton_structured_defaults():
+    handler = _new_decode_handler()
+
+    assert (
+        handler._build_sampling_params(
+            _engine_generate_request(
+                {
+                    "structured_outputs": {
+                        "disable_any_whitespace": False,
+                        "disable_additional_properties": False,
+                        "whitespace_pattern": None,
+                    }
+                }
+            )
+        )
+        == {}
+    )
+    with pytest.raises(ValueError, match="disable_any_whitespace"):
+        handler._build_sampling_params(
+            _engine_generate_request(
+                {"structured_outputs": {"disable_any_whitespace": 0}}
+            )
+        )
+
+
 async def _stream(items):
     for item in items:
         yield item
@@ -608,6 +679,42 @@ async def test_process_token_stream_tracks_logprobs_per_choice_index():
     assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [201], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.2], [-0.3]]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_accepts_incremental_logprob_arrays():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.1, 101, "a")],
+                        },
+                    },
+                    {
+                        "index": 0,
+                        "output_ids": [102],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": [(-0.3, 102, "c")],
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
+    assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.3]]
 
 
 @pytest.mark.asyncio

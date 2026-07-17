@@ -61,7 +61,10 @@ from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_K
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.llm import ModelInput
-from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang._compat import (
+    filter_supported_async_generate_kwargs,
+    require_reasoning_kwargs,
+)
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -74,6 +77,10 @@ from dynamo.sglang.capacity import (
     kv_metrics_block_values,
     local_dp_rank_bounds,
     runtime_capacity,
+)
+from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
+from dynamo.sglang.engine_generate import (
+    build_sampling_params as build_engine_generate_sampling_params,
 )
 from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
@@ -96,9 +103,14 @@ def _warmup_enabled() -> bool:
 
 
 def _get_runtime_data(
-    server_args, scheduler_info: dict[str, Any] | None = None
+    server_args,
+    scheduler_info: dict[str, Any] | None = None,
+    *,
+    enable_generate: bool = False,
 ) -> dict[str, Any] | None:
     runtime_data: dict[str, Any] = {}
+    if enable_generate:
+        runtime_data[SGLANG_GENERATE_CAPABILITY] = True
     worker_group_id = get_sglang_worker_group_id(server_args)
     if worker_group_id is not None:
         runtime_data[SGLANG_WORKER_GROUP_ID_KEY] = worker_group_id
@@ -108,6 +120,15 @@ def _get_runtime_data(
     if offloading_capacity is not None:
         runtime_data[NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY] = offloading_capacity
     return runtime_data or None
+
+
+def _priority_kwargs(engine: Any, server_args: Any, priority: Any) -> dict[str, Any]:
+    if priority is None:
+        return {}
+    normalized = int(priority)
+    if getattr(server_args, "schedule_low_priority_values_first", False):
+        normalized = -normalized
+    return filter_supported_async_generate_kwargs(engine, {"priority": normalized})
 
 
 def _local_dp_rank_range(server_args) -> tuple[int, int]:
@@ -244,7 +265,14 @@ class SglangLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.server_args.model_path,
             served_model_name=self.server_args.served_model_name,
-            runtime_data=_get_runtime_data(self.server_args, scheduler_info),
+            runtime_data=_get_runtime_data(
+                self.server_args,
+                scheduler_info,
+                enable_generate=(
+                    not self._use_sglang_tokenizer
+                    and is_generation_stage(self.serving_mode)
+                ),
+            ),
             llm=LlmRegistration(
                 context_length=self.server_args.context_length,
                 kv_cache_block_size=page_size,
@@ -353,17 +381,21 @@ class SglangLLMEngine(LLMEngine):
 
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        priority = (request.get("routing") or {}).get("priority")
+        priority_kwargs = {}
+        if priority is not None:
+            priority_kwargs = _priority_kwargs(self.engine, self.server_args, priority)
+
         # Prefill discards engine output (it only yields bootstrap info) —
         # asking SGLang to compute logprobs there would be wasted work,
         # especially with prompt_logprobs which forces a full prompt pass.
-        logprob_kwargs = (
-            {}
-            if self.serving_mode == DisaggregationMode.PREFILL
-            else _shared_logprobs.build_sglang_logprob_kwargs(
+        if self.serving_mode == DisaggregationMode.PREFILL:
+            logprob_kwargs = {}
+        else:
+            logprob_kwargs = _shared_logprobs.build_sglang_logprob_kwargs(
                 request.get("output_options", {}) or {},
                 allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
             )
-        )
         return_tokens_as_token_ids = bool(
             (request.get("output_options") or {}).get("return_tokens_as_token_ids")
         )
@@ -414,6 +446,7 @@ class SglangLLMEngine(LLMEngine):
             **bootstrap_kwargs,
             **logits_kwargs,
             **logprob_kwargs,
+            **priority_kwargs,
         )
 
         # ORDER MATTERS: async_generate must register the room (the await
@@ -470,9 +503,8 @@ class SglangLLMEngine(LLMEngine):
             task.add_done_callback(self._prefill_consume_tasks.discard)
             return
 
-        # SGLang's logprob arrays are cumulative per choice and `n > 1`
-        # requests interleave choices on the stream, so the offset is
-        # keyed by `output_idx`, not a single scalar.
+        # SGLang versions return either cumulative or per-delta logprob arrays.
+        # Track the total seen per choice because n>1 interleaves chunks.
         num_logprobs_per_choice: dict[int, int] = {}
         async for res in stream:
             # SGLang sets index when n>1; default to 0 otherwise.
@@ -490,6 +522,7 @@ class SglangLLMEngine(LLMEngine):
                 ) = _shared_logprobs.extract_from_sglang_meta(
                     meta_info,
                     num_logprobs_per_choice.get(output_idx, 0),
+                    num_output_tokens_in_chunk=len(output_ids),
                     return_tokens_as_token_ids=return_tokens_as_token_ids,
                 )
                 num_logprobs_per_choice[output_idx] = next_total
@@ -974,6 +1007,10 @@ class SglangLLMEngine(LLMEngine):
         return build_health_check_payload(bos_token_id=bos, extras=extras)
 
     def _build_sampling_params(self, request: GenerateRequest) -> dict:
+        engine_sampling_params = build_engine_generate_sampling_params(request)
+        if engine_sampling_params is not None:
+            return engine_sampling_params
+
         if not self._use_sglang_tokenizer:
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})

@@ -241,6 +241,13 @@ impl Model {
             .any(|entry| entry.value().has_generate_engine())
     }
 
+    pub fn has_generate_engine_for_capability(&self, capability: &str) -> bool {
+        self.worker_sets.iter().any(|entry| {
+            let worker_set = entry.value();
+            worker_set.has_generate_engine() && worker_set.supports_runtime_capability(capability)
+        })
+    }
+
     // -- Model serving readiness --
     //
     // The set of WorkerSets in this Model that share the same `namespace`
@@ -585,6 +592,19 @@ impl Model {
     pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.generate_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+
+    pub fn get_generate_engine_for_capability(
+        &self,
+        capability: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|worker_set| {
+            worker_set
+                .supports_runtime_capability(capability)
+                .then(|| worker_set.generate_engine.clone())
+                .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }
 
     // -- Combined engine + parsing options (atomically from one WorkerSet) --

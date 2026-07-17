@@ -1,20 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! HTTP handler for the token-in/token-out `Generate` API
-//! (`POST /inference/v1/generate`).
+//! HTTP handlers for the token-in/token-out `Generate` APIs:
+//! `POST /inference/v1/generate` for vLLM and
+//! `POST /generate` for SGLang.
 //!
-//! This is an experimental engine-native endpoint, **disabled by default**;
+//! These experimental engine-native endpoints are **disabled by default**;
 //! opt in via the `enable_engine_apis` builder flag or the
-//! `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` env var. When enabled it registers
-//! a frontend-native handler that preserves the complete request in an opaque
+//! backend-specific `DYN_*_ENABLE_*` env vars. When enabled,
+//! the frontend preserves the complete request in an opaque
 //! backend envelope. Streaming (`stream=true`) remains unimplemented.
 
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Extension, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
@@ -31,14 +32,67 @@ use super::openai::{
     get_or_create_request_id, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
+use crate::local_model::runtime_config::{
+    SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+};
 use crate::protocols::common::preprocessor::PreprocessedRequest;
-use crate::protocols::common::{SamplingOptions, StopConditions};
+use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
 
 const X_REQUEST_ID_HEADER: &str = "x-request-id";
 const X_DATA_PARALLEL_RANK_HEADER: &str = "x-data-parallel-rank";
+pub(super) const VLLM_GENERATE_DEFAULT_PATH: &str = "/inference/v1/generate";
+pub(super) const SGLANG_GENERATE_DEFAULT_PATH: &str = "/generate";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenerateBackend {
+    Vllm,
+    Sglang,
+}
+
+impl GenerateBackend {
+    fn default_path(self) -> &'static str {
+        match self {
+            Self::Vllm => VLLM_GENERATE_DEFAULT_PATH,
+            Self::Sglang => SGLANG_GENERATE_DEFAULT_PATH,
+        }
+    }
+
+    fn capability(self) -> &'static str {
+        match self {
+            Self::Vllm => VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+            Self::Sglang => SGLANG_GENERATE_CAPABILITY,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Vllm => "vLLM",
+            Self::Sglang => "SGLang",
+        }
+    }
+
+    fn worker_envelope(
+        self,
+        request: &GenerateRequest,
+        request_id: &str,
+    ) -> serde_json::Result<(&'static str, serde_json::Value)> {
+        match self {
+            Self::Vllm => Ok((
+                "vllm_tito",
+                serde_json::to_value(VllmTitoEnvelope::new(request, request_id))?,
+            )),
+            Self::Sglang => Ok((
+                "sglang_tito",
+                serde_json::to_value(SglangTitoEnvelope {
+                    sampling_params: &request.sampling_params,
+                })?,
+            )),
+        }
+    }
+}
 
 #[derive(Debug)]
 struct GenerateRequestContext {
@@ -60,16 +114,32 @@ struct GenerateErrorBody {
     code: u16,
 }
 
-/// Create an Axum [`Router`] for the token-in/token-out `Generate` endpoint.
-/// If no path is provided, the default path is `/inference/v1/generate`.
+/// Create the vLLM-compatible token-in/token-out `Generate` route.
 pub fn generate_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/inference/v1/generate".to_string());
+    backend_generate_router(state, path, GenerateBackend::Vllm)
+}
+
+/// Create the SGLang-compatible token-in/token-out `Generate` route.
+pub fn sglang_generate_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    backend_generate_router(state, path, GenerateBackend::Sglang)
+}
+
+fn backend_generate_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+    backend: GenerateBackend,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or_else(|| backend.default_path().to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_generate))
+        .layer(Extension(backend))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
@@ -153,11 +223,11 @@ fn generate_internal_error_response() -> Response {
     )
 }
 
-/// Borrowed worker envelope for vLLM-specific request fields.
+/// Complete vLLM-owned request envelope forwarded opaquely to its worker.
 ///
 /// `token_ids` are intentionally absent: `PreprocessedRequest.token_ids` is
 /// the canonical routing and wire representation, and the worker reconstructs
-/// the vLLM request from that field.
+/// the engine request from that field.
 #[derive(Serialize)]
 struct VllmTitoEnvelope<'a> {
     request_id: &'a str,
@@ -204,21 +274,98 @@ impl<'a> VllmTitoEnvelope<'a> {
     }
 }
 
-/// Project routing controls while retaining all engine-owned fields in
-/// `extra_args.vllm_tito`. The backend remains the authority for interpreting
-/// every vLLM-specific field.
+/// Minimal SGLang-owned request payload. Routing, response formatting, and
+/// public request validation remain canonical in the Rust frontend.
+#[derive(Serialize)]
+struct SglangTitoEnvelope<'a> {
+    sampling_params: &'a SamplingParams,
+}
+
+fn sglang_logprob_count(name: &str, value: Option<i32>) -> anyhow::Result<Option<u32>> {
+    match value {
+        Some(value) if value < 0 => {
+            anyhow::bail!("sampling_params.{name}={value} is not supported by SGLang")
+        }
+        Some(value) => Ok(Some(u32::try_from(value).map_err(|error| {
+            anyhow::anyhow!("invalid sampling_params.{name}: {error}")
+        })?)),
+        None => Ok(None),
+    }
+}
+fn validate_sglang_request(request: &GenerateRequest) -> Result<(), String> {
+    if request.cache_salt.is_some() {
+        return Err("cache_salt is not supported by the SGLang generate endpoint".to_string());
+    }
+    if request.kv_transfer_params.is_some() {
+        return Err("kv_transfer_params is managed internally by Dynamo for SGLang".to_string());
+    }
+    for field in [
+        "bootstrap_info",
+        "bootstrap_host",
+        "bootstrap_port",
+        "bootstrap_room",
+        "disaggregated_params",
+    ] {
+        if request.passthrough.contains_key(field) {
+            return Err(format!(
+                "`{field}` is internal Dynamo routing state and cannot be set by clients"
+            ));
+        }
+    }
+    if !request.passthrough.is_empty() {
+        let mut unsupported: Vec<_> = request.passthrough.keys().cloned().collect();
+        unsupported.sort();
+        return Err(format!(
+            "unsupported top-level generate field(s) for SGLang: {}",
+            unsupported.join(", ")
+        ));
+    }
+
+    Ok(())
+}
+
+fn generate_output_options(
+    request: &GenerateRequest,
+    backend: GenerateBackend,
+) -> anyhow::Result<OutputOptions> {
+    if matches!(backend, GenerateBackend::Vllm) {
+        return Ok(OutputOptions::default());
+    }
+
+    Ok(OutputOptions {
+        logprobs: sglang_logprob_count("logprobs", request.sampling_params.logprobs())?,
+        prompt_logprobs: sglang_logprob_count(
+            "prompt_logprobs",
+            request.sampling_params.prompt_logprobs(),
+        )?,
+        // SGLang token workers commonly run without a tokenizer. Returning
+        // token-id labels keeps logprob entries aligned without detokenization.
+        return_tokens_as_token_ids: Some(true),
+        ..Default::default()
+    })
+}
+
+/// Project canonical routing and response controls, then attach only the
+/// request payload owned by the selected backend.
 fn preprocessed_from_generate(
     request: GenerateRequest,
     model: &str,
     data_parallel_rank: Option<u32>,
     request_id: &str,
+    backend: GenerateBackend,
 ) -> anyhow::Result<PreprocessedRequest> {
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let min_tokens = sampling.min_tokens();
     let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
-    let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let output_options = generate_output_options(&request, backend)?;
+    let (envelope_key, engine_tito) = backend.worker_envelope(&request, request_id)?;
+    let mut extra_args = serde_json::Map::new();
+    // Do not copy token_ids into this envelope. The worker reconstructs that
+    // field from the canonical PreprocessedRequest token_ids after routing.
+    extra_args.insert(envelope_key.to_string(), engine_tito);
+
     let GenerateRequest {
         token_ids,
         cache_salt,
@@ -238,7 +385,7 @@ fn preprocessed_from_generate(
             n: Some(1),
             ..Default::default()
         })
-        .output_options(Default::default())
+        .output_options(output_options)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
@@ -249,11 +396,7 @@ fn preprocessed_from_generate(
             priority: Some(routing_priority),
             ..Default::default()
         }))
-        .extra_args(Some(serde_json::json!({
-            // Do not copy token_ids into this envelope. The worker must rebuild
-            // that field from PreprocessedRequest.token_ids after routing.
-            "vllm_tito": vllm_tito,
-        })))
+        .extra_args(Some(serde_json::Value::Object(extra_args)))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
@@ -261,6 +404,7 @@ fn preprocessed_from_generate(
 /// Resolve, route, and dispatch a frontend-native token-in/token-out request.
 async fn handler_generate(
     State(state): State<Arc<service_v2::State>>,
+    Extension(backend): Extension<GenerateBackend>,
     headers: HeaderMap,
     Json(request): Json<GenerateRequest>,
 ) -> Response {
@@ -271,12 +415,20 @@ async fn handler_generate(
     if let Err(message) = request.validate() {
         return generate_error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
     }
+    if backend == GenerateBackend::Sglang
+        && let Err(message) = validate_sglang_request(&request)
+    {
+        return generate_error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message);
+    }
 
     if request.stream {
         return generate_error_response(
             StatusCode::NOT_IMPLEMENTED,
             "not_implemented",
-            "streaming (stream=true) is not implemented for /inference/v1/generate yet".to_string(),
+            format!(
+                "streaming (stream=true) is not implemented for the {} Generate API yet",
+                backend.name()
+            ),
         );
     }
     let response_options = request.response_options();
@@ -284,7 +436,9 @@ async fn handler_generate(
     let model = match &request.model {
         Some(model) => model.clone(),
         None => {
-            let models = state.manager().list_generate_models();
+            let models = state
+                .manager()
+                .list_generate_models_for_capability(backend.capability());
             match models.len() {
                 1 => models.into_iter().next().unwrap(),
                 0 => {
@@ -310,7 +464,10 @@ async fn handler_generate(
         return response.into_response();
     }
 
-    let engine = match state.manager().get_generate_engine(&model) {
+    let engine = match state
+        .manager()
+        .get_generate_engine_for_capability(&model, backend.capability())
+    {
         Ok(engine) => engine,
         Err(error) => {
             let (status, error_type) = match error {
@@ -329,6 +486,7 @@ async fn handler_generate(
         &model,
         request_context.data_parallel_rank,
         &request_context.request_id,
+        backend,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => {
@@ -504,7 +662,10 @@ mod tests {
         task::{Context as TaskContext, Poll},
     };
 
-    use super::service_v2::{HttpService, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV};
+    use super::service_v2::{
+        HTTP_SVC_SGLANG_GENERATE_PATH_ENV, HTTP_SVC_VLLM_GENERATE_PATH_ENV, HttpService,
+        SGLANG_ENABLE_GENERATE_ENV, VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV,
+    };
     use super::*;
     use crate::http::service::metrics::{Endpoint, RequestType, Status};
     use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
@@ -714,6 +875,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sglang_generate_route_no_model_returns_structured_404() {
+        let (port, handle) = serve(Some(true)).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{}/generate", port))
+            .header("content-type", "application/json")
+            .body(r#"{"token_ids":[1,2,3],"sampling_params":{}}"#)
+            .send()
+            .await
+            .expect("SGLang generate request failed");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["error"]["type"], "not_found");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn sglang_generate_rejects_unsupported_top_level_fields() {
+        let (port, handle) = serve(Some(true)).await;
+        let client = reqwest::Client::new();
+        let private_fields = [
+            (
+                "bootstrap_info",
+                serde_json::json!({"bootstrap_host": "client"}),
+            ),
+            ("bootstrap_host", serde_json::json!("client")),
+            ("bootstrap_port", serde_json::json!(1234)),
+            ("bootstrap_room", serde_json::json!(7)),
+            (
+                "disaggregated_params",
+                serde_json::json!({"bootstrap_room": 7}),
+            ),
+            (
+                "kv_transfer_params",
+                serde_json::json!({"remote": "client"}),
+            ),
+            ("cache_salt", serde_json::json!("tenant-a")),
+            ("future_vllm_field", serde_json::json!(true)),
+        ];
+
+        for (field, value) in private_fields {
+            let mut body = serde_json::json!({
+                "token_ids": [1, 2, 3],
+                "sampling_params": {}
+            });
+            body[field] = value;
+            let resp = client
+                .post(format!("http://localhost:{}/generate", port))
+                .json(&body)
+                .send()
+                .await
+                .expect("SGLang generate request failed");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "field={field}");
+            let error: serde_json::Value = resp.json().await.expect("json body");
+            assert_eq!(error["error"]["type"], "invalid_request_error");
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
     async fn generate_route_streaming_returns_501() {
         let (port, handle) = serve(Some(true)).await;
         let resp = reqwest::Client::new()
@@ -782,7 +1003,12 @@ mod tests {
     #[serial_test::serial]
     async fn generate_route_404_by_default() {
         temp_env::async_with_vars(
-            [(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>)],
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, None::<&str>),
+                (SGLANG_ENABLE_GENERATE_ENV, None::<&str>),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, None::<&str>),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, None::<&str>),
+            ],
             async {
                 let (port, handle) = serve(None).await;
                 let resp = reqwest::Client::new()
@@ -803,7 +1029,12 @@ mod tests {
     #[serial_test::serial]
     async fn generate_route_is_registered_when_enabled_by_env() {
         temp_env::async_with_vars(
-            [(VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1"))],
+            [
+                (VLLM_ENABLE_INFERENCE_V1_GENERATE_ENV, Some("1")),
+                (SGLANG_ENABLE_GENERATE_ENV, None),
+                (HTTP_SVC_VLLM_GENERATE_PATH_ENV, None),
+                (HTTP_SVC_SGLANG_GENERATE_PATH_ENV, None),
+            ],
             async {
                 let (port, handle) = serve(None).await;
                 let resp = reqwest::Client::new()
@@ -843,9 +1074,14 @@ mod tests {
         let request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            GenerateBackend::Vllm,
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -896,6 +1132,75 @@ mod tests {
     }
 
     #[test]
+    fn sglang_projection_uses_backend_envelope_and_logprob_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [11, 12],
+            "sampling_params": {
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "temperature": 0.3,
+                "seed": 4,
+                "logprobs": 2,
+                "prompt_logprobs": 1
+            },
+            "model": "test-model",
+            "priority": 7
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            Some(3),
+            "resolved-request",
+            GenerateBackend::Sglang,
+        )
+        .expect("build SGLang request");
+
+        assert_eq!(preprocessed.token_ids, vec![11, 12]);
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(preprocessed.output_options.logprobs, Some(2));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(1));
+        assert_eq!(
+            preprocessed.output_options.return_tokens_as_token_ids,
+            Some(true)
+        );
+        let routing = preprocessed.routing.as_ref().expect("routing hints");
+        assert_eq!(routing.dp_rank, Some(3));
+        assert_eq!(routing.priority, Some(-7));
+
+        let extra_args = preprocessed.extra_args.as_ref().expect("extra args");
+        assert!(extra_args.get("vllm_tito").is_none());
+        let envelope = extra_args.get("sglang_tito").expect("sglang_tito envelope");
+        assert_eq!(envelope["sampling_params"]["seed"], 4);
+        assert_eq!(envelope.as_object().map(|object| object.len()), Some(1));
+        assert!(envelope.get("request_id").is_none());
+        assert!(envelope.get("model").is_none());
+        assert!(envelope.get("priority").is_none());
+        assert!(envelope.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn sglang_projection_rejects_vllm_all_logprobs_sentinel() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1],
+            "sampling_params": {"logprobs": -1}
+        }))
+        .expect("deserialize request");
+
+        let error = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            GenerateBackend::Sglang,
+        )
+        .expect_err("SGLang cannot request all logprobs with -1");
+        assert!(error.to_string().contains("not supported by SGLang"));
+    }
+
+    #[test]
     fn omitted_max_tokens_stays_omitted_in_control_shadow() {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [1, 2],
@@ -904,9 +1209,14 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            GenerateBackend::Vllm,
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -927,9 +1237,14 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            GenerateBackend::Vllm,
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
     }
 
@@ -1134,9 +1449,14 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", Some(3), "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            Some(3),
+            "resolved-request",
+            GenerateBackend::Vllm,
+        )
+        .expect("build request");
         let routing = preprocessed.routing.as_ref().expect("routing hints");
 
         assert_eq!(routing.dp_rank, Some(3));
