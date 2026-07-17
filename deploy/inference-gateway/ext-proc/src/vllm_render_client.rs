@@ -18,9 +18,6 @@ use thiserror::Error;
 const CHAT_RENDER_PATH: &str = "/v1/chat/completions/render";
 const MAX_ERROR_BODY_BYTES: usize = 1024;
 
-/// Default deadline for a vLLM render request.
-pub const DEFAULT_VLLM_RENDER_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// A reusable client for vLLM's `/v1/chat/completions/render` endpoint.
 #[derive(Clone, Debug)]
 pub struct VllmRenderClient {
@@ -171,6 +168,8 @@ mod tests {
 
     use super::*;
 
+    const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
     async fn spawn_server(router: Router) -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -197,7 +196,7 @@ mod tests {
             }),
         );
         let (base_url, server) = spawn_server(router).await;
-        let client = VllmRenderClient::new(&base_url, DEFAULT_VLLM_RENDER_TIMEOUT).unwrap();
+        let client = VllmRenderClient::new(&base_url, TEST_TIMEOUT).unwrap();
         let request =
             br#"{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"hello"}]}"#;
 
@@ -238,9 +237,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         drop(listener);
-        let client =
-            VllmRenderClient::new(&format!("http://{address}"), DEFAULT_VLLM_RENDER_TIMEOUT)
-                .unwrap();
+        let client = VllmRenderClient::new(&format!("http://{address}"), TEST_TIMEOUT).unwrap();
 
         let error = client.render_chat(b"{}").await.unwrap_err();
 
@@ -263,7 +260,7 @@ mod tests {
             }),
         );
         let (base_url, server) = spawn_server(router).await;
-        let client = VllmRenderClient::new(&base_url, DEFAULT_VLLM_RENDER_TIMEOUT).unwrap();
+        let client = VllmRenderClient::new(&base_url, TEST_TIMEOUT).unwrap();
 
         let error = client.render_chat(b"{}").await.unwrap_err();
 
@@ -284,7 +281,7 @@ mod tests {
             post(|| async { Json(json!({"prompt": "missing token_ids"})) }),
         );
         let (base_url, server) = spawn_server(router).await;
-        let client = VllmRenderClient::new(&base_url, DEFAULT_VLLM_RENDER_TIMEOUT).unwrap();
+        let client = VllmRenderClient::new(&base_url, TEST_TIMEOUT).unwrap();
 
         let error = client.render_chat(b"{}").await.unwrap_err();
 

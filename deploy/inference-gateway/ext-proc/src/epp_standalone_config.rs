@@ -15,7 +15,7 @@ use validator::ValidationError;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
-const DEFAULT_VLLM_RENDER_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_TOKENIZATION_TIMEOUT_MS: u64 = 5_000;
 
 /// Environment variable that selects the EPP operating mode.
 pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
@@ -75,9 +75,9 @@ pub struct EppStandaloneConfig {
     #[validate(length(min = 1, message = "DYN_EPP_VLLM_RENDER_URL is required"))]
     #[validate(custom(function = "validate_vllm_render_url"))]
     pub vllm_render_url: String,
-    /// Deadline for calls to the vLLM renderer.
-    #[validate(range(min = 1, message = "DYN_EPP_VLLM_RENDER_TIMEOUT_MS must be >= 1"))]
-    pub vllm_render_timeout_ms: u64,
+    /// Deadline for calls to the configured tokenization provider.
+    #[validate(range(min = 1, message = "DYN_EPP_TOKENIZATION_TIMEOUT_MS must be >= 1"))]
+    pub tokenization_timeout_ms: u64,
     /// KV-cache block size; MUST equal the inference engine block size.
     #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
     pub block_size: u32,
@@ -118,8 +118,8 @@ impl EppStandaloneConfig {
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
             vllm_render_url: trimmed(get("DYN_EPP_VLLM_RENDER_URL")).unwrap_or_default(),
-            vllm_render_timeout_ms: opt_parse::<u64>(get, "DYN_EPP_VLLM_RENDER_TIMEOUT_MS")?
-                .unwrap_or(DEFAULT_VLLM_RENDER_TIMEOUT_MS),
+            tokenization_timeout_ms: opt_parse::<u64>(get, "DYN_EPP_TOKENIZATION_TIMEOUT_MS")?
+                .unwrap_or(DEFAULT_TOKENIZATION_TIMEOUT_MS),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(cfg.vllm_render_url, "http://vllm-render:8000");
-        assert_eq!(cfg.vllm_render_timeout_ms, DEFAULT_VLLM_RENDER_TIMEOUT_MS);
+        assert_eq!(cfg.tokenization_timeout_ms, DEFAULT_TOKENIZATION_TIMEOUT_MS);
         assert_eq!(cfg.block_size, 16);
         assert_eq!(cfg.kv_event_port, DEFAULT_KV_EVENT_PORT);
         assert!(cfg.replay_port.is_none());
@@ -378,14 +378,14 @@ mod tests {
     }
 
     #[test]
-    fn vllm_render_timeout_must_be_positive() {
+    fn tokenization_timeout_must_be_positive() {
         assert!(
             parse_cfg(&[
                 ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
                 ("POD_NAMESPACE", "inference"),
                 ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
                 ("DYN_EPP_VLLM_RENDER_URL", "http://vllm-render:8000"),
-                ("DYN_EPP_VLLM_RENDER_TIMEOUT_MS", "0"),
+                ("DYN_EPP_TOKENIZATION_TIMEOUT_MS", "0"),
                 ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
             ])
             .is_err()
