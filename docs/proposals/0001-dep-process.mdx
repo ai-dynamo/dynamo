@@ -197,7 +197,7 @@ The `status` value maps to the docs-site banner: Draft to a warning callout, Und
 
 ## Implementation Details
 
-The render and mirror already exist on draft PR `ai-dynamo/dynamo#11687`. It adds a Proposals tab, a `DepMetadata` component for the status pill and metadata card, a `PrInlineComments` component that renders a mount div, and the client runtime `fern/js/dep-pr-comments.js`, injected site-wide. The runtime reads the DEP's `pr` and `issue` from the mount and fetches three sources from GitHub's public REST API:
+The render and mirror already exist on draft PR `ai-dynamo/dynamo#11687`. It adds a Proposals tab, a `DepMetadata` component for the status pill, metadata card, and lifecycle stepper, a `PrInlineComments` component that renders a mount div, and the client runtime `fern/js/dep-pr-comments.js`, injected site-wide. A build-time content sync (`fern/scripts/sync_deps.py`) fetches each DEP body from `ai-dynamo/enhancements` and emits two generated data files that drive the UI from the DEP's status alone: a filterable, sortable registry index (`DepIndex` + `fern/js/dep-index.js`), which is the Proposals-tab landing page, and right-aligned sidebar status pills (`fern/js/dep-status-pills.js`). A new or advanced DEP therefore updates every surface — index card, sidebar pill, card pill, and stepper — automatically. The comment runtime reads the DEP's `pr` and `issue` from the mount and fetches three sources from GitHub's public REST API:
 
 * `GET /repos/{owner}/{repo}/pulls/{pr}/comments` — inline review, anchored to the quoted text.
 * `GET /repos/{owner}/{repo}/issues/{pr}/comments` — the PR conversation (Revision discussion).
@@ -218,7 +218,7 @@ We validated the render and mirror on the live Fern preview against a real DEP: 
 
 * **Bake comments at build time for production.** The live fetch is unauthenticated and subject to GitHub's ~60-requests/hour/IP limit. Production should bake the mirrored comments in at docs build time so a high-traffic page never hits the limit.
 * **Remove the Nova demo page before launch.** The current Nova page is demo content and must come out before the tab ships.
-* **Automated numbering and index.** DEP numbering and an auto-generated index are manual today.
+* **Automated numbering.** DEP numbers are still assigned by hand. (The registry index itself is auto-generated — a synced or hand-authored DEP appears on it automatically.)
 * **Backfill existing enhancements DEPs** into the rendered tab.
 
 ## Implementation Phases
@@ -235,7 +235,7 @@ The phase breakdown below is proposed, not committed. Release targets and work i
 
 **Supported API / Behavior**:
 
-* Proposals tab, DEP template, status-banner convention, `DepMetadata` and `PrInlineComments` components, and the comment-mirror runtime, validated against a real DEP.
+* Proposals tab, DEP template, status-banner convention, `DepMetadata` (status pill, metadata card, lifecycle stepper) and `PrInlineComments` components, the comment-mirror runtime, the build-time content sync (`sync_deps.py`), the auto-generated registry index, and sidebar status pills — validated against a real DEP.
 
 **Not Supported**:
 
@@ -255,9 +255,9 @@ The phase breakdown below is proposed, not committed. Release targets and work i
 
 **Not Supported**:
 
-* Automated DEP numbering and index generation.
+* Automated DEP numbering.
 
-### Phase 2: Backfill and Index
+### Phase 2: Backfill
 
 **Release Target**: TBD
 
@@ -267,7 +267,7 @@ The phase breakdown below is proposed, not committed. Release targets and work i
 
 **Supported API / Behavior**:
 
-* Backfill existing enhancements DEPs onto the tab and generate a DEP index.
+* Backfill existing enhancements DEPs onto the tab. Once synced, each appears in the registry index automatically.
 
 ## Risks and Qualifiers
 

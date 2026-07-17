@@ -90,7 +90,9 @@ DEP's `status` field and its tracking issue.
 Every DEP renders at a stable `docs.nvidia.com/dynamo/.../proposals/<slug>` URL
 with a status pill on the metadata card and a matching sidebar pill. That page
 is the shareable public link for a DEP's current state and its mirrored
-discussion.
+discussion. The **registry index** at `/proposals/registry` lists every DEP and
+filters by status and owning SIG — the fastest way to browse or triage the DEPs
+that exist on the docs site.
 
 ### 6. Format as a Summary Table
 

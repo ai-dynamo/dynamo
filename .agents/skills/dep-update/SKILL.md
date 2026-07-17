@@ -119,11 +119,12 @@ the decision lives in the merged PR, not on the docs page.
 
 No manual docs edit is needed. On the next Fern build,
 `fern/scripts/sync_deps.py` re-reads the DEP's status and regenerates
-`fern/js/dep-status-data.js`, so both the on-page `<DepMetadata>` pill and the
-right-aligned Proposals-sidebar pill (`fern/js/dep-status-pills.js`) update
-automatically to match the new status. The `/proposals/<slug>` URL is stable
-across status changes. Getting a DEP rendered in the first place is the
-`dep-render` skill.
+`fern/js/dep-status-data.js` and `fern/js/dep-index-data.js`, so every surface
+updates to match the new status from one source: the on-page `<DepMetadata>`
+pill and its **lifecycle stepper**, the right-aligned Proposals-sidebar pill
+(`fern/js/dep-status-pills.js`), and the DEP's card in the **registry index**
+(`/proposals/registry`). The `/proposals/<slug>` URL is stable across status
+changes. Getting a DEP rendered in the first place is the `dep-render` skill.
 
 ## Notes
 

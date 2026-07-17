@@ -48,6 +48,8 @@ The **Dynamo docs site (this Fern site) is the render + mirror layer**. Each DEP
 
 Each card deep-links back to GitHub to reply. The docs page never posts; GitHub remains the source of truth. This gives readers one clean, shareable, cross-linked page — the gap a plain dedicated proposals repository has always had.
 
+**Finding DEPs.** The tab opens on a [registry index](./index.mdx) — a filterable, sortable card grid of every DEP by status and owning SIG, with each DEP's submitter shown by GitHub `@handle`. Each DEP also carries a color-coded status pill on its sidebar link and its metadata card, and the card renders a lifecycle stepper (Draft → Under Review → Accepted → Implemented, with off-track terminal states). Status is set once in the DEP markdown; the index card, sidebar pill, card pill, and stepper all reflect it from that one source, regenerated on every build.
+
 ## Workflow
 
 1. **Open a tracking issue** in `ai-dynamo/enhancements`. This is the DEP's anchor and its durable design-discussion thread, owned by the SIG.
@@ -108,6 +110,7 @@ The fetch is unauthenticated, so it is subject to GitHub's 60-requests/hour/IP l
 
 The files in this directory:
 
+- [`index.mdx`](./index.mdx): the registry index — the Proposals tab landing page. A filterable / sortable grid of every DEP, rendered by `DepIndex` (`fern/components/DepIndex.tsx` + `fern/js/dep-index.js`) from build-time data emitted by `sync_deps.py`. Nothing on it is hand-edited; a new DEP appears automatically.
 - [`TEMPLATE.mdx`](./TEMPLATE.mdx): the DEP page template used by the docs-site scaffolding. The section vocabulary and ordering match the KEP-style layout in `ai-dynamo/enhancements`. Not a copy target for authors — a new DEP is authored in the enhancements repository directly.
 - [`0000-example-dep.mdx`](./0000-example-dep.mdx): a worked example that renders every section of the template. Illustrative only; it demonstrates the rendered format and is not a real decision.
 - [`0000-nova.mdx`](./0000-nova.mdx): a hand-copied cross-repo demo that mirrors `ai-dynamo/enhancements#61` (Ryan Olson's Nova DEP) end-to-end. Illustrative only; retained alongside the synced version below until the build-time sync is trusted enough to remove it.
