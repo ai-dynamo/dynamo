@@ -238,12 +238,26 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	// cannot resolve them. The shell sees all env vars regardless of
 	// definition order.
 	shellHostname := k8sToShellVarSyntax(leaderHostname)
+	runAsNonRoot := true
+	allowPrivilegeEscalation := false
+
 	initContainer := corev1.Container{
 		Name:  "wait-for-leader-mp",
 		Image: mainImage,
 		Command: []string{"sh", "-c", fmt.Sprintf(
 			`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 %s/%s`,
 			shellHostname, commonconsts.VLLMMpMasterPort, waitLeaderMountPath, waitLeaderScriptKey)},
+		Resources: commonconsts.VLLMMPInitResources,
+		SecurityContext: &corev1.SecurityContext{
+			RunAsNonRoot:             &runAsNonRoot,
+			AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      waitLeaderVolumeName,

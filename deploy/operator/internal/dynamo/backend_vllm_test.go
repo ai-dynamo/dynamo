@@ -877,6 +877,20 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				g.Expect(injected.Command).To(gomega.Equal([]string{"sh", "-c", expectedCmd}))
 				g.Expect(injected.Env).To(gomega.BeEmpty())
 
+				cpuRequest := injected.Resources.Requests[corev1.ResourceCPU]
+				g.Expect(cpuRequest.String()).To(gomega.Equal("500m"))
+				memoryRequest := injected.Resources.Requests[corev1.ResourceMemory]
+				g.Expect(memoryRequest.String()).To(gomega.Equal("128Mi"))
+				cpuLimit := injected.Resources.Limits[corev1.ResourceCPU]
+				g.Expect(cpuLimit.String()).To(gomega.Equal("1"))
+				memoryLimit := injected.Resources.Limits[corev1.ResourceMemory]
+				g.Expect(memoryLimit.String()).To(gomega.Equal("256Mi"))
+
+				g.Expect(injected.SecurityContext.RunAsNonRoot).To(gomega.BeTrue())
+				g.Expect(injected.SecurityContext.AllowPrivilegeEscalation).To(gomega.BeFalse())
+				g.Expect(injected.SecurityContext.Capabilities.Drop).To(gomega.Equal([]corev1.Capability{"ALL"}))
+				g.Expect(injected.SecurityContext.SeccompProfile.Type).To(gomega.Equal(corev1.SeccompProfileTypeRuntimeDefault))
+
 				g.Expect(injected.VolumeMounts).To(gomega.HaveLen(1))
 				g.Expect(injected.VolumeMounts[0].Name).To(gomega.Equal("wait-leader-script"))
 				g.Expect(injected.VolumeMounts[0].MountPath).To(gomega.Equal("/scripts"))
