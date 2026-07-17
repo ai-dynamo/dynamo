@@ -7,9 +7,14 @@ subtitle: Run a bespoke vision tower in an aggregated Dynamo vLLM worker
 
 A custom vision encoder lets an aggregated `dynamo.vllm` worker use an
 author-provided vision tower or projector instead of vLLM's built-in multimodal
-encoder. The encoder runs in the worker process, produces one embedding tensor
-per image, and Dynamo inserts those embeddings at the image-placeholder positions
-of a mixed prompt.
+encoder. The encoder runs in the worker process and produces one media artifact
+per image. Dynamo adapts those artifacts for the resolved downstream model.
+
+At startup, Dynamo creates a `CustomEncoderAdapter` from the resolved downstream
+model configuration. The encoder owns media computation and declares the semantic
+shape of its output. The adapter owns compatibility validation and construction
+of the final vLLM prompt. Encoder implementations do not select their engine
+input route.
 
 Use this path when the language model can consume external prompt embeddings but
 the vision encoder is private, experimental, or otherwise unavailable in vLLM.
@@ -24,14 +29,21 @@ process and GPU, and no embedding transfer occurs.
 | Topology | Aggregated only |
 | Input | `image_url` content |
 | Video and audio | Not supported |
-| Language-model input | Mixed token IDs and prompt embeddings |
+| Language-model input | Consumer-selected mixed prompt embeddings or native Qwen external multimodal input |
 | Cross-request batching | Yes |
 | CUDA graph bucket selection | Reserved for future support; current dispatch is eager |
 
-The custom-encoder path requires `--enable-multimodal` and
-`--enable-prompt-embeds`. It is incompatible with frontend decoding, the vLLM
+The custom-encoder path requires `--enable-multimodal`. A text-only decoder also
+requires `--enable-prompt-embeds`; a Qwen2/2.5-VL decoder instead requires
+`--enable-mm-embeds`. It is incompatible with frontend decoding, the vLLM
 tokenizer mode, legacy multimodal worker roles, and non-aggregated disaggregation
 modes. Dynamo validates these combinations during startup.
+
+The initial native Qwen adapter is validated against vLLM 0.25.1 and supports a
+single TP/PP/DP rank with the full registered model wrapper. Prefix caching,
+chunked prefill, video placeholders, multimodal encoder CUDA graphs, and
+per-request `mm_processor_kwargs` are rejected until those combinations have
+dedicated correctness coverage.
 
 ## Run the Included Path
 
@@ -59,6 +71,36 @@ The launcher supplies the required multimodal and prompt-embedding flags. If the
 language model's chat template does not render an image-placeholder token, also
 provide `DYN_CUSTOM_JINJA_TEMPLATE` or `--custom-jinja-template`.
 
+### Performance-only Qwen2.5 benchmark
+
+The repository also includes a one-off benchmark that runs the complete
+Qwen2.5-VL-3B vision tower and feeds Qwen2.5-1.5B:
+
+```bash
+bash examples/custom_encoder/launch/agg_qwen2_5_vl_benchmark.sh
+```
+
+The vision projector produces 2048 columns while the text decoder expects 1536,
+so this backend truncates the rightmost 512 columns. That operation is not a
+trained projection and makes no output-quality or model-parity claim. Use this
+topology only to benchmark serving mechanics.
+
+### Native Qwen2.5-VL consumer
+
+To run the same Qwen2.5-VL vision compute as a native projected-plus-grid
+producer with a Qwen2.5-VL downstream model:
+
+```bash
+bash examples/custom_encoder/launch/agg_qwen2_5_vl_native.sh
+```
+
+`Qwen2_5VLNativeEncoder` declares
+`output_format = "qwen2_vl_projected_grid"` and returns ordered
+`Qwen2VLImageEncoding` values. The encoder does not choose the engine route. The
+resolved Qwen2.5-VL consumer makes Dynamo select `_Qwen2VLNativeAdapter`, which
+constructs the final native external-multimodal `TokensPrompt` without request
+UUIDs or correlation metadata.
+
 <Warning>
 The backend owns any media retrieval performed by `preprocess()`. Apply Dynamo's
 [media URL policy](README.md#security-url-validation), finite network timeouts,
@@ -74,16 +116,24 @@ implement the following contract:
 
 | Member | Execution context | Responsibility |
 | --- | --- | --- |
-| `image_token_id` | Configuration | Hardcoded placeholder token ID used by the model or custom template |
+| `output_format` | Configuration | Semantic artifact kind: `"tensor"` (default) or `"qwen2_vl_projected_grid"` |
+| `image_token_id` | Configuration | For tensor output, the hardcoded placeholder token ID used by the model or custom template |
 | `build(model_id)` | Encoder actor thread, once | Load the encoder, choose its device, and initialize thread-affine resources |
 | `preprocess(raw)` | Optional CPU thread pool | Fetch, decode, resize, or patchify one image and return `Preprocessed(item, cost)` |
-| `forward_batch(items, target_bucket=None)` | Encoder actor thread | Run one synchronous batched forward and return one CPU tensor per item, in order |
+| `forward_batch(items, target_bucket=None)` | Encoder actor thread | Run one synchronous batched forward and return one CPU artifact per item, in order |
 | `close()` | Encoder actor thread, once | Release thread-affine resources |
 
-`forward_batch()` returns one tensor shaped
-`(number_of_visual_tokens, language_model_hidden_size)` for every input item. It
-must synchronize any device work and copy the results to CPU before returning;
-the request coroutine consumes them from a different thread.
+For `output_format = "tensor"`, `forward_batch()` returns one tensor shaped
+`(number_of_visual_tokens, language_model_hidden_size)` for every input item.
+For `output_format = "qwen2_vl_projected_grid"`, it returns one
+`Qwen2VLImageEncoding(projected, grid_thw)` per image; Qwen2.5 producers must undo
+the vision tower's internal window permutation first. Both forms must be ordered,
+contiguous CPU artifacts with device work synchronized before returning.
+
+The output declaration is not an instruction to choose `EmbedsPrompt` or
+`TokensPrompt`. The downstream model decides: text-only models accept only tensor
+output through `EmbedsPrompt`, while supported Qwen2/2.5-VL models accept only the
+projected-plus-grid form through native external multimodal `TokensPrompt`.
 
 Preprocessing is disabled by default. To enable it, override `preprocess()` and
 set `preprocess_concurrency` to a positive value. The method must be synchronous,
