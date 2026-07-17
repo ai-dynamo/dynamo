@@ -1022,10 +1022,10 @@ jobs:
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          # Provision the shared model cache PV/PVC when the repo provides its NFS
+          # Provision the shared model cache PV/PVC when the repo provides its
           # endpoint; empty vars -> no cache (workers download from HuggingFace).
-          model_cache_nfs_server: ${{ vars.AZURE_MODEL_CACHE_NFS_SERVER }}
-          model_cache_nfs_path: ${{ vars.AZURE_MODEL_CACHE_NFS_PATH }}
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-test-vllm:
     name: vllm Deploy Test
