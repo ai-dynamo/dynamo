@@ -7,7 +7,7 @@ use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
-    scheduling::{AdmissionLease, RequestProgressUpdater, RoutingEligibility},
+    scheduling::{RequestLifecycleLease, RequestProgressUpdater, RoutingEligibility},
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -27,7 +27,7 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
-    pub(super) admission: Option<(RequestProgressUpdater, AdmissionLease)>,
+    pub(super) lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
 }
 
 #[derive(Clone, Copy)]
@@ -72,7 +72,7 @@ struct BestMatchArgs<'a> {
 
 impl KvPushRouter {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
-        let (outcome, admission) = self
+        let (outcome, lifecycle) = self
             .chooser
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
@@ -108,7 +108,7 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                admission,
+                lifecycle,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

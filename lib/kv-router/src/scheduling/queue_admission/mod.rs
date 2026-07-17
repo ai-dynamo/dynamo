@@ -1,20 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rustc_hash::FxHashSet;
+use serde::Deserialize;
 
 use crate::protocols::WorkerWithDpRank;
-
-mod controller;
-
-pub use controller::PolicyClassAdmissionStrategies;
-pub(crate) use controller::{
-    AdmissionTicket, ClassAdmissionAction, PolicyClassAdmissionController,
-};
 
 /// Router-assigned identity for one request's admission lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -32,7 +27,7 @@ impl AdmissionId {
 
 /// Lock-free access to the latest logical context observed for one request.
 ///
-/// Strategies may retain this reader after [`PolicyClassAdmissionStrategy::admit`]
+/// Policies may retain this reader after [`PolicyClassAdmissionPolicy::admit`]
 /// returns. The request path owns the corresponding updater and publishes
 /// monotonic progress without sending commands through the scheduler actor.
 #[derive(Debug, Clone)]
@@ -76,7 +71,7 @@ impl RequestProgressUpdater {
 
 /// Live worker eligibility for one admitted request.
 ///
-/// The host owns routing constraints and worker state. Strategies may retain
+/// The host owns routing constraints and worker state. Policies may retain
 /// this handle when deferred work must be reconsidered against current state.
 #[derive(Clone)]
 pub struct WorkerEligibility {
@@ -142,9 +137,9 @@ impl WorkerEligibilitySnapshot {
     }
 }
 
-/// Read-only request facts exposed to admission strategies.
+/// Read-only request facts exposed to admission policies.
 ///
-/// Only [`AdmissionId`] is universal. A strategy may ignore any other fact or
+/// Only [`AdmissionId`] is universal. A policy may ignore any other fact or
 /// return [`AdmissionDecision::Bypass`] when optional context does not apply.
 /// The actor-owned scheduling request is intentionally not exposed.
 #[derive(Clone)]
@@ -166,6 +161,15 @@ impl<'a> AdmissionRequest<'a> {
         worker_eligibility: WorkerEligibility,
     ) -> Self {
         let (progress, _) = RequestProgress::new(context_tokens);
+        Self::with_progress(id, session_id, progress, worker_eligibility)
+    }
+
+    pub(crate) fn with_progress(
+        id: AdmissionId,
+        session_id: Option<&'a str>,
+        progress: RequestProgress,
+        worker_eligibility: WorkerEligibility,
+    ) -> Self {
         Self {
             id,
             session_id,
@@ -210,7 +214,7 @@ pub enum WorkerPlacement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AdmissionDecision {
-    /// Continue through normal scheduling without a strategy lifecycle.
+    /// Continue through normal scheduling without a policy lifecycle.
     Bypass,
     Ready(WorkerPlacement),
     Defer,
@@ -232,7 +236,7 @@ pub enum AdmissionEvent {
     },
     /// The request ended without committing a new logical context.
     Aborted { id: AdmissionId },
-    /// The host is giving the strategy an opportunity to reconsider deferred work.
+    /// The host is giving the policy an opportunity to reconsider deferred work.
     Reconcile,
 }
 
@@ -248,8 +252,9 @@ pub enum AdmissionAction {
 /// Policy-class admission behavior.
 ///
 /// The host calls [`Self::admit`] exactly once for each admission-tracked request
-/// assigned to this strategy, using a unique ID. Query-only and ordinary tracked
-/// selection bypass admission. A `Bypass` decision receives no lifecycle events.
+/// assigned to this policy, using a unique ID. Query-only requests never enter
+/// admission, and ordinary tracked requests assigned to a class with an admission
+/// policy are rejected. A `Bypass` decision receives no lifecycle events.
 /// A ready request may receive one `Dispatched` event and every non-bypassed
 /// admitted request receives exactly one terminal `Completed` or `Aborted` event
 /// while the host remains alive. A deferred request receives no `Dispatched`
@@ -257,9 +262,9 @@ pub enum AdmissionAction {
 /// unknown actions are ignored.
 /// While any request is deferred, `Reconcile` is delivered at least once per
 /// configured queue recheck interval and may also be delivered after lifecycle
-/// or capacity changes. Host shutdown drops the strategy and its requests
+/// or capacity changes. Host shutdown drops the policy and its requests
 /// together, so no terminal events are delivered after shutdown begins.
-pub trait PolicyClassAdmissionStrategy: Send {
+pub trait PolicyClassAdmissionPolicy: Send {
     fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision;
 
     fn on_event(&mut self, _event: AdmissionEvent) -> Vec<AdmissionAction> {
@@ -273,13 +278,45 @@ pub trait PolicyClassAdmissionStrategy: Send {
     }
 }
 
+pub type PolicyClassAdmissionPolicies = HashMap<String, Box<dyn PolicyClassAdmissionPolicy>>;
+
+/// Opaque configuration owned by the selected admission policy.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct AdmissionPolicyConfig {
+    #[serde(rename = "type")]
+    policy_type: String,
+    #[serde(flatten)]
+    options: serde_yaml::Mapping,
+}
+
+impl AdmissionPolicyConfig {
+    pub fn policy_type(&self) -> &str {
+        &self.policy_type
+    }
+
+    pub fn options(&self) -> &serde_yaml::Mapping {
+        &self.options
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AdmissionTicket {
+    pub class_index: usize,
+    pub id: AdmissionId,
+}
+
+pub(crate) struct ClassAdmissionAction {
+    pub class_index: usize,
+    pub action: AdmissionAction,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct ReadyStrategy;
+    struct ReadyPolicy;
 
-    impl PolicyClassAdmissionStrategy for ReadyStrategy {
+    impl PolicyClassAdmissionPolicy for ReadyPolicy {
         fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
             assert_eq!(request.id(), AdmissionId::new(7));
             assert_eq!(request.session_id(), Some("session"));
@@ -293,12 +330,12 @@ mod tests {
     }
 
     #[test]
-    fn strategy_contract_is_object_safe() {
-        let mut strategy: Box<dyn PolicyClassAdmissionStrategy> = Box::new(ReadyStrategy);
+    fn policy_contract_is_object_safe() {
+        let mut policy: Box<dyn PolicyClassAdmissionPolicy> = Box::new(ReadyPolicy);
         let worker = WorkerWithDpRank::new(3, 0);
         let eligibility = WorkerEligibility::new(move || WorkerEligibilitySnapshot::new([worker]));
         assert_eq!(
-            strategy.admit(AdmissionRequest::new(
+            policy.admit(AdmissionRequest::new(
                 AdmissionId::new(7),
                 Some("session"),
                 42,
@@ -306,7 +343,25 @@ mod tests {
             )),
             AdmissionDecision::Ready(WorkerPlacement::Any)
         );
-        assert!(strategy.on_event(AdmissionEvent::Reconcile).is_empty());
+        assert!(policy.on_event(AdmissionEvent::Reconcile).is_empty());
+    }
+
+    #[test]
+    fn admission_policy_config_keeps_policy_owned_options() {
+        let config: AdmissionPolicyConfig = serde_yaml::from_str(
+            "type: session_aware\npause_threshold: 0.9\ncustom_option: enabled\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.policy_type(), "session_aware");
+        assert_eq!(
+            config.options()["pause_threshold"],
+            serde_yaml::Value::from(0.9)
+        );
+        assert_eq!(
+            config.options()["custom_option"],
+            serde_yaml::Value::from("enabled")
+        );
     }
 
     #[test]

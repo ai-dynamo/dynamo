@@ -15,7 +15,7 @@ use dynamo_kv_router::{
         WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
-        AdmissionLease, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
+        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, RequestLifecycleLease,
         RequestProgressUpdater, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
@@ -569,18 +569,18 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-        use_admission: bool,
+        track_lifecycle: bool,
     ) -> anyhow::Result<(
         FindBestMatchOutcome,
-        Option<(RequestProgressUpdater, AdmissionLease)>,
+        Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     )> {
         let start = Instant::now();
 
         if update_states && context_id.is_none() {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
-        let mode = if update_states && use_admission {
-            ScheduleMode::TrackedWithAdmission {
+        let mode = if update_states && track_lifecycle {
+            ScheduleMode::TrackedWithLifecycle {
                 request_id: context_id.expect("validated above").to_string(),
             }
         } else if update_states {
@@ -736,9 +736,9 @@ where
 
         debug_assert_eq!(
             response.request_progress.is_some(),
-            response.admission_lease.is_some()
+            response.lifecycle_lease.is_some()
         );
-        let admission = response.request_progress.zip(response.admission_lease);
+        let lifecycle = response.request_progress.zip(response.lifecycle_lease);
         Ok((
             FindBestMatchOutcome::Routed {
                 worker: response.best_worker,
@@ -747,7 +747,7 @@ where
                 cached_tokens: response.cached_tokens,
                 routing_hashes,
             },
-            admission,
+            lifecycle,
         ))
     }
 
@@ -857,7 +857,7 @@ where
         self.scheduler.mark_prefill_completed(request_id).await
     }
 
-    /// Legacy slot cleanup. Admission-managed requests use their `AdmissionLease`.
+    /// Legacy slot cleanup. Lifecycle-tracked requests use their `RequestLifecycleLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
     }

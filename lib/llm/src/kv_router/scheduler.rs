@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
-use dynamo_kv_router::scheduling::PolicyClassAdmissionStrategies;
+use dynamo_kv_router::scheduling::PolicyClassAdmissionPolicies;
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
@@ -63,7 +63,7 @@ where
         model_name: Option<&str>,
         worker_type: &'static str,
         cancellation_token: CancellationToken,
-        admission_strategies: PolicyClassAdmissionStrategies,
+        admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
         let initial_workers: HashMap<WorkerId, ModelRuntimeConfig> =
             workers_with_configs.borrow().clone();
@@ -116,7 +116,7 @@ where
             cancellation_token.child_token(),
             worker_type,
             watch_worker_configs,
-            admission_strategies,
+            admission_policies,
         )?);
 
         let metrics_scheduler = Arc::clone(&inner);

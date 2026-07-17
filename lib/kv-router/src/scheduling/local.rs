@@ -16,7 +16,7 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
-use super::queue_admission::PolicyClassAdmissionStrategies;
+use super::queue_admission::PolicyClassAdmissionPolicies;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
     KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
@@ -111,9 +111,9 @@ where
             cancellation_token,
             worker_type,
             monitor_worker_configs,
-            PolicyClassAdmissionStrategies::new(),
+            PolicyClassAdmissionPolicies::new(),
         )
-        .expect("synthetic policy profile does not require admission strategies")
+        .expect("synthetic policy profile does not require admission policies")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -131,11 +131,11 @@ where
         cancellation_token: CancellationToken,
         worker_type: &'static str,
         monitor_worker_configs: bool,
-        admission_strategies: PolicyClassAdmissionStrategies,
+        admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
-        let periodic_recheck_interval = admission_strategies
+        let periodic_recheck_interval = admission_policies
             .values()
-            .filter_map(|strategy| strategy.reconcile_interval())
+            .filter_map(|policy| policy.reconcile_interval())
             .fold(recheck_interval, Duration::min);
         let queue = Arc::new(SchedulerQueue::new_with_policy_profile(
             Arc::clone(&slots),
@@ -147,7 +147,7 @@ where
             overlap_scores_refresh,
             overloaded_worker_provider,
             recheck_interval,
-            admission_strategies,
+            admission_policies,
         )?);
 
         if monitor_worker_configs {
@@ -246,9 +246,9 @@ where
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let admission_lease = self
+        let lifecycle_lease = self
             .queue
-            .new_admission_lease(request.mode.admission_request_id());
+            .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
         let track_prefill_tokens = request
             .router_config_override
             .as_ref()
@@ -293,9 +293,9 @@ where
             resp_tx: Some(resp_tx),
         };
 
-        let mut admission_lease = self
+        let mut lifecycle_lease = self
             .queue
-            .enqueue_with_block_hashes_and_lease(request, block_hashes, admission_lease)
+            .enqueue_with_block_hashes_and_lease(request, block_hashes, lifecycle_lease)
             .await;
 
         let mut response = resp_rx
@@ -303,10 +303,10 @@ where
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
         match &mut response {
             Ok(response) if response.request_progress.is_some() => {
-                response.admission_lease = admission_lease.take().map(|lease| *lease);
+                response.lifecycle_lease = lifecycle_lease.take().map(|lease| *lease);
             }
             Ok(_) | Err(_) => {
-                if let Some(lease) = admission_lease.as_mut() {
+                if let Some(lease) = lifecycle_lease.as_mut() {
                     lease.disarm();
                 }
             }
@@ -481,7 +481,7 @@ where
         Ok(())
     }
 
-    /// Legacy slot cleanup. Admission-managed requests use their `AdmissionLease`.
+    /// Legacy slot cleanup. Lifecycle-tracked requests use their `RequestLifecycleLease`.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
@@ -612,7 +612,7 @@ where
             cancellation_token,
             worker_type,
             monitor_worker_configs,
-            PolicyClassAdmissionStrategies::new(),
+            PolicyClassAdmissionPolicies::new(),
         )
     }
 
@@ -732,7 +732,7 @@ mod tests {
     use crate::scheduling::selector::DefaultWorkerSelector;
     use crate::scheduling::{
         AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionRequest,
-        PolicyClassAdmissionStrategy, PrefillLoadEstimator, WorkerPlacement,
+        PolicyClassAdmissionPolicy, PrefillLoadEstimator, WorkerPlacement,
     };
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -1394,9 +1394,9 @@ mod tests {
         cancel_token.cancel();
     }
 
-    struct AbortCountingStrategy(Arc<AtomicUsize>);
+    struct AbortCountingPolicy(Arc<AtomicUsize>);
 
-    impl PolicyClassAdmissionStrategy for AbortCountingStrategy {
+    impl PolicyClassAdmissionPolicy for AbortCountingPolicy {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
@@ -1409,9 +1409,9 @@ mod tests {
         }
     }
 
-    struct DeferredAbortCountingStrategy(Arc<AtomicUsize>);
+    struct DeferredAbortCountingPolicy(Arc<AtomicUsize>);
 
-    impl PolicyClassAdmissionStrategy for DeferredAbortCountingStrategy {
+    impl PolicyClassAdmissionPolicy for DeferredAbortCountingPolicy {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Defer
         }
@@ -1425,7 +1425,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admission_lease_aborts_once() {
+    async fn lifecycle_lease_aborts_once() {
         let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
@@ -1437,10 +1437,10 @@ mod tests {
         ));
         let (_cfg_tx, cfg_rx) = watch::channel(workers);
         let aborted = Arc::new(AtomicUsize::new(0));
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        strategies.insert(
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(
             "default".to_owned(),
-            Box::new(AbortCountingStrategy(Arc::clone(&aborted))),
+            Box::new(AbortCountingPolicy(Arc::clone(&aborted))),
         );
         let cancel_token = CancellationToken::new();
         let scheduler = LocalScheduler::new_with_policy_profile(
@@ -1457,24 +1457,24 @@ mod tests {
             cancel_token.clone(),
             "test",
             false,
-            strategies,
+            policies,
         )
         .unwrap();
         let mut response = scheduler
-            .schedule_request(request(ScheduleMode::TrackedWithAdmission {
+            .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
                 request_id: "req-1".to_owned(),
             }))
             .await
             .unwrap();
-        assert!(response.admission_lease.is_some());
-        drop(response.admission_lease.take());
+        assert!(response.lifecycle_lease.is_some());
+        drop(response.lifecycle_lease.take());
         tokio::time::timeout(Duration::from_secs(1), async {
             while aborted.load(Ordering::Relaxed) != 1 {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("admission lease did not report abort");
+        .expect("lifecycle lease did not report abort");
         assert_eq!(aborted.load(Ordering::Relaxed), 1);
         slots.assert_completely_drained(Instant::now());
         cancel_token.cancel();
@@ -1493,10 +1493,10 @@ mod tests {
         ));
         let (_cfg_tx, cfg_rx) = watch::channel(workers);
         let aborted = Arc::new(AtomicUsize::new(0));
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        strategies.insert(
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(
             "default".to_owned(),
-            Box::new(DeferredAbortCountingStrategy(Arc::clone(&aborted))),
+            Box::new(DeferredAbortCountingPolicy(Arc::clone(&aborted))),
         );
         let cancel_token = CancellationToken::new();
         let scheduler = Arc::new(
@@ -1514,7 +1514,7 @@ mod tests {
                 cancel_token.clone(),
                 "test",
                 false,
-                strategies,
+                policies,
             )
             .unwrap(),
         );
@@ -1522,7 +1522,7 @@ mod tests {
             let scheduler = Arc::clone(&scheduler);
             tokio::spawn(async move {
                 scheduler
-                    .schedule_request(request(ScheduleMode::TrackedWithAdmission {
+                    .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
                         request_id: "cancelled-pending".to_owned(),
                     }))
                     .await

@@ -8,7 +8,7 @@ use std::path::Path;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::config::RouterQueuePolicy;
+use super::{config::RouterQueuePolicy, queue_admission::AdmissionPolicyConfig};
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
@@ -34,6 +34,7 @@ pub enum RouterPolicyConfigError {
 pub struct PolicyClassConfig {
     pub name: String,
     pub queue_policy: RouterQueuePolicy,
+    pub admission: Option<AdmissionPolicyConfig>,
     pub quantum: usize,
     pub prefill_busy_threshold: Option<usize>,
     pub prefill_busy_threshold_frac: Option<f64>,
@@ -115,6 +116,7 @@ impl PolicyProfile {
         let class = PolicyClassConfig {
             name: SYNTHETIC_POLICY_CLASS.to_string(),
             queue_policy: router_queue_policy,
+            admission: None,
             quantum: 1,
             prefill_busy_threshold: None,
             prefill_busy_threshold_frac: router_queue_threshold,
@@ -293,6 +295,8 @@ struct RawPolicyClassConfig {
     cache_bucket: Option<String>,
     #[serde(default)]
     queue_policy: RouterQueuePolicy,
+    #[serde(default)]
+    admission: Option<AdmissionPolicyConfig>,
     quantum: usize,
     #[serde(default)]
     prefill_busy_threshold: Option<usize>,
@@ -482,11 +486,11 @@ fn resolve_policy_class(
             )));
         }
     };
-
     Ok(ResolvedPolicyClass {
         config: PolicyClassConfig {
             name: raw.name,
             queue_policy: raw.queue_policy,
+            admission: raw.admission,
             quantum: raw.quantum,
             prefill_busy_threshold: raw.prefill_busy_threshold,
             prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
@@ -682,29 +686,48 @@ models:
     }
 
     #[test]
-    fn rejects_queue_admission_config() {
-        let error = RouterPolicyConfig::from_yaml(
+    fn accepts_opaque_admission_policy_config() {
+        let config = RouterPolicyConfig::from_yaml(
             r#"
 default_policy_family: standard
 uncached_isl_buckets:
   - min_tokens: 0
     bucket: all
 policy_classes:
-  - name: agents
+  - name: standard
     policy_family: standard
     cache_bucket: all
-    queue_admission:
-      type: session_aware
+    quantum: 1
+  - name: agents
+    admission:
+      type: experimental_scheduler
+      custom_knob: 7
+      nested:
+        enabled: true
     quantum: 1
 "#,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            error
-                .to_string()
-                .contains("unknown field `queue_admission`")
+        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+        let agents = profile.class(profile.resolve_class_index(Some("agents"), 0));
+        let admission = agents.admission.as_ref().unwrap();
+        assert_eq!(admission.policy_type(), "experimental_scheduler");
+        assert_eq!(admission.options().len(), 2);
+        assert_eq!(
+            admission
+                .options()
+                .get(serde_yaml::Value::from("custom_knob"))
+                .and_then(serde_yaml::Value::as_u64),
+            Some(7)
         );
+    }
+
+    #[test]
+    fn synthetic_profile_has_no_admission_policy() {
+        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+
+        assert!(profile.default_class().admission.is_none());
     }
 
     #[test]

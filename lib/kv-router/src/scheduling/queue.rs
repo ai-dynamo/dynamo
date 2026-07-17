@@ -22,8 +22,8 @@ use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::{
     AdmissionAction, AdmissionDecision, AdmissionTicket, ClassAdmissionAction,
-    PolicyClassAdmissionController, PolicyClassAdmissionStrategies, RequestProgressUpdater,
-    WorkerEligibility, WorkerEligibilitySnapshot, WorkerPlacement,
+    PolicyClassAdmissionPolicies, RequestProgressUpdater, WorkerEligibility,
+    WorkerEligibilitySnapshot, WorkerPlacement,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -71,8 +71,8 @@ enum AdmissionCommand {
     Enqueue {
         request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
-        lease: Option<Box<AdmissionLease>>,
-        ack_tx: oneshot::Sender<Option<Box<AdmissionLease>>>,
+        lease: Option<Box<RequestLifecycleLease>>,
+        ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
     },
     Update {
         worker: Option<WorkerWithDpRank>,
@@ -144,7 +144,7 @@ impl AdmissionCleanup {
 /// Ownership moves from worker selection into the response stream. Dropping
 /// either phase queues one terminal outcome and coalesces the actor wakeup.
 #[must_use = "dropping the lease reports the request outcome to the scheduler actor"]
-pub struct AdmissionLease {
+pub struct RequestLifecycleLease {
     cleanup: Arc<AdmissionCleanup>,
     actor_tx: mpsc::Sender<AdmissionCommand>,
     ticket: Option<AdmissionTicket>,
@@ -153,10 +153,10 @@ pub struct AdmissionLease {
     dispatched: bool,
 }
 
-impl std::fmt::Debug for AdmissionLease {
+impl std::fmt::Debug for RequestLifecycleLease {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("AdmissionLease")
+            .debug_struct("RequestLifecycleLease")
             .field("ticket", &self.ticket)
             .field("request_id", &self.request_id)
             .field("context_tokens", &self.context_tokens)
@@ -165,7 +165,7 @@ impl std::fmt::Debug for AdmissionLease {
     }
 }
 
-impl AdmissionLease {
+impl RequestLifecycleLease {
     pub fn mark_completed(&mut self, context_tokens: usize) {
         self.context_tokens = Some(context_tokens);
     }
@@ -186,7 +186,7 @@ impl AdmissionLease {
     }
 }
 
-impl Drop for AdmissionLease {
+impl Drop for RequestLifecycleLease {
     fn drop(&mut self) {
         let Some(request_id) = self.request_id.take() else {
             return;
@@ -209,7 +209,6 @@ struct SchedulerQueueActor<
     RF: OverlapScoresRefresh,
 > {
     pending: PolicyQueue<QueuedRequest>,
-    admission: PolicyClassAdmissionController,
     tracked_admissions: HashMap<String, TrackedAdmission>,
     cleanup: Arc<AdmissionCleanup>,
     queueing_enabled: bool,
@@ -287,9 +286,9 @@ impl<
             overlap_scores_refresh,
             overloaded_worker_provider,
             Duration::from_secs(60),
-            PolicyClassAdmissionStrategies::new(),
+            PolicyClassAdmissionPolicies::new(),
         )
-        .expect("synthetic policy profile does not require admission strategies")
+        .expect("synthetic policy profile does not require admission policies")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -303,7 +302,7 @@ impl<
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         queue_recheck_interval: Duration,
-        admission_strategies: PolicyClassAdmissionStrategies,
+        admission_policies: PolicyClassAdmissionPolicies,
     ) -> Result<Self, KvSchedulerError> {
         Self::new_with_policy_profile_and_capacity(
             slots,
@@ -315,7 +314,7 @@ impl<
             overlap_scores_refresh,
             overloaded_worker_provider,
             queue_recheck_interval,
-            admission_strategies,
+            admission_policies,
             ADMISSION_CHANNEL_CAPACITY,
         )
     }
@@ -331,14 +330,14 @@ impl<
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
         queue_recheck_interval: Duration,
-        admission_strategies: PolicyClassAdmissionStrategies,
+        admission_policies: PolicyClassAdmissionPolicies,
         admission_channel_capacity: usize,
     ) -> Result<Self, KvSchedulerError> {
-        let admission_enabled = !admission_strategies.is_empty();
-        let admission = PolicyClassAdmissionController::new(
-            &profile,
+        let admission_enabled = !admission_policies.is_empty();
+        let pending = PolicyQueue::new_with_admission_policies(
+            profile.clone(),
             queue_recheck_interval,
-            admission_strategies,
+            admission_policies,
         )?;
         let queueing_enabled = profile
             .classes()
@@ -387,8 +386,7 @@ impl<
         let cleanup = Arc::new(AdmissionCleanup::default());
         let now = Instant::now();
         let actor = SchedulerQueueActor {
-            pending: PolicyQueue::new(profile.clone()),
-            admission,
+            pending,
             tracked_admissions: HashMap::new(),
             cleanup: Arc::clone(&cleanup),
             queueing_enabled,
@@ -530,9 +528,9 @@ impl<
         &self,
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
-        lease: Option<Box<AdmissionLease>>,
-    ) -> Option<Box<AdmissionLease>> {
-        if self.queueing_enabled && lease.is_none() && request.mode.admission_request_id().is_some()
+        lease: Option<Box<RequestLifecycleLease>>,
+    ) -> Option<Box<RequestLifecycleLease>> {
+        if self.queueing_enabled && lease.is_none() && request.mode.lifecycle_request_id().is_some()
         {
             request.respond(Err(KvSchedulerError::BookingFailed(
                 "admission-managed requests must be scheduled through LocalScheduler".to_string(),
@@ -572,15 +570,15 @@ impl<
         }
     }
 
-    pub(crate) fn new_admission_lease(
+    pub(crate) fn new_request_lifecycle_lease(
         &self,
         request_id: Option<&str>,
-    ) -> Option<Box<AdmissionLease>> {
+    ) -> Option<Box<RequestLifecycleLease>> {
         if !self.queueing_enabled {
             return None;
         }
         request_id?;
-        Some(Box::new(AdmissionLease {
+        Some(Box::new(RequestLifecycleLease {
             cleanup: Arc::clone(&self.cleanup),
             actor_tx: self.admission_tx.clone(),
             ticket: None,
@@ -796,8 +794,7 @@ impl<
             (class_index, Some(snapshot))
         };
         let mut queue_class_index = admission_class_index;
-
-        if let Some(request_id) = request.mode.admission_request_id()
+        if let Some(request_id) = request.mode.lifecycle_request_id()
             && self.tracked_admissions.contains_key(request_id)
         {
             request.respond(Err(KvSchedulerError::BookingFailed(format!(
@@ -806,8 +803,19 @@ impl<
             return (false, false);
         }
 
-        let mut admission = if request.mode.admission_request_id().is_some()
-            && self.admission.has_strategy(admission_class_index)
+        let has_admission_policy = self.pending.has_admission_policy(admission_class_index);
+        if request.mode.is_tracked()
+            && request.mode.lifecycle_request_id().is_none()
+            && has_admission_policy
+        {
+            request.respond(Err(KvSchedulerError::BookingFailed(format!(
+                "policy class {:?} requires lifecycle-tracked scheduling",
+                self.profile.class(admission_class_index).name
+            ))));
+            return (false, false);
+        }
+
+        let mut admission = if request.mode.lifecycle_request_id().is_some() && has_admission_policy
         {
             let allowed_worker_ids = request.allowed_worker_ids.clone();
             let pinned_worker = request.pinned_worker;
@@ -837,7 +845,7 @@ impl<
                     .retain(|worker| !overloaded_worker_ids.contains(&worker.worker_id));
                 WorkerEligibilitySnapshot::with_availability(structural_workers, available_workers)
             });
-            self.admission
+            self.pending
                 .admit(
                     admission_class_index,
                     request.session_id.as_deref(),
@@ -1003,7 +1011,7 @@ impl<
             return false;
         };
         tracked.dispatched = true;
-        let actions = self.admission.dispatched(tracked.ticket, worker);
+        let actions = self.pending.dispatched(tracked.ticket, worker);
         self.apply_admission_actions(actions)
     }
 
@@ -1122,12 +1130,12 @@ impl<
     }
 
     fn complete_admission(&mut self, ticket: AdmissionTicket, context_tokens: usize) -> bool {
-        let actions = self.admission.completed(ticket, context_tokens);
+        let actions = self.pending.completed(ticket, context_tokens);
         self.apply_admission_actions(actions)
     }
 
     fn abort_admission(&mut self, ticket: AdmissionTicket) -> bool {
-        let actions = self.admission.aborted(ticket);
+        let actions = self.pending.aborted(ticket);
         self.apply_admission_actions(actions)
     }
 
@@ -1215,7 +1223,7 @@ impl<
                         if let Some(request_id) = queued.request.mode.tracked_request_id() {
                             self.tracked_admissions.remove(request_id);
                         }
-                        actions.extend(self.admission.aborted(admission.ticket));
+                        actions.extend(self.pending.aborted(admission.ticket));
                     }
                     queued.request.respond(Err(error));
                     continue;
@@ -1292,7 +1300,7 @@ impl<
         if !force && queue_due {
             self.next_queue_recheck = now + self.queue_recheck_interval;
         }
-        let actions = self.admission.reconcile(now, force);
+        let actions = self.pending.reconcile_admission(now, force);
         let made_ready = self.apply_admission_actions(actions);
         if queue_due || made_ready {
             self.handle_update(None).await;
@@ -1322,7 +1330,7 @@ impl<
                 self.pending.pop_next(|_, class, queued| {
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
-                    // that class until a bounded non-HOL strategy is introduced.
+                    // that class until a bounded non-HOL policy is introduced.
                     !Self::all_workers_prefill_busy_with(
                         &active_tokens,
                         &configs,
@@ -1454,7 +1462,7 @@ impl<
             cached_tokens: selection.cached_tokens,
             selected_worker_tiers,
             request_progress,
-            admission_lease: None,
+            lifecycle_lease: None,
         };
 
         if !request.mode.is_tracked() {
@@ -1697,7 +1705,7 @@ mod tests {
     use crate::scheduling::OverlapSignals;
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
     use crate::scheduling::{
-        AdmissionEvent, AdmissionId, AdmissionRequest, PolicyClassAdmissionStrategy,
+        AdmissionEvent, AdmissionId, AdmissionRequest, PolicyClassAdmissionPolicy,
         RefreshedOverlap, RequestProgress, RouterPolicyConfig,
     };
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
@@ -2001,7 +2009,7 @@ mod tests {
                 None,
                 None,
                 Duration::from_secs(60),
-                PolicyClassAdmissionStrategies::new(),
+                PolicyClassAdmissionPolicies::new(),
             )
             .unwrap(),
         );
@@ -2215,7 +2223,7 @@ mod tests {
                 Some(refresher),
                 None,
                 Duration::from_secs(60),
-                PolicyClassAdmissionStrategies::new(),
+                PolicyClassAdmissionPolicies::new(),
                 admission_channel_capacity,
             )
             .unwrap(),
@@ -2269,7 +2277,7 @@ mod tests {
         >,
     ) {
         let (mut request, response) = make_request(request_id, isl_tokens);
-        request.mode = ScheduleMode::TrackedWithAdmission {
+        request.mode = ScheduleMode::TrackedWithLifecycle {
             request_id: request_id.to_owned(),
         };
         (request, response)
@@ -2278,12 +2286,12 @@ mod tests {
     async fn enqueue_with_lease(
         queue: &SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>,
         request: SchedulingRequest,
-    ) -> Box<AdmissionLease> {
+    ) -> Box<RequestLifecycleLease> {
         let request_id = request
             .mode
-            .admission_request_id()
+            .lifecycle_request_id()
             .expect("admission test request must be tracked");
-        let lease = queue.new_admission_lease(Some(request_id)).unwrap();
+        let lease = queue.new_request_lifecycle_lease(Some(request_id)).unwrap();
         queue
             .enqueue_with_block_hashes_and_lease(request, None, Some(lease))
             .await
@@ -2305,7 +2313,7 @@ mod tests {
         state: Arc<StdMutex<GateState>>,
     }
 
-    impl PolicyClassAdmissionStrategy for ReconcileGate {
+    impl PolicyClassAdmissionPolicy for ReconcileGate {
         fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
             let mut state = self.state.lock().unwrap();
             state.deferred = Some(request.id());
@@ -2350,17 +2358,17 @@ mod tests {
         }
     }
 
-    fn make_queue_with_admission_strategy(
-        strategy: Box<dyn PolicyClassAdmissionStrategy>,
+    fn make_queue_with_admission_policy(
+        policy: Box<dyn PolicyClassAdmissionPolicy>,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        make_queue_with_admission_strategy_and_workers(strategy, 1)
+        make_queue_with_admission_policy_and_workers(policy, 1)
     }
 
-    fn make_queue_with_admission_strategy_and_workers(
-        strategy: Box<dyn PolicyClassAdmissionStrategy>,
+    fn make_queue_with_admission_policy_and_workers(
+        policy: Box<dyn PolicyClassAdmissionPolicy>,
         worker_count: u64,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
@@ -2382,13 +2390,13 @@ policy_classes:
     quantum: 1
 "#,
         );
-        make_queue_with_profile_and_admission_strategy(profile, "agents", strategy, worker_count)
+        make_queue_with_profile_and_admission_policy(profile, "agents", policy, worker_count)
     }
 
-    fn make_queue_with_profile_and_admission_strategy(
+    fn make_queue_with_profile_and_admission_policy(
         profile: PolicyProfile,
         class_name: &str,
-        strategy: Box<dyn PolicyClassAdmissionStrategy>,
+        policy: Box<dyn PolicyClassAdmissionPolicy>,
         worker_count: u64,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig>>,
@@ -2415,8 +2423,8 @@ policy_classes:
                 })
                 .collect(),
         );
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        strategies.insert(class_name.to_owned(), strategy);
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(class_name.to_owned(), policy);
         let queue = Arc::new(
             SchedulerQueue::new_with_policy_profile(
                 Arc::clone(&slots),
@@ -2428,7 +2436,7 @@ policy_classes:
                 None,
                 None,
                 Duration::from_secs(60),
-                strategies,
+                policies,
             )
             .unwrap(),
         );
@@ -2436,9 +2444,9 @@ policy_classes:
     }
 
     #[tokio::test]
-    async fn admission_strategy_defers_releases_and_observes_lifecycle() {
+    async fn admission_policy_defers_releases_and_observes_lifecycle() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReconcileGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(ReconcileGate {
             state: Arc::clone(&state),
         }));
         let (mut request, response) = make_admission_request("deferred", 64);
@@ -2486,7 +2494,7 @@ policy_classes:
     #[tokio::test]
     async fn cancelled_deferred_request_receives_one_terminal_event() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, _slots) = make_queue_with_admission_strategy(Box::new(ReconcileGate {
+        let (queue, _slots) = make_queue_with_admission_policy(Box::new(ReconcileGate {
             state: Arc::clone(&state),
         }));
         let (mut request, response) = make_admission_request("cancelled", 64);
@@ -2508,7 +2516,7 @@ policy_classes:
         state: Arc<StdMutex<GateState>>,
     }
 
-    impl PolicyClassAdmissionStrategy for ReadyGate {
+    impl PolicyClassAdmissionPolicy for ReadyGate {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
@@ -2529,7 +2537,7 @@ policy_classes:
 
     struct ExactReadyGate(WorkerWithDpRank);
 
-    impl PolicyClassAdmissionStrategy for ExactReadyGate {
+    impl PolicyClassAdmissionPolicy for ExactReadyGate {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Exact(self.0))
         }
@@ -2537,7 +2545,7 @@ policy_classes:
 
     struct OrderedLifecycleGate(Arc<StdMutex<Vec<&'static str>>>);
 
-    impl PolicyClassAdmissionStrategy for OrderedLifecycleGate {
+    impl PolicyClassAdmissionPolicy for OrderedLifecycleGate {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
@@ -2558,7 +2566,7 @@ policy_classes:
     async fn lease_cleanup_preserves_dispatch_before_terminal_event() {
         let events = Arc::new(StdMutex::new(Vec::new()));
         let (queue, slots) =
-            make_queue_with_admission_strategy(Box::new(OrderedLifecycleGate(Arc::clone(&events))));
+            make_queue_with_admission_policy(Box::new(OrderedLifecycleGate(Arc::clone(&events))));
         let (mut request, response) = make_admission_request("ordered-cleanup", 64);
         request.policy_class = Some("agents".to_owned());
         let mut lease = enqueue_with_lease(&queue, request).await;
@@ -2587,7 +2595,7 @@ policy_classes:
     #[tokio::test]
     async fn cancellation_after_response_send_rolls_back_booking() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(ReadyGate {
             state: Arc::clone(&state),
         }));
         let (mut request, response) = make_admission_request("cancelled-after-handoff", 64);
@@ -2618,7 +2626,7 @@ policy_classes:
     #[tokio::test]
     async fn dropped_completed_lease_commits_authoritative_context() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(ReadyGate {
             state: Arc::clone(&state),
         }));
         let (mut request, response) = make_admission_request("completed-after-terminal", 64);
@@ -2644,7 +2652,7 @@ policy_classes:
     fn lease_drop_coalesces_actor_wakes_and_preserves_cleanup() {
         let cleanup = Arc::new(AdmissionCleanup::default());
         let (actor_tx, mut actor_rx) = mpsc::channel(1);
-        let lease = |id: u64, request_id: &str| AdmissionLease {
+        let lease = |id: u64, request_id: &str| RequestLifecycleLease {
             cleanup: Arc::clone(&cleanup),
             actor_tx: actor_tx.clone(),
             ticket: Some(AdmissionTicket {
@@ -2703,7 +2711,7 @@ policy_classes:
     #[tokio::test]
     async fn duplicate_request_id_does_not_replace_active_admission() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(ReadyGate {
             state: Arc::clone(&state),
         }));
         let (mut first, first_response) = make_admission_request("duplicate", 64);
@@ -2738,7 +2746,7 @@ policy_classes:
         events: Arc<AtomicUsize>,
     }
 
-    impl PolicyClassAdmissionStrategy for BypassGate {
+    impl PolicyClassAdmissionPolicy for BypassGate {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Bypass
         }
@@ -2753,13 +2761,17 @@ policy_classes:
     async fn disabled_queueing_has_no_cancellation_lease() {
         let (queue, _slots) = make_queue(1, 16, 64, None);
 
-        assert!(queue.new_admission_lease(Some("default-path")).is_none());
+        assert!(
+            queue
+                .new_request_lifecycle_lease(Some("default-path"))
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn raw_queue_rejects_admission_mode_without_lease() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, _slots) = make_queue_with_admission_strategy(Box::new(ReconcileGate {
+        let (queue, _slots) = make_queue_with_admission_policy(Box::new(ReconcileGate {
             state: Arc::clone(&state),
         }));
         let (mut request, response) = make_admission_request("raw-admission", 64);
@@ -2778,23 +2790,24 @@ policy_classes:
     }
 
     #[tokio::test]
-    async fn legacy_tracked_request_bypasses_admission() {
+    async fn legacy_tracked_request_cannot_bypass_admission_policy() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate { state }));
+        let (queue, _slots) = make_queue_with_admission_policy(Box::new(ReadyGate { state }));
         let (mut request, response) = make_request("legacy", 64);
         request.policy_class = Some("agents".to_owned());
 
         queue.enqueue(request).await;
-        let selected = response.await.unwrap().unwrap();
+        let error = response.await.unwrap().unwrap_err();
 
-        assert!(selected.request_progress.is_none());
-        slots.free(&"legacy".to_owned(), decay_now()).unwrap();
+        assert!(matches!(error, KvSchedulerError::BookingFailed(message)
+            if message.contains("requires lifecycle-tracked scheduling")));
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test]
     async fn bypassed_request_has_no_admission_lifecycle() {
         let events = Arc::new(AtomicUsize::new(0));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(BypassGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(BypassGate {
             events: Arc::clone(&events),
         }));
         let (mut request, response) = make_admission_request("bypassed", 64);
@@ -2819,7 +2832,7 @@ policy_classes:
     #[tokio::test]
     async fn cancellation_after_bypassed_handoff_rolls_back_booking() {
         let events = Arc::new(AtomicUsize::new(0));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(BypassGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(BypassGate {
             events: Arc::clone(&events),
         }));
         let (mut request, response) = make_admission_request("bypassed-handoff", 64);
@@ -2847,7 +2860,7 @@ policy_classes:
         deferred: Option<AdmissionId>,
     }
 
-    impl PolicyClassAdmissionStrategy for FinishReleaseGate {
+    impl PolicyClassAdmissionPolicy for FinishReleaseGate {
         fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
             if self.first.is_none() {
                 self.first = Some(request.id());
@@ -2880,8 +2893,7 @@ policy_classes:
 
     #[tokio::test]
     async fn lifecycle_action_drains_without_an_unrelated_update() {
-        let (queue, slots) =
-            make_queue_with_admission_strategy(Box::<FinishReleaseGate>::default());
+        let (queue, slots) = make_queue_with_admission_policy(Box::<FinishReleaseGate>::default());
         let (mut first, first_response) = make_admission_request("first-admitted", 64);
         first.policy_class = Some("agents".to_owned());
         let mut first_lease = enqueue_with_lease(&queue, first).await;
@@ -2910,7 +2922,7 @@ policy_classes:
         deferred: Option<AdmissionId>,
     }
 
-    impl PolicyClassAdmissionStrategy for PreservePinGate {
+    impl PolicyClassAdmissionPolicy for PreservePinGate {
         fn admit(&mut self, request: AdmissionRequest<'_>) -> AdmissionDecision {
             if self.deferred.is_none() {
                 self.deferred = Some(request.id());
@@ -2939,7 +2951,7 @@ policy_classes:
     #[tokio::test]
     async fn make_ready_any_preserves_existing_exact_worker_lane() {
         let (queue, slots) =
-            make_queue_with_admission_strategy_and_workers(Box::<PreservePinGate>::default(), 2);
+            make_queue_with_admission_policy_and_workers(Box::<PreservePinGate>::default(), 2);
         for worker_id in 0..2 {
             let (mut blocker, response) = make_request(&format!("blocker-{worker_id}"), 64);
             blocker.pinned_worker = Some(WorkerWithDpRank::new(worker_id, 0));
@@ -3008,7 +3020,7 @@ policy_classes:
 "#,
         );
         let worker = WorkerWithDpRank::new(0, 0);
-        let (queue, slots) = make_queue_with_profile_and_admission_strategy(
+        let (queue, slots) = make_queue_with_profile_and_admission_policy(
             profile,
             "agents_cached",
             Box::new(ExactReadyGate(worker)),
@@ -3042,7 +3054,7 @@ policy_classes:
     #[tokio::test]
     async fn make_ready_exact_recomputes_queue_cost_for_pinned_worker() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy_and_workers(
+        let (queue, slots) = make_queue_with_admission_policy_and_workers(
             Box::new(ReconcileGate {
                 state: Arc::clone(&state),
             }),
@@ -3104,7 +3116,7 @@ policy_classes:
         );
         let state = Arc::new(StdMutex::new(GateState::default()));
         let worker = WorkerWithDpRank::new(0, 0);
-        let (queue, slots) = make_queue_with_profile_and_admission_strategy(
+        let (queue, slots) = make_queue_with_profile_and_admission_policy(
             profile,
             "agents_cached",
             Box::new(ReconcileGate {
@@ -3147,7 +3159,7 @@ policy_classes:
     #[tokio::test]
     async fn cancelled_ready_requests_release_accounting_immediately() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(ReadyGate {
             state: Arc::clone(&state),
         }));
 
@@ -3198,7 +3210,7 @@ policy_classes:
     async fn cancelled_ready_head_redrives_newly_exposed_request() {
         let state = Arc::new(StdMutex::new(GateState::default()));
         let (queue, slots) =
-            make_queue_with_admission_strategy_and_workers(Box::new(ReadyGate { state }), 2);
+            make_queue_with_admission_policy_and_workers(Box::new(ReadyGate { state }), 2);
         let worker_0 = WorkerWithDpRank::new(0, 0);
         let (mut blocker, blocker_response) = make_request("redrive-blocker", 64);
         blocker.pinned_worker = Some(worker_0);
@@ -3236,7 +3248,7 @@ policy_classes:
     #[tokio::test]
     async fn cancelled_ready_cleanup_does_not_remove_reused_request_id() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReadyGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(ReadyGate {
             state: Arc::clone(&state),
         }));
 
@@ -3287,7 +3299,7 @@ policy_classes:
     #[tokio::test]
     async fn backend_abort_finishes_without_dispatching_admission() {
         let state = Arc::new(StdMutex::new(GateState::default()));
-        let (queue, slots) = make_queue_with_admission_strategy(Box::new(ReconcileGate {
+        let (queue, slots) = make_queue_with_admission_policy(Box::new(ReconcileGate {
             state: Arc::clone(&state),
         }));
         let (mut request, response) = make_admission_request("backend-abort", 64);
@@ -3339,7 +3351,9 @@ policy_classes:
         first_rx.await.unwrap().unwrap();
 
         let (cancelled, cancelled_rx) = make_request("legacy-cancelled", isl);
-        let lease = queue.new_admission_lease(Some("legacy-cancelled")).unwrap();
+        let lease = queue
+            .new_request_lifecycle_lease(Some("legacy-cancelled"))
+            .unwrap();
         let lease = queue
             .enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease))
             .await
@@ -4487,7 +4501,9 @@ policy_classes:
         refresher.wait_for_calls(1).await;
 
         let (cancelled, cancelled_rx) = make_request("cancelled", isl);
-        let lease = queue.new_admission_lease(Some("cancelled")).unwrap();
+        let lease = queue
+            .new_request_lifecycle_lease(Some("cancelled"))
+            .unwrap();
         let enqueue = {
             let queue = Arc::clone(&queue);
             tokio::spawn(async move {

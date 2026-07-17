@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::scheduling::{AdmissionLease, RequestProgressUpdater};
+use dynamo_kv_router::scheduling::{RequestLifecycleLease, RequestProgressUpdater};
 use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
@@ -21,14 +21,14 @@ use crate::{
 /// Owns scheduler cleanup after a worker is selected.
 ///
 /// `KvPushRouter` installs this through [`RequestGuard`] immediately after
-/// selection and before backend dispatch. The admission lease moves directly
+/// selection and before backend dispatch. The lifecycle lease moves directly
 /// from the scheduling response into this guard and remains responsible for
 /// cleanup until the request ends.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
-    admission: Option<(RequestProgressUpdater, AdmissionLease)>,
+    lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     freed: bool,
 }
 
@@ -37,21 +37,21 @@ impl RequestCleanup {
         chooser: Arc<KvRouter>,
         context_id: String,
         scheduler_tracked: bool,
-        admission: Option<(RequestProgressUpdater, AdmissionLease)>,
+        lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     ) -> Self {
-        debug_assert!(admission.is_none() || scheduler_tracked);
+        debug_assert!(lifecycle.is_none() || scheduler_tracked);
         Self {
             chooser,
             context_id,
             scheduler_tracked,
-            admission,
+            lifecycle,
             freed: false,
         }
     }
 
     async fn finish(&mut self) {
-        if let Some((_progress, lease)) = self.admission.take() {
-            // AdmissionLease reports the terminal outcome to the scheduler actor.
+        if let Some((_progress, lease)) = self.lifecycle.take() {
+            // RequestLifecycleLease reports the terminal outcome to the scheduler actor.
             // The scheduler actor remains the sole owner of booking and queue cleanup.
             drop(lease);
         } else if self.scheduler_tracked
@@ -69,7 +69,7 @@ impl RequestCleanup {
 
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
-        if self.freed || !self.scheduler_tracked || self.admission.is_some() {
+        if self.freed || !self.scheduler_tracked || self.lifecycle.is_some() {
             return;
         }
 
@@ -292,7 +292,7 @@ impl RequestGuard {
         context_id: String,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
-        admission: Option<(RequestProgressUpdater, AdmissionLease)>,
+        lifecycle: Option<(RequestProgressUpdater, RequestLifecycleLease)>,
     ) -> Self {
         // Snapshot request-scoped inputs now so the guard can outlive the
         // PreprocessedRequest after it is moved into backend dispatch.
@@ -304,13 +304,13 @@ impl RequestGuard {
             .and_then(|routing| routing.expected_output_tokens);
         let track_output_blocks =
             scheduler_tracked && chooser.kv_router_config().router_track_output_blocks;
-        let track_request_progress = admission.is_some();
+        let track_request_progress = lifecycle.is_some();
         if scheduler_tracked {
             request_metrics.requests_started_total().inc();
         }
 
         Self {
-            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked, admission),
+            cleanup: RequestCleanup::new(chooser, context_id, scheduler_tracked, lifecycle),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
@@ -336,7 +336,7 @@ impl RequestGuard {
     }
 
     pub(super) async fn mark_dispatched(&mut self) {
-        if let Some((_progress, lease)) = self.cleanup.admission.as_mut() {
+        if let Some((_progress, lease)) = self.cleanup.lifecycle.as_mut() {
             // Backend dispatch already succeeded. Record that fact synchronously so
             // lease cleanup still reports Dispatched before the terminal event if it
             // overtakes the actor command.
@@ -387,7 +387,7 @@ impl RequestGuard {
             return;
         };
 
-        if let Some((progress, _lease)) = &self.cleanup.admission {
+        if let Some((progress, _lease)) = &self.cleanup.lifecycle {
             progress.update_context_tokens(
                 self.output_blocks.isl_tokens.saturating_add(cumulative_osl),
             );
@@ -422,10 +422,10 @@ impl RequestGuard {
         let context_tokens = self
             .observability
             .context_tokens(self.output_blocks.isl_tokens);
-        if let Some((progress, _lease)) = &self.cleanup.admission {
+        if let Some((progress, _lease)) = &self.cleanup.lifecycle {
             progress.update_context_tokens(context_tokens);
         }
-        if let Some((_progress, lease)) = self.cleanup.admission.as_mut() {
+        if let Some((_progress, lease)) = self.cleanup.lifecycle.as_mut() {
             lease.mark_completed(context_tokens);
         }
     }

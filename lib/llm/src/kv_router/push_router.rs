@@ -254,7 +254,7 @@ impl KvPushRouter {
             context_id.clone(),
             request,
             !is_query_only,
-            selection.admission.take(),
+            selection.lifecycle.take(),
         );
 
         let record_result: Result<(), Error> = async {
@@ -668,9 +668,9 @@ mod tests {
         protocols::{ActiveLoad, ActiveSequenceEvent, RoutingConstraints},
         scheduling::{
             AdmissionAction, AdmissionDecision, AdmissionEvent, AdmissionId, AdmissionRequest,
-            LocalScheduler, NoopOverlapScoresRefresh, OverlapSignals,
-            PolicyClassAdmissionStrategies, PolicyClassAdmissionStrategy, PolicyProfile,
-            ScheduleMode, ScheduleRequest, WorkerPlacement,
+            LocalScheduler, NoopOverlapScoresRefresh, OverlapSignals, PolicyClassAdmissionPolicies,
+            PolicyClassAdmissionPolicy, PolicyProfile, ScheduleMode, ScheduleRequest,
+            WorkerPlacement,
         },
     };
     use dynamo_runtime::{
@@ -713,9 +713,9 @@ mod tests {
         fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
     }
 
-    struct RecordingAdmissionStrategy(Arc<Mutex<Vec<AdmissionEvent>>>);
+    struct RecordingAdmissionPolicy(Arc<Mutex<Vec<AdmissionEvent>>>);
 
-    impl PolicyClassAdmissionStrategy for RecordingAdmissionStrategy {
+    impl PolicyClassAdmissionPolicy for RecordingAdmissionPolicy {
         fn admit(&mut self, _request: AdmissionRequest<'_>) -> AdmissionDecision {
             AdmissionDecision::Ready(WorkerPlacement::Any)
         }
@@ -756,10 +756,10 @@ mod tests {
         ));
         let (_config_tx, config_rx) =
             watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
-        let mut strategies = PolicyClassAdmissionStrategies::new();
-        strategies.insert(
+        let mut policies = PolicyClassAdmissionPolicies::new();
+        policies.insert(
             "default".to_owned(),
-            Box::new(RecordingAdmissionStrategy(Arc::clone(&events))),
+            Box::new(RecordingAdmissionPolicy(Arc::clone(&events))),
         );
         let cancel = CancellationToken::new();
         let scheduler = LocalScheduler::new_with_policy_profile(
@@ -776,7 +776,7 @@ mod tests {
             cancel.clone(),
             "decode",
             false,
-            strategies,
+            policies,
         )
         .unwrap();
 
@@ -787,7 +787,7 @@ mod tests {
             let request_id = format!("terminal-drop-{index}");
             let mut response = scheduler
                 .schedule_request(ScheduleRequest {
-                    mode: ScheduleMode::TrackedWithAdmission {
+                    mode: ScheduleMode::TrackedWithLifecycle {
                         request_id: request_id.clone(),
                     },
                     token_seq: Some(vec![1]),
@@ -818,7 +818,7 @@ mod tests {
                 response
                     .request_progress
                     .take()
-                    .zip(response.admission_lease.take()),
+                    .zip(response.lifecycle_lease.take()),
             );
             guard.mark_dispatched().await;
 
