@@ -144,7 +144,11 @@ async def http_server(runtime: DistributedRuntime):
                 _, writer = await asyncio.open_connection("localhost", port)
                 writer.close()
                 return
-            except ConnectionError:
+            except OSError:
+                # localhost can resolve to both ::1 and 127.0.0.1; when every
+                # address is refused open_connection raises a bare OSError, not
+                # ConnectionError, so the catch cannot be narrowed. The outer
+                # wait_for bounds how long a genuinely-down server retries.
                 raise_if_server_exited()
                 await asyncio.sleep(0.1)
 
