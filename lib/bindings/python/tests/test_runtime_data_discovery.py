@@ -344,7 +344,7 @@ async def test_lora_registration_persists_base_and_lora_model_cards(temp_file_st
 
         assert lora_cards[0]["card_json"]["source_path"] == "base-model"
         assert lora_cards[0]["card_json"]["lora"] == {"name": "adapterA"}
-        # model_suffix includes slugified name + FNV-1a hash for collision prevention
-        assert lora_cards[0]["model_suffix"].startswith("adaptera-")
+        # model_suffix is the slugified LoRA name
+        assert lora_cards[0]["model_suffix"] == "adaptera"
     finally:
         rt.shutdown()
