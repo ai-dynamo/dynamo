@@ -93,6 +93,7 @@ pub struct VllmBackend {
     engine_ready_timeout_secs: u64,
     managed_engine: ManagedEngineArgs,
     extra: ExtraEngineArgs,
+    reasoning_parser: Option<String>,
     cancel: CancellationToken,
     inner: RwLock<Option<Inner>>,
 }
@@ -111,6 +112,7 @@ impl VllmBackend {
         engine_ready_timeout_secs: u64,
         managed_engine: ManagedEngineArgs,
         extra: ExtraEngineArgs,
+        reasoning_parser: Option<String>,
     ) -> Self {
         Self {
             model,
@@ -119,6 +121,7 @@ impl VllmBackend {
             engine_ready_timeout_secs,
             managed_engine,
             extra,
+            reasoning_parser,
             cancel: CancellationToken::new(),
             inner: RwLock::new(None),
         }
@@ -141,14 +144,6 @@ impl VllmBackend {
 
         let disaggregation_mode = args.common.disaggregation_mode;
 
-        let engine = Self::new(
-            args.model.clone(),
-            args.served_model_name.clone(),
-            disaggregation_mode,
-            args.engine_ready_timeout_secs,
-            args.managed_engine,
-            args.extra,
-        );
         let (tool_call_parser, reasoning_parser) = if disaggregation_mode.is_prefill() {
             (None, None)
         } else {
@@ -157,6 +152,15 @@ impl VllmBackend {
                 args.common.dyn_reasoning_parser,
             )
         };
+        let engine = Self::new(
+            args.model.clone(),
+            args.served_model_name.clone(),
+            disaggregation_mode,
+            args.engine_ready_timeout_secs,
+            args.managed_engine,
+            args.extra,
+            reasoning_parser.clone(),
+        );
         let config = WorkerConfig {
             namespace: args.common.namespace,
             component: args.common.component,
@@ -208,10 +212,12 @@ impl LLMEngine for VllmBackend {
             .map_err(|e| cannot_connect(format!("failed to resolve handshake port: {e:#}")))?;
 
         let managed_config = {
-            // vLLM 0.24 into_config takes 7 positional args; name them so a future
+            // vLLM 0.25 into_config takes 9 positional args; name them so a future
             // value/signature change can't silently land in the wrong slot.
             let max_model_len: Option<u32> = None; // let vLLM auto-fit from KV profiling
             let max_logprobs: Option<i32> = None;
+            let profiler_config: Option<String> = None;
+            let reasoning_parser: Option<&str> = self.reasoning_parser.as_deref();
             let language_model_only = false;
             let disable_log_stats = false; // keep stats on (mirrors with_log_stats(true) below)
             let shutdown_timeout: u64 = 0; // NOTE: 0 = abort in-flight requests on shutdown
@@ -219,6 +225,8 @@ impl LLMEngine for VllmBackend {
                 self.model.clone(),
                 max_model_len,
                 max_logprobs,
+                profiler_config,
+                reasoning_parser,
                 language_model_only,
                 disable_log_stats,
                 shutdown_timeout,
@@ -627,6 +635,7 @@ mod tests {
         assert_eq!(config.model_input, ModelInput::Tokens);
         assert_eq!(config.tool_call_parser.as_deref(), Some("hermes"));
         assert_eq!(config.reasoning_parser.as_deref(), Some("qwen3"));
+        assert_eq!(engine.reasoning_parser.as_deref(), Some("qwen3"));
         assert!(!config.exclude_tools_when_tool_choice_none);
         assert_eq!(engine.managed_engine.data_parallel_size, 2);
         assert_eq!(

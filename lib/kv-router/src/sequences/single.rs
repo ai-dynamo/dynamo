@@ -203,6 +203,7 @@ impl ActiveSequences {
         let (blocks, first_new_prompt_idx) = self.blocks.acquire_prompt(&prompt_hashes);
 
         if let Some(first_new_prompt_idx) = first_new_prompt_idx {
+            #[cfg(any(test, debug_assertions))]
             debug_assert!(
                 prompt_hashes[first_new_prompt_idx..]
                     .iter()

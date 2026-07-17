@@ -160,6 +160,42 @@ vllm_configs = {
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
     ),
+    # Speculative decoding: Llama-3.1-8B main model with an EAGLE3 draft model
+    # (see launch/agg_spec_decoding.sh). The base model is gated on HF, so this
+    # needs HF_TOKEN set and only runs where the token + VRAM are available.
+    # Nightly-only: the 8B base plus EAGLE3 draft model is intentionally outside pre-merge CI.
+    "aggregated_spec_decoding": VLLMConfig(
+        name="aggregated_spec_decoding",
+        directory=vllm_dir,
+        script_name="agg_spec_decoding.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
+            # and only the base cfg.model is auto-registered, so the draft repo
+            # can't be resolved offline without this.
+            pytest.mark.model("yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"),
+            # Profiled with a 1 GiB KV cap (peak ~18.6 GiB: 8B weights + EAGLE3
+            # draft + capped KV). The byte cap (build_vllm_gpu_mem_args) makes
+            # this GPU-size-independent, so it fits the 24 GiB parallel stage.
+            pytest.mark.profiled_vram_gib(20.0),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_073_741_824),
+            pytest.mark.timeout(900),
+            pytest.mark.nightly,
+        ],
+        model="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        # 8B weights leave little KV room on the 24 GiB gpu_1 lane; cap context (payloads are tiny).
+        script_args=["--max-model-len", "4096"],
+        request_payloads=[
+            chat_payload_default(),
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=["Paris"],
+                temperature=0.0,
+                max_tokens=16,
+            ),
+        ],
+    ),
     "aggregated_unified": VLLMConfig(
         name="aggregated_unified",
         directory=vllm_dir,
@@ -364,8 +400,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2263"),
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             router_selection_chat_payload_default(),
@@ -381,8 +417,8 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.router,
             pytest.mark.pre_merge,
-            pytest.mark.skip(reason="DYN-2264"),
-        ],  # TODO: profile to get max_vram and timeout
+            pytest.mark.timeout(600),
+        ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)

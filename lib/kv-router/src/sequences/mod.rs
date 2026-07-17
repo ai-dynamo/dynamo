@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod block_tracker;
+mod compressed_path_arena;
 pub mod multi_worker;
 mod prefill_tracker;
 mod prompt_membership_trie;
