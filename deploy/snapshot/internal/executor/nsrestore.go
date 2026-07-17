@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -99,8 +100,8 @@ type nsrestorePhaseTimings struct {
 	cudaDuration           time.Duration
 }
 
-func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (*nsrestorePhaseTimings, int, error) {
-	timings := &nsrestorePhaseTimings{}
+func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts RestoreOptions, log logr.Logger) (timings *nsrestorePhaseTimings, resultPID int, retErr error) {
+	timings = &nsrestorePhaseTimings{}
 
 	nsrestoreSetupStart := time.Now()
 	deletedFile, err := snapshotruntime.OpenDeletedFiles(opts.CheckpointPath)
@@ -120,6 +121,9 @@ func executeRestore(ctx context.Context, m *types.CheckpointManifest, opts Resto
 	if err != nil {
 		return nil, 0, fmt.Errorf("compose rootfs: %w", err)
 	}
+	defer func() {
+		retErr = errors.Join(retErr, composition.Close())
+	}()
 	log.V(1).Info(
 		"Root composition timing",
 		"root_path", composition.RootPath,

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -141,7 +142,7 @@ func TestPrivilegedWorkspaceHandleCloneAcrossMountNamespaces(t *testing.T) {
 	}
 }
 
-func TestPrivilegedPlaceholderFirstRootComposition(t *testing.T) {
+func TestPrivilegedSnapshotOverPlaceholderRootComposition(t *testing.T) {
 	if os.Getenv("DYNAMO_SNAPSHOT_PRIVILEGED_TEST") != "1" {
 		t.Skip("set DYNAMO_SNAPSHOT_PRIVILEGED_TEST=1 and run as root")
 	}
@@ -150,17 +151,30 @@ func TestPrivilegedPlaceholderFirstRootComposition(t *testing.T) {
 		if os.Geteuid() != 0 {
 			t.Skip("privileged root composition test requires root")
 		}
+		requireTool(t, "mksquashfs")
 		root = filepath.Join(t.TempDir(), "root")
 		if err := os.Mkdir(root, 0o755); err != nil {
 			t.Fatal(err)
 		}
+		probeXattr := "user.dynamo-snapshot-xattr-probe"
+		if err := unix.Setxattr(root, probeXattr, []byte("probe"), 0); err != nil {
+			if errors.Is(err, unix.ENOTSUP) {
+				t.Skipf("test filesystem does not support user xattrs: %v", err)
+			}
+			t.Fatal(err)
+		}
+		if err := unix.Removexattr(root, probeXattr); err != nil {
+			t.Fatal(err)
+		}
+		stagingDir := t.TempDir()
 		command := exec.Command(
 			os.Args[0],
-			"-test.run=^TestPrivilegedPlaceholderFirstRootComposition$",
+			"-test.run=^TestPrivilegedSnapshotOverPlaceholderRootComposition$",
 		)
 		command.Env = append(
 			os.Environ(),
 			"DYNAMO_SNAPSHOT_PRIVILEGED_HELPER_ROOT="+root,
+			"DYNAMO_SNAPSHOT_PRIVILEGED_STAGING_DIR="+stagingDir,
 		)
 		command.SysProcAttr = &unix.SysProcAttr{Cloneflags: unix.CLONE_NEWNS}
 		output, err := command.CombinedOutput()
@@ -169,16 +183,27 @@ func TestPrivilegedPlaceholderFirstRootComposition(t *testing.T) {
 		}
 		return
 	}
-	runPrivilegedRootComposition(t, root)
+	stagingDir := os.Getenv("DYNAMO_SNAPSHOT_PRIVILEGED_STAGING_DIR")
+	if stagingDir == "" {
+		t.Fatal("privileged staging directory is required")
+	}
+	runPrivilegedRootComposition(t, root, stagingDir)
 }
 
-func runPrivilegedRootComposition(t *testing.T, root string) {
+func runPrivilegedRootComposition(t *testing.T, root, stagingDir string) {
 	t.Helper()
 	const (
 		placeholderUID  = 1234
 		placeholderGID  = 2345
 		placeholderMode = 0o7751
-		backingGID      = 3456
+		snapshotUID     = 3456
+		snapshotGID     = 4567
+		snapshotMode    = 0o3750
+		opaqueUID       = 5678
+		opaqueGID       = 6789
+		opaqueMode      = 0o1750
+		fileXattr       = "user.dynamo-snapshot-test"
+		fileXattrValue  = "checkpoint"
 	)
 	requireTool(t, "mksquashfs")
 	if err := unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""); err != nil {
@@ -212,15 +237,42 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 		}
 	}
 	write(placeholderLower, "collision", "placeholder")
+	write(placeholderLower, "placeholder-only", "placeholder")
 	write(placeholderLower, "delete-me", "placeholder")
+	write(placeholderLower, "recreated/old-child", "placeholder")
 	write(placeholderLower, "opaque/placeholder-only", "placeholder")
 	write(placeholderLower, "opaque/shared/placeholder-nested", "placeholder")
 	write(placeholderLower, "file-mount", "")
 	write(placeholderLower, "mount-source", "file-mount")
 	write(snapshotSource, "collision", "snapshot")
 	write(snapshotSource, "snapshot-only", "snapshot")
+	write(snapshotSource, "recreated", "snapshot-file")
 	write(snapshotSource, "opaque/snapshot-only", "snapshot")
 	write(snapshotSource, "opaque/shared/snapshot-nested", "snapshot")
+	if err := unix.Setxattr(
+		filepath.Join(snapshotSource, "snapshot-only"),
+		fileXattr,
+		[]byte(fileXattrValue),
+		0,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Chown(
+		filepath.Join(snapshotSource, "opaque"),
+		opaqueUID,
+		opaqueGID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Chmod(filepath.Join(snapshotSource, "opaque"), opaqueMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Chown(snapshotSource, snapshotUID, snapshotGID); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Chmod(snapshotSource, snapshotMode); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(
 		filepath.Join(checkpoint, deletedFilesFilename),
 		[]byte(`{"whiteouts":["delete-me","mounted/user-data"],"opaqueDirectories":["opaque"]}`),
@@ -229,19 +281,13 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 	imagePath := filepath.Join(checkpoint, RootfsDiffFilename)
-	command := exec.CommandContext(
+	if err := runMksquashfs(
 		context.Background(),
-		"mksquashfs",
 		snapshotSource,
 		imagePath,
-		"-comp", "zstd",
-		"-b", "1M",
-		"-processors", "2",
-		"-noappend",
-		"-no-progress",
-	)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("mksquashfs: %v\n%s", err, output)
+		nil,
+	); err != nil {
+		t.Fatal(err)
 	}
 
 	// Match the agent pod: only loop-control is host-mounted. Loop nodes live
@@ -264,15 +310,58 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 		t.Fatal(err)
 	}
 	defer image.Close()
-	rootfsMount, err := PrepareDetachedRootfsMount(image)
+	deleted, err := os.Open(filepath.Join(checkpoint, deletedFilesFilename))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rootfsMount.Close()
+	defer deleted.Close()
+	type mountResult struct {
+		mount *os.File
+		err   error
+	}
+	results := make(chan mountResult, 9)
+	for range 9 {
+		go func() {
+			mount, err := prepareDetachedRootfsMount(image, stagingDir)
+			results <- mountResult{mount, err}
+		}()
+	}
+	var preparationErr error
+	var preparedMounts []*os.File
+	for range 9 {
+		result := <-results
+		if result.err != nil {
+			preparationErr = errors.Join(preparationErr, result.err)
+			continue
+		}
+		preparedMounts = append(preparedMounts, result.mount)
+	}
+	for _, mount := range preparedMounts {
+		if err := mount.Close(); err != nil {
+			preparationErr = errors.Join(preparationErr, err)
+		}
+	}
+	if preparationErr != nil {
+		t.Fatal(preparationErr)
+	}
+	mountinfo, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(mountinfo), " "+stagingDir+"/") {
+		t.Fatal("concurrent preparation leaked a staging mount")
+	}
+	assertDirectoryEmpty(t, stagingDir)
+	firstRootfsMount, err := prepareDetachedRootfsMount(image, stagingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRootfsMount, err := prepareDetachedRootfsMount(image, stagingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, path := range []string{
-		"checkpoint",
-		"proc",
 		"mounted",
 		strings.TrimPrefix(RootfsBackingWorkspaceMountPath, "/"),
 	} {
@@ -286,24 +375,6 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 		"workdir=" + placeholderWork,
 	}, ",")
 	if err := unix.Mount("overlay", root, "overlay", 0, options); err != nil {
-		t.Fatal(err)
-	}
-	if err := unix.Mount(
-		checkpoint,
-		filepath.Join(root, "checkpoint"),
-		"",
-		unix.MS_BIND,
-		"",
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := unix.Mount(
-		"/proc",
-		filepath.Join(root, "proc"),
-		"",
-		unix.MS_BIND|unix.MS_REC,
-		"",
-	); err != nil {
 		t.Fatal(err)
 	}
 	mounted := filepath.Join(root, "mounted")
@@ -324,29 +395,11 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 	if err := unix.Mount("tmpfs", backing, "tmpfs", 0, "mode=700"); err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.Chown(backing, 0, backingGID); err != nil {
+	procMountinfo, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.Chmod(backing, 0o2700); err != nil {
-		t.Fatal(err)
-	}
-	inheritanceProbe := filepath.Join(backing, "inheritance-probe")
-	if err := os.Mkdir(inheritanceProbe, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var inherited unix.Stat_t
-	if err := unix.Stat(inheritanceProbe, &inherited); err != nil {
-		t.Fatal(err)
-	}
-	if got := inherited.Mode & 0o7777; got != 0o2700 {
-		t.Fatalf("setgid-inherited directory mode = %#o, want 02700", got)
-	}
-	if inherited.Gid != backingGID {
-		t.Fatalf("setgid-inherited directory gid = %d, want %d", inherited.Gid, backingGID)
-	}
-	if err := os.Remove(inheritanceProbe); err != nil {
-		t.Fatal(err)
-	}
+	defer procMountinfo.Close()
 	if err := unix.Chown(root, placeholderUID, placeholderGID); err != nil {
 		t.Fatal(err)
 	}
@@ -380,26 +433,75 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 			placeholderMode,
 		)
 	}
-	workspaceFD, err := unix.Open(
-		RootfsBackingWorkspaceMountPath,
-		unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
-		0,
-	)
-	if err != nil {
+	mountCount := func() int {
+		t.Helper()
+		if _, err := procMountinfo.Seek(0, 0); err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(procMountinfo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 5 &&
+				(fields[4] == RootfsBackingWorkspaceMountPath ||
+					strings.HasPrefix(fields[4], RootfsBackingWorkspaceMountPath+"/")) {
+				count++
+			}
+		}
+		return count
+	}
+	baselineMounts := mountCount()
+	compose := func(rootfsMount *os.File) *RootComposition {
+		t.Helper()
+		rootfsMountFD, err := unix.Dup(int(rootfsMount.Fd()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		workspaceFD, err := unix.Open(
+			RootfsBackingWorkspaceMountPath,
+			unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW,
+			0,
+		)
+		if err != nil {
+			unix.Close(rootfsMountFD)
+			t.Fatal(err)
+		}
+		composition, composeErr := ComposeRoot(
+			rootfsMountFD,
+			workspaceFD,
+			int(deleted.Fd()),
+		)
+		closeErr := rootfsMount.Close()
+		if composeErr != nil {
+			t.Fatal(composeErr)
+		}
+		if closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		return composition
+	}
+	firstComposition := compose(firstRootfsMount)
+	staleName := fmt.Sprintf("stale-after-failed-restore-%d", os.Getpid())
+	if err := os.WriteFile(
+		filepath.Join(firstComposition.RootPath, staleName),
+		[]byte("stale"),
+		0o600,
+	); err != nil {
 		t.Fatal(err)
 	}
-	deleted, err := os.Open("/checkpoint/" + deletedFilesFilename)
-	if err != nil {
+	if err := firstComposition.Close(); err != nil {
 		t.Fatal(err)
 	}
-	defer deleted.Close()
-	composition, err := ComposeRoot(
-		int(rootfsMount.Fd()),
-		workspaceFD,
-		int(deleted.Fd()),
-	)
-	if err != nil {
-		t.Fatal(err)
+	if got := mountCount(); got != baselineMounts {
+		t.Fatalf("mounts after failed restore cleanup = %d, want %d", got, baselineMounts)
+	}
+
+	composition := compose(secondRootfsMount)
+	if _, err := os.Stat(filepath.Join(composition.RootPath, staleName)); !os.IsNotExist(err) {
+		t.Fatalf("stale file survived retry composition: %v", err)
 	}
 	if composition.RootPath != restoreRoot {
 		t.Fatalf("composed root = %q, want %q", composition.RootPath, restoreRoot)
@@ -420,39 +522,22 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 	if _, err := os.Stat(RootfsBackingWorkspaceMountPath); err != nil {
 		t.Fatalf("caller backing workspace is unavailable: %v", err)
 	}
-	for _, path := range []string{restoreUpper, composition.RootPath} {
-		var got unix.Stat_t
-		if err := unix.Stat(path, &got); err != nil {
-			t.Fatal(err)
-		}
-		if got.Uid != placeholderMetadata.Uid ||
-			got.Gid != placeholderMetadata.Gid ||
-			got.Mode&0o7777 != placeholderMetadata.Mode&0o7777 {
-			t.Fatalf(
-				"%s metadata = uid %d gid %d mode %#o, want uid %d gid %d mode %#o",
-				path,
-				got.Uid,
-				got.Gid,
-				got.Mode&0o7777,
-				placeholderMetadata.Uid,
-				placeholderMetadata.Gid,
-				placeholderMetadata.Mode&0o7777,
-			)
-		}
-	}
-	var replayedOpaque unix.Stat_t
-	if err := unix.Stat(filepath.Join(restoreUpper, "opaque"), &replayedOpaque); err != nil {
+	var composedRoot unix.Stat_t
+	if err := unix.Stat(composition.RootPath, &composedRoot); err != nil {
 		t.Fatal(err)
 	}
-	if replayedOpaque.Gid != placeholderMetadata.Gid {
+	if composedRoot.Uid != snapshotUID ||
+		composedRoot.Gid != snapshotGID ||
+		composedRoot.Mode&0o7777 != snapshotMode {
 		t.Fatalf(
-			"replayed opaque directory gid = %d, want placeholder gid %d",
-			replayedOpaque.Gid,
-			placeholderMetadata.Gid,
+			"composed root metadata = uid %d gid %d mode %#o, want uid %d gid %d mode %#o",
+			composedRoot.Uid,
+			composedRoot.Gid,
+			composedRoot.Mode&0o7777,
+			snapshotUID,
+			snapshotGID,
+			snapshotMode,
 		)
-	}
-	if replayedOpaque.Mode&unix.S_ISGID == 0 {
-		t.Fatalf("replayed opaque directory mode = %#o, want setgid", replayedOpaque.Mode&0o7777)
 	}
 
 	assertContent := func(path, want string) {
@@ -468,19 +553,52 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 	staged := func(path string) string {
 		return filepath.Join(composition.RootPath, strings.TrimPrefix(path, "/"))
 	}
+	var replayedOpaque unix.Stat_t
+	if err := unix.Stat(staged("/opaque"), &replayedOpaque); err != nil {
+		t.Fatal(err)
+	}
+	if replayedOpaque.Uid != opaqueUID ||
+		replayedOpaque.Gid != opaqueGID ||
+		replayedOpaque.Mode&0o7777 != opaqueMode {
+		t.Fatalf(
+			"replayed opaque metadata = uid %d gid %d mode %#o, want uid %d gid %d mode %#o",
+			replayedOpaque.Uid,
+			replayedOpaque.Gid,
+			replayedOpaque.Mode&0o7777,
+			opaqueUID,
+			opaqueGID,
+			opaqueMode,
+		)
+	}
+	value := make([]byte, len(fileXattrValue))
+	size, err := unix.Getxattr(staged("/snapshot-only"), fileXattr, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(value[:size]) != fileXattrValue {
+		t.Fatalf("snapshot file xattr = %q, want %q", value[:size], fileXattrValue)
+	}
 	assertContent("/mounted/child-only", "mounted")
 	assertContent("/file-mount", "file-mount")
-	assertContent(staged("/collision"), "placeholder")
+	assertContent(staged("/collision"), "snapshot")
+	assertContent(staged("/placeholder-only"), "placeholder")
 	assertContent(staged("/snapshot-only"), "snapshot")
+	assertContent(staged("/recreated"), "snapshot-file")
+	var recreated unix.Stat_t
+	if err := unix.Lstat(staged("/recreated"), &recreated); err != nil {
+		t.Fatal(err)
+	}
+	if recreated.Mode&unix.S_IFMT != unix.S_IFREG {
+		t.Fatalf("recreated path mode = %#o, want regular file", recreated.Mode)
+	}
 	assertContent(staged("/opaque/snapshot-only"), "snapshot")
 	assertContent(staged("/opaque/shared/snapshot-nested"), "snapshot")
 	assertContent(staged("/file-mount"), "")
 	for _, path := range []string{
-		"/checkpoint/" + deletedFilesFilename,
 		"/delete-me",
 		"/mounted/child-only",
 		"/opaque/placeholder-only",
-		"/proc/self",
+		"/opaque/shared/placeholder-nested",
 	} {
 		if _, err := os.Lstat(staged(path)); !os.IsNotExist(err) {
 			t.Fatalf("%s should be hidden, got %v", path, err)
@@ -495,9 +613,15 @@ func runPrivilegedRootComposition(t *testing.T, root string) {
 			t.Fatalf("rootfs backing path %s should be inaccessible, got %v", path, err)
 		}
 	}
-	for _, path := range []string{"/checkpoint", "/proc", "/mounted", "/file-mount"} {
+	for _, path := range []string{"/mounted", "/file-mount"} {
 		if _, err := os.Stat(staged(path)); err != nil {
 			t.Fatalf("placeholder mountpoint %s is unavailable: %v", path, err)
 		}
+	}
+	if err := composition.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := mountCount(); got != baselineMounts {
+		t.Fatalf("mounts after composition close = %d, want %d", got, baselineMounts)
 	}
 }
