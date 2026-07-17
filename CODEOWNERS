@@ -80,6 +80,7 @@
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /examples/backends/vllm/                                                     @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/vllm-rs-backend/src/                                                    @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/backend/vllm-sidecar/                                                   @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/                                                 @ai-dynamo/dynamo-backend-vllm-codeowners
 /lib/vllm-rs-backend/Cargo.toml                                              @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/vllm/tests/                                           @ai-dynamo/dynamo-backend-vllm-codeowners
@@ -96,11 +97,10 @@
 /components/src/dynamo/trtllm/logits_processing/                             @ai-dynamo/dynamo-backend-trtllm-codeowners
 
 # === backend-sglang  (@ai-dynamo/dynamo-backend-sglang-codeowners) ===
-/lib/sglang-sidecar/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners
 /examples/backends/sglang/                                                   @ai-dynamo/dynamo-backend-sglang-codeowners
+/lib/backend/sglang-sidecar/                                                 @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/                                               @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/tests/                                         @ai-dynamo/dynamo-backend-sglang-codeowners
-/components/src/dynamo/sglang_sidecar/                                       @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/request_handlers/                              @ai-dynamo/dynamo-backend-sglang-codeowners
 
 # === kv-memory  (@ai-dynamo/dynamo-kv-memory-codeowners) ===
@@ -177,6 +177,7 @@
 # === runtime  (@ai-dynamo/dynamo-runtime-codeowners) ===
 /tests/                                                                      @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/                                                                    @ai-dynamo/dynamo-runtime-codeowners
+/lib/truthy/                                                                 @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/bin/                                                                @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/                                                                @ai-dynamo/dynamo-runtime-codeowners
 /tests/basic/                                                                @ai-dynamo/dynamo-runtime-codeowners

@@ -247,6 +247,8 @@ class RequestHandlerConfig:
     additional_metrics: Optional["AdditionalMetricsCollector"] = None
     max_seq_len: Optional[int] = None
     disagg_machine_id: int = 0  # 10-bit machine_id for snowflake disagg_request_id
+    # Force engine-owned conversation-affinity ADP routing regardless of engine detection.
+    conversation_affinity: bool = False
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -271,6 +273,9 @@ class HandlerBase(BaseGenerativeHandler):
         # request (engine may not be initialized at handler construction). See
         # conversation_affinity.py. None = not yet resolved.
         self._conversation_affinity: Optional[bool] = None
+        # Manual override (--conversation-affinity / DYN_ENGINE_CONV_AFFINITY) to force
+        # engine-side assignment of conversation-affinity regardless of engine detection.
+        self._engine_conversation_affinity_override: bool = config.conversation_affinity
         self.encode_client = config.encode_client
         self.multimodal_processor = config.multimodal_processor
         self.first_generation = True
@@ -1110,8 +1115,18 @@ class HandlerBase(BaseGenerativeHandler):
         # initialized by first request). When on, the engine's ConversationAwareADPRouter
         # picks the attention-DP rank from the conversation id, so we must NOT force a rank.
         if self._conversation_affinity is None:
-            self._conversation_affinity = engine_conversation_affinity_enabled(
-                self.engine.llm
+            if (
+                self._engine_conversation_affinity_override
+                and not CONVERSATION_PARAMS_AVAILABLE
+            ):
+                raise RuntimeError(
+                    "--conversation-affinity / DYN_ENGINE_CONV_AFFINITY is set but "
+                    "the installed TensorRT-LLM build has no ConversationParams API (requires a "
+                    "release newer than 1.3.0rc20)."
+                )
+            self._conversation_affinity = (
+                self._engine_conversation_affinity_override
+                or engine_conversation_affinity_enabled(self.engine.llm)
             )
             if self._conversation_affinity and not CONVERSATION_PARAMS_AVAILABLE:
                 raise RuntimeError(

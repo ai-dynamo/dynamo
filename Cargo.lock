@@ -1939,9 +1939,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.19.3"
+version = "0.19.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6468cb7fa330840f3ebcd8df51edc0e7bf5c18df524792ce6004c6821851cdf3"
+checksum = "42310153e06cf4cd532901f7096beb27504d681736a29ee90728ae4e2d93b2a8"
 dependencies = [
  "half",
  "libloading 0.9.0",
@@ -2384,6 +2384,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
@@ -2500,12 +2501,13 @@ dependencies = [
  "dynamo-kv-hashing",
  "dynamo-runtime",
  "dynamo-tokens",
+ "dynamo-truthy",
+ "fastrand",
  "flume 0.12.0",
  "indexmap 2.14.0",
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
- "rand 0.9.4",
  "reqwest 0.12.28",
  "rmp-serde",
  "rstest 0.18.2",
@@ -2524,7 +2526,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "uuid",
- "validator",
  "xxhash-rust",
  "zmq",
 ]
@@ -2644,6 +2645,7 @@ version = "1.3.0"
 dependencies = [
  "anyhow",
  "cudarc",
+ "dynamo-truthy",
  "libc",
  "libloading 0.8.9",
  "nix 0.30.1",
@@ -2669,6 +2671,7 @@ dependencies = [
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
+ "dynamo-truthy",
  "futures",
  "indicatif 0.18.4",
  "kvbm-common",
@@ -2827,6 +2830,7 @@ dependencies = [
  "dashmap",
  "derive-getters",
  "derive_builder",
+ "dynamo-truthy",
  "educe",
  "either",
  "etcd-client",
@@ -2941,6 +2945,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-truthy"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "dynamo-vllm-rs-backend"
 version = "1.3.0"
 dependencies = [
@@ -2960,6 +2971,27 @@ dependencies = [
  "vllm-llm",
  "vllm-managed-engine",
  "vllm-metrics",
+]
+
+[[package]]
+name = "dynamo-vllm-sidecar"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "clap",
+ "dynamo-backend-common",
+ "futures",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic 0.13.1",
+ "tonic-build 0.13.1",
+ "tracing",
 ]
 
 [[package]]

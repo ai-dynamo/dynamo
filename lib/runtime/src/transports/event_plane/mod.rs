@@ -120,11 +120,10 @@ async fn resolve_zmq_broker(
         }));
     }
 
-    // Priority 2: Discovery-based lookup if DYN_ZMQ_BROKER_ENABLED=true
-    if std::env::var(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_ENABLED)
-        .unwrap_or_default()
-        == "true"
-    {
+    // Priority 2: Discovery-based lookup if DYN_ZMQ_BROKER_ENABLED is truthy
+    if crate::config::env_is_truthy(
+        crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+    ) {
         let query = DiscoveryQuery::EventChannels(EventChannelQuery::component(
             scope.namespace().to_string(),
             "zmq_broker".to_string(),
@@ -150,7 +149,7 @@ async fn resolve_zmq_broker(
 
         if xsub_endpoints.is_empty() {
             anyhow::bail!(
-                "DYN_ZMQ_BROKER_ENABLED=true but no broker found in discovery for namespace '{}'",
+                "DYN_ZMQ_BROKER_ENABLED is set but no broker found in discovery for namespace '{}'",
                 scope.namespace()
             );
         }
@@ -716,8 +715,12 @@ impl EventSubscriber {
                         ),
                     };
 
-                    let subscriber =
-                        Arc::new(DynamicSubscriber::new(discovery, query, topic.clone()));
+                    let subscriber = Arc::new(DynamicSubscriber::with_cancel_token(
+                        discovery,
+                        query,
+                        topic.clone(),
+                        drt.primary_token().child_token(),
+                    ));
 
                     let stream = subscriber.start_zmq().await?;
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
@@ -1094,6 +1097,47 @@ mod tests {
                     instances.is_empty(),
                     "unregister must complete within the graceful-shutdown window"
                 );
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn runtime_cancellation_stops_retained_direct_zmq_subscriber() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("event-subscriber-shutdown-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+
+                let mut subscriber = EventSubscriber::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create subscriber");
+
+                drt.primary_token().cancel();
+
+                let next =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), subscriber.next())
+                        .await
+                        .expect("runtime cancellation should stop the subscriber stream");
+                assert!(next.is_none());
             },
         )
         .await;

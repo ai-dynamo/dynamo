@@ -30,8 +30,7 @@ class DynamoRuntimeConfig(ConfigBase):
     event_plane: Optional[str] = None
     fpm_trace: bool = False
     connector: list[str]
-    enable_local_indexer: bool
-    durable_kv_events: bool
+    enable_local_indexer: bool = True
 
     dyn_tool_call_parser: Optional[str] = None
     dyn_reasoning_parser: Optional[str] = None
@@ -87,8 +86,6 @@ class DynamoRuntimeConfig(ConfigBase):
                     )
             os.environ["DYN_FPM_TRACE"] = "1" if self.fpm_trace else "0"
 
-        # TODO  get a better way for spot fixes like this.
-        self.enable_local_indexer = not self.durable_kv_events
         self._validate_output_modalities()
 
         if self.engine_request_limit is not None and self.engine_request_limit <= 0:
@@ -185,14 +182,6 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=[],
             help="[Deprecated for vLLM] Use --kv-transfer-config instead. For TRT-LLM, options: nixl, lmcache, kvbm, null, none.",
             nargs="*",
-        )
-
-        add_negatable_bool_argument(
-            g,
-            flag_name="--durable-kv-events",
-            env_var="DYN_DURABLE_KV_EVENTS",
-            default=False,
-            help="[Deprecated] Enable durable KV events using NATS JetStream instead of the local indexer. This option will be removed in a future release. The event-plane subscriber (local_indexer mode) is now the recommended path.",
         )
 
         # Optional: tool/reasoning parsers (choices from dynamo._core when available)

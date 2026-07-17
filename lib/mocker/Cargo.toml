@@ -24,6 +24,7 @@ kvbm-offload = ["dep:kvbm-engine", "dep:kvbm-physical", "dep:kvbm-common", "dep:
 dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
+dynamo-truthy = { workspace = true }
 kvbm-logical = { workspace = true }
 
 # kvbm-offload feature dependencies (G1↔G2 transport simulation)
@@ -64,5 +65,7 @@ rustc-hash = "2"
 tokio-timerfd = "0.2"
 
 [dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
 rstest = "0.18.2"
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
