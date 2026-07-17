@@ -13,7 +13,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
     - name: VllmDecodeWorker
       type: decode
       replicas: 1
@@ -23,7 +23,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
               workingDir: /workspace/examples/backends/vllm
               envFrom:
                 - secretRef:
