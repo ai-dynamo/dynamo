@@ -29,6 +29,10 @@ pub fn cannot_connect(message: impl Into<String>) -> DynamoError {
     backend(BackendError::CannotConnect, message)
 }
 
+pub fn connection_timeout(message: impl Into<String>) -> DynamoError {
+    backend(BackendError::ConnectionTimeout, message)
+}
+
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
     let kind = match status.code() {
         tonic::Code::InvalidArgument

@@ -197,6 +197,7 @@ sglang:
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang*/**'
   - 'lib/sidecar/sglang/**'
+  - 'lib/sidecar/trtllm/**'
   - 'container/templates/sglang_*'
   - 'container/deps/sglang/**'
   - '!**/*.md'

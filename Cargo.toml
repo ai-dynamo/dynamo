@@ -26,6 +26,7 @@ members = [
     "lib/sidecar/common",
     "lib/sidecar/vllm",
     "lib/sidecar/sglang",
+    "lib/sidecar/trtllm",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
