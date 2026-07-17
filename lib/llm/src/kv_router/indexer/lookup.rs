@@ -223,6 +223,11 @@ impl<'a> LookupPipeline<'a> {
                 })
             }
             PrimaryLookup::Remote(primary) => {
+                if lower_tier_options.retain_router_hint_chain {
+                    tracing::warn!(
+                        "router_hint chain retention is not supported with remote primary indexer; proceeding without router hints"
+                    );
+                }
                 let Some(side) = self.side else {
                     return primary
                         .find_matches_by_tier(sequence.into_owned_at_boundary(), false)
