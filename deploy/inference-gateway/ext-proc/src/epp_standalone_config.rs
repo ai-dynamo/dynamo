@@ -11,10 +11,8 @@
 //! [`EppStandaloneConfig::validate_config`] for field and cross-field checks.
 
 use validator::Validate;
-use validator::ValidationError;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
-const DEFAULT_DATA_PARALLEL_SIZE: u32 = 1;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
 
 /// Environment variable that selects the EPP operating mode.
@@ -55,27 +53,20 @@ impl EppMode {
 }
 
 #[derive(Debug, Clone, Validate)]
-#[validate(schema(
-    function = "validate_epp_standalone_config",
-    skip_on_field_errors = true
-))]
 pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    /// EPP Service for peer discovery and state synchronization.
-    /// `None` means single-replica with cross-replica sync disabled.
+    /// EPP Service for peer discovery and state synchronization. The eventual
+    /// selector resolves its named `replica-agg` port from EndpointSlices.
     pub peer_service: Option<String>,
-    /// Peer replication sync port. Required when `peer_service` is set.
-    #[validate(range(min = 1))]
-    pub peer_sync_port: Option<u16>,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
     pub inference_pool_name: String,
     /// Kubernetes namespace the EPP runs in (from `POD_NAMESPACE`, downward API).
     #[validate(length(min = 1, message = "POD_NAMESPACE is required"))]
     pub namespace: String,
-    /// Model id used to build the offline tokenizer and register with the selector.
+    /// Served/catalog model identity used to group discovered workers.
     #[validate(length(min = 1, message = "DYN_MODEL_NAME is required"))]
     pub model_name: String,
     /// KV-cache block size; MUST equal the inference engine block size.
@@ -84,14 +75,20 @@ pub struct EppStandaloneConfig {
     /// KV zmq event port.
     #[validate(range(min = 1))]
     pub kv_event_port: u16,
-    /// Optional zmq port the selector uses for live-stream gap replay.
+    /// Optional ZMQ port the selector uses for live-stream gap replay. This
+    /// must match the worker's explicitly configured replay endpoint.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_KV_EVENT_REPLAY_PORT must be greater than zero when set"
+    ))]
     pub replay_port: Option<u16>,
-    /// Engine data-parallel size. Currently only support DP=1.
-    #[validate(range(min = 1, max = 1))]
-    pub data_parallel_size: u32,
     /// Optional per-worker total KV blocks.
     pub total_kv_blocks: Option<u64>,
-    /// Optional per-worker max batched tokens (required when queuing or policy config is used).
+    /// Optional per-worker max batched tokens.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_MAX_NUM_BATCHED_TOKENS must be greater than zero when set"
+    ))]
     pub max_num_batched_tokens: Option<u64>,
 }
 
@@ -108,16 +105,13 @@ impl EppStandaloneConfig {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
             peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
-            peer_sync_port: opt_parse::<u16>(get, "DYN_EPP_PEER_SYNC_PORT")?,
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
-            replay_port: opt_parse::<u16>(get, "DYN_EPP_REPLAY_PORT")?,
-            data_parallel_size: opt_parse::<u32>(get, "DYN_DATA_PARALLEL_SIZE")?
-                .unwrap_or(DEFAULT_DATA_PARALLEL_SIZE),
+            replay_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_REPLAY_PORT")?,
             total_kv_blocks: opt_parse::<u64>(get, "DYN_EPP_TOTAL_KV_BLOCKS")?,
             max_num_batched_tokens: opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?,
         })
@@ -128,17 +122,6 @@ impl EppStandaloneConfig {
         self.validate()
             .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
     }
-}
-
-fn validate_epp_standalone_config(config: &EppStandaloneConfig) -> Result<(), ValidationError> {
-    if config.peer_service.is_some() && config.peer_sync_port.is_none() {
-        let mut error = ValidationError::new("peer_sync_port_required");
-        error.message =
-            Some("DYN_EPP_PEER_SYNC_PORT is required when DYN_EPP_PEER_SERVICE is set".into());
-        return Err(error);
-    }
-
-    Ok(())
 }
 
 /// Trim a raw value and treat empty as absent.
@@ -228,13 +211,11 @@ mod tests {
         assert_eq!(cfg.selector_threads, DEFAULT_SELECTOR_THREADS);
         // No peer service => single-replica (replica sync off).
         assert!(cfg.peer_service.is_none());
-        assert!(cfg.peer_sync_port.is_none());
         assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
         assert_eq!(cfg.block_size, 16);
         assert_eq!(cfg.kv_event_port, DEFAULT_KV_EVENT_PORT);
-        assert_eq!(cfg.data_parallel_size, 1);
         assert!(cfg.replay_port.is_none());
         assert!(cfg.total_kv_blocks.is_none());
     }
@@ -254,35 +235,19 @@ mod tests {
     }
 
     #[test]
-    fn replication_config_parsed() {
+    fn peer_service_config_parsed() {
         let cfg = parse_cfg(&[
             ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
-            ("DYN_EPP_PEER_SYNC_PORT", "9191"),
             ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
         ])
-        .expect("replication config should parse");
+        .expect("peer service config should parse");
         assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"));
-        assert_eq!(cfg.peer_sync_port, Some(9191));
         assert_eq!(cfg.selector_threads, 8);
         assert_eq!(cfg.namespace, "inference");
-    }
-
-    #[test]
-    fn peer_service_requires_sync_port() {
-        assert!(
-            parse_cfg(&[
-                ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
-                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
-                ("POD_NAMESPACE", "inference"),
-                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
-                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-            ])
-            .is_err()
-        );
     }
 
     #[test]
@@ -311,21 +276,43 @@ mod tests {
     }
 
     #[test]
-    fn data_parallel_size_must_be_one() {
-        // Data parallelism is not supported in this release: only DP=1 is valid.
-        let base = [
+    fn replay_port_is_optional_and_uses_the_kv_event_name() {
+        let cfg = parse_cfg(&[
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-        ];
-        let with_dp = |dp: &str| {
-            let mut pairs = base.to_vec();
-            pairs.push(("DYN_DATA_PARALLEL_SIZE", dp));
-            parse_cfg(&pairs)
-        };
-        assert!(with_dp("0").is_err());
-        assert!(with_dp("2").is_err());
-        assert_eq!(with_dp("1").unwrap().data_parallel_size, 1);
+            ("DYN_EPP_KV_EVENT_REPLAY_PORT", "5558"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.replay_port, Some(5558));
+    }
+
+    #[test]
+    fn zero_replay_port_fails() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+                ("DYN_EPP_KV_EVENT_REPLAY_PORT", "0"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn zero_max_num_batched_tokens_fails() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+                ("DYN_EPP_MAX_NUM_BATCHED_TOKENS", "0"),
+            ])
+            .is_err()
+        );
     }
 }
