@@ -16,6 +16,52 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestMkdirAllAtWithoutLowerMetadata(t *testing.T) {
+	root := t.TempDir()
+	upper := filepath.Join(root, "upper")
+	snapshot := filepath.Join(root, "snapshot")
+	placeholder := filepath.Join(root, "placeholder")
+	for _, path := range []string{upper, snapshot, placeholder} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open := func(path string) int {
+		t.Helper()
+		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { unix.Close(fd) })
+		return fd
+	}
+	upperFD := open(upper)
+	snapshotFD := open(snapshot)
+	placeholderFD := open(placeholder)
+
+	const missing = "home/dynamo/.cache/huggingface"
+	createdFD, err := mkdirAllAt(upperFD, missing, snapshotFD, placeholderFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unix.Close(createdFD)
+	if info, err := os.Stat(filepath.Join(upper, missing)); err != nil {
+		t.Fatal(err)
+	} else if !info.IsDir() {
+		t.Fatalf("created path mode = %v, want directory", info.Mode())
+	}
+
+	if err := os.Symlink(".", filepath.Join(placeholder, "symlink")); err != nil {
+		t.Fatal(err)
+	}
+	if fd, err := mkdirAllAt(upperFD, "symlink/child", snapshotFD, placeholderFD); err == nil {
+		unix.Close(fd)
+		t.Fatal("mkdirAllAt unexpectedly ignored lower symlink")
+	} else if !errors.Is(err, unix.ENOTDIR) && !errors.Is(err, unix.ELOOP) {
+		t.Fatalf("mkdirAllAt lower symlink error = %v, want ENOTDIR or ELOOP", err)
+	}
+}
+
 func TestPrivilegedWorkspaceHandleCloneAcrossMountNamespaces(t *testing.T) {
 	const (
 		ownerRootEnv = "DYNAMO_SNAPSHOT_WORKSPACE_OWNER_ROOT"
