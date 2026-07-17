@@ -1189,6 +1189,24 @@ impl ModelDeploymentCard {
                 if let Some(model_dir) = p.parent() {
                     crate::tokenizers::hf::merge_special_tokens_from_config(&mut hf, model_dir);
                 }
+
+                // Disable any truncation baked into `tokenizer.json`: the HF
+                // `tokenizers` crate honors it on `encode()`, silently clipping every
+                // prompt (e.g. `stepfun-ai/Step-3.7-Flash-*` caps at 2048), unlike
+                // Python `transformers`, which resets it on load. Match that: never
+                // truncate implicitly; over-length prompts are rejected elsewhere.
+                if hf.get_truncation().is_some() {
+                    tracing::warn!(
+                        "tokenizer.json declares a truncation config; disabling it so \
+                         prompts are not silently clipped"
+                    );
+                    // Hard-fail rather than warn: if we can't clear it, the prompt
+                    // would still be silently clipped, defeating the purpose.
+                    hf.with_truncation(None)
+                        .map_err(anyhow::Error::msg)
+                        .context("failed to disable tokenizer.json truncation")?;
+                }
+
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
