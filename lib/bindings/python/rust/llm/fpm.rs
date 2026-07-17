@@ -432,11 +432,99 @@ pub(crate) struct FpmEventSubscriber {
     // (insert on Added, remove on Removed).  Used by get_recent_stats()
     // to filter out ghost entries without contending with Task 1's writes.
     known_workers: Arc<DashSet<String>>,
-    // Serialized ModelDeploymentCards keyed by their complete discovery
-    // identity. A worker can own a base card and multiple LoRA cards;
-    // retaining the suffix prevents removal of one card from making the
-    // whole worker disappear.
-    worker_model_cards: Arc<DashMap<ModelCardInstanceId, String>>,
+    // Serialized ModelDeploymentCards grouped by worker. Each worker retains
+    // complete card identities for exact removal and one selected base/fallback
+    // card for snapshots.
+    worker_model_cards: Arc<DashMap<String, WorkerModelCards>>,
+}
+
+#[derive(Default)]
+struct WorkerModelCards {
+    cards: HashMap<ModelCardInstanceId, IndexedModelCard>,
+    card_ids: Vec<ModelCardInstanceId>,
+    base_card_id: Option<ModelCardInstanceId>,
+}
+
+struct IndexedModelCard {
+    card: String,
+    index: usize,
+}
+
+impl WorkerModelCards {
+    fn insert(&mut self, card_id: ModelCardInstanceId, card: String) {
+        if let Some(existing) = self.cards.get_mut(&card_id) {
+            existing.card = card;
+            return;
+        }
+
+        if card_id.model_suffix.is_none() {
+            self.base_card_id = Some(card_id.clone());
+        }
+        let index = self.card_ids.len();
+        self.card_ids.push(card_id.clone());
+        self.cards.insert(card_id, IndexedModelCard { card, index });
+    }
+
+    fn remove(&mut self, card_id: &ModelCardInstanceId) {
+        let Some(removed) = self.cards.remove(card_id) else {
+            return;
+        };
+
+        let last_id = self
+            .card_ids
+            .pop()
+            .expect("the card index must contain every stored card");
+        if removed.index < self.card_ids.len() {
+            self.card_ids[removed.index] = last_id.clone();
+            self.cards
+                .get_mut(&last_id)
+                .expect("the swapped card must remain stored")
+                .index = removed.index;
+        }
+
+        if self.base_card_id.as_ref() == Some(card_id) {
+            self.base_card_id = None;
+        }
+    }
+
+    fn selected_card(&self) -> Option<&str> {
+        let card_id = self
+            .base_card_id
+            .as_ref()
+            .or_else(|| self.card_ids.first())?;
+        self.cards.get(card_id).map(|entry| entry.card.as_str())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.card_ids.is_empty()
+    }
+}
+
+fn insert_worker_model_card(
+    cards: &DashMap<String, WorkerModelCards>,
+    worker_id: String,
+    card_id: ModelCardInstanceId,
+    card: String,
+) {
+    cards.entry(worker_id).or_default().insert(card_id, card);
+}
+
+fn remove_worker_model_card(
+    cards: &DashMap<String, WorkerModelCards>,
+    worker_id: &str,
+    card_id: &ModelCardInstanceId,
+) -> bool {
+    let Some(mut worker_cards) = cards.get_mut(worker_id) else {
+        return false;
+    };
+    worker_cards.remove(card_id);
+    if !worker_cards.is_empty() {
+        return true;
+    }
+
+    drop(worker_cards);
+    cards.remove(worker_id);
+    false
 }
 
 #[pymethods]
@@ -685,7 +773,12 @@ impl FpmEventSubscriber {
                                                 let DiscoveryInstanceId::Model(card_id) = instance.id() else {
                                                     unreachable!("model instance must have a model identity");
                                                 };
-                                                cards.insert(card_id, s);
+                                                insert_worker_model_card(
+                                                    &cards,
+                                                    wid.clone(),
+                                                    card_id,
+                                                    s,
+                                                );
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
@@ -705,9 +798,7 @@ impl FpmEventSubscriber {
                                         continue;
                                     };
                                     let removed_id = card_id.instance_id.to_string();
-                                    cards.remove(&card_id);
-
-                                    if has_model_card_for_worker(&cards, card_id.instance_id) {
+                                    if remove_worker_model_card(&cards, &removed_id, &card_id) {
                                         tracing::debug!(
                                             "FPM tracker: model card removed for worker {removed_id}; \
                                              other cards remain"
@@ -789,22 +880,16 @@ impl FpmEventSubscriber {
             ));
         }
 
-        let mut selected: HashMap<String, (bool, String)> = HashMap::new();
-        for entry in self.worker_model_cards.iter() {
-            let worker_id = entry.key().instance_id.to_string();
-            if !self.known_workers.contains(&worker_id) {
-                continue;
-            }
-            select_worker_model_card(
-                &mut selected,
-                worker_id,
-                entry.key().model_suffix.is_none(),
-                entry.value().clone(),
-            );
-        }
-        let snapshot = selected
-            .into_iter()
-            .map(|(worker_id, (_, card))| (worker_id, card))
+        let snapshot = self
+            .worker_model_cards
+            .iter()
+            .filter(|entry| self.known_workers.contains(entry.key()))
+            .filter_map(|entry| {
+                entry
+                    .value()
+                    .selected_card()
+                    .map(|card| (entry.key().clone(), card.to_string()))
+            })
             .collect();
 
         Ok(snapshot)
@@ -814,32 +899,6 @@ impl FpmEventSubscriber {
     fn shutdown(&self) {
         self.cancel.cancel();
     }
-}
-
-fn select_worker_model_card(
-    selected: &mut HashMap<String, (bool, String)>,
-    worker_id: String,
-    is_base: bool,
-    card: String,
-) {
-    match selected.entry(worker_id) {
-        std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert((is_base, card));
-        }
-        std::collections::hash_map::Entry::Occupied(mut entry) if is_base && !entry.get().0 => {
-            entry.insert((true, card));
-        }
-        std::collections::hash_map::Entry::Occupied(_) => {}
-    }
-}
-
-fn has_model_card_for_worker(
-    cards: &DashMap<ModelCardInstanceId, String>,
-    instance_id: u64,
-) -> bool {
-    cards
-        .iter()
-        .any(|entry| entry.key().instance_id == instance_id)
 }
 
 impl Drop for FpmEventSubscriber {
@@ -864,25 +923,41 @@ mod tests {
 
     #[test]
     fn base_model_card_wins_over_lora_cards() {
-        let mut selected = HashMap::new();
-        select_worker_model_card(&mut selected, "42".to_string(), false, "lora".to_string());
-        select_worker_model_card(&mut selected, "42".to_string(), true, "base".to_string());
-        select_worker_model_card(&mut selected, "42".to_string(), false, "lora-2".to_string());
+        let mut cards = WorkerModelCards::default();
+        cards.insert(card_id(42, Some("adapter-a")), "lora".to_string());
+        cards.insert(card_id(42, None), "base".to_string());
+        cards.insert(card_id(42, Some("adapter-b")), "lora-2".to_string());
 
-        assert_eq!(selected.get("42"), Some(&(true, "base".to_string())));
+        assert_eq!(cards.selected_card(), Some("base"));
     }
 
     #[test]
-    fn removing_one_model_card_keeps_worker_live_while_another_remains() {
+    fn removing_cards_keeps_worker_live_until_last_card() {
         let cards = DashMap::new();
         let base = card_id(42, None);
-        let lora = card_id(42, Some("adapter"));
-        cards.insert(base.clone(), "base".to_string());
-        cards.insert(lora, "lora".to_string());
+        let lora_a = card_id(42, Some("adapter-a"));
+        let lora_b = card_id(42, Some("adapter-b"));
+        insert_worker_model_card(&cards, "42".to_string(), base.clone(), "base".to_string());
+        insert_worker_model_card(
+            &cards,
+            "42".to_string(),
+            lora_a.clone(),
+            "lora-a".to_string(),
+        );
+        insert_worker_model_card(
+            &cards,
+            "42".to_string(),
+            lora_b.clone(),
+            "lora-b".to_string(),
+        );
 
-        cards.remove(&base);
+        assert!(remove_worker_model_card(&cards, "42", &base));
+        assert_eq!(cards.get("42").unwrap().selected_card(), Some("lora-b"));
 
-        assert!(has_model_card_for_worker(&cards, 42));
-        assert!(!has_model_card_for_worker(&cards, 7));
+        assert!(remove_worker_model_card(&cards, "42", &lora_b));
+        assert_eq!(cards.get("42").unwrap().selected_card(), Some("lora-a"));
+
+        assert!(!remove_worker_model_card(&cards, "42", &lora_a));
+        assert!(!cards.contains_key("42"));
     }
 }
