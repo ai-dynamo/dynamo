@@ -1,0 +1,660 @@
+# SPDX-License-Identifier: Apache-2.0
+name: EPD Test Template
+
+# Reusable workflow for running EPD heterogeneous tests
+# Can be called from other workflows with different parameters
+
+on:
+  workflow_call:
+    secrets:
+      AUNG_SAN_I_DYNAMO:
+        description: 'SSH private key with read access to this repository'
+        required: true
+    inputs:
+      test_name:
+        description: 'Test name (e.g., e-pd-2nodes)'
+        required: true
+        type: string
+      test_yaml_path:
+        description: 'Path to test YAML file relative to repo root'
+        required: true
+        type: string
+      runner:
+        description: 'GitHub runner to use'
+        required: true
+        type: string
+      PR_NUMBER:
+        description: 'PR number'
+        required: false
+        type: string
+        default: ''
+      CHECKOUT_COMMIT:
+        description: 'Commit SHA'
+        required: false
+        type: string
+        default: ''
+      docker_image_xpu:
+        description: 'Docker image for XPU'
+        required: true
+        type: string
+      docker_image_gpu:
+        description: 'Docker image for NVIDIA GPU'
+        required: true
+        type: string
+      xpu_resource_template:
+        description: 'XPU resource template name'
+        required: false
+        type: string
+        default: ''
+      nvidia_resource_template:
+        description: 'NVIDIA resource template name'
+        required: false
+        type: string
+        default: ''
+      xpu_node:
+        description: 'XPU node label value'
+        required: false
+        type: string
+        default: 'xpu_node'
+      nvidia_node:
+        description: 'NVIDIA node label value'
+        required: false
+        type: string
+        default: 'nvidia_node'
+      model:
+        description: 'Model path'
+        required: false
+        type: string
+        default: ''
+      tensor_parallel:
+        description: 'Tensor parallel size'
+        required: false
+        type: string
+        default: ''
+      log_dir_name:
+        description: 'Log directory name for artifacts'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run-test:
+    name: ${{ inputs.test_name }}
+    runs-on: ${{ inputs.runner }}
+    env:
+      NS: dynamo-system
+    steps:
+      - name: Install SSH Key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.AUNG_SAN_I_DYNAMO }}
+
+      - name: Verify SSH checkout credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Loaded SSH identities:"
+          ssh-add -l
+
+          echo "Testing SSH authentication to GitHub..."
+          set +e
+          SSH_OUTPUT=$(ssh -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new git@github.com 2>&1)
+          SSH_STATUS=$?
+          set -e
+
+          echo "$SSH_OUTPUT"
+
+          if echo "$SSH_OUTPUT" | grep -q "successfully authenticated"; then
+            echo "SSH authentication to GitHub succeeded"
+          else
+            echo "ERROR: SSH authentication to GitHub failed"
+            echo "Check that secret AUNG_SAN_I_DYNAMO contains the private key whose public key has read access to ${GITHUB_REPOSITORY}"
+            exit "$SSH_STATUS"
+          fi
+
+      - name: Checkout repository
+        shell: bash
+        env:
+          COMMIT: ${{ inputs.CHECKOUT_COMMIT }}
+          PR_NUMBER: ${{ inputs.PR_NUMBER }}
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          echo "REPO_NAME=$REPO_NAME" >> "$GITHUB_ENV"
+          COMMIT_SHA="$COMMIT"
+          if [ -z "$COMMIT_SHA" ]; then
+            COMMIT_SHA="$GITHUB_SHA"
+          fi
+
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          echo "COMMIT=$COMMIT_SHA"
+          echo "PR_NUMBER=$PR_NUMBER"
+          pwd
+          ls -la "$GITHUB_WORKSPACE"; echo ''
+
+          rm -rf "$GITHUB_WORKSPACE" 2>/dev/null || true
+          mkdir -p "$GITHUB_WORKSPACE"
+
+          cd "$GITHUB_WORKSPACE"
+
+          # Ensure GitHub's SSH host key is trusted (fixes "Host key verification failed")
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >> ~/.ssh/known_hosts
+          sort -u ~/.ssh/known_hosts -o ~/.ssh/known_hosts
+          
+          REPO_SSH_URL="git@github.com:${GITHUB_REPOSITORY}.git"
+          if [ -n "$PR_NUMBER" ]; then
+            echo "Checking out main and merging PR #$PR_NUMBER"
+            git clone --branch main "$REPO_SSH_URL" "$REPO_NAME"
+            cd "$REPO_NAME"
+            git fetch origin pull/${PR_NUMBER}/head:pr-${PR_NUMBER}
+            git merge --no-edit pr-${PR_NUMBER}
+          else
+            echo "Checking out commit SHA: $COMMIT_SHA"
+            git clone --filter=blob:none "$REPO_SSH_URL" "$REPO_NAME"
+            cd "$REPO_NAME"
+            git checkout "$COMMIT_SHA"
+          fi
+
+      - name: Prepare diagnostics helper
+        env:
+          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
+        run: |
+          # Shared helper: snapshot pod logs (current + previous), describe, and
+          # events to a local dir. Called at every failure point so logs are
+          # captured before pods churn / events age out, and again at the end.
+          # The quoted heredoc keeps $VARS literal -- they expand when the helper
+          # runs, reading TEST_NAME (from GITHUB_ENV) and LOG_DIR_NAME from env.
+          # Usage: dump-diagnostics.sh [subdir]
+          cat > "$RUNNER_TEMP/dump-diagnostics.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -u
+          SUFFIX="${1:-}"
+          DEST="$LOG_DIR_NAME"
+          [ -n "$SUFFIX" ] && DEST="$LOG_DIR_NAME/$SUFFIX"
+          mkdir -p "$DEST"
+
+          if [ -z "${TEST_NAME:-}" ]; then
+            echo "dump-diagnostics: TEST_NAME is empty, nothing to collect" | tee "$DEST/NO_TEST_NAME.txt"
+            exit 0
+          fi
+
+          SEL="nvidia.com/dynamo-graph-deployment-name=$TEST_NAME"
+          echo "dump-diagnostics: writing to $DEST (TEST_NAME=$TEST_NAME)"
+
+          kubectl get pods -n "$NS" -l "$SEL" -o wide       > "$DEST/pods-wide.txt"   2>&1 || true
+          kubectl get pods -n "$NS" -l "$SEL" --show-labels > "$DEST/pods-labels.txt" 2>&1 || true
+          kubectl get dynamographdeployment "$TEST_NAME" -n "$NS" -o yaml > "$DEST/dynamographdeployment.yaml" 2>&1 || true
+          kubectl get events -n "$NS" --sort-by=.lastTimestamp > "$DEST/events.txt" 2>&1 || true
+
+          PODS=$(kubectl get pods -n "$NS" -l "$SEL" -o name 2>/dev/null || true)
+          BENCH=$(kubectl get pods -n "$NS" -l "job-name=$TEST_NAME-bench" -o name 2>/dev/null || true)
+          for pod in $PODS $BENCH; do
+            name=${pod##*/}
+            kubectl logs -n "$NS" "$pod" --all-containers=true            > "$DEST/$name.log"          2>&1 || true
+            kubectl logs -n "$NS" "$pod" --all-containers=true --previous > "$DEST/$name-previous.log" 2>/dev/null || true
+            kubectl describe -n "$NS" "$pod"                              > "$DEST/$name-describe.txt" 2>&1 || true
+          done
+          SCRIPT
+          chmod +x "$RUNNER_TEMP/dump-diagnostics.sh"
+          echo "Wrote diagnostics helper to $RUNNER_TEMP/dump-diagnostics.sh"
+
+      - name: Set resource templates and nodes
+        id: set-templates
+        env:
+          INPUT_XPU_RESOURCE_TEMPLATE: ${{ inputs.xpu_resource_template }}
+          INPUT_NVIDIA_RESOURCE_TEMPLATE: ${{ inputs.nvidia_resource_template }}
+          INPUT_XPU_NODE: ${{ inputs.xpu_node }}
+          INPUT_NVIDIA_NODE: ${{ inputs.nvidia_node }}
+        run: |
+          XPU_TEMPLATE="$INPUT_XPU_RESOURCE_TEMPLATE"
+          NVIDIA_TEMPLATE="$INPUT_NVIDIA_RESOURCE_TEMPLATE"
+          XPU_NODE="$INPUT_XPU_NODE"
+          NVIDIA_NODE="$INPUT_NVIDIA_NODE"
+
+          echo "XPU_RESOURCE_TEMPLATE=$XPU_TEMPLATE" >> "$GITHUB_ENV"
+          echo "NVIDIA_RESOURCE_TEMPLATE=$NVIDIA_TEMPLATE" >> "$GITHUB_ENV"
+          echo "XPU_NODE=$XPU_NODE" >> "$GITHUB_ENV"
+          echo "NVIDIA_NODE=$NVIDIA_NODE" >> "$GITHUB_ENV"
+
+          echo "Using ResourceClaimTemplates and Nodes:"
+          echo "  XPU: $XPU_TEMPLATE (Node: $XPU_NODE)"
+          echo "  NVIDIA: $NVIDIA_TEMPLATE (Node: $NVIDIA_NODE)"
+
+          echo ""
+          echo "Verifying ResourceClaimTemplates exist:"
+          kubectl get resourceclaimtemplate "$XPU_TEMPLATE" -n "$NS" || { echo "ERROR: $XPU_TEMPLATE not found"; exit 1; }
+          kubectl get resourceclaimtemplate "$NVIDIA_TEMPLATE" -n "$NS" || { echo "ERROR: $NVIDIA_TEMPLATE not found"; exit 1; }
+
+          echo ""
+          echo "Verifying node labels exist:"
+          verify_node_label() {
+            local role_name="$1"
+            local label_value="$2"
+
+            kubectl get nodes -l "dynamo.intel.com/node=$label_value" --no-headers | grep -q . || {
+              echo "ERROR: No node found with label dynamo.intel.com/node=$label_value for $role_name"
+              exit 1
+            }
+          }
+
+          verify_node_label XPU "$XPU_NODE"
+          verify_node_label NVIDIA "$NVIDIA_NODE"
+
+      - name: Deploy test
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          INPUT_TEST_NAME: ${{ inputs.test_name }}
+          INPUT_TEST_YAML_PATH: ${{ inputs.test_yaml_path }}
+          DOCKER_IMAGE_XPU: ${{ inputs.docker_image_xpu }}
+          DOCKER_IMAGE_GPU: ${{ inputs.docker_image_gpu }}
+          XPU_RESOURCE_TEMPLATE: ${{ inputs.xpu_resource_template }}
+          NVIDIA_RESOURCE_TEMPLATE: ${{ inputs.nvidia_resource_template }}
+          XPU_NODE: ${{ inputs.xpu_node }}
+          NVIDIA_NODE: ${{ inputs.nvidia_node }}
+          MODEL: ${{ inputs.model }}
+          TENSOR_PARALLEL: ${{ inputs.tensor_parallel }}
+        run: |
+          cd "$GITHUB_WORKSPACE/$REPO_NAME"
+
+          # Use run ID + attempt to create unique deployment names to avoid collisions between concurrent runs.
+          # Keep only the last 6 chars of the run ID to stay short (CCL has a 63 char hostname limit).
+          RUN_ID_SHORT="${RUN_ID: -6}"
+          export TEST_NAME="r${RUN_ID_SHORT}a${RUN_ATTEMPT}-${INPUT_TEST_NAME}"
+          echo "TEST_NAME=$TEST_NAME" >> "$GITHUB_ENV"
+          echo "Deploying with unique name: $TEST_NAME (run $RUN_ID attempt $RUN_ATTEMPT)"
+
+          # Delete any existing DynamoGraphDeployment from previous runs (shouldn't exist with unique names)
+          kubectl delete job "$TEST_NAME-bench" -n "$NS" --ignore-not-found=true --wait=true
+          kubectl delete dynamographdeployment "$TEST_NAME" -n "$NS" --ignore-not-found=true --wait=true
+
+          echo "Applying DynamoGraphDeployment (excluding benchmark Job):"
+          echo "  TEST_NAME=$TEST_NAME"
+          echo "  DOCKER_IMAGE_XPU=$DOCKER_IMAGE_XPU"
+          echo "  DOCKER_IMAGE_GPU=$DOCKER_IMAGE_GPU"
+          echo "  XPU_RESOURCE_TEMPLATE=$XPU_RESOURCE_TEMPLATE (Node: $XPU_NODE)"
+          echo "  NVIDIA_RESOURCE_TEMPLATE=$NVIDIA_RESOURCE_TEMPLATE (Node: $NVIDIA_NODE)"
+
+          # Apply DynamoGraphDeployment only, skip Job (will be created after service pods are Ready)
+          envsubst '${TEST_NAME} ${DOCKER_IMAGE_XPU} ${DOCKER_IMAGE_GPU} ${XPU_RESOURCE_TEMPLATE} ${NVIDIA_RESOURCE_TEMPLATE} ${XPU_NODE} ${NVIDIA_NODE} ${MODEL} ${TENSOR_PARALLEL}' < "$INPUT_TEST_YAML_PATH" | \
+            yq 'select(.kind != "Job")' | \
+            kubectl apply -f - -n "$NS"
+
+          echo ""
+          echo "Checking DynamoGraphDeployment status:"
+          kubectl get dynamographdeployment "$TEST_NAME" -n "$NS" -o yaml
+
+      - name: Wait for services
+        # Cap below GitHub's hard job limit so this step fails on its own terms
+        # (running its diagnostics dump) instead of being force-cancelled.
+        timeout-minutes: 250
+        env:
+          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
+        run: |
+          echo "Waiting for pods to be created by DynamoGraphDeployment controller..."
+          pod_count=0
+          for i in {1..10}; do
+            pod_count=$(kubectl get pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME" --no-headers 2>/dev/null | wc -l || echo 0)
+            if [ "$pod_count" -gt 0 ]; then
+              echo "Found $pod_count pod(s), proceeding to wait for Ready status..."
+              break
+            fi
+            echo "No pods found yet, waiting... (attempt $i/10)"
+            sleep 30
+          done
+
+          if [ "$pod_count" -eq 0 ]; then
+            echo "ERROR: No pods were created after 5 minutes"
+            "$RUNNER_TEMP/dump-diagnostics.sh" no-pods-created || true
+            exit 1
+          fi
+
+          # Smart wait for pods: up to 4 hours for resource scheduling, but fail fast on errors
+          # This allows K8s to schedule when resources are constrained, but exits immediately on real failures
+          echo "Waiting for pods to become Ready (max 4 hours for resource scheduling)..."
+          timeout_seconds=$((4 * 60 * 60))  # 4 hours
+          elapsed=0
+          check_interval=30
+
+          # Retry readiness checks until every pod is Ready, an error is detected, or the timeout expires.
+          while [ $elapsed -lt $timeout_seconds ]; do
+            # Get pod statuses
+            all_ready=true
+            has_error=false
+            error_msg=""
+
+            # Scan the current pod list once; the outer loop handles retrying until all pods are Ready.
+            while IFS= read -r pod; do
+              if [ -z "$pod" ]; then continue; fi
+
+              # Check pod phase
+              phase=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+
+              if [ "$phase" = "Running" ]; then
+                # Check if all containers are ready
+                ready=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
+                if [ "$ready" != "True" ]; then
+                  all_ready=false
+                  # Check for CrashLoopBackOff in Running pods
+                  reason=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || echo "")
+                  if [ "$reason" = "CrashLoopBackOff" ] || [ "$reason" = "ImagePullBackOff" ] || [ "$reason" = "ErrImagePull" ]; then
+                    has_error=true
+                    message=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' 2>/dev/null || echo "")
+                    error_msg="Pod $pod in error state: $reason - $message"
+                    break
+                  fi
+                fi
+              elif [ "$phase" = "Succeeded" ] || [ "$phase" = "Completed" ]; then
+                # Job pods that completed successfully
+                continue
+              elif [ "$phase" = "Failed" ] || [ "$phase" = "Error" ]; then
+                has_error=true
+                error_msg="Pod $pod in phase: $phase"
+                break
+              elif [ "$phase" = "Pending" ]; then
+                all_ready=false
+                # Check for error conditions in pending pods
+                reason=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || echo "")
+                if [ "$reason" = "ImagePullBackOff" ] || [ "$reason" = "ErrImagePull" ] || [ "$reason" = "CrashLoopBackOff" ]; then
+                  has_error=true
+                  message=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.status.containerStatuses[0].state.waiting.message}' 2>/dev/null || echo "")
+                  error_msg="Pod $pod in error state: $reason - $message"
+                  break
+                fi
+              else
+                all_ready=false
+              fi
+            done < <(kubectl get pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME" -o name 2>/dev/null | sed 's|pod/||')
+
+            # Exit on errors
+            if [ "$has_error" = true ]; then
+              echo "ERROR: $error_msg"
+              kubectl get pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"
+              kubectl describe pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"
+              # Capture logs now -- a crash-looping/failed pod may be replaced before Collect logs runs
+              "$RUNNER_TEMP/dump-diagnostics.sh" pod-error || true
+              exit 1
+            fi
+
+            # Exit if all ready
+            if [ "$all_ready" = true ]; then
+              echo "✓ All pods are Ready"
+              kubectl get pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"
+              break
+            fi
+
+            # Show status and wait
+            echo "Pods not ready yet (${elapsed}s elapsed, max ${timeout_seconds}s). Checking again in ${check_interval}s..."
+            kubectl get pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME" --no-headers | awk '{print "  - " $1 ": " $3}'
+            sleep $check_interval
+            elapsed=$((elapsed + check_interval))
+          done
+
+          if [ $elapsed -ge $timeout_seconds ]; then
+            echo "ERROR: Pods did not become Ready within 4 hours"
+            kubectl get pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"
+            kubectl describe pods -n "$NS" -l nvidia.com/dynamo-graph-deployment-name="$TEST_NAME"
+            "$RUNNER_TEMP/dump-diagnostics.sh" pods-not-ready || true
+            exit 1
+          fi
+
+      - name: Deploy benchmark job
+        timeout-minutes: 15
+        env:
+          INPUT_TEST_YAML_PATH: ${{ inputs.test_yaml_path }}
+          DOCKER_IMAGE_XPU: ${{ inputs.docker_image_xpu }}
+          DOCKER_IMAGE_GPU: ${{ inputs.docker_image_gpu }}
+          XPU_RESOURCE_TEMPLATE: ${{ inputs.xpu_resource_template }}
+          NVIDIA_RESOURCE_TEMPLATE: ${{ inputs.nvidia_resource_template }}
+          XPU_NODE: ${{ inputs.xpu_node }}
+          NVIDIA_NODE: ${{ inputs.nvidia_node }}
+          MODEL: ${{ inputs.model }}
+          TENSOR_PARALLEL: ${{ inputs.tensor_parallel }}
+          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
+        run: |
+          cd "$GITHUB_WORKSPACE/$REPO_NAME"
+
+          echo "All service pods are Ready, deploying benchmark Job now..."
+
+          # Apply only the Job
+          envsubst '${TEST_NAME} ${DOCKER_IMAGE_XPU} ${DOCKER_IMAGE_GPU} ${XPU_RESOURCE_TEMPLATE} ${NVIDIA_RESOURCE_TEMPLATE} ${XPU_NODE} ${NVIDIA_NODE} ${MODEL} ${TENSOR_PARALLEL}' < "$INPUT_TEST_YAML_PATH" | \
+            yq 'select(.kind == "Job")' | \
+            kubectl apply -f - -n "$NS"
+
+          echo "Benchmark Job created, waiting for pod to be Ready..."
+
+          # Wait for benchmark pod to be created and Ready (max 3 minutes)
+          timeout_sec=180
+          check_interval=15
+          elapsed=0
+          while [ $elapsed -lt $timeout_sec ]; do
+            BENCHMARK_POD=$(kubectl get pods -n "$NS" -l job-name="$TEST_NAME-bench" -o name 2>/dev/null | head -n1)
+            if [ -z "$BENCHMARK_POD" ]; then
+              echo "Waiting for benchmark pod to be created (${elapsed}s/${timeout_sec}s)..."
+            else
+              # Pod exists, check if Ready
+              ready=$(kubectl get "$BENCHMARK_POD" -n "$NS" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "False")
+              if [ "$ready" = "True" ]; then
+                echo "✓ Benchmark pod is Ready: $BENCHMARK_POD"
+                break
+              else
+                echo "Benchmark pod exists but not Ready yet (${elapsed}s/${timeout_sec}s)"
+              fi
+            fi
+            sleep $check_interval
+            elapsed=$((elapsed + check_interval))
+          done
+
+          if [ $elapsed -ge $timeout_sec ]; then
+            echo "ERROR: Benchmark pod did not become Ready within 3 minutes"
+            echo "Pods currently in namespace:"
+            kubectl get pods -n "$NS" --no-headers || true
+            "$RUNNER_TEMP/dump-diagnostics.sh" bench-not-ready || true
+            exit 1
+          fi
+
+      - name: Wait for curl test and benchmark completion
+        timeout-minutes: 35
+        env:
+          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
+        run: |
+          echo "Waiting for BenchmarkRunner pod to complete..."
+          BENCHMARK_POD=$(kubectl get pods -n "$NS" -l job-name="$TEST_NAME-bench" -o name | head -n1)
+          if [ -z "$BENCHMARK_POD" ]; then
+            echo "ERROR: No BenchmarkRunner pod found"
+            echo "Pods currently in namespace:"
+            kubectl get pods -n "$NS" --no-headers || true
+            "$RUNNER_TEMP/dump-diagnostics.sh" bench-missing || true
+            exit 1
+          fi
+
+          echo "Found $BENCHMARK_POD"
+
+          # Wait for benchmark to complete (max 30 minutes)
+          # Timer starts after all pods are Ready (Step N-2 for Services, N-1 for BenchmarkRunner)
+          # measures benchmark execution time only
+          for i in {1..180}; do
+            phase=$(kubectl get "$BENCHMARK_POD" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+            echo "Benchmark pod phase: $phase (check $i/180)"
+
+            if [ "$phase" = "Succeeded" ]; then
+              echo "Benchmark pod completed successfully"
+              LOGS=$(kubectl logs -n "$NS" "$BENCHMARK_POD" 2>&1)
+              echo "$LOGS"
+
+              # Parse benchmark results
+              SUCCESSFUL_REQUESTS=$(echo "$LOGS" | grep -oP 'Successful requests:\s+\K\d+' || echo "")
+              FAILED_REQUESTS=$(echo "$LOGS" | grep -oP 'Failed requests:\s+\K\d+' || echo "")
+
+              echo ""
+              echo "========================================="
+              echo "Benchmark Results Summary:"
+              echo "  Successful requests: ${SUCCESSFUL_REQUESTS:-unknown}"
+              echo "  Failed requests: ${FAILED_REQUESTS:-unknown}"
+              echo "========================================="
+
+              # Fail if there were any failed requests
+              if [ -n "$FAILED_REQUESTS" ] && [ "$FAILED_REQUESTS" -gt 0 ]; then
+                echo "ERROR: Benchmark validation failed - $FAILED_REQUESTS failed requests detected"
+                exit 1
+              fi
+
+              echo "✓ Benchmark validation passed"
+              exit 0
+            elif [ "$phase" = "Failed" ] || [ "$phase" = "Error" ]; then
+              echo "ERROR: Benchmark pod in phase: $phase"
+              kubectl logs -n "$NS" "$BENCHMARK_POD"
+              "$RUNNER_TEMP/dump-diagnostics.sh" bench-failed || true
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "ERROR: Benchmark did not complete within 30 minutes"
+          kubectl logs -n "$NS" "$BENCHMARK_POD"
+          "$RUNNER_TEMP/dump-diagnostics.sh" bench-timeout || true
+          exit 1
+
+      - name: Collect logs
+        if: always()
+        env:
+          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
+        run: |
+          # Final snapshot to the artifact root. Reuses the shared helper, which
+          # guards against an empty TEST_NAME and captures current + previous
+          # logs, describe, and events. If an earlier step already failed it
+          # wrote a subdir snapshot (e.g. pod-error/) that survives here.
+          if [ ! -x "$RUNNER_TEMP/dump-diagnostics.sh" ]; then
+            echo "WARNING: diagnostics helper missing; collecting nothing"
+            mkdir -p "$LOG_DIR_NAME"
+            exit 0
+          fi
+          "$RUNNER_TEMP/dump-diagnostics.sh" || true
+
+      - name: Generate performance summary
+        if: always()
+        env:
+          INPUT_TEST_NAME: ${{ inputs.test_name }}
+          LOG_DIR_NAME: ${{ inputs.log_dir_name }}
+        run: |
+          echo "Generating performance summary JSON..."
+
+          # Find benchmark pod log file
+          BENCHMARK_LOG=""
+          for log in "$LOG_DIR_NAME"/*bench*.log; do
+            if [ -f "$log" ]; then
+              BENCHMARK_LOG="$log"
+              break
+            fi
+          done
+
+          if [ -z "$BENCHMARK_LOG" ] || [ ! -f "$BENCHMARK_LOG" ]; then
+            echo "⚠ Warning: Benchmark log not found, creating empty perf_summary.json"
+            echo '{"error": "Benchmark log not found"}' > "$LOG_DIR_NAME/perf_summary.json"
+            exit 0
+          fi
+
+          echo "Parsing benchmark results from: $BENCHMARK_LOG"
+
+          # Extract metrics using grep and awk. INPUT_TEST_NAME is read from the
+          # environment at script-run time (the heredoc is quoted, so nothing here
+          # is expanded until /tmp/parse_perf.sh actually runs).
+          cat > /tmp/parse_perf.sh << 'EOF'
+          #!/bin/bash
+          LOG_FILE="$1"
+
+          # Emit a valid JSON number for the label's last token, or `null` when the
+          # line is absent or the token isn't numeric. Without this guard, a missing
+          # metric produced an empty field (e.g. `"x": ,`) and broke the JSON.
+          extract_metric() {
+            local v
+            v=$(grep "$1" "$LOG_FILE" | awk '{print $NF}' | head -1)
+            if printf '%s' "$v" | grep -Eq '^-?[0-9]+(\.[0-9]+)?$'; then
+              printf '%s' "$v"
+            else
+              printf 'null'
+            fi
+          }
+
+          # JSON-escape a string value (backslash and double-quote) using pure
+          # bash parameter expansion -- no external tools, fully portable.
+          json_escape() {
+            local s=$1
+            s=${s//\\/\\\\}
+            s=${s//\"/\\\"}
+            printf '%s' "$s"
+          }
+
+          cat << JSON
+          {
+            "test_name": "$(json_escape "$INPUT_TEST_NAME")",
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "summary": {
+              "successful_requests": $(extract_metric "Successful requests:"),
+              "failed_requests": $(extract_metric "Failed requests:"),
+              "max_request_concurrency": $(extract_metric "Maximum request concurrency:"),
+              "benchmark_duration_s": $(extract_metric "Benchmark duration"),
+              "total_input_tokens": $(extract_metric "Total input tokens:"),
+              "total_generated_tokens": $(extract_metric "Total generated tokens:"),
+              "request_throughput_rps": $(extract_metric "Request throughput"),
+              "output_token_throughput_tps": $(extract_metric "Output token throughput"),
+              "peak_output_token_throughput_tps": $(extract_metric "Peak output token throughput"),
+              "peak_concurrent_requests": $(extract_metric "Peak concurrent requests:"),
+              "total_token_throughput_tps": $(extract_metric "Total token throughput")
+            },
+            "ttft_ms": {
+              "mean": $(extract_metric "Mean TTFT"),
+              "median": $(extract_metric "Median TTFT"),
+              "p50": $(extract_metric "P50 TTFT"),
+              "p90": $(extract_metric "P90 TTFT"),
+              "p99": $(extract_metric "P99 TTFT")
+            },
+            "tpot_ms": {
+              "mean": $(extract_metric "Mean TPOT"),
+              "median": $(extract_metric "Median TPOT"),
+              "p50": $(extract_metric "P50 TPOT"),
+              "p90": $(extract_metric "P90 TPOT"),
+              "p99": $(extract_metric "P99 TPOT")
+            },
+            "itl_ms": {
+              "mean": $(extract_metric "Mean ITL"),
+              "median": $(extract_metric "Median ITL"),
+              "p50": $(extract_metric "P50 ITL"),
+              "p90": $(extract_metric "P90 ITL"),
+              "p99": $(extract_metric "P99 ITL")
+            },
+            "e2el_ms": {
+              "mean": $(extract_metric "Mean E2EL"),
+              "median": $(extract_metric "Median E2EL"),
+              "p50": $(extract_metric "P50 E2EL"),
+              "p90": $(extract_metric "P90 E2EL"),
+              "p99": $(extract_metric "P99 E2EL")
+            }
+          }
+          JSON
+          EOF
+
+          chmod +x /tmp/parse_perf.sh
+          /tmp/parse_perf.sh "$BENCHMARK_LOG" > "$LOG_DIR_NAME/perf_summary.json"
+
+          echo "✓ Generated perf_summary.json:"
+          head -20 "$LOG_DIR_NAME/perf_summary.json"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.log_dir_name }}
+          path: ${{ inputs.log_dir_name }}/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kubectl delete job "$TEST_NAME-bench" -n "$NS" --ignore-not-found || true
+          kubectl delete dynamographdeployment "$TEST_NAME" -n "$NS" --ignore-not-found || true

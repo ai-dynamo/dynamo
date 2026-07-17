@@ -4,6 +4,8 @@
 name: PR-XPU
 
 on:
+  schedule:
+    - cron: '0 23 * * *'
   push:
     branches:
       - "pull-request/[0-9]+"
@@ -30,6 +32,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            echo "has_xpu_label=true" >> "$GITHUB_OUTPUT"
+            echo "🌙 Nightly XPU CI run – skipping PR label gate"
+            exit 0
+          fi
+
           PR_NUMBER="${GITHUB_REF_NAME##*/}"
 
           # Check for xpu label
@@ -51,33 +59,190 @@ jobs:
     if: needs.guard.outputs.has_xpu_label == 'true'
     runs-on: ubuntu-latest
     outputs:
-      core: ${{ steps.changes.outputs.core }}
-      vllm: ${{ steps.changes.outputs.vllm }}
+      core: ${{ github.event_name == 'schedule' && 'true' || steps.changes.outputs.core }}
+      vllm: ${{ github.event_name == 'schedule' && 'true' || steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
+      docker_image_gpu: ${{ steps.shared-images.outputs.docker_image_gpu }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           fetch-depth: 0
       - name: Check for changes
+        if: github.event_name != 'schedule'
         id: changes
         uses: ./.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
+      - name: Set shared images
+        id: shared-images
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            echo "docker_image_gpu=nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:nightly" >> "$GITHUB_OUTPUT"
+          else
+            echo "docker_image_gpu=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-cuda13" >> "$GITHUB_OUTPUT"
+          fi
 
   # ============================================================================
-  # XPU CI – VLLM
+  # BUILD XPU IMAGE
   # ============================================================================
 
-  xpu-ci-vllm:
+  build-xpu:
     needs: [changed-files]
     if: >-
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/xpu-ci.yaml
+    runs-on: xpu-heterogeneous-ubuntu-latest
+    outputs:
+      image: ${{ steps.push.outputs.registry_image_tag }}
+    env:
+      FRAMEWORK: vllm
+      TARGET: runtime
+      DEVICE: xpu
+      PLATFORM: linux/amd64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Generate Dockerfile
+        shell: bash
+        run: |
+          echo "::group::Generating XPU Dockerfile"
+          python3 ./container/render.py \
+              --target=${{ env.TARGET }} \
+              --framework=${{ env.FRAMEWORK }} \
+              --device=${{ env.DEVICE }} \
+              --platform=${{ env.PLATFORM }} \
+              --show-result \
+              --output-short-filename
+          echo "::endgroup::"
+
+      - name: Build XPU image
+        id: build
+        shell: bash
+        run: |
+          set -x
+
+          IMAGE_NAME="dynamo-${{ env.FRAMEWORK }}-${{ env.TARGET }}-${{ env.DEVICE }}"
+          SHORT_SHA="$(git rev-parse HEAD | cut -c1-7)"
+          IMAGE_TAG="${IMAGE_NAME}:${{ github.run_id }}-${SHORT_SHA}"
+
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          docker build \
+            --progress=plain \
+            --tag "${IMAGE_TAG}" \
+            -f ./container/rendered.Dockerfile \
+            . 2>&1 | tee build-xpu.log
+
+          echo "### 🐳 XPU Image Built" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image Tag | \`${IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Framework | ${{ env.FRAMEWORK }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Device | ${{ env.DEVICE }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build XPU test image
+        shell: bash
+        run: |
+          set -x
+
+          TEST_IMAGE_TAG="${{ steps.build.outputs.image_tag }}-test"
+
+          docker build \
+            --progress=plain \
+            --tag "${TEST_IMAGE_TAG}" \
+            -f container/Dockerfile.test \
+            --build-arg BASE_IMAGE=${{ steps.build.outputs.image_tag }} \
+            . 2>&1 | tee build-xpu-test.log
+
+      - name: Push XPU image to registry
+        id: push
+        shell: bash
+        run: |
+          set -x
+
+          REGISTRY="sc09super01-srv.intel.com/dynamo"
+          IMAGE_TAG="${{ steps.build.outputs.image_tag }}"
+          REGISTRY_IMAGE_TAG="${REGISTRY}/${IMAGE_TAG}"
+
+          docker tag "${IMAGE_TAG}" "${REGISTRY_IMAGE_TAG}"
+          docker push "${REGISTRY_IMAGE_TAG}"
+
+          echo "registry_image_tag=${REGISTRY_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "### 🚀 XPU Image Pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Registry Image | \`${REGISTRY_IMAGE_TAG}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xpu-build-log
+          path: |
+            build-xpu.log
+            build-xpu-test.log
+          retention-days: 7
+
+  # ============================================================================
+  # HETEROGENEOUS P/D TESTS
+  # ============================================================================
+
+  heterog-test-px-dn:
+    name: "Heterog: XPU Prefill + NVIDIA Decode"
+    needs: [changed-files, build-xpu]
+    if: >-
+      needs.build-xpu.result == 'success' &&
+      (needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true')
+    uses: ./.github/workflows/epd-test-template.yml
+    secrets: inherit
     with:
-      framework: vllm
-      pytest_markers: 'vllm and pre_merge and not multimodal'
+      test_name: "px-dn"
+      test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/px-dn.yaml"
+      runner: "xpu"
+      CHECKOUT_COMMIT: ${{ github.sha }}
+      docker_image_xpu: ${{ needs.build-xpu.outputs.image }}
+      docker_image_gpu: "${{ needs.changed-files.outputs.docker_image_gpu }}"
+      xpu_resource_template: "onexpu-rdma-kueue"
+      nvidia_resource_template: "onenvidia-rdma-kueue"
+      xpu_node: "xpu_node"
+      nvidia_node: "nvidia_node"
+      model: 'Qwen/Qwen3-0.6B'
+      tensor_parallel: '1'
+      log_dir_name: "dynamo-heterog-logs-px-dn"
+
+  heterog-test-pn-dx:
+    name: "Heterog: NVIDIA Prefill + XPU Decode"
+    needs: [changed-files, build-xpu, heterog-test-px-dn]
+    if: >-
+      always() &&
+      needs.build-xpu.result == 'success' &&
+      needs.heterog-test-px-dn.result != 'cancelled' &&
+      (needs.changed-files.outputs.core == 'true' ||
+      needs.changed-files.outputs.vllm == 'true')
+    uses: ./.github/workflows/epd-test-template.yml
+    secrets: inherit
+    with:
+      test_name: "pn-dx"
+      test_yaml_path: ".ci/test/dynamo-heterog/k8s/tests/pn-dx.yaml"
+      runner: "xpu"
+      CHECKOUT_COMMIT: ${{ github.sha }}
+      docker_image_xpu: ${{ needs.build-xpu.outputs.image }}
+      docker_image_gpu: "${{ needs.changed-files.outputs.docker_image_gpu }}"
+      xpu_resource_template: "onexpu-rdma-kueue"
+      nvidia_resource_template: "onenvidia-rdma-kueue"
+      xpu_node: "xpu_node"
+      nvidia_node: "nvidia_node"
+      model: 'Qwen/Qwen3-0.6B'
+      tensor_parallel: '1'
+      log_dir_name: "dynamo-heterog-logs-pn-dx"
 
   # ============================================================================
   # STATUS CHECK
@@ -85,7 +250,7 @@ jobs:
 
   xpu-status-check:
     runs-on: ubuntu-latest
-    needs: [guard, changed-files, xpu-ci-vllm]
+    needs: [guard, changed-files, build-xpu, heterog-test-px-dn, heterog-test-pn-dx]
     if: always() && needs.guard.outputs.has_xpu_label == 'true'
     steps:
       - name: Check all XPU jobs
