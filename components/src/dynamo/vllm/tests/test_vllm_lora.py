@@ -9,6 +9,7 @@ add_lora<->register_model rollback couplings), and the on_endpoint_ready
 handoff. Everything is mocked: no GPU, no real AsyncLLM, no real discovery.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,6 +47,7 @@ def _make_lora_engine(enable_lora: bool = True, endpoint=None) -> VllmLLMEngine:
             enable_lora=enable_lora,
             model="/models/base",
             block_size=16,
+            max_loras=4,
         ),
         disaggregation_mode=DisaggregationMode.AGGREGATED,
         served_model_name="base-model",
@@ -161,6 +163,15 @@ def test_resolve_lora_request_for_loaded_adapter():
     assert lora_request.lora_path == "/path/a"
 
 
+def test_request_time_activation_is_tracked_for_unload():
+    engine = _make_lora_engine()
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=7, path="/path/a")}
+
+    engine._track_lora_request_activation(engine._resolve_lora_request("adapterA"))
+
+    assert engine._engine_loaded_loras == {"adapterA"}
+
+
 def test_resolve_lora_request_for_base_is_none(monkeypatch):
     monkeypatch.setattr(llm_engine_mod, "get_lora_manager", lambda: MagicMock())
     engine = _make_lora_engine()
@@ -234,6 +245,7 @@ async def test_generate_passes_resolved_lora_request(monkeypatch):
     ]
     assert captured["kwargs"]["lora_request"] is not None
     assert captured["kwargs"]["lora_request"].lora_name == "adapterA"
+    assert "adapterA" in engine._engine_loaded_loras
 
     # Base-model request -> None.
     _ = [
@@ -263,6 +275,140 @@ async def test_load_lora_happy_path(monkeypatch):
     register.assert_awaited_once()
     assert register.await_args.kwargs["lora_name"] == "adapterA"
     assert engine.loaded_loras["adapterA"].id == 123
+
+
+@pytest.mark.asyncio
+async def test_prefill_load_lora_defers_engine_activation(monkeypatch):
+    """Prefill records and advertises the adapter without eagerly loading it.
+
+    The first inference supplies the cached path through ``LoRARequest`` and
+    lets vLLM activate the adapter on demand. Decode and aggregated workers
+    continue to preload so they are ready to generate immediately.
+    """
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    register, _ = _patch_discovery(monkeypatch)
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "success"
+    engine.engine_client.add_lora.assert_not_awaited()
+    assert engine.loaded_loras["adapterA"] == LoRAInfo(id=123, path="/cache/adapter")
+    register.assert_awaited_once()
+    assert register.await_args.kwargs["worker_type"] == WorkerType.Prefill
+    assert register.await_args.kwargs["needs"] == [[WorkerType.Decode]]
+    assert register.await_args.kwargs["max_gpu_lora_count"] == 4
+
+
+@pytest.mark.asyncio
+async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    register, _ = _patch_discovery(monkeypatch)
+    register.side_effect = RuntimeError("discovery is down")
+
+    result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+
+    assert result["status"] == "error"
+    assert "adapterA" not in engine.loaded_loras
+    engine.engine_client.add_lora.assert_not_awaited()
+    engine.engine_client.remove_lora.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefill_inference_uses_lifecycle_registered_lora(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    engine._default_sampling_params = SimpleNamespace()
+    engine._model_max_len = None
+    engine._dp_range = None
+    _patch_discovery(monkeypatch)
+
+    load_result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+    assert load_result["status"] == "success"
+    engine.engine_client.add_lora.assert_not_awaited()
+
+    captured: dict = {}
+
+    async def _empty_gen():
+        return
+        yield  # pragma: no cover
+
+    def _fake_generate(*args, **kwargs):
+        captured["kwargs"] = kwargs
+        return _empty_gen()
+
+    engine.engine_client.generate = _fake_generate
+    monkeypatch.setattr(
+        llm_engine_mod,
+        "build_sampling_params",
+        lambda *a, **k: SimpleNamespace(extra_args=None, max_tokens=10, min_tokens=0),
+    )
+    monkeypatch.setattr(
+        llm_engine_mod.telemetry, "engine_trace_kwargs", lambda context: {}
+    )
+
+    _ = [
+        chunk
+        async for chunk in engine.generate(
+            {"token_ids": [1, 2], "model": "adapterA"},
+            SimpleNamespace(id=lambda: "req-1"),
+        )
+    ]
+
+    lora_request = captured["kwargs"]["lora_request"]
+    assert lora_request.lora_name == "adapterA"
+    assert lora_request.lora_path == "/cache/adapter"
+
+
+@pytest.mark.asyncio
+async def test_prefill_request_admission_serializes_with_unload(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+
+    admission_started = asyncio.Event()
+    allow_admission = asyncio.Event()
+    admitted = asyncio.Event()
+
+    async def _blocked_generate(_lora_request):
+        admission_started.set()
+        await allow_admission.wait()
+        admitted.set()
+        yield SimpleNamespace()
+
+    async def _remove_lora(lora_id):
+        assert lora_id == 123
+        assert admitted.is_set()
+
+    engine.engine_client.remove_lora = AsyncMock(side_effect=_remove_lora)
+    admission = engine._generate_with_lora_admission_lock(
+        engine._resolve_lora_request("adapterA"),
+        _blocked_generate,
+    )
+    admission_task = asyncio.create_task(anext(admission))
+    await admission_started.wait()
+
+    unload_task = asyncio.create_task(engine.unload_lora({"lora_name": "adapterA"}))
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+    unregister.assert_not_awaited()
+    assert "adapterA" in engine.loaded_loras
+
+    allow_admission.set()
+    await admission_task
+    result = await unload_task
+    await admission.aclose()
+
+    assert result["status"] == "success"
+    engine.engine_client.remove_lora.assert_awaited_once_with(123)
 
 
 @pytest.mark.asyncio
@@ -503,6 +649,7 @@ async def test_unload_lora_happy_path(monkeypatch):
     _, unregister = _patch_discovery(monkeypatch)
     # Healthy adapter: loaded into the engine AND published to discovery.
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     engine._published_loras = {"adapterA"}
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -521,6 +668,7 @@ async def test_unload_lora_unregisters_before_engine_removal(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     _, unregister = _patch_discovery(monkeypatch)
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     engine._published_loras = {"adapterA"}
 
     order: list[str] = []
@@ -540,6 +688,7 @@ async def test_unload_lora_loaded_but_unpublished_skips_unregister(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     _, unregister = _patch_discovery(monkeypatch)
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     # _published_loras intentionally empty.
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -567,6 +716,7 @@ async def test_unload_lora_happy_path_clears_published(monkeypatch):
     engine = _make_lora_engine(endpoint=object())
     _, unregister = _patch_discovery(monkeypatch)
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     engine._published_loras = {"adapterA"}
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -623,6 +773,7 @@ async def test_unload_lora_engine_removal_failure_after_unregister(monkeypatch):
     _, unregister = _patch_discovery(monkeypatch)
     engine.engine_client.remove_lora.side_effect = RuntimeError("engine wedged")
     engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._engine_loaded_loras = {"adapterA"}
     engine._published_loras = {"adapterA"}
 
     result = await engine.unload_lora({"lora_name": "adapterA"})
@@ -632,6 +783,59 @@ async def test_unload_lora_engine_removal_failure_after_unregister(monkeypatch):
     unregister.assert_awaited_once()
     assert "adapterA" not in engine._published_loras
     assert "adapterA" in engine.loaded_loras
+
+
+@pytest.mark.asyncio
+async def test_prefill_unload_skips_engine_removal_for_metadata_only_adapter(
+    monkeypatch,
+):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    _, unregister = _patch_discovery(monkeypatch)
+
+    load_result = await engine.load_lora(
+        {"lora_name": "adapterA", "source": {"uri": "file:///x"}}
+    )
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert load_result["status"] == "success"
+    assert result["status"] == "success"
+    unregister.assert_awaited_once()
+    engine.engine_client.add_lora.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prefill_unload_removes_request_activated_adapter(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
+    engine._track_lora_request_activation(engine._resolve_lora_request("adapterA"))
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "success"
+    unregister.assert_awaited_once()
+    engine.engine_client.remove_lora.assert_awaited_once_with(123)
+
+
+@pytest.mark.asyncio
+async def test_prefill_unload_treats_missing_request_adapter_as_idempotent(monkeypatch):
+    engine = _make_lora_engine(endpoint=object())
+    engine.disaggregation_mode = DisaggregationMode.PREFILL
+    _, unregister = _patch_discovery(monkeypatch)
+    engine.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/adapter")}
+    engine._published_loras = {"adapterA"}
+    engine._engine_loaded_loras = {"adapterA"}
+    engine.engine_client.remove_lora.side_effect = RuntimeError("adapter not found")
+
+    result = await engine.unload_lora({"lora_name": "adapterA"})
+
+    assert result["status"] == "success"
+    unregister.assert_awaited_once()
+    assert "adapterA" not in engine.loaded_loras
+    engine.engine_client.remove_lora.assert_awaited_once_with(123)
 
 
 # --------------------------------------------------------------------------- #
