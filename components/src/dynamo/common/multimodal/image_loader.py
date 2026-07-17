@@ -8,7 +8,7 @@ import logging
 import os
 from collections import OrderedDict
 from io import BytesIO
-from typing import Any, Dict, Final, List
+from typing import Any, Coroutine, Dict, Final, List
 from urllib.parse import urlparse
 
 from PIL import Image
@@ -268,7 +268,7 @@ class ImageLoader:
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
         """
-        image_futures = []
+        image_futures: list[Coroutine[Any, Any, Image.Image]] = []
         slot_to_future_idx: list[int | None] = []
 
         for idx, item in enumerate(image_mm_items):
@@ -301,7 +301,7 @@ class ImageLoader:
 
         # Process images in parallel
         results = await asyncio.gather(*image_futures, return_exceptions=True)
-        loaded_images = []
+        loaded_images: list[Image.Image | None] = []
         collective_exceptions = ""
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
@@ -312,7 +312,13 @@ class ImageLoader:
                 loaded_images.append(None)
                 continue
             result = results[future_idx]
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
+                # asyncio.gather(..., return_exceptions=True) may return a
+                # cancellation (a BaseException, but not an Exception). Keep
+                # cancellation semantics instead of folding it into a batch
+                # image-loading error.
+                if not isinstance(result, Exception):
+                    raise result
                 source = media_item.get(URL_VARIANT_KEY, "decoded")
                 logger.error(f"Failed to load image from {source[:80]}...: {result}")
                 collective_exceptions += (

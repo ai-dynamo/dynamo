@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 
 MINIMUM_VLLM_VERSION = "0.17.0"
 
-logger = logging.getLogger(__name__)
+# This connector is instantiated inside vLLM's spawned EngineCore process.
+# That process configures the ``vllm`` logger hierarchy, but not Dynamo's root
+# logger, so use a vLLM child logger to keep connector diagnostics observable.
+logger = logging.getLogger("vllm.dynamo.multimodal_embedding_cache_connector")
 
 
 def _get_device(vllm_config: "VllmConfig") -> str:
@@ -145,6 +148,9 @@ class DynamoMultimodalEmbeddingCacheConnector(ECConnectorBase):
         """
         if identifier in self._cache_order:
             self._cache_order.move_to_end(identifier)
+            logger.debug(
+                "Dynamo multimodal embedding cache hit: identifier=%r", identifier
+            )
             return True
         return False
 

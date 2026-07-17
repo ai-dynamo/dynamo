@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -49,7 +50,9 @@ AUDIO_URL_KEY = "audio_url"
 URL_VARIANT_KEY = "Url"
 
 
-def pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
+def pad_mm_hashes_to_64(
+    mm_hashes: Sequence[str | None],
+) -> list[str | None]:
     """Pad frontend hashes to vLLM's 64-character UUID representation."""
     return [
         value.ljust(64, "0") if isinstance(value, str) and len(value) < 64 else value
@@ -70,11 +73,11 @@ def _normalize_forwarded_mm_modality(
 def _build_forwarded_mm_uuids(
     extra_args: dict[str, Any],
     use_unified_vision_chunk: bool,
-) -> Optional[dict[str, Any]]:
+) -> Optional[dict[str, list[str | None]]]:
     """Preserve frontend cache identities, including mixed modalities."""
     grouped_hashes = extra_args.get("mm_hashes_by_modality")
     if isinstance(grouped_hashes, dict):
-        mm_uuids: dict[str, Any] = {}
+        mm_uuids: dict[str, list[str | None]] = {}
         for modality, hashes in grouped_hashes.items():
             if not hashes:
                 continue
@@ -94,7 +97,8 @@ def _build_forwarded_mm_uuids(
             "image",
             use_unified_vision_chunk,
         )
-        return {modality_key: pad_mm_hashes_to_64(list(forwarded_hashes))}
+        padded_hashes = pad_mm_hashes_to_64(list(forwarded_hashes))
+        return {modality_key: padded_hashes}
 
     return None
 
@@ -173,7 +177,7 @@ def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
 
 def compute_mm_uuids(
     multi_modal_data: Optional[dict[str, Any]],
-) -> Optional[dict[str, list[str]]]:
+) -> Optional[dict[str, list[str | None]]]:
     """Compute image UUIDs when the frontend did not provide canonical hashes."""
     if not multi_modal_data:
         return None
@@ -201,7 +205,8 @@ def compute_mm_uuids(
         images = [images]
     if not images:
         return None
-    return {modality: compute_mm_uuids_from_images(images)}
+    uuids: list[str | None] = list(compute_mm_uuids_from_images(images))
+    return {modality: uuids}
 
 
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:

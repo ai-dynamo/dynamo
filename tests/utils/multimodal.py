@@ -3,6 +3,7 @@
 
 import base64
 import os
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -135,7 +136,13 @@ def make_image_payload_cached_tokens(
 
 
 class UuidPassthroughChatPayload(ChatPayload):
-    """Send a URL+UUID cache fill followed by a UUID-only cache hit."""
+    """Send a URL+UUID cache fill followed by a UUID-only cache hit.
+
+    When ``exercise_embedding_cache`` is true, insert a second URL+UUID fill
+    with a different UUID. Tests can pair this sequence with a one-image GPU
+    encoder cache so the final request must load the first embedding from
+    Dynamo's CPU embedding cache.
+    """
 
     def __init__(
         self,
@@ -145,10 +152,26 @@ class UuidPassthroughChatPayload(ChatPayload):
         max_tokens: int = 100,
         temperature: float = 0.0,
         timeout: int = 60,
+        exercise_embedding_cache: bool = False,
     ):
         object.__setattr__(self, "_uuid_initializing", True)
         object.__setattr__(self, "_uuid_model", None)
         object.__setattr__(self, "_uuid_image_uuid", image_uuid)
+        object.__setattr__(
+            self,
+            "_uuid_eviction_image_uuid",
+            f"{image_uuid}-eviction" if exercise_embedding_cache else None,
+        )
+        object.__setattr__(
+            self,
+            "_uuid_final_expected_log",
+            [
+                "Dynamo multimodal embedding cache hit: "
+                f"identifier={re.escape(repr(image_uuid))}"
+            ]
+            if exercise_embedding_cache
+            else [],
+        )
         object.__setattr__(self, "_uuid_max_tokens", max_tokens)
         object.__setattr__(self, "_uuid_temperature", temperature)
         object.__setattr__(self, "_uuid_request_index", 0)
@@ -157,7 +180,7 @@ class UuidPassthroughChatPayload(ChatPayload):
             body=None,
             expected_response=expected_response,
             expected_log=[],
-            repeat_count=2,
+            repeat_count=3 if exercise_embedding_cache else 2,
             timeout=timeout,
         )
         object.__setattr__(self, "_uuid_initializing", False)
@@ -166,6 +189,7 @@ class UuidPassthroughChatPayload(ChatPayload):
         payload = deepcopy(self)
         object.__setattr__(payload, "_uuid_model", model)
         object.__setattr__(payload, "_uuid_request_index", 0)
+        object.__setattr__(payload, "expected_log", [])
         return payload
 
     @property
@@ -173,14 +197,28 @@ class UuidPassthroughChatPayload(ChatPayload):
         request_index = self._uuid_request_index
         object.__setattr__(self, "_uuid_request_index", request_index + 1)
 
+        eviction_image_uuid = self._uuid_eviction_image_uuid
         if request_index == 0:
             image_url = {"url": MULTIMODAL_IMG_URL}
+            image_uuid = self._uuid_image_uuid
+            text = _MULTIMODAL_COLOR_PROMPT
+        elif request_index == 1 and eviction_image_uuid is not None:
+            image_url = {"url": MULTIMODAL_IMG_URL}
+            image_uuid = eviction_image_uuid
             text = _MULTIMODAL_COLOR_PROMPT
         else:
             image_url = None
+            image_uuid = self._uuid_image_uuid
             text = (
                 "What colors are prominent in the same image? "
                 "Respond only with the colors."
+            )
+
+        if request_index == self.repeat_count - 1:
+            object.__setattr__(
+                self,
+                "expected_log",
+                list(self._uuid_final_expected_log),
             )
 
         body = {
@@ -192,7 +230,7 @@ class UuidPassthroughChatPayload(ChatPayload):
                         {
                             "type": "image_url",
                             "image_url": image_url,
-                            "uuid": self._uuid_image_uuid,
+                            "uuid": image_uuid,
                         },
                     ],
                 }
@@ -210,17 +248,24 @@ class UuidPassthroughChatPayload(ChatPayload):
         object.__setattr__(self, "_uuid_body_storage", value)
         if not getattr(self, "_uuid_initializing", True):
             object.__setattr__(self, "_uuid_request_index", 0)
+            object.__setattr__(self, "expected_log", [])
 
     def final_validation(self) -> None:
-        assert self._uuid_request_index == self.repeat_count, (
-            "UUID passthrough payload did not send the expected URL+UUID "
-            "and UUID-only request pair"
-        )
+        assert (
+            self._uuid_request_index == self.repeat_count
+        ), "UUID passthrough payload did not send the expected request sequence"
 
 
-def make_image_payload_uuid_passthrough(expected_response: list[str]) -> ChatPayload:
+def make_image_payload_uuid_passthrough(
+    expected_response: list[str],
+    *,
+    exercise_embedding_cache: bool = False,
+) -> ChatPayload:
     """Build the maintained vLLM cached multimodal UUID smoke payload."""
-    return UuidPassthroughChatPayload(expected_response=expected_response)
+    return UuidPassthroughChatPayload(
+        expected_response=expected_response,
+        exercise_embedding_cache=exercise_embedding_cache,
+    )
 
 
 class Base64LazyChatPayload(ChatPayload):

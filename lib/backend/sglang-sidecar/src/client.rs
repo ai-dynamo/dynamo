@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Thin client for SGLang's native `sglang.runtime.v1.SglangService`.
+//! Thin sidecar client for SGLang's native `sglang.runtime.v1.SglangService`.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};

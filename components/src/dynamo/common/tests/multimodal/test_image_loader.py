@@ -280,6 +280,17 @@ async def test_uuid_only_image_slots_preserve_batch_alignment(
     assert images == [first, None, second]
 
 
+async def test_batch_propagates_cancellation(loader: ImageLoader) -> None:
+    loader.load_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=asyncio.CancelledError
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await loader.load_image_batch(
+            [{URL_VARIANT_KEY: "https://example.com/image.png"}]
+        )
+
+
 async def test_unsupported_format_batch_data_url_raises_415(
     loader: ImageLoader,
 ) -> None:

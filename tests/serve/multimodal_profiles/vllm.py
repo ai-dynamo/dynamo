@@ -420,8 +420,25 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     MmCase(payload=make_image_payload(["green"])),
                     MmCase(
                         suffix="uuid_passthrough",
-                        payload=make_image_payload_uuid_passthrough(["green"]),
-                        extra_script_args=["--mm-processor-cache-gb", "4"],
+                        payload=make_image_payload_uuid_passthrough(
+                            ["green"], exercise_embedding_cache=True
+                        ),
+                        extra_script_args=[
+                            "--mm-processor-cache-gb",
+                            "4",
+                            "--multimodal-embedding-cache-capacity-gb",
+                            "1",
+                            # Gemma 4 budgets 280 embeddings per image; the
+                            # 512x512 fixture emits 256. A 280-slot GPU cache can
+                            # retain only one, so the second fill evicts the first.
+                            "--max-num-batched-tokens",
+                            "280",
+                            "--limit-mm-per-prompt",
+                            '{"image": 1, "video": 0, "audio": 0}',
+                        ],
+                        # The connector runs in vLLM's spawned EngineCore, so
+                        # its debug hit diagnostic uses vLLM's logger level.
+                        env={"VLLM_LOGGING_LEVEL": "DEBUG"},
                     ),
                 ],
             ),

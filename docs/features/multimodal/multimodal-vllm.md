@@ -112,7 +112,25 @@ and its SGLang and TensorRT-LLM backends reject image UUIDs rather than silently
 ignoring unsupported cache semantics.
 
 To enable the cache, pass a nonzero `--mm-processor-cache-gb` value to the vLLM
-worker. Populate an entry by adding `uuid` beside the media field:
+worker.
+
+For an aggregated worker, enable Dynamo's CPU embedding cache alongside the
+vLLM processor cache:
+
+```bash
+bash launch/agg_multimodal.sh --model Qwen/Qwen3-VL-2B-Instruct \
+  --mm-processor-cache-gb 4 \
+  --multimodal-embedding-cache-capacity-gb 1
+```
+
+The caches store different data. The vLLM processor cache retains the processed
+media metadata required to resolve a UUID-only request. Dynamo's embedding cache
+retains encoder output and can restore it after eviction from vLLM's GPU encoder
+cache. Keep both caches enabled; the embedding cache alone cannot reconstruct a
+UUID-only input. Both caches are local to one vLLM engine, so the fill and reuse
+requests must reach the same aggregated worker.
+
+Populate an entry by adding `uuid` beside the media field:
 
 ```json
 {

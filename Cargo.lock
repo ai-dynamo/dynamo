@@ -2501,12 +2501,12 @@ dependencies = [
  "dynamo-runtime",
  "dynamo-tokens",
  "dynamo-truthy",
+ "fastrand",
  "flume 0.12.0",
  "indexmap 2.14.0",
  "ordered-float 4.6.0",
  "parking_lot",
  "prometheus",
- "rand 0.9.4",
  "reqwest 0.12.28",
  "rmp-serde",
  "rstest 0.18.2",
@@ -2525,7 +2525,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "uuid",
- "validator",
  "xxhash-rust",
  "zmq",
 ]
@@ -2762,7 +2761,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "2.0.2"
-source = "git+https://github.com/furionw/frontend-crates.git?rev=522a09c319772e3e8c4250f9afd917e7a460f2cc#522a09c319772e3e8c4250f9afd917e7a460f2cc"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=5cf0f586240cc1d1e4944b339544567a353d26b7#5cf0f586240cc1d1e4944b339544567a353d26b7"
 dependencies = [
  "async-openai",
  "derive_builder",

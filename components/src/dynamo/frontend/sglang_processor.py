@@ -26,6 +26,7 @@ from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
 from .sglang_prepost import (
+    ReasoningParser,
     SglangStreamingPostProcessor,
     ToolCallParserType,
     _client_wants_separate_reasoning,
@@ -232,6 +233,7 @@ def _preprocess_worker(
         eos_token_ids,
         pre.guided_decoding,
         pre.tool_call_parser,
+        pre.reasoning_parser,
         require_reasoning=_guided_tool_choice_requires_reasoning(
             request, pre.force_reasoning
         ),
@@ -257,6 +259,7 @@ def _build_dynamo_preproc(
     eos_token_ids: int | list[int] | None,
     guided_decoding: dict[str, Any] | None = None,
     tool_call_parser: ToolCallParserType | None = None,
+    reasoning_parser: ReasoningParser | None = None,
     require_reasoning: bool = False,
 ) -> dict[str, Any]:
     """Build the Dynamo preprocessed request dict from request fields."""
@@ -312,11 +315,11 @@ def _build_dynamo_preproc(
         "output_options": {
             "logprobs": logprobs_val,
             "prompt_logprobs": None,
-            # Preserve special tokens only when a tool-call parser is
-            # actually active — the parser needs delimiter tokens
-            # (e.g. <|tool_call|>) to detect calls. Mirrors the
-            # post-processor's _skip_special_tokens logic.
-            "skip_special_tokens": tool_call_parser is None,
+            # Preserve special tokens when a parser is active so delimiters
+            # remain visible. Mirrors the post-processor's decode behavior.
+            "skip_special_tokens": (
+                tool_call_parser is None and reasoning_parser is None
+            ),
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
         "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
@@ -458,6 +461,7 @@ class SglangProcessor:
                 self.eos_token_ids,
                 pre.guided_decoding,
                 pre.tool_call_parser,
+                pre.reasoning_parser,
                 require_reasoning=_guided_tool_choice_requires_reasoning(
                     request, pre.force_reasoning
                 ),

@@ -241,6 +241,7 @@ class VllmProcessor:
         routed_engine: RoutedEngine,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -251,6 +252,7 @@ class VllmProcessor:
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
+        self.default_chat_template_kwargs = default_chat_template_kwargs
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -447,6 +449,7 @@ class VllmProcessor:
                 tool_parser_class=self.tool_parser_class,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
+                default_chat_template_kwargs=self.default_chat_template_kwargs,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -1025,6 +1028,9 @@ class EngineFactory:
             routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
+            default_chat_template_kwargs=getattr(
+                self.flags, "default_chat_template_kwargs", None
+            ),
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

@@ -51,7 +51,7 @@ dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "5.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
-dynamo-sglang-sidecar = { path = "../../sglang-sidecar" }
+dynamo-sglang-sidecar = { path = "../../backend/sglang-sidecar" }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
@@ -120,5 +120,5 @@ debug = true
 strip = false
 
 [patch.crates-io]
-# Temporary until ai-dynamo/frontend-crates#119 is released.
-dynamo-protocols = { git = "https://github.com/furionw/frontend-crates.git", rev = "522a09c319772e3e8c4250f9afd917e7a460f2cc" }
+# Temporary until UUID passthrough support is released in dynamo-protocols.
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "5cf0f586240cc1d1e4944b339544567a353d26b7" }

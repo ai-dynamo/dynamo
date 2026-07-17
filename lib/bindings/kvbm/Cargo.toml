@@ -62,5 +62,5 @@ cudarc = { version = "=0.19.8", features = ["cuda-version-from-build-system", "f
 [dev-dependencies]
 
 [patch.crates-io]
-# Temporary until ai-dynamo/frontend-crates#119 is released.
-dynamo-protocols = { git = "https://github.com/furionw/frontend-crates.git", rev = "522a09c319772e3e8c4250f9afd917e7a460f2cc" }
+# Temporary until UUID passthrough support is released in dynamo-protocols.
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "5cf0f586240cc1d1e4944b339544567a353d26b7" }

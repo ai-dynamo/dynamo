@@ -456,6 +456,7 @@ def test_forwarded_placeholder_preserves_is_embed_mask():
         ([], []),
         (["0123456789abcdef"], ["0123456789abcdef" + "0" * 48]),
         (["f" * 64], ["f" * 64]),
+        (["opaque-key", None], ["opaque-key" + "0" * 54, None]),
     ],
 )
 def test_pad_mm_hashes_to_64(hashes, expected):
