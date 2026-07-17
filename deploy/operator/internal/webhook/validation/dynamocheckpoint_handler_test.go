@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestValidateDynamoCheckpointGMSSnapshotRejectsUnpreparedTemplate(t *testing.T) {
@@ -89,9 +90,47 @@ func TestValidateDynamoCheckpointGMSSnapshotAllowsPreparedTemplate(t *testing.T)
 	require.NoError(t, validateDynamoCheckpoint(ctx, ckpt))
 }
 
-func TestValidateDynamoCheckpointRejectsDisabledFeature(t *testing.T) {
+func TestDynamoCheckpointHandlerCheckpointGate(t *testing.T) {
 	ctx := features.WithGate(context.Background(), features.Gates{})
-	err := validateDynamoCheckpoint(ctx, &nvidiacomv1alpha1.DynamoCheckpoint{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "checkpoint functionality is disabled")
+	tests := []struct {
+		name      string
+		operation string
+		deleting  bool
+		wantError bool
+	}{
+		{name: "create is rejected", operation: "create", wantError: true},
+		{name: "update is rejected", operation: "update", wantError: true},
+		{name: "update during deletion is allowed", operation: "update", deleting: true},
+		{name: "delete is allowed", operation: "delete"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldCheckpoint := &nvidiacomv1alpha1.DynamoCheckpoint{}
+			checkpoint := oldCheckpoint.DeepCopy()
+			if tt.deleting {
+				now := metav1.Now()
+				checkpoint.DeletionTimestamp = &now
+			}
+
+			handler := NewDynamoCheckpointHandler()
+			var err error
+			switch tt.operation {
+			case "create":
+				_, err = handler.ValidateCreate(ctx, checkpoint)
+			case "update":
+				_, err = handler.ValidateUpdate(ctx, oldCheckpoint, checkpoint)
+			case "delete":
+				_, err = handler.ValidateDelete(ctx, checkpoint)
+			default:
+				t.Fatalf("unknown operation %q", tt.operation)
+			}
+
+			if tt.wantError {
+				require.ErrorContains(t, err, "checkpoint functionality is disabled")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

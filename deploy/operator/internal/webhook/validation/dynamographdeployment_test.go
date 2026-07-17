@@ -441,10 +441,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			checkpointOff: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Job: &nvidiacomv1beta1.ComponentCheckpointJobConfig{
+							GMSClientContainers: []string{"main"},
+						},
+					},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
+			wantWebhookErrs: []string{
+				"spec.components[1].experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration",
+				"spec.components[1].experimental.checkpoint.job.gmsClientContainers: Forbidden: requires gpuMemoryService to be set",
+			},
 		},
 
 		// KV-transfer CEL rules.

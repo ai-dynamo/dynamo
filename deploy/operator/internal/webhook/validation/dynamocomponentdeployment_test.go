@@ -58,6 +58,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		name            string
 		deployment      runtime.Object
 		oldDeployment   runtime.Object
+		checkpointOff   bool
 		wantSchemaErr   string
 		wantCELErr      string
 		wantWebhookErrs []string
@@ -70,6 +71,31 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.Replicas = &validReplicas
 				dcd.Spec.BackendFramework = dcdAdmissionSGLangBackend
 			}),
+		},
+		{
+			name:          "checkpoint configuration requires operator feature gate",
+			checkpointOff: true,
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
+		},
+		{
+			name:          "checkpoint update requires operator feature gate",
+			checkpointOff: true,
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
 		},
 		{
 			name: "invalid replicas",
@@ -1010,7 +1036,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 
 			handler := NewDynamoComponentDeploymentHandler()
 			ctx := dgdAdmissionContext(dgdAdmissionOperation(tt.oldDeployment), nvidiacomv1beta1.DynamoComponentDeploymentGVK)
-			ctx = features.WithGate(ctx, features.Gates{Checkpoint: true})
+			ctx = features.WithGate(ctx, features.Gates{Checkpoint: !tt.checkpointOff})
 			var warnings []string
 			var err error
 			if tt.oldDeployment == nil {

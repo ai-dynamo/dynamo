@@ -287,13 +287,14 @@ func (v *sharedValidation) validateComponentCheckpointConfig(
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
 ) field.ErrorList {
+	var allErrs field.ErrorList
 	if checkpointConfig.Enabled && !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
-		return field.ErrorList{field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration")}
+		allErrs = append(allErrs, field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration"))
 	}
 	if checkpointConfig.Job == nil {
-		return nil
+		return allErrs
 	}
-	return v.validateComponentCheckpointJobConfig(checkpointConfig.Job, fldPath.Child("job"), gms)
+	return append(allErrs, v.validateComponentCheckpointJobConfig(checkpointConfig.Job, fldPath.Child("job"), gms)...)
 }
 
 // validateComponentCheckpointJobConfig validates job. job and fldPath must not be nil.

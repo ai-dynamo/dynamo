@@ -883,6 +883,25 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, snap.Name, updated.Status.PodSnapshotName)
 	})
 
+	t.Run("disabled checkpoint gate does not create a PodSnapshot", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+		job := newCheckpointJob(defaultCheckpointJobName)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod("worker-0", job))
+		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
+
+		_, err := r.handleCreating(ctx, ckpt)
+		require.NoError(t, err)
+
+		var snaps nvidiacomv1alpha1.PodSnapshotList
+		require.NoError(t, r.List(ctx, &snaps, client.InNamespace(testNamespace)))
+		assert.Empty(t, snaps.Items)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
+		assert.Equal(t, checkpointDisabledMessage, updated.Status.Message)
+	})
+
 	// ownedSnapshot returns a PodSnapshot owned by ckpt and bound to a PodSnapshotContent,
 	// carrying the given terminal condition (empty type leaves it Pending).
 	ownedSnapshot := func(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, condType string) *nvidiacomv1alpha1.PodSnapshot {
@@ -922,6 +941,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
 
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
+		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
